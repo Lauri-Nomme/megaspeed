@@ -36,6 +36,9 @@ Snapshot: `corpus/build/summary.json` (not committed).
 | PR closed | 2026-08-19 11:51 → 2026-11-13 14:07 UTC |
 | Commit dates | 2026-08-13 17:15 → 2026-11-12 17:07 UTC (~90 days) |
 | PR lifetime | 23 h … 214 h, median 96 h |
+| Opened per month | 2026-08: 22, 2026-09: 43, 2026-10: 45, 2026-11: 21 |
+| Revisions per PR (RESCOPED) | 0: 4, 1: 67, 2: 45, 3: 15 |
+| Comments per PR | 1: 5, 2: 62, 3: 52, 4: 12 |
 
 ### Shape of the interaction
 
@@ -56,7 +59,10 @@ Snapshot: `corpus/build/summary.json` (not committed).
 
 * `GET /rest/api/1.0/users/admin` → `name=admin` (setup complete).
 * `GET /rest/api/1.0/admin/license` → licensed DC, expiry in the future.
-* `git push` over HTTPS as each of the five users (used throughout generation).
+* `git push` over HTTPS as each of the five users (used throughout generation);
+  final acid test: a tag pushed as `alice` was accepted ("[new tag]"), then
+  deleted — an unlicensed/expired instance rejects any push with
+  "License limit exceeded".
 * `corpus/verify.py`: 100 tickets, 0 filter-contract problems, 131 PRs.
 * `python3 -m ingest --live --probe --repo DEL/delivery-api --repo DEL/delivery-web`:
   269 requests, **131/131 PRs matched, 0 dropped**, 473 PR-attributed commits, activities
