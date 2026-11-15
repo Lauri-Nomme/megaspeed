@@ -13,8 +13,13 @@ reduced to labels by the pipeline.
 
 from __future__ import annotations
 
+import base64
+import json
 import re
+import ssl
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from typing import Any, Iterator
 from urllib.parse import urlencode
@@ -77,7 +82,11 @@ def _page(values: list[Any], start: int, limit: int) -> dict:
 
 @dataclass
 class HttpTransport:
-    """Thin, rate-limit-friendly DC REST transport (bearer or basic auth)."""
+    """Thin, rate-limit-friendly DC REST transport (bearer or basic auth).
+
+    Stdlib only (``urllib``): live mode must not add a dependency that fixture
+    mode never uses, and ``requests`` buys us nothing at this size.
+    """
 
     base_url: str
     token: str = ""
@@ -87,30 +96,33 @@ class HttpTransport:
     max_retries: int = 3
     timeout: float = 30.0
 
-    def __post_init__(self) -> None:
-        import requests  # local import: fixture mode must not need the network stack
-
-        self._requests = requests.Session()
+    def _headers(self) -> dict[str, str]:
+        headers = {"Accept": "application/json"}
         if self.token:
-            self._requests.headers["Authorization"] = f"Bearer {self.token}"
-        elif self.user and self.password:
-            self._requests.auth = (self.user, self.password)
-        self._requests.headers["Accept"] = "application/json"
-        self._requests.verify = self.verify_tls
+            headers["Authorization"] = f"Bearer {self.token}"
+        elif self.user:
+            raw = f"{self.user}:{self.password}".encode()
+            headers["Authorization"] = "Basic " + base64.b64encode(raw).decode()
+        return headers
 
     def get(self, path: str, params: dict | None = None) -> dict:
         url = self.base_url + path + (("?" + urlencode(params)) if params else "")
         last: Exception | None = None
         for attempt in range(self.max_retries):
+            request = urllib.request.Request(url, headers=self._headers(), method="GET")
+            context = None
+            if url.startswith("https") and not self.verify_tls:
+                context = ssl._create_unverified_context()  # noqa: SLF001 - explicit opt-in
             try:
-                res = self._requests.get(url, timeout=self.timeout)
-                if res.status_code == 429 or res.status_code >= 500:
+                with urllib.request.urlopen(request, timeout=self.timeout, context=context) as response:
+                    return json.loads(response.read().decode())
+            except urllib.error.HTTPError as exc:
+                if exc.code in (429, 500, 502, 503, 504):
+                    last = exc
                     time.sleep(1.5 ** attempt)
                     continue
-                if res.status_code >= 400:
-                    raise BitbucketError(f"{res.status_code} {res.reason} for {path}")
-                return res.json()
-            except Exception as exc:  # noqa: BLE001 - retried, then re-raised
+                raise BitbucketError(f"{exc.code} {exc.reason} for {path}") from exc
+            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
                 last = exc
                 time.sleep(1.5 ** attempt)
         raise BitbucketError(f"GET {path} failed after {self.max_retries} attempts: {last}")

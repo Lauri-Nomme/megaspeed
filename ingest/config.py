@@ -35,11 +35,16 @@ class Config:
     fixture_path: Path | None = None
     sentinel_slugs: tuple[str, ...] = ()
     auth_user: str = ""
-    auth_secret: str = ""
+    auth_token: str = ""
+    auth_password: str = ""
 
     @property
     def live(self) -> bool:
         return bool(self.base_url)
+
+    @property
+    def has_credentials(self) -> bool:
+        return bool(self.auth_token or (self.auth_user and self.auth_password))
 
 
 def _resolve(value: str | os.PathLike[str], base: Path) -> Path:
@@ -86,10 +91,14 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         if review.get("sentinel_slugs") or os.environ.get("MEGASPEED_SENTINEL_SLUGS")
         else (),
         auth_user=os.environ.get("MEGASPEED_BB_USER", ""),
-        auth_secret=os.environ.get("MEGASPEED_BB_TOKEN", "") or os.environ.get("MEGASPEED_BB_PASSWORD", ""),
+        auth_token=os.environ.get("MEGASPEED_BB_TOKEN", ""),
+        auth_password=os.environ.get("MEGASPEED_BB_PASSWORD", ""),
     )
     if not config.repos:
         raise SystemExit(f"no repos configured (see {cfg_path}: [[source.repos]])")
-    if config.base_url and not config.auth_secret:
-        raise SystemExit("MEGASPEED_BB_BASE_URL is set but no MEGASPEED_BB_TOKEN / MEGASPEED_BB_PASSWORD")
+    if config.base_url and not config.has_credentials:
+        raise SystemExit(
+            "MEGASPEED_BB_BASE_URL is set but no credentials: set MEGASPEED_BB_TOKEN"
+            " or MEGASPEED_BB_USER + MEGASPEED_BB_PASSWORD"
+        )
     return config

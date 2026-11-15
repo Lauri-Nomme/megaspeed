@@ -43,10 +43,19 @@ def split_name(user: dict) -> tuple[str, str]:
 
 
 def actor_key(user: dict) -> str:
-    """Stable raw-zone identity key for a Bitbucket actor."""
+    """Stable raw-zone identity key for a Bitbucket actor.
+
+    Slug first, then the email local part (DC slugs are usually the local part),
+    then the display name. This keeps "lauri.nomme", "lauri.nomme@corp" and a
+    slug-less commit author pointing at one identity.
+    """
     slug = str(user.get("name") or "").strip()
     email = str(user.get("emailAddress") or "").strip().lower()
-    return "bb:" + (slug or email or str(user.get("displayName") or "").strip() or "unknown")
+    if slug:
+        return "bb:" + slug
+    if email:
+        return "bb:" + email.split("@", 1)[0]
+    return "bb:" + (str(user.get("displayName") or "").strip() or "unknown")
 
 
 class IdentityTable:

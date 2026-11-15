@@ -29,6 +29,31 @@ def _fixture_bundle(path: Path | None, n: int, seed: int) -> dict:
     return fixtures_mod.generate(n=n, seed=seed)
 
 
+def _print_probe(report: dict) -> None:
+    print(f"probe          {report['as_of']} · {report['requests']} requests · read-only, nothing written")
+    print(f"ticket filter  {report['ticket_regex']}   (shape {report['key_shape']})")
+    for repo in report["repos"]:
+        states = ", ".join(f"{k}={v}" for k, v in sorted(repo["by_state"].items()))
+        actions = ", ".join(f"{k}={v}" for k, v in sorted(repo["actions"].items()))
+        print(f"\nrepo           {repo['repo']}: {repo['prs']} PRs ({states}), {repo['commits']} commits")
+        print(f"activities     {actions}")
+        if repo["ignored_actions"]:
+            ignored = ", ".join(f"{k}={v}" for k, v in sorted(repo["ignored_actions"].items()))
+            print(f"ignored        {ignored}  (outside the closed vocabulary)")
+        print(f"filter         {len(repo['matched_prs'])} matched {repo['keys'] or ''}"
+              f" · {len(repo['unmatched_prs'])} dropped")
+        if repo["unmatched_prs"]:
+            print(f"               no ticket key on PRs {repo['unmatched_prs']}")
+    if report["bypass_filter"]:
+        print(f"\ndry run        {report['dry_run_events']} events in memory (filter bypassed for mechanics only)")
+        print(f"by activity    {report['dry_run_event_activities']}")
+        print(f"pseudonyms     {', '.join(report['dry_run_pseudonyms'])}")
+        for row in report["dry_run_sample"]:
+            print(f"  {row['ts']}  {row['activity']:16} {row['actor']:5} {row['attributes']}")
+    else:
+        print("\nhint           --probe-bypass-filter to map the reducer over this corpus in memory")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python3 -m ingest", description="Bitbucket DC -> pseudonymised store")
     mode = ap.add_mutually_exclusive_group()
@@ -41,6 +66,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--db", default=None, help="override store path")
     ap.add_argument("--config", default=None)
+    ap.add_argument("--repo", action="append", default=None, metavar="PROJECT/REPO",
+                    help="override configured repos (repeatable)")
+    ap.add_argument("--probe", action="store_true",
+                    help="live mode: read-only diagnostics, no store writes")
+    ap.add_argument("--probe-bypass-filter", action="store_true",
+                    help="probe only: run the reducer in memory over unfiltered PRs")
     ap.add_argument("--out", default=str(REPO_ROOT / "fixtures" / "bitbucket-dc-fixture.json"))
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args(argv)
@@ -48,6 +79,15 @@ def main(argv: list[str] | None = None) -> int:
     cfg: Config = load_config(args.config)
     if args.db:
         cfg.db_path = Path(args.db).expanduser().resolve()
+    if args.repo:
+        repos = []
+        for item in args.repo:
+            project, _, repo = item.partition("/")
+            if not project or not repo:
+                print(f"bad --repo {item!r}, expected PROJECT/REPO", file=sys.stderr)
+                return 2
+            repos.append((project, repo))
+        cfg.repos = repos
     seed = args.seed if args.seed is not None else cfg.seed
 
     if args.write_fixtures:
@@ -70,13 +110,33 @@ def main(argv: list[str] | None = None) -> int:
             _print_verify(report, cfg.db_path)
         return 0 if report["ok"] else 1
 
+    if args.probe and not args.live:
+        print("--probe only makes sense with --live", file=sys.stderr)
+        return 2
+
     if args.live:
         if not cfg.base_url:
             print("live mode needs MEGASPEED_BB_BASE_URL (and MEGASPEED_BB_TOKEN)", file=sys.stderr)
             return 2
-        transport = HttpTransport(cfg.base_url, token=cfg.auth_secret, user=cfg.auth_user)
+        transport = HttpTransport(
+            cfg.base_url,
+            token=cfg.auth_token,
+            user=cfg.auth_user,
+            password=cfg.auth_password,
+        )
         transport.check()
         source = "bitbucket-dc"
+        if args.probe:
+            from .bitbucket import BitbucketClient
+            from .probe import probe as run_probe
+
+            client = BitbucketClient(transport, page_limit=cfg.page_limit, min_interval=0.05)
+            report = run_probe(cfg, client, bypass_filter=args.probe_bypass_filter)
+            if args.json:
+                print(json.dumps(report, indent=2, default=str))
+            else:
+                _print_probe(report)
+            return 0
     else:
         bundle = _fixture_bundle(Path(args.fixture_file) if args.fixture_file else cfg.fixture_path, args.n, seed)
         transport = FixtureTransport(bundle)

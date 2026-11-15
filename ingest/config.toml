@@ -28,8 +28,21 @@ project = "ENG"
 repo = "mobile"
 
 [bitbucket]
+# Fixture mode is the default: leave base_url empty and this section is unused.
+# Live mode reads MEGASPEED_BB_BASE_URL anyway; this is just a fallback.
 base_url = ""          # e.g. https://bitbucket.example.com
 page_limit = 25
+
+# Local Bitbucket DC 9.4.18 lab (FIX/golden). Its corpus has no Jira ticket keys,
+# so it exercises transport/paging/reducer mechanics only -- expect 0 kept PRs.
+#
+#   export MEGASPEED_BB_BASE_URL=http://127.0.0.1:7990
+#   export MEGASPEED_BB_USER=admin
+#   export MEGASPEED_BB_PASSWORD=admin-lab-pw
+#   .venv/bin/python -m ingest --live --repo FIX/golden --probe
+#
+# Real ingest stays off the default path and should use its own store:
+#   MEGASPEED_DB=data/live.duckdb .venv/bin/python -m ingest --live --repo FIX/golden
 
 [fixture]
 seed = 20261115
