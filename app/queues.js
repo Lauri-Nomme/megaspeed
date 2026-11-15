@@ -3,7 +3,8 @@
  * The point is the diagnosis, not the curve: a server with a long wait and a
  * high queue is *overloaded*; the same wait with a short queue is *slow*. These
  * need different fixes (capacity vs tooling), so the diagnosis is stated in
- * words next to the numbers, with `≈` where the wall-clock calendar biases it.
+ * words next to the numbers, with `≈` where a wall-clock reading would bias it
+ * (waits are business hours when the tenant has a calendar, prd/19).
  *
  * Small multiples share one x scale, so rows are comparable at a glance.
  */
@@ -211,7 +212,9 @@ export class QueueChart {
     ctx.fillStyle = '#8A8D93';
     ctx.textAlign = 'left';
     ctx.fillText(
-      `WIP sampled every ${fmtDuration(bucketMs)} · wall-clock · completions in grey`,
+      `WIP sampled every ${fmtDuration(bucketMs)} · ` +
+        `${this.data && this.data.hours_mode === 'business' ? 'business hours' : 'wall-clock'} · ` +
+        'completions in grey',
       GUTTER, g.height - 8,
     );
   }

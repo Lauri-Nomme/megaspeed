@@ -679,7 +679,9 @@ function renderSourcesPage() {
     ['commits', String(meta.commits ?? '—')],
     ['dropped', `${meta.prs_dropped ?? '—'} PRs had no ticket key`],
     ['window', `${meta.first_ts ? fmtDay(Date.parse(meta.first_ts)) : '—'} → ${meta.last_ts ? fmtDay(Date.parse(meta.last_ts)) : '—'}`],
-    ['duration basis', 'wall-clock hours; the working-hours calendar is a later slice'],
+    ['duration basis', meta.calendar && meta.calendar.hours_mode === 'business'
+      ? `business hours — ${meta.calendar.working_hours?.default || '24/7'} ${meta.calendar.timezone || ''}, holidays and vacations excluded`
+      : 'wall-clock hours; no working-hours calendar configured'],
   ];
   $('sources-body').innerHTML = `<dl class="facts">${rows.map(([key, value]) =>
     `<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join('')}</dl>
@@ -907,6 +909,16 @@ function renderProvenance() {
     `Snapshot from ${ageOf(meta.as_of)}: ${meta.events} events, ${meta.prs} PRs, ${meta.commits} commits · ` +
     `${meta.source || 'unknown source'}, ${meta.prs_dropped} PRs without a ticket key dropped${capped}`;
   $('nav-count').textContent = `${meta.events} events · ${meta.prs} PRs`;
+  const calendar = meta.calendar || {};
+  const basis = $('timebasis');
+  if (basis) {
+    const business = calendar.hours_mode === 'business';
+    basis.textContent = business ? 'business hours' : 'wall-clock hours';
+    basis.title = business
+      ? `prd/19: ${calendar.assumption || 'business hours'}` +
+        ` (${calendar.overrides || 0} overrides, ${calendar.vacations || 0} vacations)`
+      : (calendar.error || 'no working-hours calendar configured');
+  }
 }
 
 function setEmpty(reason, hint) {
@@ -1497,7 +1509,8 @@ document.addEventListener('keydown', (event) => {
 });
 
 async function copyMarkdown(entity) {
-  await copyText(entity ? entityMarkdown(entity) : '');
+  const hoursMode = (state.delivery && state.delivery.hours_mode) || 'wall-clock';
+  await copyText(entity ? entityMarkdown(entity, hoursMode) : '');
 }
 
 async function copyText(text) {

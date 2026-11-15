@@ -1,8 +1,8 @@
 /* Shared formatting for every megaspeed view.
  *
  * Units are spaced with a slash ("246 /h") and numbers are tabular everywhere
- * (prd/10 §3.4). Durations are wall-clock and the UI always says so where it
- * matters; nothing here invents a business-hour calendar.
+ * (prd/10 §3.4). Durations are business hours when the tenant has a calendar
+ * (prd/19) and wall-clock otherwise; every view labels which mode answered.
  */
 
 export const MINUTE = 60_000;

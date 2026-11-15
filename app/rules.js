@@ -106,7 +106,8 @@ export function rulesMarkdown(data) {
   const lines = [
     `# Rules — what should we change first? (${data.level || 'team'})`,
     '',
-    `_${data.sample.prs} PRs opened over ${data.sample.days} days · wall-clock hours · ` +
+    `_${data.sample.prs} PRs opened over ${data.sample.days} days · ` +
+      `${data.hours_mode === 'business' ? 'business hours' : 'wall-clock hours'} · ` +
       `snapshot ${data.as_of}_`,
     '',
   ];

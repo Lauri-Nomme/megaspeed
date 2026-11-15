@@ -219,7 +219,7 @@ export function impactSentence(row) {
     `so ≈${fmtHours(row.impact_hours)} of downstream wait accumulate behind it.`;
 }
 
-export function entityMarkdown(entity) {
+export function entityMarkdown(entity, hoursMode = 'wall-clock') {
   if (entity.row) {
     const row = entity.row;
     return [
@@ -231,7 +231,9 @@ export function entityMarkdown(entity) {
       `- age: ${fmtHours(row.age_hours)}`,
       row.dependents ? `- impact: ≈${fmtHours(row.impact_hours)} over ${row.dependents} dependent PR(s)` : '',
       '',
-      '_wall-clock hours; no working-hours calendar yet_',
+      '_' + (hoursMode === 'business'
+        ? 'business hours (tenant working-hours calendar)'
+        : 'wall-clock hours; no working-hours calendar configured') + '_',
     ].filter(Boolean).join('\n');
   }
   const pr = entity.pr;
