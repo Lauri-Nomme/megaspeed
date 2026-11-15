@@ -2,48 +2,51 @@
 
 ## Done
 
-- [x] Repo root moved to `megaspeed/`; history retained.
-- [x] PRD (`prd/01..09`) + UX spec (`prd/10-ux-look-feel.md`).
-- [x] Deploy live (nginx + DNS). Walking skeleton + Playwright harness. Both QA reports.
-- [x] **Corpus** — `bb-lab-b` licensed + `DEL` corpus (131 PRs, 100 tickets, 5 users, ~3 months).
-- [x] **Ingest-fix** — 63 tests (was 13), `--verify` green: real DC `UPDATED`→`reviewer_changed`,
-      incremental recompute, `MEGASPEED_TICKET_PROJECTS` prefix filter (no more `UTF-8`/`SHA-256`
-      false positives), bot classification (`actor_kind`), tighter `--verify`, `PRREV`/`THREAD` objects.
-- [x] **Fix + build UI** — all 14 UI bugs fixed (object lanes, provenance above fold, real lifecycle
-      phases, filter=fade-not-delete, viewport survival, tooltip invalidation, axis, a11y, screenshot
-      clone, zoom clamp, direction colours, empty state, persistence). Added backend
-      `analysis/ballcourt.py` → `/api/blocking`, `/api/queues`, `/api/delivery`. Added views: **Blocking
-      map, Queue view, Delivery list, Overview, Sources, Policy-lab stub** + shell (sidebar, functional
-      scope/timeframe, scope banner, detail panel, pivot menu, Copy as Markdown, histogram brush→chip).
-      Verified gantt phases == server state machine exactly. Tested on a second instance (8767).
+- [x] Repo root, PRD + UX spec, deploy (nginx+DNS), walking skeleton, Playwright harness, both QA reports.
+- [x] **Corpus** — `bb-lab-b` licensed + `DEL` corpus (131 PRs, 100 tickets, 5 users + admin, ~3 months).
+- [x] **Ingest-fix** — 63 tests green; real DC `UPDATED`→`reviewer_changed`, incremental recompute, prefix
+      filter, bots, tighter `--verify`, `PRREV`/`THREAD` objects.
+- [x] **Fix + build UI** — 14 UI bugs fixed; blocking map + queue + delivery + overview + sources +
+      policy-stub; shell (sidebar, scope/timeframe, scope banner); `analysis/ballcourt.py` → `/api/blocking`,
+      `/api/queues`, `/api/delivery`.
+- [x] **Wire + verify ingest vs `DEL`** — 131 seen → 131 kept / 0 dropped; 1316 events; `reviewer_changed`
+      **266** (was 0); bots classified (14 bot events); 0 false-positive keys; `--verify` `contract OK`;
+      idempotent re-run (`0 new`); incremental-recompute proven (`approvals_lost` flips on 12 re-derived);
+      byte-level audit: no raw prose/whitespace anywhere.
 
 ## In progress (fallback `opencode-go/deepseek-v4.1-flash`)
 
-- [ ] **Wire + verify ingest vs `DEL`** — run the fixed ingest against `bb-lab-b` DEL into a temp DB,
-      confirm 131 kept / 0 dropped, `reviewer_changed`>0, bots, `--verify`, idempotency.
+- [ ] **Server-fix** (`server/` + `app/`): eval/screenshot 400s, CORS, `screenshot.out` path restriction,
+      date-only `to=` inclusive, unknown filters, graceful lock 503, pagination/aggregation.
 
 ## Next (dispatch on completion)
 
-1. **Server-fix pass** (`server/` + `app/`): clean 400s on `/api/eval`+`/api/screenshot` malformed
-   input, restrict `screenshot.out` path, CORS, date-only `to=` inclusive end-of-day, unknown filters
-   error (not silent), graceful DuckDB-lock 503 without leaking path/PID, and pagination/aggregation
-   so the UI stops loading every event.
-2. **Final integration**: restart 8766 on the new code, ingest `DEL` into the live store
-   (`MEGASPEED_TICKET_PROJECTS=DEL`), point the UI at real data, smoke-test all views via the harness.
+1. **Final integration** — restart 8766 on the new code, ingest `DEL` into the live store
+   (`MEGASPEED_TICKET_PROJECTS=DEL`), point the UI at real data, smoke-test every view via the harness.
+2. **Docs drift** — `docs/DEV.md` + `ingest/config.toml` still say port 7990 and "REVIEWED/UPDATED ignored".
 
-## Follow-ups (later)
+## Known (corpus / deferred — not bugs in the ingest)
 
-- Light theme; shift-click/drag-box selection + pivot on graph nodes/queue rows; commits+tickets on
-  timeline (G13); semantic zoom/epic nesting (G2); cost-labelled "load the full range" (G14);
-  business-hours calendar (re-baselines waits); sweep-line queue WIP for 10k scale.
-- `push_class` via git patch-id; question/phase LLM classification; Story/Epic/Sprint (Jira+Tempo).
+- `reviewer_changed` has no `removed` cases (DEL corpus never emits `removedReviewers`); `REVIEWED` folds
+  into `reviewer_changed{change=reviewed}` (a future `pr_reviewed` label would be cleaner).
+- 6 human actors (incl. `bb:admin`→`LaAd`, the seeding account) — not exactly 5.
+- PERSON object links partial by design (only `pr_approved`/`reviewer_changed` link PERSON; read `events.actor`).
+- 265/467 COMMIT objects unlinked (no per-commit event); `merge_commit` absent (DEL `MERGED` has no commit block).
+- THREADs all `state=open` (corpus has no thread resolution) — resolution path untested live.
+- `push_class` = `other` on all live pushes (needs git patch-id clone — GAP-01).
+- `sentinel=false` on all approvals (no sentinel slugs in DEL) — sentinel dimension inert here.
+
+## Follow-ups (later slices)
+
+- Light theme; selection/pivot on graph; commits+tickets on timeline (G13); semantic zoom (G2);
+  cost-labelled load (G14); business-hours calendar; queue WIP sweep-line.
+- `push_class` via patch-id; question/phase LLM classification; Story/Epic/Sprint (Jira+Tempo).
 
 ## Test lab (Bitbucket DC 9.4.18)
 
-- `bb-lab-a` :7990 — FIX/golden (no keys → negative filter cases).
-- `bb-lab-b` :7991 — LICENSED, `DEL` corpus (positive cases). Users `admin`/`admin-lab-pw`,
-  alice/bob/carol/dave/erin (pw `lab-pw-<name>`). License is a rolling ~3h dev window.
-- Scripts: `~/dev/hans/lab/`, `megaspeed/corpus/`.
+- `bb-lab-a` :7990 — FIX/golden (no keys). `bb-lab-b` :7991 — LICENSED, `DEL` (env override needed:
+  `MEGASPEED_BB_BASE_URL=http://127.0.0.1:7991`, `MEGASPEED_BB_USER=admin`, `MEGASPEED_BB_PASSWORD=admin-lab-pw`).
+- Users `admin`/`admin-lab-pw`, alice/bob/carol/dave/erin (`lab-pw-<name>`).
 
 ## Open items (real production data)
 
