@@ -25,6 +25,9 @@ const EDGE = 'rgba(70,160,200,.30)';
 const LABEL = '#E8E9EB';
 const MUTED = '#8A8D93';
 const NODE_FILL = '#191C29';
+// 13 + 15 * sqrt(1); the collision pass uses this constant instead of the
+// per-lens radius so a lens switch recolours without relayout.
+const MAX_RADIUS = 28;
 
 export const LENSES = {
   hours: { label: 'wait hours', hint: 'measured wait time attributed to the node', value: (n) => n.hours, unit: 'h' },
@@ -116,6 +119,10 @@ export class BlockingMap {
     const iterations = 320;
     const edges = this.edges;
     const maxHours = Math.max(1, ...edges.map((e) => e.hours));
+    // Short-range collision floor. Without it, nodes with near-identical edge
+    // profiles collapse onto one point (and, once clamped, onto one corner).
+    const minDist = 0.085;
+    const maxRepel = 0.006;
     for (let step = 0; step < iterations; step += 1) {
       const alpha = 1 - step / iterations;
       // repulsion
@@ -127,11 +134,21 @@ export class BlockingMap {
           let dy = b.y - a.y;
           let dist = Math.hypot(dx, dy);
           if (dist < 1e-4) { dx = 0.01 * (i - j); dy = 0.01; dist = Math.hypot(dx, dy); }
-          const force = (0.035 * alpha) / (dist * dist);
+          // Cap the inverse-square term: uncapped, a dense cluster hurls every
+          // node to the plot edge, where the clamp stacks them on top of each
+          // other — the opposite of what repulsion is meant to achieve.
+          const force = Math.min(maxRepel, (0.00005 * alpha) / (dist * dist));
           const fx = (dx / dist) * force;
           const fy = (dy / dist) * force;
           a.x -= fx; a.y -= fy;
           b.x += fx; b.y += fy;
+          if (dist < minDist) {
+            const push = (minDist - dist) * 0.5 * alpha;
+            const nx = dx / dist;
+            const ny = dy / dist;
+            a.x -= nx * push; a.y -= ny * push;
+            b.x += nx * push; b.y += ny * push;
+          }
         }
       }
       // springs
@@ -154,6 +171,79 @@ export class BlockingMap {
         node.x = Math.min(0.93, Math.max(0.07, node.x));
         node.y = Math.min(0.9, Math.max(0.1, node.y));
       }
+    }
+  }
+
+  /** Split labels that still overlap at the current canvas size.
+   *
+   * The force layout works in normalised space and cannot know how wide a
+   * label renders, so two nodes with near-identical edge profiles can land on
+   * one point (or on the same clamped corner). This deterministic pixel-space
+   * pass treats each node, its name and its lens value as one box and pushes
+   * colliding pairs apart until they clear. Only render positions move; the
+   * graph data is untouched.
+   */
+  separate(g) {
+    const nodes = this.nodes;
+    if (nodes.length < 2) return;
+    // A hidden page has no box to lay out in; keep the last real positions.
+    if (!this.canvas.parentElement || !this.canvas.parentElement.clientWidth) return;
+    const ctx = this.ctx;
+    const previousFont = ctx.font;
+    ctx.font = '600 12px Inter, system-ui, sans-serif';
+    const boxes = nodes.map((node) => {
+      const p = this.nodePos(node, g);
+      const labelW = ctx.measureText(node.id).width;
+      return {
+        node,
+        x: p.x,
+        y: p.y,
+        // half extents: the largest ring and the centred name label
+        hx: Math.max(MAX_RADIUS, labelW / 2) + 8,
+        // ring + name above + lens value below
+        hy: MAX_RADIUS + 22,
+      };
+    });
+    ctx.font = previousFont;
+    const minX = g.padX * 0.5;
+    const maxX = g.width - g.padX * 0.5;
+    const minY = g.padY * 0.5;
+    const maxY = g.height - g.padY * 0.8;
+    const iterations = 80;
+    for (let step = 0; step < iterations; step += 1) {
+      let moved = false;
+      for (let i = 0; i < boxes.length; i += 1) {
+        for (let j = i + 1; j < boxes.length; j += 1) {
+          const a = boxes[i];
+          const b = boxes[j];
+          const dx = b.x - a.x;
+          const dy = b.y - a.y;
+          const ox = a.hx + b.hx - Math.abs(dx);
+          const oy = a.hy + b.hy - Math.abs(dy);
+          if (ox <= 0 || oy <= 0) continue;
+          moved = true;
+          if (ox <= oy) {
+            const dir = dx === 0 ? (step % 2 === 0 ? 1 : -1) : Math.sign(dx);
+            const push = (ox / 2 + 0.5) * dir;
+            a.x -= push;
+            b.x += push;
+          } else {
+            const dir = dy === 0 ? (step % 2 === 0 ? 1 : -1) : Math.sign(dy);
+            const push = (oy / 2 + 0.5) * dir;
+            a.y -= push;
+            b.y += push;
+          }
+        }
+      }
+      for (const box of boxes) {
+        box.x = Math.min(maxX, Math.max(minX, box.x));
+        box.y = Math.min(maxY, Math.max(minY, box.y));
+      }
+      if (!moved) break;
+    }
+    for (const box of boxes) {
+      box.node.x = (box.x - g.padX) / g.plotW;
+      box.node.y = (box.y - g.padY) / g.plotH;
     }
   }
 
@@ -208,6 +298,12 @@ export class BlockingMap {
     const focus = this.hover || this.selected;
     this.hits = [];
 
+    // radius is needed by the collision pass, so size the nodes first
+    this.nodes.forEach((node, index) => {
+      node._r = Math.min(MAX_RADIUS, 13 + 15 * Math.sqrt((values[index] || 0) / maxValue));
+    });
+    this.separate(g);
+
     // edges first
     for (const edge of this.edges) {
       const a = this.nodePos(edge.a, g);
@@ -258,8 +354,7 @@ export class BlockingMap {
     this.nodes.forEach((node, index) => {
       const p = this.nodePos(node, g);
       const value = values[index] || 0;
-      const radius = 13 + 15 * Math.sqrt(value / maxValue);
-      node._r = radius;
+      const radius = node._r;
       const roleColor = ROLE_COLOR[node.id] || (node.kind === 'person' ? '#B9BBC0' : '#8C98D4');
       const isFocus = focus === node.id;
       const dimmed = focus && !isFocus && !this.edges.some(

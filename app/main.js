@@ -457,10 +457,22 @@ function renderOverviewPage() {
 }
 
 // ------------------------------------------------------------------ sources
+/** The store the server is actually reading, never a path baked into the UI. */
+function storeLabel(meta) {
+  const raw = String(meta.store || '').replace(/\\/g, '/').replace(/\/+$/, '');
+  if (!raw) return '— (the API did not report one)';
+  const parts = raw.split('/').filter(Boolean);
+  // Show the repo-relative tail (`data/<store>.duckdb`) even when the API
+  // reports an absolute path, so the label is short and can never drift.
+  const at = parts.lastIndexOf('data');
+  const rel = at >= 0 ? parts.slice(at).join('/') : parts.slice(-2).join('/');
+  return `${rel} (local, read-only)`;
+}
+
 function renderSourcesPage() {
   const meta = state.meta || {};
   const rows = [
-    ['store', 'data/megaspeed.duckdb (local, read-only)'],
+    ['store', storeLabel(meta)],
     ['source', meta.source || '—'],
     ['snapshot', meta.as_of ? `${fmtStamp(Date.parse(meta.as_of))} (${ageOf(meta.as_of)})` : '—'],
     ['events', String(meta.events ?? '—')],
