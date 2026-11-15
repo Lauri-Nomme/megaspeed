@@ -190,6 +190,18 @@ export class BlockingMap {
     ctx.fillStyle = '#151924';
     ctx.fillRect(0, 0, g.width, g.height);
 
+    if (!this.nodes.length) {
+      ctx.fillStyle = '#8A8D93';
+      ctx.font = '500 12px Inter, system-ui, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('No measured handover in this window.', g.width / 2, g.height / 2 - 8);
+      ctx.fillStyle = '#6B6F76';
+      ctx.font = '500 11px "JetBrains Mono", ui-monospace, monospace';
+      ctx.fillText('widen the timeframe, or wait for more events', g.width / 2, g.height / 2 + 12);
+      this.hits = [];
+      return;
+    }
+
     const lens = LENSES[this.lens];
     const values = this.nodes.map((n) => lens.value(n) || 0);
     const maxValue = Math.max(1e-9, ...values);

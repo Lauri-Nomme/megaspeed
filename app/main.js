@@ -268,7 +268,7 @@ function renderPhaseLegend() {
 // ----------------------------------------------------------------- delivery
 function renderDeliveryPage() {
   const data = state.delivery;
-  const counts = tabCounts(data);
+  const counts = scopedTabCounts(data);
   if (data && state.tab !== 'all') {
     // the actionable subset is the default, but never an empty screen
     const available = state.tab === 'blocked' ? counts.blocked : counts.oldest;
@@ -287,6 +287,17 @@ function renderDeliveryPage() {
       `${data.impact_note}.`
     : '';
   renderDeliveryDetail();
+}
+
+/** Counts follow the scope, so the tab number always matches the rows below it. */
+function scopedTabCounts(data) {
+  if (!data) return { blocked: 0, oldest: 0, all: 0 };
+  const rows = data.rows.filter((row) => matchesScopeRow(row));
+  return {
+    blocked: rows.filter((row) => row.blocked).length,
+    oldest: rows.filter((row) => !row.blocked && row.waiting_hours >= 72).length,
+    all: rows.length,
+  };
 }
 
 function matchesScopeRow(row) {
