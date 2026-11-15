@@ -60,6 +60,8 @@ need to re-visit the airgapped env just because a feature wasn't captured). Incr
 - `push_class` on `pr_pushed` events.
 - `comment_type` + `thread_outcome` on `THREAD` objects.
 - `question_raised` / `question_answered` events with `phase`.
+- **PR diff size** — lines added/removed per PR (`git diff --numstat <target>...<head>` totals from the
+  same shallow git cache), stored as PR attributes; commit count is already in the store (COMMIT objects).
 
 ## Tests (per AGENTS.md — every feature)
 

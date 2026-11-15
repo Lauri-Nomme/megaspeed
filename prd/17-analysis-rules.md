@@ -19,6 +19,8 @@ product's headline output (prd/15).
    `rejected` / `walked_back` threads (each ≈ a re-review round for zero value).
 7. **`conformance`** — PRs merged with 0 approvals; PRs with > N review rounds.
 8. **`sentinel_queue`** — (when role/sentinel data exists) median wait on the mandatory approval.
+9. **`pr_size`** — commits per PR (count of COMMIT objects, already in the store) + diff size
+   (lines added/removed, scrape-side capture per prd/16), vs review latency.
 
 ## Suggestion engine
 
@@ -32,6 +34,7 @@ Example templates:
 - "K% of review threads are nits/out-of-scope that got rejected → move nits/out-of-scope to the ticket, not the PR."
 - "P PRs merged with no approval → enforce the +1 rule."
 - "The mandatory-approval (sentinel) queue is the longest wait → rotate / add sentinels."
+- "PRs over N commits / M lines get the slowest reviews → adopt a PR size cap."
 
 ## API
 
@@ -47,5 +50,5 @@ Per prd/10 design language (dense table, semantic color, sentence-case).
 
 ## Out of scope (v1)
 
-Business-hours calendar (wall-clock for now) · PR-size vs latency (needs diff size) · story/epic level ·
-question-phase full spectrum · simulation (policy lab).
+Business-hours calendar (wall-clock for now) · story/epic level · question-phase full spectrum ·
+simulation (policy lab).
