@@ -96,6 +96,17 @@ class FixtureFileLimitTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("at least 1", err.getvalue())
 
+    def test_mismatched_fixture_repo_is_a_clean_error_not_a_traceback(self):
+        # The bundle only has ENG/platform; the configured repos include
+        # ENG/mobile, so the fixture transport reports a missing repo.
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = main(["--fixture-file", str(self.bundle_path), "--repo", "ENG/nosuch",
+                         "--db", str(self.db), "--json"])
+        self.assertEqual(code, 2)
+        self.assertIn("bitbucket error:", err.getvalue())
+        self.assertNotIn("Traceback", err.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

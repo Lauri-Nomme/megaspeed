@@ -20,7 +20,7 @@ from . import fixtures as fixtures_mod
 from .config import Config, REPO_ROOT, load_config
 from .pipeline import run
 from .store import connect, verify
-from .transport import FixtureTransport, HttpTransport
+from .transport import BitbucketError, FixtureTransport, HttpTransport
 
 
 def _fixture_bundle(path: Path | None, n: int, seed: int) -> dict:
@@ -133,48 +133,56 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     limit = None
-    if args.live:
-        if not cfg.base_url:
-            print("live mode needs MEGASPEED_BB_BASE_URL (and MEGASPEED_BB_TOKEN)", file=sys.stderr)
-            return 2
-        transport = HttpTransport(
-            cfg.base_url,
-            token=cfg.auth_token,
-            user=cfg.auth_user,
-            password=cfg.auth_password,
-        )
-        transport.check()
-        source = "bitbucket-dc"
-        if args.probe:
-            from .bitbucket import BitbucketClient
-            from .probe import probe as run_probe
+    try:
+        if args.live:
+            if not cfg.base_url:
+                print("live mode needs MEGASPEED_BB_BASE_URL (and MEGASPEED_BB_TOKEN)", file=sys.stderr)
+                return 2
+            transport = HttpTransport(
+                cfg.base_url,
+                token=cfg.auth_token,
+                user=cfg.auth_user,
+                password=cfg.auth_password,
+            )
+            transport.check()
+            source = "bitbucket-dc"
+            if args.probe:
+                from .bitbucket import BitbucketClient
+                from .probe import probe as run_probe
 
-            client = BitbucketClient(transport, page_limit=cfg.page_limit, min_interval=0.05)
-            report = run_probe(cfg, client, bypass_filter=args.probe_bypass_filter)
-            if args.json:
-                print(json.dumps(report, indent=2, default=str))
-            else:
-                _print_probe(report)
-            return 0
-    else:
-        bundle = _fixture_bundle(Path(args.fixture_file) if args.fixture_file else cfg.fixture_path,
-                                 generate_n, seed)
-        transport = FixtureTransport(bundle)
-        source = "fixture"
-        # A replay of a bundle is bounded by the bundle, not by the generator
-        # default -- capping a 60-PR file at 50 silently dropped 10 PRs, and the
-        # limit used to fire after the counter incremented (51 seen, 50 read).
-        if args.fixture_file and args.n is not None:
-            available = _bundle_pr_count(bundle)
-            if args.n > available:
-                print(
-                    f"warning: --n {args.n} exceeds the {available} PR(s) in {args.fixture_file};"
-                    f" reading all {available}",
-                    file=sys.stderr,
-                )
-            limit = args.n
+                client = BitbucketClient(transport, page_limit=cfg.page_limit, min_interval=0.05)
+                report = run_probe(cfg, client, bypass_filter=args.probe_bypass_filter)
+                if args.json:
+                    print(json.dumps(report, indent=2, default=str))
+                else:
+                    _print_probe(report)
+                return 0
+        else:
+            bundle = _fixture_bundle(Path(args.fixture_file) if args.fixture_file else cfg.fixture_path,
+                                     generate_n, seed)
+            transport = FixtureTransport(bundle)
+            source = "fixture"
+            # A replay of a bundle is bounded by the bundle, not by the generator
+            # default -- capping a 60-PR file at 50 silently dropped 10 PRs, and
+            # the limit used to fire after the counter incremented (51 seen, 50
+            # read).
+            if args.fixture_file and args.n is not None:
+                available = _bundle_pr_count(bundle)
+                if args.n > available:
+                    print(
+                        f"warning: --n {args.n} exceeds the {available} PR(s) in {args.fixture_file};"
+                        f" reading all {available}",
+                        file=sys.stderr,
+                    )
+                limit = args.n
 
-    report = run(cfg, transport, source=source, limit=limit)
+        report = run(cfg, transport, source=source, limit=limit)
+    except BitbucketError as exc:
+        # The likely operator mistakes (typo'd repo, bad password, DNS/port, a
+        # bundle whose repos differ from config) deserve a message, not a stack.
+        print(f"bitbucket error: {exc}", file=sys.stderr)
+        return 2
+
     if args.json:
         print(json.dumps(report, indent=2, default=str))
     else:
