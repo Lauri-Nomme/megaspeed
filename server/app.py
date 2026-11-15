@@ -122,11 +122,13 @@ def store_conn():
 
 
 def _missing_store() -> JSONResponse:
+    # The file name, not the absolute path: an error body is not the place to
+    # publish the server's home directory (BUG-07 / BUG-08).
     return JSONResponse(
         status_code=503,
         content={
             "ok": False,
-            "error": f"no store at {DB_PATH}",
+            "error": f"no store at {DB_PATH.name}",
             "hint": "run: python3 -m ingest --fixture --n 50",
         },
     )
