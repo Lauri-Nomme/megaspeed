@@ -5,7 +5,7 @@
 
 ## What this is
 
-A product plan (PRD) for a tool that ingests **Jira**, **Bitbucket**, and **Slack**
+A product plan (PRD) for a tool that ingests **Bitbucket Data Center**, **Jira Cloud** (+ **Jira Cloud Tempo**), and **Slack**
 metadata, reduces it to a **pseudonymised, object-centric event log**, and then
 answers one question repeatedly: *who is blocking whom, and what is the cheapest
 thing we can change to maximise delivery?*

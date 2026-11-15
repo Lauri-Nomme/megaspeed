@@ -79,9 +79,10 @@ Forcing it into a flat per-story trace would destroy the signal we need.
 ## Scope of the first release
 
 One team, one focus epic, but mined against **the team's full history** (a
-single epic is too small a sample). Sources: Jira, Bitbucket (Data Center),
-Slack. The Bitbucket activities stream + patch-id push classification is the
-cleanest signal and is the spine of slice 1.
+single epic is too small a sample). Sources: **Bitbucket Data Center**,
+**Jira Cloud** (+ **Jira Cloud Tempo** for worklogs), **Slack**. The Bitbucket
+activities stream + patch-id push classification is the cleanest signal and is
+the spine of slice 1.
 
 ## Constraints that shape everything
 

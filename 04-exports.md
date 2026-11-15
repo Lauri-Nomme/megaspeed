@@ -4,7 +4,11 @@ Everything below is *what we pull* and *why*. What we **retain** downstream is
 only the pseudonymised subset per `02-pseudonymization.md` — the raw text listed
 here is read by the local classifier and discarded.
 
-## Jira
+## Jira (Cloud)
+
+Jira Cloud REST API (v3), changelog via `expand=changelog`, and the Cloud Agile
+API for boards/sprints. Worklogs come from **Jira Cloud Tempo**, not native Jira
+(see below).
 
 | Export | Fields | Why it matters |
 | --- | --- | --- |
@@ -12,10 +16,21 @@ here is read by the local classifier and discarded.
 | Changelog (`expand=changelog`, paginated) | every change to status, assignee, sprint, points, description, Flagged — with author + ts | status transitions → activities; sprint changes → carry-over; point changes → estimate revision |
 | Description edit history | edits to the description field | goals often get clarified by editing, not commenting |
 | Comments | author, created, updated, body | body is *read by classifier only* → question/severity events; never stored |
-| Worklogs | author, `started`, `timeSpentSeconds`, `created` | the `created − started` gap measures worklog *noise*; a cross-check, not a source of truth |
 | Sprints (Agile API) | start, end, complete, goal, membership-at-start vs added-later | carry-over and mid-sprint insertion |
 | Dev-status / remote links | story → PR / branch / commit mapping | the glue between ticket layer and PR layer |
 | Refinement calendar | a list of meeting dates/times | separates "waiting for the next refinement" (batching delay) from actual work |
+
+### Jira Cloud Tempo (worklogs)
+
+Tempo Timesheets (Cloud) is the time-tracking source. Its REST API exposes
+worklogs with author, `dateStarted`, `timeSpentSeconds`, and `createdAt` (the
+moment the log was created). The `createdAt − dateStarted` gap is the **worklog
+noise** signal — we measure it directly rather than trusting the logged hours.
+The author resolves to the same Jira Cloud `accountId` in the identity table.
+
+| Export | Fields | Why it matters |
+| --- | --- | --- |
+| Tempo worklogs | author, `dateStarted`, `timeSpentSeconds`, `createdAt` | the `createdAt − dateStarted` gap measures logging delay/coarseness; a cross-check, not a source of truth |
 
 ## Bitbucket (Data Center)
 

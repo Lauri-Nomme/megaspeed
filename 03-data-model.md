@@ -78,7 +78,7 @@ ts                     activity            actor  objects                       
 
 ## Identity resolution
 
-A table in the **raw zone** maps `Jira accountId ↔ Bitbucket slug ↔ git email ↔
+A table in the **raw zone** maps `Jira Cloud accountId (incl. Tempo authors) ↔ Bitbucket slug ↔ git email ↔
 Slack ID → pseudonym`. Downstream, only `pseudonym` and `role-class` propagate.
 This is what makes "the same person" consistent across a Jira assignee, a git
 author, and a Slack user.
