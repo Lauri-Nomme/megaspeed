@@ -161,8 +161,19 @@ setInterval(() => {
 async function runEval(id, code) {
   let result;
   try {
-    const fn = new Function(`return (async () => {\n${code}\n})()`);
-    const value = await fn();
+    let value;
+    try {
+      // Indirect eval returns the completion value of the last expression, like
+      // a console: `1 + 1`, `document.title`, `window.__megaspeed.state`.
+      value = (0, eval)(code);
+    } catch (err) {
+      if (!(err instanceof SyntaxError)) throw err;
+      // Top-level `await` is not valid in eval; retry as an async function body
+      // (where a value needs an explicit `return`).
+      const AsyncFunction = Object.getPrototypeOf(async function noop() {}).constructor;
+      value = new AsyncFunction(code)();
+    }
+    if (value && typeof value.then === 'function') value = await value;
     result = { ok: true, data: value === undefined ? null : value };
   } catch (err) {
     result = { ok: false, error: String((err && err.message) || err) };
@@ -181,32 +192,95 @@ async function runEval(id, code) {
   }
 }
 
-/* Screenshot bridge. Captures the canvas render (the dense view) inside the
- * requested element's box. There is no html2canvas dependency on purpose:
- * the canvas *is* the app's content, and a build-free bundle is the point. */
-window.__megaspeedShot = function megaspeedShot(selector = '.app') {
+/* Screenshot bridge.
+ *
+ * Default path renders the real DOM: clone the element, swap the <canvas> for
+ * an <img> of its bitmap, inline the stylesheet, and paint the whole thing
+ * through an SVG foreignObject. Chromium handles this natively, so there is no
+ * html2canvas dependency and no build step.
+ *
+ * Fallback (if the DOM render throws or yields nothing): composite the canvas
+ * bitmap into the element's box. The canvas is the app's dense content, so the
+ * fallback still shows the data.
+ */
+window.__megaspeedShot = async function megaspeedShot(selector = '.app', options = {}) {
   const element = document.querySelector(selector);
   if (!element) throw new Error(`selector not found: ${selector}`);
-  const canvas = element.tagName === 'CANVAS' ? element : element.querySelector('canvas');
-  if (!canvas) throw new Error(`no canvas inside ${selector}`);
+  const scale = Math.min(2, Number(options.scale) || window.devicePixelRatio || 1);
   const rect = element.getBoundingClientRect();
-  const canvasRect = canvas.getBoundingClientRect();
-  const scale = Math.min(2, window.devicePixelRatio || 1);
+
   const out = document.createElement('canvas');
   out.width = Math.max(1, Math.round(rect.width * scale));
   out.height = Math.max(1, Math.round(rect.height * scale));
   const ctx = out.getContext('2d');
   ctx.fillStyle = getComputedStyle(document.body).backgroundColor || '#191B1C';
   ctx.fillRect(0, 0, out.width, out.height);
-  ctx.drawImage(
-    canvas,
-    (canvasRect.left - rect.left) * scale,
-    (canvasRect.top - rect.top) * scale,
-    canvasRect.width * scale,
-    canvasRect.height * scale,
-  );
-  return out.toDataURL('image/png');
+
+  try {
+    const image = await domToImage(element, rect);
+    ctx.drawImage(image, 0, 0, out.width, out.height);
+    return out.toDataURL('image/png');
+  } catch (err) {
+    const canvas = element.tagName === 'CANVAS' ? element : element.querySelector('canvas');
+    if (!canvas) throw err;
+    const canvasRect = canvas.getBoundingClientRect();
+    ctx.drawImage(
+      canvas,
+      (canvasRect.left - rect.left) * scale,
+      (canvasRect.top - rect.top) * scale,
+      canvasRect.width * scale,
+      canvasRect.height * scale,
+    );
+    return out.toDataURL('image/png');
+  }
 };
+
+async function domToImage(element, rect) {
+  const clone = element.cloneNode(true);
+  // backdrop-filter does not survive SVG foreignObject rounding and smears the
+  // canvas around the tooltip; flatten it in the clone only.
+  for (const node of clone.querySelectorAll('*')) {
+    node.style.backdropFilter = 'none';
+    node.style.webkitBackdropFilter = 'none';
+  }
+  const sourceCanvas = element.querySelector('canvas');
+  const cloneCanvas = clone.querySelector('canvas');
+  if (sourceCanvas && cloneCanvas) {
+    const img = document.createElement('img');
+    img.src = sourceCanvas.toDataURL('image/png');
+    img.style.width = `${sourceCanvas.clientWidth}px`;
+    img.style.height = `${sourceCanvas.clientHeight}px`;
+    img.style.display = 'block';
+    cloneCanvas.replaceWith(img);
+  }
+  clone.style.width = `${rect.width}px`;
+  clone.style.height = `${rect.height}px`;
+  clone.style.margin = '0';
+
+  const css = await fetch('/style.css', { cache: 'force-cache' }).then((r) => r.text());
+  const wrapper = document.createElement('div');
+  wrapper.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
+  wrapper.setAttribute(
+    'style',
+    `width:${rect.width}px;height:${rect.height}px;background:#191B1C;` +
+    'font-family:Inter,"Segoe UI",Roboto,sans-serif;font-size:13px;color:#E8E9EB;',
+  );
+  const style = document.createElement('style');
+  style.textContent = css;
+  wrapper.appendChild(style);
+  wrapper.appendChild(clone);
+
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${rect.width}" height="${rect.height}">` +
+    `<foreignObject x="0" y="0" width="100%" height="100%">` +
+    new XMLSerializer().serializeToString(wrapper) +
+    '</foreignObject></svg>';
+
+  const image = new Image();
+  image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  await image.decode();
+  return image;
+}
 
 // Exposed so the eval bridge can drive the UI: __megaspeed.timeline.zoom(0.5).
 window.__megaspeed = {

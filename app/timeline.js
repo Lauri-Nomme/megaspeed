@@ -463,12 +463,8 @@ export class Timeline {
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'right';
     ctx.fillStyle = COLORS.text3;
-    ctx.fillText(this.dim === 'actor' ? 'ACTORS' : this.dim === 'object' ? 'PULL REQUESTS' : 'ACTIVITIES',
-      g.gutter - 10, AXIS_H + HIST_H + 11);
-    ctx.textAlign = 'left';
-    ctx.fillStyle = COLORS.text2;
-    ctx.font = `600 ${Math.max(10, g.label - 1)}px Inter, system-ui, sans-serif`;
-    ctx.fillText(`${rows.length}`, g.gutter + 4, AXIS_H + HIST_H + 11);
+    const section = this.dim === 'actor' ? 'ACTORS' : this.dim === 'object' ? 'PULL REQUESTS' : 'ACTIVITIES';
+    ctx.fillText(`${section} · ${rows.length}`, g.gutter - 10, AXIS_H + HIST_H + 11);
 
     rows.forEach((row, i) => {
       const y = g.laneTop + i * g.laneH;
@@ -485,12 +481,8 @@ export class Timeline {
       ctx.font = `500 ${g.label}px "JetBrains Mono", ui-monospace, monospace`;
       ctx.fillStyle = this.hover && this.hover.laneKey === row.key ? COLORS.text1 : COLORS.text2;
       ctx.textAlign = 'right';
-      const label = this.dim === 'object' ? row.key : row.key;
-      ctx.fillText(label.length > 18 ? `${label.slice(0, 17)}…` : label, g.gutter - 10, y + g.laneH / 2);
-      ctx.textAlign = 'left';
-      ctx.fillStyle = COLORS.text3;
-      ctx.font = `500 ${Math.max(9, g.label - 2)}px "JetBrains Mono", ui-monospace, monospace`;
-      ctx.fillText(String(row.count), g.gutter + 4, y + g.laneH / 2);
+      const label = row.key;
+      ctx.fillText(label.length > 20 ? `${label.slice(0, 19)}…` : label, g.gutter - 10, y + g.laneH / 2);
     });
 
     // markers, with per-pixel aggregation
@@ -539,10 +531,7 @@ export class Timeline {
     ctx.font = `600 ${Math.max(10, g.label - 1)}px Inter, system-ui, sans-serif`;
     ctx.textAlign = 'right';
     ctx.fillStyle = COLORS.text3;
-    ctx.fillText('PR LIFECYCLE', g.gutter - 10, g.barTop - 11);
-    ctx.textAlign = 'left';
-    ctx.fillStyle = COLORS.text2;
-    ctx.fillText(`${g.barRows.length}`, g.gutter + 4, g.barTop - 11);
+    ctx.fillText(`PR LIFECYCLE · ${g.barRows.length}`, g.gutter - 10, g.barTop - 11);
 
     g.barRows.forEach((pr, i) => {
       const y = g.barTop + i * g.barH;
@@ -557,7 +546,7 @@ export class Timeline {
       ctx.fillStyle = isHover ? COLORS.text1 : COLORS.text2;
       const key = pr.keys[0] ? `${pr.keys[0]} ` : '';
       const label = `${key}#${pr.number} ${pr.repo}`;
-      ctx.fillText(label.length > 20 ? label.slice(0, 19) + '…' : label, g.gutter - 10, y + g.barH / 2);
+      ctx.fillText(label.length > 23 ? label.slice(0, 22) + '…' : label, g.gutter - 10, y + g.barH / 2);
 
       const segments = this.segments(pr);
       const barY = y + 2;

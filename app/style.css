@@ -191,6 +191,19 @@ button:focus-visible, select:focus-visible, .legend button:focus-visible {
 .legend button.off .swatch { opacity: .25; }
 .legend .count { color: var(--text-tertiary); }
 
+.phase-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding-left: 12px;
+  border-left: 1px solid var(--border-hairline);
+  color: var(--text-tertiary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.phase-legend span { display: inline-flex; align-items: center; gap: 5px; }
+.phase-legend i { width: 12px; height: 7px; border-radius: 2px; display: inline-block; }
+
 /* --- stage / canvas ---------------------------------------------------- */
 .stage {
   position: relative;
@@ -239,7 +252,9 @@ button:focus-visible, select:focus-visible, .legend button:focus-visible {
   gap: 4px;
   color: var(--text-secondary);
   text-align: center;
+  pointer-events: none;
 }
+.empty[hidden] { display: none; }
 .empty p { margin: 0; }
 .empty .muted { color: var(--text-tertiary); font-size: 12px; }
 .empty code { color: var(--link); }
