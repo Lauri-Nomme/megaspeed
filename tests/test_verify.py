@@ -143,6 +143,17 @@ class VerifyTamperTests(unittest.TestCase):
         self.assertFalse(report["ok"])
         self.assertTrue(any("both" in p for p in report["problems"]), report["problems"])
 
+    def test_store_from_an_older_schema_is_reported_not_crashed(self):
+        # Additive migrations run on the next ingest; --verify must say so
+        # instead of raising a BinderException on the missing column.
+        self.con.execute("ALTER TABLE objects DROP COLUMN attributes")
+        report = verify(self.con, self.cfg.key_shape, self.cfg.ticket_projects)
+        self.assertFalse(report["ok"])
+        self.assertTrue(
+            any("missing expected columns" in p and "attributes" in p for p in report["problems"]),
+            report["problems"],
+        )
+
     def test_undeclared_table_and_column_are_still_rejected(self):
         problems = self.assert_violation("CREATE TABLE raw_comments (body VARCHAR)")
         self.assertTrue(any("undeclared table" in p for p in problems), problems)

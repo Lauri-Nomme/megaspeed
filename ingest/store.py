@@ -448,12 +448,22 @@ def verify(con, key_shape: str = DEFAULT_KEY_SHAPE,
     for (otype,) in con.execute("SELECT DISTINCT object_type FROM objects").fetchall():
         if otype not in taxonomy.OBJECT_TYPES:
             problems.append(f"object type outside vocabulary: {otype!r}")
-    for (attrs,) in con.execute("SELECT DISTINCT CAST(attributes AS VARCHAR) FROM objects").fetchall():
-        try:
-            payload = json.loads(attrs) if isinstance(attrs, str) else (attrs or {})
-            taxonomy.check_object_attributes(payload)
-        except (taxonomy.TaxonomyError, json.JSONDecodeError) as exc:
-            problems.append(f"invalid object attributes: {exc}")
+    object_columns = {
+        row[0]
+        for row in con.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = 'main' AND table_name = 'objects'"
+        ).fetchall()
+    }
+    if "attributes" in object_columns:
+        for (attrs,) in con.execute(
+            "SELECT DISTINCT CAST(attributes AS VARCHAR) FROM objects"
+        ).fetchall():
+            try:
+                payload = json.loads(attrs) if isinstance(attrs, str) else (attrs or {})
+                taxonomy.check_object_attributes(payload)
+            except (taxonomy.TaxonomyError, json.JSONDecodeError) as exc:
+                problems.append(f"invalid object attributes: {exc}")
 
     # A pseudonym must not be a bot in one event and a human in another: the
     # actor dimension is a property of the account, not of the activity.
