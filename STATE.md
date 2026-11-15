@@ -17,11 +17,15 @@
       (`MEGASPEED_SHOT_DIR`), date-only `to=` inclusive, real filters (unknown → 400), graceful retryable
       lock 503 (no path/PID leak), pagination (`limit`/`offset`/`X-Total-Count`) + `/api/events/counts`
       histogram; UI pages progressively and survives a lock. 63/63 tests.
+- [x] **Final integration** — `DEL` live at https://megaspeed.example.com (nginx 200); 131 PRs / 1316 events /
+      467 commits / 101 `DEL-*` tickets; all views smoke-tested (Timeline, Delivery, Blocking map, Queue,
+      Overview, Sources, Policy stub) with no page errors and only 2xx/304 in the server log; docs drift
+      fixed (DEV.md + config.toml).
 
 ## In progress (fallback `opencode-go/deepseek-v4.1-flash`)
 
-- [ ] **Final integration** — ingest `DEL` into `data/del.duckdb`, restart 8766 on the new code, smoke-test
-      all views, fix docs drift (DEV.md + config.toml).
+- [ ] **Polish** — fix Sources store-path label (stale `data/megaspeed.duckdb`) and blocking-map node
+      overlap (collision separation).
 
 ## Next (dispatch on completion)
 
