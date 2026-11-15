@@ -87,6 +87,11 @@ def _digest(payload: Any) -> str:
     ).hexdigest()
 
 
+def _line_count(value: Any) -> bool:
+    """True for a non-negative int. ``bool`` is an ``int`` in python: exclude it."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
 def _ts(value: Any, default: datetime | None = None) -> datetime:
     if value in (None, "", 0):
         if default is None:
@@ -289,6 +294,14 @@ class Reducer:
         merge_properties = (pr.pr.get("properties") or {}).get("mergeCommit") or {}
         if merge_properties.get("id"):
             pr_record["attributes"]["merge_commit"] = str(merge_properties["id"])
+        # prd/16 "PR diff size": the scrape's git cache measured the final head's
+        # numstat totals. Both counts travel together; an absent block means the
+        # size is unknown (analysis reads that as "pending", never as zero).
+        size = pr.pr.get("megaspeedDiffSize") or {}
+        added, removed = size.get("lines_added"), size.get("lines_removed")
+        if _line_count(added) and _line_count(removed):
+            pr_record["attributes"]["lines_added"] = added
+            pr_record["attributes"]["lines_removed"] = removed
         stats.objects.append(pr_record)
         for key in keys:
             stats.objects.append(_object("TICKET", f"TICKET:{key}", ticket_keys=[key]))

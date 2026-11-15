@@ -39,6 +39,12 @@ the scrape report. Nothing is retried across runs beyond the incremental cache.
 The label is handed to :mod:`ingest.pipeline` through the non-DC
 ``megaspeedPatchId`` block it already reads, so the reducer stays a pure
 raw-payload -> label transform.
+
+The same cache also answers prd/16's **PR diff size**: ``git diff --numstat
+<target>...<head>`` totals for the PR's final head, handed over as the non-DC
+``megaspeedDiffSize`` block on the PR record. A diff that cannot be computed
+(head gone, no merge base) leaves the block off entirely -- the analysis layer
+reads an absent size as "pending" and never as zero.
 """
 
 from __future__ import annotations
@@ -97,6 +103,14 @@ class Verdict:
 
     push_class: str
     detail: str
+
+
+@dataclass(frozen=True)
+class DiffSize:
+    """A PR's final diff size in lines (prd/16 "PR diff size")."""
+
+    lines_added: int
+    lines_removed: int
 
 
 @dataclass(frozen=True)
@@ -167,6 +181,25 @@ def parse_range_diff(output: str) -> tuple[list[str], int]:
     return ops, changed
 
 
+def parse_numstat(output: str) -> tuple[int, int]:
+    """``(lines added, lines removed)`` summed from ``git diff --numstat``.
+
+    One line per changed path: ``<added>\\t<removed>\\t<path>``. A binary path
+    reports ``-`` for both counts and contributes nothing (git has no line
+    count for it); a rename with no edits reports ``0\\t0`` and is kept as such.
+    """
+    added = removed = 0
+    for line in output.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 2:
+            continue
+        if fields[0].isdigit():
+            added += int(fields[0])
+        if fields[1].isdigit():
+            removed += int(fields[1])
+    return added, removed
+
+
 class PushClassifier:
     """Classify rescopes of one repo against a cached shallow bare repo."""
 
@@ -200,6 +233,10 @@ class PushClassifier:
         self.reasons: Counter[str] = Counter()
         #: did the diff move at a comment anchor? (prd/16 Q4 thread outcomes)
         self.thread_counts: Counter[str] = Counter()
+        #: why a PR's diff size could not be measured (report only)
+        self.size_reasons: Counter[str] = Counter()
+        #: PRs whose diff size this run measured (fixture-provided ones excluded)
+        self.sizes = 0
         #: git fetch invocations, so the report can show what the cache cost.
         self.fetches = 0
         self._repos: dict[str, Path] = {}
@@ -249,6 +286,10 @@ class PushClassifier:
             "counts": dict(sorted(self.counts.items())),
             "reasons": dict(sorted(self.reasons.items())),
             "thread_changes": dict(sorted(self.thread_counts.items())),
+            "diff_size": {
+                "measured": self.sizes,
+                "reasons": dict(sorted(self.size_reasons.items())),
+            },
             "fetches": self.fetches,
             "repos": sorted(self._repos),
         }
@@ -301,6 +342,53 @@ class PushClassifier:
         path = self._repo(project, repo)
         self._ensure_heads(path, [], [target, old, new])
         return self._classify(path, target, old, new)
+
+    # -- prd/16: PR diff size (lines added/removed) -----------------------
+    def annotate_diff_size(
+        self,
+        project: str,
+        repo: str,
+        pr_record: dict,
+        commits: list[dict] | tuple[dict, ...] = (),
+    ) -> None:
+        """Stamp ``megaspeedDiffSize`` on the PR record (prd/16 "PR diff size").
+
+        ``git diff --numstat <target>...<head>`` totals for the PR's **final**
+        head, against the same shallow cache ``push_class`` uses. The block is
+        non-DC: the reducer copies the two integers onto the PR object's
+        attributes, which is what ``analysis/rules.py``'s ``pr_size`` reads.
+
+        Nothing is stamped when the size is unknown -- a head the server no
+        longer serves, a shallow window without a merge base, git missing or a
+        failing diff. The analysis layer treats an absent size as "pending", so
+        a guess (or a zero) here would be worse than silence. Never raises.
+        """
+        if "megaspeedDiffSize" in pr_record:
+            return  # a fixture bundle (or a second pass) already has it
+        target = self._pr_target(pr_record)
+        head = self._pr_head(pr_record) or (
+            str((commits[-1] or {}).get("id") or "") if commits else ""
+        )
+        if not self.available:
+            self.size_reasons["git_unavailable"] += 1
+            return
+        try:
+            path = self._repo(project, repo)
+            # The cache is shared with push_class/threads: only pay for a fetch
+            # when a commit this PR needs is not there yet.
+            if not (self._present(path, target) and self._present(path, head)):
+                self._ensure_heads(path, self._refspecs(pr_record), [target, head])
+        except GitError:
+            self.size_reasons["repo_unavailable"] += 1
+            return
+        size = self._diff_size(path, target, head)
+        if size is None:
+            return
+        pr_record["megaspeedDiffSize"] = {
+            "lines_added": size.lines_added,
+            "lines_removed": size.lines_removed,
+        }
+        self.sizes += 1
 
     # -- prd/16 Q4: did the diff move at a comment anchor? ----------------
     def annotate_threads(
@@ -422,6 +510,36 @@ class PushClassifier:
         if result.code != 0:
             return None
         return bool(result.text.strip())
+
+    def _diff_size(self, path: Path, target: str, head: str) -> DiffSize | None:
+        """``git diff --numstat target...head`` totals, or ``None`` when unknown.
+
+        The three-dot form diffs against the merge base, so a target that moved
+        after the branch was cut does not inflate the PR's own size. Renames are
+        left to git's default detection: a file moved without edits is a 0-line
+        change, not a delete plus an add of the whole file.
+        """
+        if not (target and head):
+            self.size_reasons["no_head"] += 1
+            return None
+        for label, sha in (("target", target), ("head", head)):
+            if not self._present(path, sha):
+                self.size_reasons[f"missing_{label}"] += 1
+                return None
+        if not self._ensure_merge_base(path, target, head):
+            self.size_reasons["no_merge_base"] += 1
+            return None
+        result = self._run(
+            path,
+            ["diff", "--numstat", "--no-ext-diff", "--no-textconv", "--find-renames",
+             f"{target}...{head}"],
+            check=False,
+        )
+        if result.code != 0:
+            self.size_reasons["diff_failed"] += 1
+            return None
+        added, removed = parse_numstat(result.text)
+        return DiffSize(added, removed)
 
     # -- cache management ------------------------------------------------
     def _repo(self, project: str, repo: str) -> Path:

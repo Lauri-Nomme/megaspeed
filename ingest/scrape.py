@@ -441,6 +441,9 @@ def collect(
                     push_classifier.annotate(project, repo, pr.pr, pr.activities)
                     for name, value in push_classifier.counts.items():
                         stats.push_classes[name] = value
+                    # ... and measure the PR's final diff size (numstat totals)
+                    # from the same cache, for the analysis-side pr_size metric.
+                    push_classifier.annotate_diff_size(project, repo, pr.pr, pr.commits)
                     if text_classifier is not None:
                         # ... and whether the diff moved at each comment anchor,
                         # which is the deterministic half of thread_outcome.

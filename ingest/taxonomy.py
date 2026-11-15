@@ -87,6 +87,23 @@ HASH = re.compile(r"^[0-9a-f]{7,40}$")
 # well-meaning "notes" field can never be smuggled in next to a label.
 CLASSIFIER_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,63}$")
 
+
+class _NonNegativeInt:
+    """Spec marker: an integer that cannot be negative (a line count, an index).
+
+    ``bool`` is an ``int`` in python and a negative line count is nonsense, so
+    both are rejected -- otherwise ``--verify`` would happily accept a store
+    whose ``lines_added`` is ``True``.
+    """
+
+    __name__ = "non-negative int"
+
+    def __repr__(self) -> str:  # pragma: no cover - diagnostics only
+        return "<non-negative int>"
+
+
+COUNT = _NonNegativeInt()
+
 # attribute name -> allowed string values, or a python type for scalars.
 ATTRIBUTE_SPEC: dict[str, Any] = {
     "phase": QUESTION_PHASE,
@@ -127,6 +144,11 @@ OBJECT_ATTRIBUTE_SPEC: dict[str, Any] = {
     "thread_outcome": THREAD_OUTCOME,
     "classifier_version": CLASSIFIER_TOKEN,
     "merge_commit": HASH,
+    # prd/16 "PR diff size": ``git diff --numstat <target>...<head>`` totals on
+    # the PR's final head. Integers only; both absent when the diff could not be
+    # computed (the analysis layer reads that as "pending", never as zero).
+    "lines_added": COUNT,
+    "lines_removed": COUNT,
 }
 
 # Bitbucket DC activity action -> activity vocabulary (PRD 02).
@@ -182,6 +204,11 @@ def _check_spec(attrs: dict[str, Any], spec_map: dict[str, Any], label: str) -> 
         elif isinstance(spec, re.Pattern):
             if not isinstance(value, str) or not spec.fullmatch(value):
                 raise TaxonomyError(f"{label} {key!r} must match {spec.pattern!r}, got {value!r}")
+        elif spec is COUNT:
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise TaxonomyError(
+                    f"{label} {key!r} must be a non-negative int, got {value!r}"
+                )
         elif isinstance(spec, type):
             # bool is a subclass of int in python; keep them strictly apart.
             if spec is int and isinstance(value, bool):

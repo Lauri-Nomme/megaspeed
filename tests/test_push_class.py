@@ -31,7 +31,7 @@ import unittest
 from pathlib import Path
 
 from ingest import taxonomy
-from ingest.gitclass import PushClassifier, parse_range_diff, rescope_hashes
+from ingest.gitclass import PushClassifier, parse_numstat, parse_range_diff, rescope_hashes
 from ingest.importer import import_bundle
 from ingest.scrape import scrape
 from ingest.store import connect, verify
@@ -295,6 +295,111 @@ class PushClassScenarioTests(unittest.TestCase):
         self.assertNotIn("megaspeedPatchId", activities[2])
 
 
+class DiffSizeTests(unittest.TestCase):
+    """prd/16 "PR diff size": numstat totals for the PR's final head."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.tmp.name)
+        cls.repo = ScenarioRepo(cls.root)
+        cls.repo.build()
+        cls.classifier = _classifier(cls.root)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    @staticmethod
+    def _pr(target: str, head: str) -> dict:
+        return {
+            "fromRef": {"latestCommit": head, "displayId": "DEMO-1-retry"},
+            "toRef": {"latestCommit": target, "displayId": "main"},
+        }
+
+    def test_the_final_head_s_numstat_totals_are_stamped(self):
+        """``content``: one line replaced (+1/-1) and one appended (+1)."""
+        target, _old, new = self.repo.cases["content"]
+        pr = self._pr(target, new)
+        self.classifier.annotate_diff_size(PROJECT, REPO, pr)
+        self.assertEqual(pr["megaspeedDiffSize"], {"lines_added": 2, "lines_removed": 1})
+
+    def test_a_wholesale_add_counts_every_line(self):
+        target, _old, new = self.repo.cases["rewrite"]
+        pr = self._pr(target, new)
+        self.classifier.annotate_diff_size(PROJECT, REPO, pr)
+        self.assertEqual(pr["megaspeedDiffSize"], {"lines_added": 12, "lines_removed": 0})
+
+    def test_the_size_is_measured_against_the_merge_base_not_a_moved_target(self):
+        """The three-dot range keeps the target's own commits out of the size.
+
+        ``pure``'s target moved ``notes.txt``; the branch only touches ``f.txt``,
+        so the size is that one changed line -- not the target's change too.
+        """
+        target, _old, new = self.repo.cases["pure"]
+        pr = self._pr(target, new)
+        self.classifier.annotate_diff_size(PROJECT, REPO, pr)
+        self.assertEqual(pr["megaspeedDiffSize"], {"lines_added": 1, "lines_removed": 1})
+
+    def test_a_head_the_server_cannot_serve_leaves_the_size_absent(self):
+        target, _old, _new = self.repo.cases["content"]
+        pr = self._pr(target, "f" * 40)
+        self.classifier.annotate_diff_size(PROJECT, REPO, pr)  # must not raise
+        self.assertNotIn("megaspeedDiffSize", pr)
+
+    def test_a_missing_target_leaves_the_size_absent(self):
+        pr = {"fromRef": {"latestCommit": ""}, "toRef": {"latestCommit": ""}}
+        self.classifier.annotate_diff_size(PROJECT, REPO, pr)
+        self.assertNotIn("megaspeedDiffSize", pr)
+
+    def test_no_merge_base_leaves_the_size_absent(self):
+        """An orphan head shares no history with the target: unknown, not zero."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            work = root / "work"
+            work.mkdir()
+            _git(work, "init", "-q", "-b", "main")
+            target = _commit(work, "main work", {"a.txt": "a\n"})
+            _git(work, "checkout", "-q", "--orphan", "orphan")
+            head = _commit(work, "orphan work", {"b.txt": "b\n"})
+            served = root / "served" / "scm" / PROJECT / f"{REPO}.git"
+            served.parent.mkdir(parents=True)
+            _git(work, "clone", "-q", "--bare", str(work), str(served))
+            _git(served, "config", "uploadpack.allowAnySHA1InWant", "true")
+
+            classifier = _classifier(root)
+            pr = {"fromRef": {"latestCommit": head}, "toRef": {"latestCommit": target}}
+            classifier.annotate_diff_size(PROJECT, REPO, pr)
+            self.assertNotIn("megaspeedDiffSize", pr)
+            self.assertTrue(classifier.size_reasons.get("no_merge_base"), classifier.report())
+
+    def test_an_already_stamped_size_is_left_alone(self):
+        """A fixture bundle (or a second pass) is authoritative."""
+        target, _old, new = self.repo.cases["content"]
+        pr = self._pr(target, new)
+        pr["megaspeedDiffSize"] = {"lines_added": 7, "lines_removed": 3}
+        self.classifier.annotate_diff_size(PROJECT, REPO, pr)
+        self.assertEqual(pr["megaspeedDiffSize"], {"lines_added": 7, "lines_removed": 3})
+
+    def test_the_size_shares_the_push_class_cache_without_extra_fetches(self):
+        """Measuring a PR whose heads push_class already fetched costs no fetch."""
+        target, old, new = self.repo.cases["content"]
+        self.classifier.classify(PROJECT, REPO, target, old, new)
+        before = self.classifier.fetches
+        pr = self._pr(target, new)
+        self.classifier.annotate_diff_size(PROJECT, REPO, pr)
+        self.assertIn("megaspeedDiffSize", pr)
+        self.assertEqual(self.classifier.fetches, before)
+
+    def test_git_missing_is_not_fatal(self):
+        classifier = _classifier(self.root)
+        classifier.git = ""
+        pr = self._pr("a" * 40, "b" * 40)
+        classifier.annotate_diff_size(PROJECT, REPO, pr)
+        self.assertNotIn("megaspeedDiffSize", pr)
+        self.assertEqual(classifier.size_reasons["git_unavailable"], 1)
+
+
 class HelpersTests(unittest.TestCase):
     def test_rescope_hashes_uses_the_push_time_target(self):
         activity = {
@@ -320,6 +425,18 @@ class HelpersTests(unittest.TestCase):
         ops, changed = parse_range_diff(output)
         self.assertEqual(ops, ["=", "!", ">"])
         self.assertEqual(changed, 2)
+
+    def test_parse_numstat_totals_and_skips_binary_paths(self):
+        output = "3\t1\tf.txt\n-\t-\timage.png\n0\t0\tmoved.txt\n12\t0\tnew.txt\n"
+        self.assertEqual(parse_numstat(output), (15, 1))
+        self.assertEqual(parse_numstat(""), (0, 0))
+
+    def test_the_object_attribute_spec_accepts_the_size_integers(self):
+        payload = {"lines_added": 12, "lines_removed": 0}
+        self.assertEqual(taxonomy.check_object_attributes(payload), payload)
+        for bad in ("12", 12.5, True, -1):
+            with self.assertRaises(taxonomy.TaxonomyError, msg=repr(bad)):
+                taxonomy.check_object_attributes({"lines_added": bad})
 
     def test_the_vocabulary_accepts_all_three_and_rejects_prose(self):
         for value in ("content", "pure_rebase", "rebase_conflict"):
@@ -421,10 +538,27 @@ class ScrapeWiringTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_push_class_crosses_the_bundle_and_verifies(self):
+    def _cfg(self):
         from ingest.config import Config
 
-        target, old, new = self.repo.cases["content"]
+        return Config(
+            db_path=self.root / "store.duckdb",
+            identity_path=self.root / "identity.json",
+            ticket_regex=r"\b[A-Z]+-\d+\b",
+            key_shape=r"^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$",
+            repos=[(PROJECT, REPO)],
+            ticket_projects=("DEMO",),
+            base_url="",
+        )
+
+    @staticmethod
+    def _bundle(target: str, old: str, new: str, *, head: str | None = None) -> dict:
+        """One PR whose single rescope moves ``old`` -> ``new`` onto ``target``.
+
+        ``head`` overrides the PR's final ``fromRef.latestCommit`` (the head the
+        diff size is measured at); it defaults to the rescope's new head.
+        """
+        head = head or new
         commit = {
             "id": new,
             "displayId": new[:7],
@@ -456,13 +590,13 @@ class ScrapeWiringTests(unittest.TestCase):
             "closed": False,
             "createdDate": 1_790_000_000_000,
             "updatedDate": 1_790_000_100_000,
-            "fromRef": {"latestCommit": new, "displayId": "DEMO-1-retry"},
+            "fromRef": {"latestCommit": head, "displayId": "DEMO-1-retry"},
             "toRef": {"latestCommit": target, "displayId": "main"},
             "author": {"user": {"name": "ada", "displayName": "Ada Lovelace", "type": "NORMAL"}},
             "reviewers": [],
             "properties": {},
         }
-        bundle = {
+        return {
             "schema": "megaspeed.fixture/1",
             "projects": [{
                 "key": PROJECT,
@@ -472,15 +606,9 @@ class ScrapeWiringTests(unittest.TestCase):
                 }],
             }],
         }
-        cfg = Config(
-            db_path=self.root / "store.duckdb",
-            identity_path=self.root / "identity.json",
-            ticket_regex=r"\b[A-Z]+-\d+\b",
-            key_shape=r"^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$",
-            repos=[(PROJECT, REPO)],
-            ticket_projects=("DEMO",),
-            base_url="",
-        )
+
+    def _scrape(self, bundle: dict):
+        cfg = self._cfg()
         out = self.root / "export" / "demo.tgz"
         report = scrape(
             cfg,
@@ -490,6 +618,11 @@ class ScrapeWiringTests(unittest.TestCase):
             state_dir=self.root / "export" / "demo.state",
             push_classifier=self.classifier,
         )
+        return cfg, out, report
+
+    def test_push_class_crosses_the_bundle_and_verifies(self):
+        target, old, new = self.repo.cases["content"]
+        cfg, out, report = self._scrape(self._bundle(target, old, new))
         self.assertEqual(report["push_class"]["counts"], {"content": 1})
 
         from ingest.bundle import read_bundle
@@ -508,6 +641,60 @@ class ScrapeWiringTests(unittest.TestCase):
                 "SELECT attributes FROM events WHERE activity = 'pr_pushed'"
             ).fetchone()[0])
             self.assertEqual(stored["push_class"], "content")
+        finally:
+            con.close()
+
+    def test_diff_size_lands_on_the_pr_object_and_verifies(self):
+        """prd/16 "PR diff size": the numstat totals cross as PR attributes.
+
+        The ``content`` scenario's final head changes one line of ``f.txt`` and
+        appends one more: against the merge base that is 2 added / 1 removed.
+        """
+        target, old, new = self.repo.cases["content"]
+        cfg, out, report = self._scrape(self._bundle(target, old, new))
+        self.assertEqual(report["push_class"]["diff_size"]["measured"], 1)
+
+        import_bundle(cfg, out)
+        con = connect(cfg.db_path, read_only=True)
+        try:
+            payload = verify(con, cfg.key_shape, cfg.ticket_projects)
+            self.assertTrue(payload["ok"], payload["problems"])
+            attributes = json.loads(con.execute(
+                "SELECT attributes FROM objects WHERE object_type = 'PR'"
+            ).fetchone()[0])
+            self.assertEqual(attributes["lines_added"], 2, attributes)
+            self.assertEqual(attributes["lines_removed"], 1, attributes)
+        finally:
+            con.close()
+
+    def test_an_unknown_head_leaves_the_size_absent_and_still_verifies(self):
+        """No merge base / missing head -> attributes absent, never zero, no crash."""
+        target, old, new = self.repo.cases["content"]
+        bundle = self._bundle(target, old, new, head="f" * 40)
+        cfg, out, report = self._scrape(bundle)
+        self.assertEqual(report["push_class"]["diff_size"]["measured"], 0)
+        self.assertTrue(
+            report["push_class"]["diff_size"]["reasons"].get("missing_head")
+        )
+
+        from ingest.bundle import read_bundle
+
+        written = read_bundle(out)
+        prs = [o for o in written.objects if o["object_type"] == "PR"]
+        self.assertEqual(len(prs), 1)
+        self.assertNotIn("lines_added", prs[0]["attributes"])
+        self.assertNotIn("lines_removed", prs[0]["attributes"])
+
+        import_bundle(cfg, out)
+        con = connect(cfg.db_path, read_only=True)
+        try:
+            payload = verify(con, cfg.key_shape, cfg.ticket_projects)
+            self.assertTrue(payload["ok"], payload["problems"])
+            attributes = json.loads(con.execute(
+                "SELECT attributes FROM objects WHERE object_type = 'PR'"
+            ).fetchone()[0])
+            self.assertNotIn("lines_added", attributes)
+            self.assertNotIn("lines_removed", attributes)
         finally:
             con.close()
 

@@ -97,6 +97,12 @@ def _print_scrape(r: dict) -> None:
         print(f"push class     {counts}")
         if reasons:
             print(f"push reasons   {reasons}")
+        size = push.get("diff_size") or {}
+        unknown = ", ".join(
+            f"{k}={v}" for k, v in (size.get("reasons") or {}).items()
+        )
+        print(f"diff size      {size.get('measured', 0)} PR(s) measured"
+              + (f" · unknown: {unknown}" if unknown else ""))
     elif push:
         why = "git not installed" if "git" in push and not push.get("git") else "off"
         print(f"push class     {why} (no local git cache)")
