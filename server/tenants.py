@@ -20,7 +20,9 @@ from pathlib import Path
 STORE_SUFFIX = ".duckdb"
 
 # One safe path segment: starts alphanumeric, then letters/digits/._- (≤64).
-NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+# ``\Z``, not ``$``: ``$`` also matches just before a trailing newline, which
+# would let ``"del\n"`` through as a "safe" name.
+NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 
 
 def valid_name(name: str) -> bool:
