@@ -1,35 +1,39 @@
 # STATE — megaspeed · LIVE
 
 Live behind nginx (→ `127.0.0.1:8766`), 3 tenants. GitHub: `Lauri-Nomme/megaspeed` (private, install-details scrubbed).
-Tests: **158** (`tests/`) + **46** (`scrape/tests`) green.
+Tests: **215** (`tests/`) + **46** (`scrape/tests`) green.
 
-## Scrape side (airgapped) — full value in one pass
+## Scrape (airgapped) — full value in one pass
 
-- **BB ingest** — scrape → tgz → import; ticket pre-filter + `updatedDate` watermark + settled-PR finality +
-  early termination (strict `<`), progress reporting. 131/131 DEL, `--verify` OK.
-- **`push_class`** — shallow/partial git cache, `git patch-id` + `range-diff` → content/pure_rebase/rebase_conflict.
-- **LLM classification** — `ingest/classify.py`: mock + Ollama backends, closed vocab (`comment_type`,
-  `thread_outcome`, `question` + `phase`), hybrid deterministic+LLM thread outcome, tgz emit, `--verify`.
-  Real model `qwen3-30b-a3b:2507` bench: ~1.9 s/comment, 0 fallbacks; full DEL ≈ 471 calls ≈ 15 min CPU.
+- **Ingest**: scrape → tgz → import; ticket **pre-filter** + `updatedDate` watermark + settled-PR finality +
+  early termination (strict `<`), progress reporting. **Ticket-set scoping** (`MEGASPEED_TICKET_KEYS`/`_FILE`,
+  exact keys, set-over-prefix) → DEL `DEL-100,DEL-101` = 3 PRs / 8 requests.
+- **`push_class`** (shallow git cache, patch-id + range-diff). **LLM classification** (`comment_type`,
+  `thread_outcome`, `question`+`phase`) via `qwen3-30b-a3b` on precision (~1.9 s/comment).
+- **PR diff size** capture — in progress.
+
+## Analysis → suggested rules (the "what to change first" output)
+
+`analysis/rules.py` → `GET /api/insights` → **Rules** view. 9 metrics → ranked suggestions (impact ×
+confidence). DEL top-3: cycle-time (4.3 d median), rework-loops (p90 3 rounds), review-tail.
+`rebase-waste` / `comment-tax` / `pr-size` are implemented but silent on the CURRENT DEL store (stale —
+scraped before push_class + LLM existed; see below).
 
 ## LLM (precision box)
 
-Ollama `qwen3-30b-a3b:2507` (30B MoE / ~3B active, Q4_K_M, CPU) in k3s `home-iot/ollama-moe`;
-`http://10.43.36.10:11434` (svc) / `10.42.5.219:11434` (pod); `logproxy` sidecar `:11435`.
-`:3000`/`:4000` are Mastodon. Weak GPU → small models only.
+Ollama `qwen3-30b-a3b:2507` (30B MoE / ~3B active, CPU) — `http://10.43.36.10:11434`; logproxy `:11435`.
 
-## CI
+## In progress (fallback `opencode-go/deepseek-v4.1-flash`)
 
-`.github/workflows/build-scraper.yml` — builds on main/PR, path-filtered to the scraper component;
-**main push → tagged release with the `megaspeed-scrape` binary attached** (`scraper-<sha>`).
+- [ ] **PR diff-size capture** (scrape-side `git diff --numstat` → `PR.attributes.lines_added/removed`).
 
-## Next
+## Next / follow-ups
 
-- [ ] **Analysis → suggested-rules layer** (prd/15): reviewer responsiveness (self-vs-other),
-      time-to-first-review, PR-size vs latency, sentinel queue, comment-tax by type — the surface
-      that turns the mined data into "what to change".
-- [ ] Business-hours calendar. [ ] Story/Epic/Sprint (Jira+Tempo).
+- [ ] **Re-scrape DEL `--full`** (with push_class + LLM + diff size) so `rebase-waste`, `comment-tax`,
+      and `pr_size` fire on real data — the store was built before those landed.
+- [ ] Business-hours calendar (re-baselines waits). [ ] Story/Epic/Sprint (Jira+Tempo).
 
 ## Open (production)
 
-- [ ] Production Bitbucket DC URL + auth. [ ] Jira key format.
+- [ ] Production Bitbucket DC URL + auth (configurable via `MEGASPEED_BB_*`). [ ] Jira keys
+      (`MEGASPEED_TICKET_KEYS`/`_FILE`, e.g. `FOOBAR-1234`).
