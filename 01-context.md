@@ -60,6 +60,19 @@ Forcing it into a flat per-story trace would destroy the signal we need.
    mined data, used to test interventions *before* inflicting them on the team,
    plus a daily "what should I do next" prioritisation report.
 
+## Deliverable
+
+The product is an **interactive web interface** over the pseudonymised event
+log. Two outputs, in priority order:
+
+1. **Timeline visualization** (ship first) — a left-to-right timeline of events
+   and actors, gantt-style object bars, and blocking visualization, with zoom
+   in/out.
+2. **Simulation in the web UI** (ship second) — run calibrated scenarios from
+   the browser and compare them.
+
+See `09-web-ui.md`.
+
 ## Non-goals
 
 - **Not a people-ranking tool.** Output is presented at role/queue level with
@@ -79,10 +92,11 @@ Forcing it into a flat per-story trace would destroy the signal we need.
 ## Scope of the first release
 
 One team, one focus epic, but mined against **the team's full history** (a
-single epic is too small a sample). Sources: **Bitbucket Data Center**,
-**Jira Cloud** (+ **Jira Cloud Tempo** for worklogs), **Slack**. The Bitbucket
-activities stream + patch-id push classification is the cleanest signal and is
-the spine of slice 1.
+single epic is too small a sample). Sources, in **ingest priority order**:
+**Bitbucket Data Center** (#1), **Jira Cloud** (+ **Jira Cloud Tempo** for
+worklogs, #2), **Slack** (#3, de-prioritised). The Bitbucket activities stream
++ patch-id push classification is the cleanest signal and is the spine of
+slice 1.
 
 ## Constraints that shape everything
 

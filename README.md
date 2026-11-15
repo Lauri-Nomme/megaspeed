@@ -55,11 +55,12 @@ couldn't account for tens of thousands of GPUs.
 | `01-context.md` | Problem, goals, non-goals, scope |
 | `02-pseudonymization.md` | **The special requirement** — closed-vocabulary pseudonymisation, local classification, threat model |
 | `03-data-model.md` | Object-centric event log (OCEL 2.0), object types, events |
-| `04-exports.md` | Jira / Bitbucket / Slack export specs, push classification |
+| `04-exports.md` | Bitbucket DC / Jira Cloud (+ Tempo) / Slack export specs, push classification |
 | `05-analysis.md` | Ball-in-court, blocking graphs, queueing, rework, drivers, simulation |
 | `06-architecture.md` | Components, tech choices, raw↔pseudonymised boundary |
-| `07-milestones.md` | Delivery slices (design-time ordering only) |
+| `07-milestones.md` | Delivery slices, ingest & output priorities |
 | `08-risks.md` | GDPR, works council, Goodhart, data quality, open questions |
+| `09-web-ui.md` | Web interface: timeline viz (#1), blocking/queue views, simulation UI (#2) |
 
 ## Status
 

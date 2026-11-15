@@ -14,12 +14,13 @@
                                                           │ keys + pseudonyms + labels only
                                                           ▼
                 PSEUDONYMISED ZONE (shareable, LLM-safe)
-  ┌─────────────────────────┐   ┌────────────────────┐   ┌──────────────────────┐
-  │ primary store            │──►│ analysis (SQL)      │──►│ reports               │
-  │ DuckDB + Parquet (OCEL)  │   │ + optional open-    │   │ flow eff, blocking     │
-  │ no free-text columns     │   │   source LLM over   │   │ graph, daily "next"    │
-  └─────────────────────────┘   │   the labels only    │   └──────────────────────┘
-                                └────────────────────┘
+  ┌─────────────────────────┐   ┌────────────────────┐   ┌──────────────────────────────┐
+  │ primary store            │──►│ analysis (SQL)      │──►│ web UI (read-only)            │
+  │ DuckDB + Parquet (OCEL)  │   │ + optional open-    │   │  · LTR timeline (events,      │
+  │ no free-text columns     │   │   source LLM over   │   │    actors, gantt bars, zoom)  │
+  └─────────────────────────┘   │   the labels only    │   │  · blocking & queue views     │
+                                └────────────────────┘   │  · simulation (#2)             │
+                                                         └──────────────────────────────┘
 ```
 
 ## Technology choices (with reasoning)
@@ -32,6 +33,7 @@
 | Local classification LLM | **Ollama / llama.cpp**, qwen2.5/llama3.2 3B or gemma3/phi-class, temp 0, JSON-schema constrained | cheap, local; **this is what performs raw→generalised classification**; the schema enforces the closed vocabulary |
 | Analysis LLM (open-source) | any open model, on the pseudonymised view only | it never sees raw text because it never has it |
 | Simulation | **SimPy** (or Simod for BPMN) | discrete-event, calibrated from mined distributions |
+| Web UI | **React + D3/ECharts**, read-only **FastAPI** over DuckDB (DuckDB-WASM as zero-server fallback) | timeline/gantt/graph in one stack; read-only so the UI cannot leak raw content |
 | Scrapers | small per-source CLI (Python), rate-limited, resumable, **cursor/watermark-based incremental** | simple, auditable, run in the raw zone only |
 
 ## The boundary, enforced three ways
@@ -45,6 +47,10 @@
 
 The classifier emits, alongside every event, `classifier_version` and a content
 hash, so outputs are reproducible and tunable without retaining raw text.
+
+The web UI is a **read-only** client of the pseudonymised store: it has no
+credentials to the source systems and no write path, so it cannot leak raw
+content even by accident (see `09-web-ui.md`).
 
 ## Deployment target
 

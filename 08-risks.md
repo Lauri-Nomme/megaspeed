@@ -18,6 +18,16 @@ Once people know what's measured, they optimise it. Mitigate by: role-level
 presentation, not individual dashboards; measure system outcomes (cycle time,
 flow efficiency), not individual throughput; revisit metrics as behaviour shifts.
 
+### User interface
+
+- **Raw-content leakage in the UI** — the web UI is read-only over the
+  pseudonymised store; tooltips and labels render only keys, pseudonyms, and
+  closed attributes. The canary test extends to every rendered view (raw strings
+  must never appear).
+- **Timeline performance at scale** — ~10k+ events need level-of-detail
+  aggregation (coarse zoom = counts/densities, fine zoom = events) or the UI
+  stalls. Zoom/pan are a load-bearing feature, not polish.
+
 ### Data quality
 
 - **Timezones** — normalise everything to one TZ or the wait times are garbage.
