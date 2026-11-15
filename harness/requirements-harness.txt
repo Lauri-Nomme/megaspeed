@@ -1,0 +1,8 @@
+# Harness-only deps: the persistent browser behind the eval/screenshot bridge.
+# Install into the project venv:
+#   .venv/bin/pip install -r harness/requirements-harness.txt
+#
+# 1.62.0 is pinned because its chromium revision is 1234, which is what is
+# already cached in ~/.cache/ms-playwright (chromium-1234 and
+# chromium_headless_shell-1234). Bumping this needs `playwright install chromium`.
+playwright==1.62.0

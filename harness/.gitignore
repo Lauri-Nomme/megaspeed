@@ -1,0 +1,3 @@
+# local browser profile + transient artifacts
+.browser-profile/
+*.log
