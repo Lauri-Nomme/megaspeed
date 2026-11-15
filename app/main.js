@@ -46,8 +46,12 @@ const TIMEFRAMES = {
 
 const state = {
   meta: null,
+  stamp: '',
   events: [],
   objects: [],
+  counts: null,
+  eventCapped: false,
+  objectCapped: false,
   page: 'timeline',
   scope: { kind: 'all', value: null, label: 'everything' },
   timeframe: '1q',
@@ -73,6 +77,9 @@ const timeline = new Timeline({
     if (stats.aggregated) bits.push(`aggregated into ${fmtBucket(stats.bucketMs)} buckets — zoom in for individual events`);
     if (stats.openPrs) bits.push(`${stats.openPrs} PRs still open are right-censored at the snapshot time`);
     bits.push(`${stats.visible} of ${stats.total} events in view`);
+    if (state.eventCapped && state.counts && state.counts.total > state.events.length) {
+      bits.push(`only the first ${state.events.length} of ${state.counts.total} events are loaded`);
+    }
     $('honesty').textContent = bits.join(' · ');
     $('empty').hidden = !(stats.allHidden || !!state.emptyReason);
     if (stats.allHidden) {
@@ -112,10 +119,27 @@ function cached(key) {
   return state.cache.get(key);
 }
 
+async function fetchJSON(url, options = {}) {
+  const response = await fetch(url, { cache: 'no-store', ...options });
+  let body = null;
+  try { body = await response.json(); } catch { body = null; }
+  return { response, body };
+}
+
+class HttpError extends Error {
+  constructor(status, body, url) {
+    super(`${url} → ${status}`);
+    this.status = status;
+    this.body = body || {};
+    this.url = url;
+  }
+}
+
 async function getJSON(url) {
-  const response = await fetch(url, { cache: 'no-store' });
-  if (!response.ok) throw new Error(`${url} → ${response.status}`);
-  return response.json();
+  const { response, body } = await fetchJSON(url);
+  if (!response.ok) throw new HttpError(response.status, body, url);
+  if (body === null) throw new Error(`${url} → invalid JSON`);
+  return body;
 }
 
 function timeframeDays() {
@@ -652,9 +676,10 @@ function renderProvenance() {
   const meta = state.meta;
   if (!meta) return;
   syncChromeHeight();
+  const capped = state.objectCapped ? ` · objects capped at ${state.objects.length}` : '';
   $('provenance').textContent =
     `Snapshot from ${ageOf(meta.as_of)}: ${meta.events} events, ${meta.prs} PRs, ${meta.commits} commits · ` +
-    `${meta.source || 'unknown source'}, ${meta.prs_dropped} PRs without a ticket key dropped`;
+    `${meta.source || 'unknown source'}, ${meta.prs_dropped} PRs without a ticket key dropped${capped}`;
   $('nav-count').textContent = `${meta.events} events · ${meta.prs} PRs`;
 }
 
@@ -668,38 +693,165 @@ function setEmpty(reason) {
   }
 }
 
-async function load() {
+/* Paged loading (GAP-04).
+ *
+ * `/api/events` and `/api/objects` take `limit`/`offset` and report the total
+ * in `X-Total-Count`, so the first page paints immediately and the rest
+ * streams in. `/api/events/counts` gives the histogram and the true window
+ * totals without a single event row, which is what the honesty line uses.
+ */
+const EVENT_PAGE = 2000;
+const EVENT_MAX = 40000;
+const OBJECT_PAGE = 5000;
+const OBJECT_MAX = 60000;
+const RETRY_LIMIT = 20;
+
+let loadSeq = 0;
+let retryTimer = 0;
+let retryCount = 0;
+
+function totalOf(response, fallback) {
+  const header = Number(response.headers.get('X-Total-Count'));
+  return Number.isFinite(header) && header >= 0 ? header : fallback;
+}
+
+async function pageAll(url, pageSize, max, onPage) {
+  let offset = 0;
+  let total = Infinity;
+  while (offset < total && offset < max) {
+    const { response, body } = await fetchJSON(`${url}${url.includes('?') ? '&' : '?'}limit=${pageSize}&offset=${offset}`);
+    if (!response.ok) throw new HttpError(response.status, body, url);
+    if (!Array.isArray(body)) throw new Error(`${url} → unexpected payload`);
+    total = totalOf(response, total === Infinity ? body.length : total);
+    if (!body.length) break;
+    offset += body.length;
+    const enough = await onPage(body, offset, total);
+    if (enough) break;
+    if (body.length < pageSize) break;
+  }
+  return { loaded: offset, total: Number.isFinite(total) ? total : offset };
+}
+
+function storeBusy(error) {
+  return Boolean(error && error.status === 503 && error.body && error.body.retryable);
+}
+
+function retryWhenFree() {
+  if (retryCount >= RETRY_LIMIT) {
+    setStatus('ingest is holding the store — reload when it finishes', 'stale');
+    return;
+  }
+  retryCount += 1;
+  clearTimeout(retryTimer);
+  retryTimer = setTimeout(() => load({ force: true }), Math.min(8000, 400 * retryCount));
+}
+
+async function load({ force = false } = {}) {
+  const seq = ++loadSeq;
+  let health;
   try {
-    const [health, events, objects] = await Promise.all([
-      fetch('/api/health', { cache: 'no-store' }).then((r) => r.json()),
-      fetch('/api/events', { cache: 'no-store' }).then((r) => r.json()),
-      fetch('/api/objects', { cache: 'no-store' }).then((r) => r.json()),
-    ]);
-    if (!health.ok) {
-      $('provenance').textContent = health.error || 'store unavailable';
+    health = await getJSON('/api/health');
+  } catch (err) {
+    if (storeBusy(err)) {
+      setStatus('ingest running — waiting for the store', 'stale');
+      retryWhenFree();
+      return;
+    }
+    if (err.status === 503) {
+      $('provenance').textContent = err.body.error || 'store unavailable';
       setEmpty('No store yet.');
       setStatus('no store', 'stale');
       return;
     }
-    setEmpty('');
-    state.meta = health;
-    state.events = Array.isArray(events) ? events : [];
-    state.objects = Array.isArray(objects) ? objects : [];
-    state.cache.clear();
-    applyScopeToTimeline();
-    buildScopeOptions();
-    renderProvenance();
-    renderLegend();
-    renderPhaseLegend();
-    if (state.page !== 'timeline') await ensureData(state.page);
-    renderPage();
-    syncChromeHeight();
-    setStatus(`live · ${state.events.length} events`, 'live');
-    window.__megaspeedReady = true;
-  } catch (err) {
     setStatus('offline', 'stale');
     $('provenance').textContent = `could not reach the API: ${err.message}`;
+    return;
   }
+  retryCount = 0;
+  if (!health.ok) {
+    $('provenance').textContent = health.error || 'store unavailable';
+    setEmpty('No store yet.');
+    setStatus('no store', 'stale');
+    state.meta = null;
+    state.stamp = '';
+    return;
+  }
+
+  const stamp = `${health.as_of || ''}|${health.events ?? ''}`;
+  if (!force && state.stamp === stamp && state.events.length) {
+    // Same snapshot as last time (e.g. the store file was touched by a no-op
+    // run): nothing to refetch, so nothing is refetched.
+    state.meta = health;
+    renderProvenance();
+    setStatus(`live · ${state.events.length} events`, 'live');
+    window.__megaspeedReady = true;
+    return;
+  }
+
+  setEmpty('');
+  state.meta = health;
+  state.stamp = stamp;
+  const previousView = timeline.captureView();
+  try {
+    // Cheap first: window totals + activity histogram, no event rows.
+    try {
+      state.counts = await getJSON('/api/events/counts?granularity=day');
+    } catch (err) {
+      if (storeBusy(err)) throw err;
+      state.counts = null;
+    }
+    if (seq !== loadSeq) return;
+
+    state.events = [];
+    state.eventCapped = false;
+    const events = await pageAll('/api/events', EVENT_PAGE, EVENT_MAX, async (page, loaded, total) => {
+      if (seq !== loadSeq) return true;
+      state.events.push(...page);
+      state.eventCapped = loaded < total;
+      // paint the first page straight away, then keep the canvas still
+      if (loaded <= EVENT_PAGE) {
+        applyScopeToTimeline();
+        renderLegend();
+        renderPhaseLegend();
+        setStatus(`loading events ${loaded} of ${total}`, 'live');
+      }
+      return false;
+    });
+    if (seq !== loadSeq) return;
+    state.eventCapped = events.loaded < events.total;
+
+    state.objects = [];
+    const objects = await pageAll('/api/objects', OBJECT_PAGE, OBJECT_MAX, async (page) => {
+      if (seq !== loadSeq) return true;
+      state.objects.push(...page);
+      return false;
+    });
+    if (seq !== loadSeq) return;
+    state.objectCapped = objects.loaded < objects.total;
+  } catch (err) {
+    if (seq !== loadSeq) return;
+    if (storeBusy(err)) {
+      setStatus('ingest running — waiting for the store', 'stale');
+      retryWhenFree();
+      return;
+    }
+    setStatus('offline', 'stale');
+    $('provenance').textContent = `could not reach the API: ${err.message}`;
+    return;
+  }
+
+  state.cache.clear();
+  applyScopeToTimeline();
+  if (previousView) timeline.restoreView(previousView);
+  buildScopeOptions();
+  renderProvenance();
+  renderLegend();
+  renderPhaseLegend();
+  if (state.page !== 'timeline') await ensureData(state.page);
+  renderPage();
+  syncChromeHeight();
+  setStatus(`live · ${state.events.length} events`, 'live');
+  window.__megaspeedReady = true;
 }
 
 // ------------------------------------------------------------------ harness

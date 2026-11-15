@@ -218,6 +218,26 @@ export class Timeline {
     this.schedule();
   }
 
+  /** Snapshot the investigation window across a data refresh (B5).
+
+   * The API is paged, so ``setData`` may run several times per load (once per
+   * page). The view is captured once, before the first page, and restored after
+   * the last one, so progressive loading never moves the user's window.
+   */
+  captureView() {
+    return this._initialised && this.view ? { ...this.view } : null;
+  }
+
+  restoreView(view) {
+    if (!view || !this._initialised) return false;
+    const start = Math.max(view.start, this.domain.start);
+    const end = Math.min(view.end, this.domain.end);
+    if (!(end > start)) return false;
+    this.view = { start, end };
+    this.schedule();
+    return true;
+  }
+
   setLanes(dim) {
     this.dim = dim;
     this.clearHover();
