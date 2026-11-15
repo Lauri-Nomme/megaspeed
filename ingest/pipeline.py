@@ -667,7 +667,7 @@ def run(cfg: Config, transport, source: str, limit: int | None = None) -> dict:
             },
         )
         after = con.execute("SELECT count(*) FROM events").fetchone()[0]
-        report = verify(con)
+        report = verify(con, cfg.key_shape, cfg.ticket_projects)
     finally:
         con.close()
     ident.save()

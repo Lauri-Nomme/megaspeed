@@ -104,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         con = connect(cfg.db_path, read_only=True)
         try:
-            report = verify(con)
+            report = verify(con, cfg.key_shape, cfg.ticket_projects)
         finally:
             con.close()
         if args.json:
@@ -188,7 +188,10 @@ def _print_verify(report: dict, db: Path) -> None:
     for table, columns in report["tables"].items():
         print(f"  {table:14} {', '.join(columns)}")
     if report["ok"]:
-        print("contract       OK — columns allowlisted, no whitespace-bearing strings, no canaries")
+        print(
+            "contract       OK — columns allowlisted, identifier shapes checked, "
+            "closed vocabularies hold, no canaries"
+        )
     else:
         print("contract       VIOLATED")
         for problem in report["problems"]:

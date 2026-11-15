@@ -13,14 +13,29 @@ Three defences, in order of strength:
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import duckdb
 
 from . import taxonomy
+from .config import DEFAULT_KEY_SHAPE, DEFAULT_TICKET_PROJECTS
 
 SCHEMA_SQL = Path(__file__).with_name("schema.sql")
+
+# Pseudonym shape: two initials (prd/02) plus an optional numeric collision
+# suffix, or a synthetic actor (prd/03: CI, calendar, bot:<name>).
+ACTOR_RE = r"^(?:[A-Z][a-z]?[A-Z][a-z]?\d*|system|CI|calendar|bot:[A-Za-z0-9_.-]+)$"
+# content_hash is a blake2b digest (digest_size=8) in hex, nothing else.
+CONTENT_HASH_RE = r"^[0-9a-f]{16}$"
+REPO_RE = r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+OBJECT_ID_PREFIX = {
+    "PR": "PR:",
+    "COMMIT": "COMMIT:",
+    "TICKET": "TICKET:",
+    "PERSON": "PERSON:",
+}
 
 ALLOWED: dict[str, set[str]] = {
     "events": {
@@ -372,8 +387,16 @@ def _scan(con, table: str, column: str, dtype: str, predicate: str, params: list
     return int(con.execute(sql, params).fetchone()[0])
 
 
-def verify(con) -> dict:
-    """Return a report; ``ok`` is False if any part of the contract is broken."""
+def verify(con, key_shape: str = DEFAULT_KEY_SHAPE,
+           ticket_projects: tuple[str, ...] = DEFAULT_TICKET_PROJECTS) -> dict:
+    """Return a report; ``ok`` is False if any part of the contract is broken.
+
+    The guard is deliberately about *content class*, not only container shape:
+    every string column must hold something of a known shape (a pseudonym, a
+    hex hash, a repo slug, a key with a configured project prefix, a closed
+    label). The old whitespace check alone blessed camelCase names, prose-like
+    hashes and garbage enum values.
+    """
     problems: list[str] = []
 
     tables = {r[0] for r in con.execute(
@@ -436,6 +459,105 @@ def verify(con) -> dict:
     for actor, seen in sorted(kinds.items()):
         if len(seen) > 1:
             problems.append(f"actor {actor!r} classified as both {sorted(seen)}")
+
+    # ---- content class of every identifier-ish column --------------------
+    shape_checks = [
+        ("events", "actor", "VARCHAR", "NOT regexp_matches(v, ?)", [ACTOR_RE]),
+        ("events", "content_hash", "VARCHAR", "NOT regexp_matches(v, ?)", [CONTENT_HASH_RE]),
+        ("events", "repo", "VARCHAR", "NOT regexp_matches(v, ?)", [REPO_RE]),
+        ("objects", "repo", "VARCHAR", "NOT regexp_matches(v, ?)", [REPO_RE]),
+        ("ingest_runs", "source", "VARCHAR", "v NOT IN ('fixture', 'bitbucket-dc')", []),
+    ]
+    for table, column, dtype, predicate, params in shape_checks:
+        bad = _scan(con, table, column, dtype, predicate, params)
+        if bad:
+            problems.append(f"{table}.{column}: {bad} value(s) outside the expected shape")
+
+    versions = sorted(taxonomy.CLASSIFIER_VERSIONS)
+    bad = _scan(
+        con, "events", "classifier_version", "VARCHAR",
+        f"v NOT IN ({','.join('?' * len(versions))})", versions,
+    )
+    if bad:
+        problems.append(f"events.classifier_version: {bad} value(s) outside {versions}")
+
+    bad = _scan(
+        con, "objects", "state", "VARCHAR",
+        f"v NOT IN ({','.join('?' * len(taxonomy.OBJECT_STATE))})", sorted(taxonomy.OBJECT_STATE),
+    )
+    if bad:
+        problems.append(f"objects.state: {bad} value(s) outside {sorted(taxonomy.OBJECT_STATE)}")
+
+    message_classes = sorted(taxonomy.MESSAGE_CLASS)
+    bad = _scan(
+        con, "objects", "message_class", "VARCHAR",
+        f"v NOT IN ({','.join('?' * len(message_classes))})", message_classes,
+    )
+    if bad:
+        problems.append(f"objects.message_class: {bad} value(s) outside the closed set")
+
+    # Ticket keys: shape **and** a configured project prefix (BUG-04's gate is
+    # re-asserted here, so a loosened config cannot be blessed by --verify).
+    bad = _scan(con, "objects", "ticket_keys", "VARCHAR[]", "NOT regexp_matches(v, ?)", [key_shape])
+    if bad:
+        problems.append(f"objects.ticket_keys: {bad} value(s) do not match key_shape")
+    projects = sorted(str(p).upper() for p in ticket_projects)
+    prefix_predicate = (
+        f"split_part(v, '-', 1) NOT IN ({','.join('?' * len(projects))})" if projects else "TRUE"
+    )
+    bad = _scan(con, "objects", "ticket_keys", "VARCHAR[]", prefix_predicate, projects)
+    if bad:
+        problems.append(
+            f"objects.ticket_keys: {bad} value(s) outside the configured projects {projects}"
+        )
+    bad = con.execute(
+        "SELECT count(*) FROM objects WHERE object_type = 'PR'"
+        " AND (ticket_keys IS NULL OR len(ticket_keys) = 0)"
+    ).fetchone()[0]
+    if bad:
+        problems.append(f"objects: {bad} PR(s) without a matched ticket key")
+
+    # Object ids must carry their type and a well-formed suffix.
+    for otype, oid in con.execute("SELECT object_type, object_id FROM objects").fetchall():
+        prefix = OBJECT_ID_PREFIX.get(otype)
+        if prefix and not str(oid).startswith(prefix):
+            problems.append(f"object {oid!r} does not match its type {otype!r}")
+        elif otype == "PR" and not re.search(r"#\d+$", str(oid)):
+            problems.append(f"PR object id without a numeric id: {oid!r}")
+        elif otype == "COMMIT" and not re.fullmatch(r"COMMIT:[0-9a-f]{7,40}", str(oid)):
+            problems.append(f"COMMIT object id is not a hash: {oid!r}")
+        elif otype == "TICKET" and not re.fullmatch(key_shape, str(oid).partition(":")[2]):
+            problems.append(f"TICKET object id is not a key: {oid!r}")
+        elif otype == "PERSON" and not re.fullmatch(ACTOR_RE, str(oid).partition(":")[2]):
+            problems.append(f"PERSON object id is not a pseudonym: {oid!r}")
+
+    # ---- referential integrity ------------------------------------------
+    orphans = con.execute(
+        "SELECT count(*) FROM event_objects eo"
+        " LEFT JOIN events e ON eo.event_key = e.event_key WHERE e.event_key IS NULL"
+    ).fetchone()[0]
+    if orphans:
+        problems.append(f"event_objects: {orphans} row(s) reference a missing event")
+    dangling = con.execute(
+        "SELECT count(*) FROM event_objects eo"
+        " LEFT JOIN objects o ON eo.object_id = o.object_id AND eo.object_type = o.object_type"
+        " WHERE o.object_id IS NULL"
+    ).fetchone()[0]
+    if dangling:
+        problems.append(f"event_objects: {dangling} row(s) reference a missing object")
+    lonely = con.execute(
+        "SELECT count(*) FROM events e"
+        " WHERE NOT EXISTS (SELECT 1 FROM event_objects eo WHERE eo.event_key = e.event_key)"
+    ).fetchone()[0]
+    if lonely:
+        problems.append(f"events: {lonely} event(s) reference no object")
+    unpaired = con.execute(
+        "SELECT count(*) FROM events e WHERE NOT EXISTS ("
+        " SELECT 1 FROM objects o WHERE o.object_type = 'PR'"
+        " AND o.repo = e.repo AND o.pr_id = e.pr_id)"
+    ).fetchone()[0]
+    if unpaired:
+        problems.append(f"events: {unpaired} event(s) have no matching PR object (repo/pr_id)")
 
     return {
         "ok": not problems,

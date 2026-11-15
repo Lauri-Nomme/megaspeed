@@ -17,6 +17,10 @@ from typing import Any
 # Version of the raw -> label projection. Bumped when a mapping changes; stored
 # next to every event so a re-classification is reproducible.
 CLASSIFIER_VERSION = "deterministic-v1"
+# Every version this codebase has ever emitted. Add a member when bumping: a
+# store may legitimately still hold rows from an older version until the next
+# re-ingest replays them (BUG-02), and --verify must accept those.
+CLASSIFIER_VERSIONS = frozenset({"deterministic-v1"})
 
 # --- closed sets ---------------------------------------------------------------
 
