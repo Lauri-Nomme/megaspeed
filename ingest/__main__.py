@@ -1,6 +1,15 @@
 """CLI entrypoint: ``python3 -m ingest``.
 
-Fixture mode is the default and needs no credentials:
+The ingest is split into the two sides of the airgap (prd/11 §7):
+
+    # scrape side (next to the source): -> a tgz of pseudonymised rows
+    python3 -m ingest scrape --live --repo DEL/delivery-api --out export/del.tgz
+
+    # import side (this env): tgz -> DuckDB store
+    python3 -m ingest import export/del.tgz --db data/del.duckdb
+
+The older one-shot form is still supported and is the dev shortcut
+(``--live`` = scrape + import back-to-back, through a real bundle file):
 
     python3 -m ingest --fixture --n 50
     python3 -m ingest --fixture --n 50 --write-fixtures   # (re)generate fixtures/
@@ -18,7 +27,8 @@ from pathlib import Path
 
 from . import fixtures as fixtures_mod
 from .config import Config, REPO_ROOT, load_config
-from .pipeline import run
+from .live import run
+from .scrape import DEFAULT_OVERLAP_HOURS
 from .store import connect, verify
 from .transport import BitbucketError, FixtureTransport, HttpTransport
 
@@ -65,12 +75,15 @@ def _print_probe(report: dict) -> None:
         print("\nhint           --probe-bypass-filter to map the reducer over this corpus in memory")
 
 
-def main(argv: list[str] | None = None) -> int:
+def _legacy_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(prog="python3 -m ingest", description="Bitbucket DC -> pseudonymised store")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--fixture", action="store_true", help="ingest synthetic data (default)")
     mode.add_argument("--fixture-file", metavar="PATH", help="ingest a committed fixture bundle")
-    mode.add_argument("--live", action="store_true", help="call the real Bitbucket DC REST API")
+    mode.add_argument("--live", action="store_true",
+                      help="scrape a real Bitbucket DC + import it (dev shortcut for scrape+import)")
+    mode.add_argument("--import", dest="import_bundle", metavar="PATH.tgz",
+                      help="import a scrape bundle into the store (same as the 'import' subcommand)")
     mode.add_argument("--verify", action="store_true", help="check the pseudonymisation contract of an existing store")
     mode.add_argument("--write-fixtures", action="store_true", help="write the synthetic bundle to fixtures/ and exit")
     ap.add_argument("--n", type=int, default=None,
@@ -86,7 +99,34 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--probe-bypass-filter", action="store_true",
                     help="probe only: run the reducer in memory over unfiltered PRs")
     ap.add_argument("--out", default=str(REPO_ROOT / "fixtures" / "bitbucket-dc-fixture.json"))
+    # Dev-shortcut controls: keep the bundle / its state around instead of
+    # writing them to a throwaway temp dir.
+    ap.add_argument("--bundle", default=None, metavar="PATH.tgz",
+                    help="--live/--fixture: also keep the transfer bundle at this path")
+    ap.add_argument("--state-dir", default=None, metavar="DIR",
+                    help="--live/--fixture: watermark + identity state (enables incremental scrapes)")
+    ap.add_argument("--overlap-hours", type=int, default=DEFAULT_OVERLAP_HOURS, metavar="N",
+                    help=f"re-emit this far before the watermark (default {DEFAULT_OVERLAP_HOURS})")
+    ap.add_argument("--full", action="store_true", help="ignore the watermark and re-scrape everything")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # Two halves, two CLIs: `python3 -m ingest scrape|import ...`. The scrape
+    # side is also its own artifact (scrape/build.sh -> megaspeed-scrape).
+    if argv and argv[0] in ("scrape", "import"):
+        command, rest = argv[0], argv[1:]
+        if command == "scrape":
+            from .scrape_cli import main as scrape_main
+
+            return scrape_main(rest)
+        from .importer import main as import_main
+
+        return import_main(rest)
+
+    ap = _legacy_parser()
     args = ap.parse_args(argv)
 
     if args.n is not None and args.n < 1:
@@ -127,6 +167,23 @@ def main(argv: list[str] | None = None) -> int:
         else:
             _print_verify(report, cfg.db_path)
         return 0 if report["ok"] else 1
+
+    if args.import_bundle:
+        from .importer import import_bundle as do_import
+        from .importer import _print_import
+        from .bundle import BundleError
+        from .importer import ImportRejected
+
+        try:
+            imported = do_import(cfg, args.import_bundle)
+        except (BundleError, ImportRejected) as exc:
+            print(f"bundle rejected: {exc}", file=sys.stderr)
+            return 2
+        if args.json:
+            print(json.dumps(imported, indent=2, default=str))
+        else:
+            _print_import(imported)
+        return 0 if imported["verified"] is not False else 1
 
     if args.probe and not args.live:
         print("--probe only makes sense with --live", file=sys.stderr)
@@ -176,7 +233,16 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 limit = args.n
 
-        report = run(cfg, transport, source=source, limit=limit)
+        report = run(
+            cfg,
+            transport,
+            source=source,
+            limit=limit,
+            out=args.bundle,
+            state_dir=args.state_dir,
+            overlap_hours=args.overlap_hours,
+            full=args.full,
+        )
     except BitbucketError as exc:
         # The likely operator mistakes (typo'd repo, bad password, DNS/port, a
         # bundle whose repos differ from config) deserve a message, not a stack.
@@ -197,6 +263,7 @@ def main(argv: list[str] | None = None) -> int:
 
 def _print_run(r: dict) -> None:
     print(f"source         {r['source']} (run {r['run_id']})")
+    print(f"bundle         {r['bundle']}  ({r['bundle_bytes']} bytes)")
     print(f"store          {r['db']}")
     print(f"identity map   {r['identity_map']}  (raw zone, never served)")
     print(f"ticket filter  {r['ticket_regex']}   (projects {','.join(r['ticket_projects'])})")

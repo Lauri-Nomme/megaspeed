@@ -17,16 +17,15 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
 from . import taxonomy
-from .bitbucket import BitbucketClient, PullRequest
+from .bitbucket import PullRequest
 from .config import Config
 from .pseudonym import IdentityTable
-from .store import connect, ensure_schema, to_naive_utc, utcnow, verify, write_events, write_objects, write_run
+from .timeutil import to_naive_utc
 
 SYSTEM_ACTOR = "system"
 
@@ -658,118 +657,18 @@ def _object(object_type: str, object_id: str, **kwargs) -> dict:
     return record
 
 
-def run(cfg: Config, transport, source: str, limit: int | None = None) -> dict:
-    """Ingest every configured repo into the pseudonymised store."""
-    as_of = utcnow()
-    run_id = f"{source}-{as_of.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:6]}"
-    key_filter = KeyFilter.build(cfg.ticket_regex, cfg.key_shape, cfg.ticket_projects)
-    ident = IdentityTable(cfg.identity_path)
-    client = BitbucketClient(transport, page_limit=cfg.page_limit, min_interval=0.0 if source == "fixture" else 0.2)
-    reducer = Reducer(cfg, ident, key_filter, as_of)
-    stats = Stats()
+def run(cfg: Config, transport, source: str, limit: int | None = None, **kwargs) -> dict:
+    """Dev shortcut, kept as ``ingest.pipeline.run`` for existing callers.
 
-    stop = False
-    for project, repo in cfg.repos:
-        for pr in client.pull_requests(project, repo):
-            if limit is not None and stats.prs_seen >= limit:
-                stop = True
-                break
-            stats.prs_seen += 1
-            if pr.updated_ms:
-                stamp = to_naive_utc(pr.updated_ms)
-                stats.watermark = stamp if stats.watermark is None else max(stats.watermark, stamp)
-            keys = reducer.key_filter.keys(
-                (pr.pr.get("fromRef") or {}).get("displayId"),
-                pr.pr.get("title"),
-                pr.pr.get("description"),
-                *[c.get("message") for c in pr.commits],
-            )
-            if not keys:
-                stats.prs_dropped += 1
-                continue
-            stats.prs_kept += 1
-            _note_placements(reducer.key_filter, pr, stats)
-            # activities are fetched only for PRs that survived the filter
-            pr.activities = list(client.iter_activities(project, repo, pr.id))
-            reducer.reduce(pr, keys, pr.activities, stats)
-        if stop:
-            break
+    The two sides live in :mod:`ingest.scrape` (source -> tgz) and
+    :mod:`ingest.importer` (tgz -> store); :mod:`ingest.live` runs both, in
+    process, through a real bundle file. Production uses the split CLIs.
 
-    for pseudonym in sorted(stats.people):
-        stats.objects.append(
-            _object(
-                "PERSON",
-                f"PERSON:{pseudonym}",
-                actor=pseudonym,
-                attributes={"actor_kind": reducer.actor_kind(pseudonym)},
-            )
-        )
+    The import is deliberately dynamic: a static ``from .live import ...``
+    would make the ``megaspeed-scrape`` artifact (prd/13) pull in the store,
+    the importer and DuckDB through this dev-only wrapper.
+    """
+    from importlib import import_module
 
-    cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
-    con = connect(cfg.db_path)
-    try:
-        ensure_schema(con)
-        before = con.execute("SELECT count(*) FROM events").fetchone()[0]
-        fill_derived(con, stats.events)
-        written, rewritten = write_events(con, stats.events, stats.relations)
-        write_objects(con, stats.objects)
-        # Derived attributes are a function of the *whole* stored event log, not
-        # of this run's look-ahead: recompute them for every PR we touched so a
-        # fact that arrives in a later ingest rewrites the earlier events too.
-        derived = recompute_derived(con, {(e["repo"], e["pr_id"]) for e in stats.events})
-        write_run(
-            con,
-            {
-                "run_id": run_id,
-                "source": source,
-                "as_of": as_of,
-                "source_watermark": stats.watermark,
-                "classifier_version": taxonomy.CLASSIFIER_VERSION,
-                "prs_seen": stats.prs_seen,
-                "prs_kept": stats.prs_kept,
-                "prs_dropped": stats.prs_dropped,
-                "events_written": written,
-                "events_skipped": len(stats.events) - written,
-            },
-        )
-        after = con.execute("SELECT count(*) FROM events").fetchone()[0]
-        report = verify(con, cfg.key_shape, cfg.ticket_projects)
-    finally:
-        con.close()
-    ident.save()
-
-    return {
-        "run_id": run_id,
-        "source": source,
-        "as_of": as_of,
-        "db": str(cfg.db_path),
-        "identity_map": str(cfg.identity_path),
-        "requests": client.requests,
-        "prs_seen": stats.prs_seen,
-        "prs_kept": stats.prs_kept,
-        "prs_dropped": stats.prs_dropped,
-        "events_emitted": len(stats.events),
-        "events_new": int(after - before),
-        "events_rewritten": rewritten,
-        "events_derived": derived,
-        "objects": len(stats.objects),
-        "activities_by_action": dict(sorted(stats.activities_by_action.items())),
-        "keys_by_placement": dict(sorted(stats.keys_by_placement.items())),
-        "verified": report["ok"],
-        "problems": report["problems"],
-        "summary": report["summary"],
-        "ticket_regex": cfg.ticket_regex,
-        "ticket_projects": list(cfg.ticket_projects),
-    }
-
-
-def _note_placements(key_filter: KeyFilter, pr: PullRequest, stats: Stats) -> None:
-    placements = {
-        "branch": (pr.pr.get("fromRef") or {}).get("displayId") or "",
-        "title": pr.pr.get("title") or "",
-        "description": pr.pr.get("description") or "",
-        "commit": "\n".join(c.get("message") or "" for c in pr.commits),
-    }
-    for name, text in placements.items():
-        if key_filter.keys(text):
-            stats.keys_by_placement[name] = stats.keys_by_placement.get(name, 0) + 1
+    live = import_module(f"{__package__}.live")
+    return live.run(cfg, transport, source, limit, **kwargs)

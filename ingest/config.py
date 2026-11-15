@@ -122,6 +122,21 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
 
     repos = [(str(r["project"]), str(r["repo"])) for r in source.get("repos", [])]
 
+    # The self-contained scraper artifact ships no config file: the repo list can
+    # come from the environment too.
+    #   MEGASPEED_REPOS=DEL/delivery-api,DEL/delivery-web
+    repos_env = os.environ.get("MEGASPEED_REPOS", "").strip()
+    if repos_env:
+        repos = []
+        for item in repos_env.split(","):
+            project, _, repo = item.strip().partition("/")
+            if not project or not repo:
+                raise SystemExit(
+                    f"bad MEGASPEED_REPOS entry {item!r}: expected PROJECT/REPO,"
+                    " e.g. MEGASPEED_REPOS=DEL/delivery-api,DEL/delivery-web"
+                )
+            repos.append((project, repo))
+
     fixture_path = os.environ.get("MEGASPEED_FIXTURE_PATH", fixture.get("path") or "")
     config = Config(
         db_path=_resolve(os.environ.get("MEGASPEED_DB", store.get("db", "data/megaspeed.duckdb")), base),
@@ -153,7 +168,10 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         auth_password=os.environ.get("MEGASPEED_BB_PASSWORD", ""),
     )
     if not config.repos:
-        raise SystemExit(f"no repos configured (see {cfg_path}: [[source.repos]])")
+        raise SystemExit(
+            "no repos configured: set MEGASPEED_REPOS=PROJECT/REPO,PROJECT/REPO or add"
+            f" [[source.repos]] to a config file (--config PATH; looked at {cfg_path})"
+        )
     if config.base_url and not config.has_credentials:
         raise SystemExit(
             "MEGASPEED_BB_BASE_URL is set but no credentials: set MEGASPEED_BB_TOKEN"

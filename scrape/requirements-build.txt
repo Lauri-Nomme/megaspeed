@@ -1,0 +1,5 @@
+# Build-time dependencies for the scraper artifact (prd/13).
+# The scraper itself is stdlib-only: PyInstaller is *only* needed to freeze it.
+# Deliberately NOT here: duckdb (import side), fastapi/uvicorn/websockets
+# (server), playwright (harness) -- none of them belong in the scrape artifact.
+pyinstaller>=6.10,<7

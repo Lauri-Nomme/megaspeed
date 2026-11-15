@@ -14,13 +14,20 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 
 import duckdb
 
 from . import taxonomy
 from .config import DEFAULT_KEY_SHAPE, DEFAULT_TICKET_PROJECTS
+from .timeutil import iso, to_naive_utc, utcnow  # re-exported for existing importers
+
+__all__ = [
+    "ALLOWED", "CANARY", "connect", "ensure_schema", "iso", "list_events",
+    "list_objects", "summary", "to_naive_utc", "utcnow", "verify", "write_events",
+    "write_objects", "write_run",
+]
 
 SCHEMA_SQL = Path(__file__).with_name("schema.sql")
 
@@ -62,32 +69,6 @@ ALLOWED: dict[str, set[str]] = {
 }
 
 CANARY = "zzcanary"
-
-
-def utcnow() -> datetime:
-    return datetime.now(timezone.utc).replace(tzinfo=None)
-
-
-def to_naive_utc(value: datetime | int | float | str) -> datetime:
-    """Accept epoch-ms, epoch-s, ISO-8601 or datetime; return naive UTC."""
-    if isinstance(value, datetime):
-        dt = value
-    elif isinstance(value, (int, float)):
-        # Bitbucket DC uses epoch milliseconds.
-        seconds = value / 1000.0 if value > 1e11 else float(value)
-        dt = datetime.fromtimestamp(seconds, tz=timezone.utc)
-    else:
-        text = str(value).strip()
-        if not text:
-            raise ValueError("empty timestamp")
-        dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    if dt.tzinfo is not None:
-        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
-    return dt
-
-
-def iso(ts: datetime) -> str:
-    return ts.replace(tzinfo=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def connect(path: str | Path, read_only: bool = False):

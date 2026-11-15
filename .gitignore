@@ -17,6 +17,8 @@ dist/
 build/
 .playwright/
 *.log
+# transfer bundles written by the scrape side (--out default)
+export/
 
 # nginx deploy config lives on the host, not in the repo
 megaspeed.example.com

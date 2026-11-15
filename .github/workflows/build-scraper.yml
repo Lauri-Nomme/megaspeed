@@ -1,0 +1,90 @@
+name: build-scraper
+
+# The scraper is the airgapped component (prd/11, prd/13): source -> classify ->
+# pseudonymise -> tgz. It is built as a self-contained artifact so it can be
+# carried onto an isolated box, so this job only runs when that component (or
+# the way we build it) actually changed. An app/server change must not rebuild
+# it -- that is what the `paths:` filters below are for.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ingest/**"
+      - "scrape/**"
+      - ".github/workflows/build-scraper.yml"
+      # build / dependency manifests for the artifact
+      - "scrape/requirements-build.txt"
+      - "requirements*.txt"
+      - "pyproject.toml"
+      - "setup.py"
+      - "setup.cfg"
+      - "Makefile"
+  pull_request:
+    branches: [main]
+    paths:
+      - "ingest/**"
+      - "scrape/**"
+      - ".github/workflows/build-scraper.yml"
+      - "scrape/requirements-build.txt"
+      - "requirements*.txt"
+      - "pyproject.toml"
+      - "setup.py"
+      - "setup.cfg"
+      - "Makefile"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-scraper-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: megaspeed-scrape (onefile)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r scrape/requirements-build.txt
+
+      - name: Scrape-side contract tests (stdlib only, no DuckDB)
+        run: python -m unittest discover -s scrape/tests -v
+
+      - name: Build megaspeed-scrape
+        # The same script developers run locally; fails loudly if PyInstaller is
+        # missing instead of silently shipping the weaker zipapp fallback.
+        run: bash scrape/build.sh --pyinstaller
+
+      - name: Smoke test the artifact
+        # No repo, no venv, no installed dependencies: fixture source -> tgz.
+        run: |
+          ./scrape/dist/megaspeed-scrape --version
+          tmp="$(mktemp -d)"
+          MEGASPEED_REPOS=ENG/platform,ENG/mobile \
+            ./scrape/dist/megaspeed-scrape --fixture --n 3 --out "$tmp/smoke.tgz" --json > "$tmp/report.json"
+          python - "$tmp/report.json" <<'PY'
+          import json, sys
+          report = json.load(open(sys.argv[1]))
+          assert report["events"] > 0, report
+          assert report["bundle"].endswith(".tgz")
+          print(f"smoke: {report['events']} events, {report['counts']['objects']} objects")
+          PY
+
+      - name: Upload scraper artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: megaspeed-scrape-${{ github.sha }}
+          path: scrape/dist/megaspeed-scrape
+          if-no-files-found: error
+          retention-days: 30
