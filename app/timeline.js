@@ -1,55 +1,55 @@
 /* megaspeed timeline — custom Canvas 2D renderer (no chart library, no build).
  *
- * LTR time axis, swimlanes, activity markers, PR lifecycle bars, semantic-ish
- * LOD (aggregate when several events land in one pixel column), zoom + pan.
+ * LTR time axis, swimlanes (actors / PRs / queues), activity markers, PR
+ * lifecycle bars, semantic-ish LOD (aggregate when several events land in one
+ * pixel column), zoom + pan, keyboard path.
  *
  * Everything it draws is a ticket key, a PR id, a commit hash, a pseudonym, a
  * timestamp or a closed label. There is no raw text in the data model.
+ *
+ * Phase honesty (docs/QA-UI-REPORT.md B3): a bar segment is a *measured* phase
+ * only when the event log supports it. Author-ball intervals with commits are
+ * "in progress"; without commits they are "waiting on author"; an interval that
+ * ends at a rebase push is "rebasing"; CI only when a build event exists. The
+ * tail after the last event of an open PR is "no events since" — hatched, never
+ * painted as a measured phase.
  */
 
-const COLORS = {
-  critical: '#F05C70',
-  warning: '#FBCD58',
-  healthy: '#73CF55',
-  info: '#63B1FF',
-  cat1: '#73CF55',
-  cat2: '#53C9DF',
-  cat3: '#B565E8',
-  cat4: '#E25AB5',
-  cat5: '#E8B84A',
-  cat6: '#C04B56',
-  cat7: '#8A8D93',
-  teal: '#3CB49A',
-  text1: '#E8E9EB',
-  text2: '#919397',
-  text3: '#606165',
-  hairline: 'rgba(255,255,255,.06)',
-  canvas: '#151924',
-};
+import {
+  MINUTE, HOUR, DAY, fmtDay, fmtClock, fmtStamp, fmtDuration, fmtTick, esc, rgba,
+} from './format.js';
 
 export const ACTIVITY_ORDER = [
   'pr_opened', 'pr_pushed', 'comment_added', 'pr_approved', 'pr_unapproved',
-  'pr_needs_work', 'pr_merged', 'pr_declined', 'reviewer_changed',
+  'pr_needs_work', 'pr_merged', 'pr_declined', 'reviewer_changed', 'build_status',
 ];
 
+// Category hues only (prd/10 §3.3.5: teal = waits on and amber = waited on by
+// are a reserved pair, never reused for a category or a phase).
 export const ACTIVITY_COLOR = {
-  pr_opened: COLORS.cat2,
-  pr_pushed: COLORS.cat3,
-  comment_added: COLORS.cat7,
-  pr_approved: COLORS.healthy,
-  pr_unapproved: COLORS.critical,
-  pr_needs_work: COLORS.warning,
-  pr_merged: COLORS.teal,
-  pr_declined: COLORS.cat6,
-  reviewer_changed: COLORS.cat4,
+  pr_opened: '#53C9DF',
+  pr_pushed: '#B565E8',
+  comment_added: '#8A8D93',
+  pr_approved: '#73CF55',
+  pr_unapproved: '#F05C70',
+  pr_needs_work: '#FBCD58',
+  pr_merged: '#238FF9',
+  pr_declined: '#C04B56',
+  reviewer_changed: '#E25AB5',
+  build_status: '#53C9DF',
 };
 
-const PHASE = {
-  waiting: { color: COLORS.warning, label: 'waiting on author' },
-  review: { color: COLORS.info, label: 'in review' },
-  active: { color: COLORS.cat3, label: 'in progress' },
-  done: { color: '#8A8D93', label: 'closed' },
+export const PHASE = {
+  waiting: { color: '#E8B84A', label: 'waiting on author', hint: 'ball with the author, no commits in the log' },
+  active: { color: '#B565E8', label: 'in progress', hint: 'author held the ball and committed' },
+  review: { color: '#63B1FF', label: 'in review', hint: 'ball with reviewers' },
+  ci: { color: '#53C9DF', label: 'CI', hint: 'ball with CI (needs a build event in the store)' },
+  rebasing: { color: '#E25AB5', label: 'rebasing', hint: 'interval ended in a rebase push' },
+  closed: { color: '#8A8D93', label: 'closed', hint: 'closed after the last event' },
+  unobserved: { color: '#70747B', label: 'no events since', hint: 'not measured — no events in the store' },
 };
+
+export const PHASE_ORDER = ['waiting', 'active', 'review', 'ci', 'rebasing', 'closed', 'unobserved'];
 
 const METRICS = {
   S: { lane: 15, bar: 11, label: 10, marker: 2.2 },
@@ -57,88 +57,82 @@ const METRICS = {
   L: { lane: 30, bar: 21, label: 12, marker: 3.8 },
 };
 
-const GUTTER = 164;
-const AXIS_H = 34;
-const HIST_H = 38;
+const GUTTER = 176;
+const AXIS_H = 42;
+const HIST_H = 36;
 const HEADER_H = 22;
 const SECTION_GAP = 18;
 const BOTTOM = 14;
-
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-const MINUTE = 60_000;
-const HOUR = 60 * MINUTE;
-const DAY = 24 * HOUR;
 
 const STEPS = [
   MINUTE, 2 * MINUTE, 5 * MINUTE, 10 * MINUTE, 15 * MINUTE, 30 * MINUTE,
   HOUR, 2 * HOUR, 3 * HOUR, 6 * HOUR, 12 * HOUR, DAY, 2 * DAY, 7 * DAY, 14 * DAY, 28 * DAY, 91 * DAY,
 ];
 
-const pad = (n) => String(n).padStart(2, '0');
+const ACTIVITY_STATES = ['on', 'faint', 'hide'];
+const QUEUE_ORDER = ['review', 'author', 'CI', 'calendar'];
 
-function fmtTick(ms, step) {
-  const d = new Date(ms);
-  if (step >= DAY) return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
-  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+function fit(ctx, text, maxWidth) {
+  if (maxWidth <= 0) return '';
+  if (ctx.measureText(text).width <= maxWidth) return text;
+  let value = text;
+  while (value.length > 1 && ctx.measureText(`${value}…`).width > maxWidth) value = value.slice(0, -1);
+  return `${value}…`;
 }
 
-export function fmtStamp(ms) {
-  const d = new Date(ms);
-  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} ` +
-    `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())} UTC`;
-}
-
-export function fmtDay(ms) {
-  const d = new Date(ms);
-  return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
-}
-
-function fmtDuration(ms) {
-  if (ms < MINUTE) return '0 min';
-  const mins = Math.round(ms / MINUTE);
-  if (mins < 60) return `${mins} min`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours} h ${mins % 60 ? `${mins % 60} min` : ''}`.trim();
-  const days = Math.floor(hours / 24);
-  return `${days} d ${hours % 24} h`;
-}
-
-function rgba(hex, alpha) {
-  const n = parseInt(hex.slice(1), 16);
-  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
-}
-
-const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-
-function phaseOf(activity) {
-  switch (activity) {
-    case 'pr_opened':
-    case 'pr_pushed':
-    case 'pr_approved':
-      return 'review';
-    case 'comment_added':
-    case 'pr_needs_work':
-    case 'pr_unapproved':
-      return 'waiting';
-    case 'pr_merged':
-    case 'pr_declined':
-      return 'done';
-    default:
-      return null;
+/** Ball-in-court state machine — mirrors analysis/ballcourt.py on the client. */
+function advanceState(pr, state, event) {
+  const activity = event.activity;
+  const attrs = event.attributes || {};
+  if (activity === 'pr_merged' || activity === 'pr_declined') return null;
+  if (activity === 'pr_opened' || activity === 'pr_pushed' || activity === 'pr_approved' || activity === 'reviewer_changed') {
+    const kind = activity === 'pr_pushed' ? `push:${attrs.push_class || 'other'}` : activity;
+    return { ball: 'review', by: event.actor, kind, since: event.t };
   }
+  if (activity === 'pr_unapproved' || activity === 'pr_needs_work') {
+    return { ball: 'author', by: event.actor, kind: activity, since: event.t };
+  }
+  if (activity === 'comment_added') {
+    if (event.actor === pr.author) return { ball: 'review', by: event.actor, kind: 'author_reply', since: event.t };
+    if (attrs.severity === 'mandatory') return { ball: 'author', by: event.actor, kind: 'blocker_comment', since: event.t };
+    return { ball: state?.ball || 'review', by: event.actor, kind: 'comment', since: event.t };
+  }
+  if (activity === 'rebased') return { ball: 'review', by: event.actor, kind: 'rebase', since: event.t };
+  if (activity === 'build_status') return { ball: 'CI', by: event.actor, kind: 'ci', since: event.t };
+  return state;
+}
+
+function phaseFor(state, pr, next, commits) {
+  if (state.ball === 'CI') return 'ci';
+  const activity = next.activity;
+  const attrs = next.attributes || {};
+  if (activity === 'pr_pushed') {
+    const pushClass = attrs.push_class || 'other';
+    return pushClass === 'pure_rebase' || pushClass === 'rebase_conflict' ? 'rebasing' : 'active';
+  }
+  if (activity === 'rebased') return 'rebasing';
+  if (activity === 'pr_merged' || activity === 'pr_declined') return 'review';
+  if (state.ball === 'author') {
+    // evidence of author work: their own push/comment, or commits in the interval
+    if (activity === 'pr_pushed' || next.actor === pr.actor) return 'active';
+    return commits > 0 ? 'active' : 'waiting';
+  }
+  return 'review';
 }
 
 export class Timeline {
-  constructor({ canvas, tip, onStats }) {
+  constructor({ canvas, tip, onStats, onSelect }) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.tip = tip;
     this.onStats = onStats;
+    this.onSelect = onSelect;
     this.density = 'M';
     this.dim = 'actor';
-    this.hidden = new Set();
+    this.activityState = new Map();
     this.events = [];
     this.prs = [];
+    this.commitsByPr = new Map();
     this.now = Date.now();
     this.domain = { start: 0, end: 1 };
     this.view = { start: 0, end: 1 };
@@ -147,67 +141,116 @@ export class Timeline {
     this.drag = null;
     this.dirty = false;
     this.raf = 0;
+    this._life = new Map();
+    this._initialised = false;
     this._bind();
   }
 
   // ---------------------------------------------------------------- data
   setData(events, objects, meta = {}) {
+    const previous = this._initialised ? { ...this.view } : null;
     this.events = events
       .map((e) => ({ ...e, t: Date.parse(e.ts) }))
       .sort((a, b) => a.t - b.t);
     const prs = new Map();
+    this.commitsByPr = new Map();
     for (const obj of objects) {
-      if (obj.object_type !== 'PR') continue;
-      prs.set(obj.object_id, {
-        id: obj.object_id,
-        number: obj.pr_id,
-        repo: (obj.repo || '').split('/').pop(),
-        keys: obj.ticket_keys || [],
-        created: Date.parse(obj.created_at),
-        closed: obj.closed_at ? Date.parse(obj.closed_at) : null,
-        state: obj.state || 'open',
-        actor: obj.actor,
-        events: [],
-      });
+      if (obj.object_type === 'PR') {
+        prs.set(obj.object_id, {
+          id: obj.object_id,
+          number: obj.pr_id,
+          repo: (obj.repo || '').split('/').pop(),
+          repoFull: obj.repo || '',
+          keys: obj.ticket_keys || [],
+          created: Date.parse(obj.created_at),
+          closed: obj.closed_at ? Date.parse(obj.closed_at) : null,
+          state: obj.state || 'open',
+          actor: obj.actor,
+          events: [],
+        });
+      } else if (obj.object_type === 'COMMIT' && obj.repo && obj.pr_id != null && obj.created_at) {
+        const key = `${obj.repo}#${obj.pr_id}`;
+        if (!this.commitsByPr.has(key)) this.commitsByPr.set(key, []);
+        this.commitsByPr.get(key).push(Date.parse(obj.created_at));
+      }
     }
+    for (const times of this.commitsByPr.values()) times.sort((a, b) => a - b);
     for (const event of this.events) {
       const pr = prs.get(`PR:${event.repo}#${event.pr_id}`);
       if (pr) pr.events.push(event);
     }
-    this.prs = [...prs.values()].sort((a, b) => a.created - b.created);
+    for (const pr of prs.values()) pr.commits = this.commitsByPr.get(`${pr.repoFull}#${pr.number}`) || [];
+    this.prs = [...prs.values()].sort((a, b) => (a.repoFull || '').localeCompare(b.repoFull || '') || a.number - b.number);
     this.now = meta.as_of ? Date.parse(meta.as_of) : (meta.last_ts ? Date.parse(meta.last_ts) : Date.now());
+
     const times = this.events.map((e) => e.t).concat(this.prs.map((p) => p.created));
+    if (!times.length) {
+      this.domain = { start: this.now - DAY, end: this.now };
+      this.view = { ...this.domain };
+      this._initialised = true;
+      this.schedule();
+      return;
+    }
     const start = Math.min(...times);
     const end = Math.max(...times, ...this.prs.map((p) => p.closed || this.now));
     const padMs = Math.max((end - start) * 0.015, 10 * MINUTE);
     this.domain = { start: start - padMs, end: end + padMs };
-    this.view = { ...this.domain };
-    this.fit();
+    this._life = new Map();
+    // B5: a live refresh updates the data under the current view; it does not
+    // throw the investigator's window away.
+    if (previous && previous.end > this.domain.start && previous.start < this.domain.end) {
+      this.view = { start: previous.start, end: previous.end };
+      this.clampView();
+    } else {
+      this.view = { ...this.domain };
+    }
+    this._initialised = true;
+    this.clearHover();
+    this.schedule();
   }
 
   setDensity(d) {
     this.density = d;
+    this.clearHover();
     this.schedule();
   }
 
   setLanes(dim) {
     this.dim = dim;
+    this.clearHover();
     this.schedule();
   }
 
-  toggleActivity(activity) {
-    if (this.hidden.has(activity)) this.hidden.delete(activity);
-    else this.hidden.add(activity);
+  stateOf(activity) {
+    return this.activityState.get(activity) || 'on';
+  }
+
+  cycleActivity(activity) {
+    const current = this.stateOf(activity);
+    const next = ACTIVITY_STATES[(ACTIVITY_STATES.indexOf(current) + 1) % ACTIVITY_STATES.length];
+    if (next === 'on') this.activityState.delete(activity);
+    else this.activityState.set(activity, next);
+    this.clearHover();
+    this.schedule();
+    return next;
+  }
+
+  setActivityState(activity, state) {
+    if (!state || state === 'on') this.activityState.delete(activity);
+    else this.activityState.set(activity, state);
     this.schedule();
   }
 
-  visibleEvents() {
-    return this.events.filter((e) => !this.hidden.has(e.activity));
+  activityCounts() {
+    const counts = new Map();
+    for (const event of this.events) counts.set(event.activity, (counts.get(event.activity) || 0) + 1);
+    return counts;
   }
 
   // ---------------------------------------------------------------- view
   fit() {
     this.view = { ...this.domain };
+    this.clearHover();
     this.schedule();
   }
 
@@ -221,10 +264,12 @@ export class Timeline {
     const anchor = anchorPx == null ? (g ? g.gutter + g.plotW / 2 : this.canvas.clientWidth / 2) : anchorPx;
     const t = this.timeAt(anchor);
     let next = span * factor;
-    next = Math.max(10 * MINUTE, Math.min(next, (this.domain.end - this.domain.start) * 2));
+    // B10: zooming out stops at the data window (Fit), never at 2× the domain.
+    next = Math.max(10 * MINUTE, Math.min(next, this.domain.end - this.domain.start));
     const ratio = (anchor - (g ? g.gutter : 0)) / Math.max(1, g ? g.plotW : this.canvas.clientWidth);
     this.view = { start: t - next * ratio, end: t + next * (1 - ratio) };
     this.clampView();
+    this.clearHover();
     this.schedule();
   }
 
@@ -235,17 +280,39 @@ export class Timeline {
     this.view.start -= dt;
     this.view.end -= dt;
     this.clampView();
+    this.clearHover();
+    this.schedule();
+  }
+
+  panFraction(fraction) {
+    const dt = this.span() * fraction;
+    this.view.start += dt;
+    this.view.end += dt;
+    this.clampView();
+    this.clearHover();
     this.schedule();
   }
 
   clampView() {
-    const span = Math.min(this.span(), (this.domain.end - this.domain.start) * 2);
+    const span = Math.min(this.span(), this.domain.end - this.domain.start);
     const slack = Math.max(span * 0.2, HOUR);
     const lo = this.domain.start - slack;
     const hi = this.domain.end + slack - span;
-    let start = Math.min(this.view.start, hi);
+    let start = Math.min(this.view.start, Math.max(lo, hi));
     start = Math.max(start, lo);
     this.view = { start, end: start + span };
+  }
+
+  /** Set the visible window from absolute timestamps (top-bar timeframe). */
+  setWindow(start, end) {
+    if (!(end > start)) return;
+    const domainSpan = this.domain.end - this.domain.start;
+    const span = Math.min(end - start, domainSpan);
+    const latest = this.domain.end - span;
+    const from = Math.max(this.domain.start, Math.min(start, latest));
+    this.view = { start: from, end: from + span };
+    this.clearHover();
+    this.schedule();
   }
 
   timeAt(px) {
@@ -260,38 +327,121 @@ export class Timeline {
     return g.gutter + ((t - this.view.start) / this.span()) * g.plotW;
   }
 
+  // ---------------------------------------------------------------- lifecycle
+  lifecycle(pr) {
+    const cached = this._life.get(pr.id);
+    if (cached) return cached;
+    const segments = [];
+    let state = null;
+    let since = pr.created;
+    for (const event of pr.events) {
+      if (state && event.t > since) {
+        const commits = countBetween(pr.commits, since, event.t);
+        const phase = phaseFor(state, pr, event, commits);
+        segments.push({
+          from: since, to: event.t, phase, commits,
+          ball: state.ball, by: state.by, kind: state.kind,
+          endedBy: event.activity,
+        });
+      }
+      const next = advanceState(pr, state, event);
+      if (!next) {
+        state = null;
+        segments.push({ from: event.t, to: event.t, phase: 'closed', commits: 0, ball: 'closed', by: event.actor, kind: event.activity, endedBy: event.activity });
+        break;
+      }
+      state = next;
+      since = event.t;
+    }
+    if (state) {
+      const end = pr.closed || this.now;
+      if (end > since) {
+        segments.push({
+          from: since, to: end, phase: pr.closed ? 'closed' : 'unobserved', commits: 0,
+          ball: state.ball, by: state.by, kind: state.kind, endedBy: null,
+        });
+      }
+    }
+    this._life.set(pr.id, segments);
+    return segments;
+  }
+
+  phases(pr) {
+    const totals = new Map();
+    for (const seg of this.lifecycle(pr)) {
+      const duration = seg.to - seg.from;
+      if (duration <= 0) continue;
+      totals.set(seg.phase, (totals.get(seg.phase) || 0) + duration);
+    }
+    return totals;
+  }
+
+  phaseStats() {
+    const stats = new Map();
+    for (const pr of this.prs) {
+      for (const seg of this.lifecycle(pr)) {
+        const duration = seg.to - seg.from;
+        if (duration <= 0) continue;
+        const entry = stats.get(seg.phase) || { hours: 0, count: 0 };
+        entry.hours += duration / HOUR;
+        entry.count += 1;
+        stats.set(seg.phase, entry);
+      }
+    }
+    return stats;
+  }
+
   // ---------------------------------------------------------------- lanes
   laneRows() {
-    const events = this.visibleEvents();
-    const counts = new Map();
-    for (const e of events) {
-      const key = this.laneKey(e);
-      counts.set(key, (counts.get(key) || 0) + 1);
+    if (this.dim === 'object') {
+      return this.prs.map((pr) => ({
+        key: `${pr.repo}#${pr.number}`,
+        pr,
+        count: pr.events.length,
+        label: `${pr.keys[0] ? `${pr.keys[0]} ` : ''}#${pr.number} ${pr.repo}`,
+      }));
     }
-    let keys = [...counts.keys()];
-    if (this.dim === 'activity') {
-      keys = keys.sort((a, b) => ACTIVITY_ORDER.indexOf(a) - ACTIVITY_ORDER.indexOf(b));
-    } else if (this.dim === 'object') {
-      keys = keys.sort((a, b) => Number(a.replace('#', '')) - Number(b.replace('#', '')));
-    } else {
-      keys = keys.sort((a, b) => (counts.get(b) - counts.get(a)) || a.localeCompare(b));
+    if (this.dim === 'queue') {
+      return QUEUE_ORDER.map((key) => {
+        const hours = this.queueHours(key);
+        return { key, count: Math.round(hours), label: `${key} · ${fmtDuration(hours * HOUR)}` };
+      }).filter((row) => row.count > 0);
     }
+    // B4: rows come from ALL events, so toggling a legend key never re-sorts
+    // the lanes. Counts are totals, not "visible" counts.
+    const counts = this.activityCounts();
+    const keys = [...new Set(this.events.map((e) => e.actor))];
+    keys.sort((a, b) => (counts.get(b) - counts.get(a)) || a.localeCompare(b));
     return keys.map((key) => ({ key, count: counts.get(key) }));
   }
 
-  laneKey(event) {
-    if (this.dim === 'actor') return event.actor;
-    if (this.dim === 'activity') return event.activity;
-    return `#${event.pr_id}`;
+  queueHours(queue) {
+    let hours = 0;
+    for (const pr of this.prs) {
+      for (const seg of this.lifecycle(pr)) {
+        if (seg.to <= seg.from) continue;
+        if (this.queueOf(seg) === queue) hours += (seg.to - seg.from) / HOUR;
+      }
+    }
+    return hours;
+  }
+
+  queueOf(seg) {
+    if (seg.ball === 'author') return 'author';
+    if (seg.ball === 'CI') return 'CI';
+    if (seg.ball === 'calendar') return 'calendar';
+    return 'review';
   }
 
   // ---------------------------------------------------------------- layout
   layout() {
     const m = METRICS[this.density];
     const lanes = this.laneRows();
-    const barRows = this.prs;
-    const height = AXIS_H + HIST_H + HEADER_H + lanes.length * m.lane + SECTION_GAP +
-      HEADER_H + barRows.length * m.bar + BOTTOM;
+    const objectMode = this.dim === 'object';
+    const laneH = objectMode ? Math.max(m.bar + 6, m.lane) : m.lane;
+    const barRows = objectMode ? [] : this.prs;
+    const height = AXIS_H + HIST_H + HEADER_H + lanes.length * laneH +
+      (objectMode ? 0 : SECTION_GAP + HEADER_H + barRows.length * m.bar) + BOTTOM;
     const width = this.canvas.parentElement.clientWidth || 1200;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     this.canvas.width = Math.round(width * dpr);
@@ -300,10 +450,10 @@ export class Timeline {
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.geom = {
       width, height, gutter: GUTTER, plotW: Math.max(80, width - GUTTER - 10),
-      axisH: AXIS_H, histH: HIST_H, headerH: HEADER_H, laneH: m.lane, barH: m.bar,
-      label: m.label, marker: m.marker,
+      axisH: AXIS_H, histH: HIST_H, headerH: HEADER_H, laneH, barH: m.bar,
+      label: m.label, marker: m.marker, objectMode,
       laneTop: AXIS_H + HIST_H + HEADER_H,
-      barTop: AXIS_H + HIST_H + HEADER_H + lanes.length * m.lane + SECTION_GAP + HEADER_H,
+      barTop: AXIS_H + HIST_H + HEADER_H + lanes.length * laneH + SECTION_GAP + HEADER_H,
       lanes, barRows,
     };
     return this.geom;
@@ -319,6 +469,11 @@ export class Timeline {
     });
   }
 
+  clearHover() {
+    this.hover = null;
+    if (this.tip) this.tip.hidden = true;
+  }
+
   render() {
     this.dirty = false;
     const ctx = this.ctx;
@@ -327,35 +482,67 @@ export class Timeline {
     this.hits = [];
 
     ctx.clearRect(0, 0, g.width, g.height);
-    ctx.fillStyle = COLORS.canvas;
+    ctx.fillStyle = '#151924';
     ctx.fillRect(0, 0, g.width, g.height);
 
     this.drawTimeBands(ctx, g);
     this.drawAxis(ctx, g);
     this.drawHistogram(ctx, g);
     this.drawLanes(ctx, g, m);
-    this.drawBars(ctx, g, m);
+    if (!g.objectMode) this.drawBars(ctx, g, m);
 
-    // gutter edge + axis baseline
-    ctx.strokeStyle = COLORS.hairline;
+    ctx.strokeStyle = 'rgba(255,255,255,.06)';
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(g.gutter + 0.5, 0);
     ctx.lineTo(g.gutter + 0.5, g.height);
     ctx.stroke();
 
+    // B6: a tooltip may not survive the state that produced it.
+    if (this.hover) {
+      const ttl = this.hover.event ? this.hits.some((h) => h.kind === 'event' && h.event === this.hover.event)
+        : this.hover.pr ? this.hits.some((h) => h.kind === 'bar' && h.pr === this.hover.pr)
+          : this.hover.interval ? this.hits.some((h) => h.kind === 'interval' && h.interval === this.hover.interval)
+            : false;
+      if (!ttl) this.clearHover();
+    }
+
+    const stats = this.phaseStats();
+    const counts = this.activityCounts();
+    const hiddenAll = counts.size > 0 && [...counts.keys()].every((a) => this.stateOf(a) === 'hide');
     if (this.onStats) {
       this.onStats({
         start: this.view.start,
         end: this.view.end,
-        visible: this.visibleEvents().length,
+        visible: this.visibleCount(),
         total: this.events.length,
         span: this.span(),
         bucketMs: this.span() / g.plotW,
         aggregated: this.aggregated > 0,
         openPrs: this.prs.filter((p) => p.state === 'open').length,
+        lanes: g.lanes.length,
+        dim: this.dim,
+        allHidden: hiddenAll,
+        phases: stats,
       });
     }
+    this.canvas.setAttribute(
+      'aria-label',
+      `Event timeline, ${fmtDay(this.view.start)} ${fmtClock(this.view.start)} to ` +
+      `${fmtDay(this.view.end)} ${fmtClock(this.view.end)}; ${visibleWord(this)} events, ` +
+      `${g.lanes.length} ${this.dim === 'actor' ? 'actor' : this.dim === 'object' ? 'PR' : 'queue'} lanes. ` +
+      'Arrow keys pan, plus and minus zoom, Home fits.',
+    );
+  }
+
+  visibleCount() {
+    let n = 0;
+    for (const event of this.events) {
+      if (this.stateOf(event.activity) === 'hide') continue;
+      if (event.t < this.view.start || event.t > this.view.end) continue;
+      n += 1;
+    }
+    return n;
   }
 
   drawTimeBands(ctx, g) {
@@ -372,21 +559,24 @@ export class Timeline {
         ctx.fillStyle = 'rgba(255,255,255,.022)';
         ctx.fillRect(x0, AXIS_H, x1 - x0, g.height - AXIS_H);
       }
-      const night0 = this.px(t + 18 * HOUR);
-      const night1 = this.px(t + DAY);
-      if (night1 > night0) {
-        ctx.fillStyle = 'rgba(0,0,0,.18)';
-        ctx.fillRect(night0, AXIS_H, night1 - night0, g.height - AXIS_H);
-      }
-      const night2 = this.px(t);
-      const night3 = this.px(t + 8 * HOUR);
-      if (night3 > night2) {
-        ctx.fillStyle = 'rgba(0,0,0,.18)';
-        ctx.fillRect(night2, AXIS_H, night3 - night2, g.height - AXIS_H);
+      if (dayWidth >= 90) {
+        const night0 = this.px(t + 18 * HOUR);
+        const night1 = this.px(t + DAY);
+        if (night1 > night0) {
+          ctx.fillStyle = 'rgba(0,0,0,.18)';
+          ctx.fillRect(night0, AXIS_H, night1 - night0, g.height - AXIS_H);
+        }
+        const night2 = this.px(t);
+        const night3 = this.px(t + 8 * HOUR);
+        if (night3 > night2) {
+          ctx.fillStyle = 'rgba(0,0,0,.18)';
+          ctx.fillRect(night2, AXIS_H, night3 - night2, g.height - AXIS_H);
+        }
       }
     }
   }
 
+  /** B7: two legible label rows, measured and edge-clamped so nothing clips. */
   drawAxis(ctx, g) {
     const span = this.span();
     let step = STEPS[STEPS.length - 1];
@@ -396,59 +586,90 @@ export class Timeline {
     this.tickStep = step;
 
     const first = Math.ceil(this.view.start / step) * step;
-    ctx.font = `500 ${g.label}px "JetBrains Mono", ui-monospace, monospace`;
+    ctx.font = `500 ${Math.max(10, g.label - 1)}px "JetBrains Mono", ui-monospace, monospace`;
     ctx.textBaseline = 'middle';
+    const right = g.gutter + g.plotW;
+    const clockRow = AXIS_H - 13;
+    const dayRow = 12;
+    let lastRight = -Infinity;
+    let lastDay = null;
 
-    let lastDayLabel = null;
+    ctx.fillStyle = '#8A8D93';
+    ctx.textAlign = 'right';
+    ctx.fillText('UTC', g.gutter - 10, clockRow);
+
     for (let t = first; t <= this.view.end; t += step) {
       const x = this.px(t);
-      if (x < g.gutter || x > g.gutter + g.plotW) continue;
+      if (x < g.gutter || x > right) continue;
       const major = step >= DAY || new Date(t).getUTCHours() === 0;
       ctx.strokeStyle = major ? 'rgba(255,255,255,.10)' : 'rgba(255,255,255,.045)';
       ctx.beginPath();
-      ctx.moveTo(Math.round(x) + 0.5, AXIS_H - 6);
+      ctx.moveTo(Math.round(x) + 0.5, AXIS_H - 7);
       ctx.lineTo(Math.round(x) + 0.5, g.height - BOTTOM);
       ctx.stroke();
 
+      const label = fmtTick(t, step);
+      ctx.font = `500 ${Math.max(10, g.label - 1)}px "JetBrains Mono", ui-monospace, monospace`;
+      const width = ctx.measureText(label).width;
+      let left = x + 4;
+      if (left + width > right - 2) left = x - 4 - width;
+      if (left < g.gutter || left < lastRight + 6) continue;
+      ctx.textAlign = 'left';
+      ctx.fillStyle = major ? '#B9BBC0' : '#8A8D93';
+      ctx.fillText(label, left, clockRow);
+      lastRight = left + width;
+
       if (step < DAY && new Date(t).getUTCHours() === 0) {
         const day = fmtDay(t);
-        if (day !== lastDayLabel) {
-          lastDayLabel = day;
-          ctx.fillStyle = COLORS.text2;
-          ctx.textAlign = 'left';
-          ctx.fillText(day, x + 4, 10);
+        if (day !== lastDay) {
+          lastDay = day;
+          const dayWidth = ctx.measureText(day).width;
+          let dayLeft = x + 4;
+          if (dayLeft + dayWidth > right - 2) dayLeft = x - 4 - dayWidth;
+          if (dayLeft >= g.gutter && dayLeft + dayWidth < right) {
+            ctx.fillStyle = '#B9BBC0';
+            ctx.font = `600 ${Math.max(10, g.label - 1)}px "JetBrains Mono", ui-monospace, monospace`;
+            ctx.fillText(day, dayLeft, dayRow);
+            ctx.font = `500 ${Math.max(10, g.label - 1)}px "JetBrains Mono", ui-monospace, monospace`;
+          }
         }
       }
-      ctx.fillStyle = major ? COLORS.text2 : COLORS.text3;
-      ctx.textAlign = 'left';
-      ctx.fillText(fmtTick(t, step), x + 4, AXIS_H - 12);
     }
+    ctx.strokeStyle = 'rgba(255,255,255,.08)';
+    ctx.beginPath();
+    ctx.moveTo(g.gutter, AXIS_H - 0.5);
+    ctx.lineTo(g.width, AXIS_H - 0.5);
+    ctx.stroke();
   }
 
   drawHistogram(ctx, g) {
-    const events = this.visibleEvents().filter((e) => e.t >= this.view.start && e.t <= this.view.end);
     const buckets = new Map();
     let max = 0;
-    for (const e of events) {
-      const x = Math.floor(this.px(e.t));
-      const n = (buckets.get(x) || 0) + 1;
+    let total = 0;
+    for (const event of this.events) {
+      if (event.t < this.view.start || event.t > this.view.end) continue;
+      const state = this.stateOf(event.activity);
+      if (state === 'hide') continue;
+      total += 1;
+      const x = Math.floor(this.px(event.t));
+      const n = (buckets.get(x) || 0) + (state === 'faint' ? 0.35 : 1);
       buckets.set(x, n);
       if (n > max) max = n;
     }
-    const top = AXIS_H + 6;
-    const height = HIST_H - 14;
+    const top = AXIS_H + 5;
+    const height = HIST_H - 13;
     ctx.font = `500 ${Math.max(9, g.label - 1)}px "JetBrains Mono", ui-monospace, monospace`;
-    ctx.fillStyle = COLORS.text3;
+    ctx.fillStyle = '#8A8D93';
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
-    ctx.fillText('events', g.gutter - 10, top + height / 2);
+    ctx.fillText(`${total} event${total === 1 ? '' : 's'}`, g.gutter - 10, top + height / 2);
 
     for (const [x, n] of buckets) {
       const h = Math.max(2, Math.round((n / Math.max(1, max)) * height));
       ctx.fillStyle = n > 1 ? 'rgba(99,177,255,.55)' : 'rgba(99,177,255,.30)';
       ctx.fillRect(x, top + height - h, 2, h);
     }
-    ctx.strokeStyle = COLORS.hairline;
+    ctx.strokeStyle = 'rgba(255,255,255,.06)';
     ctx.beginPath();
     ctx.moveTo(g.gutter, AXIS_H + HIST_H - 0.5);
     ctx.lineTo(g.width, AXIS_H + HIST_H - 0.5);
@@ -456,14 +677,12 @@ export class Timeline {
   }
 
   drawLanes(ctx, g, m) {
-    const events = this.visibleEvents().filter((e) => e.t >= this.view.start && e.t <= this.view.end);
     const rows = g.lanes;
-
     ctx.font = `500 ${g.label}px "JetBrains Mono", ui-monospace, monospace`;
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'right';
-    ctx.fillStyle = COLORS.text3;
-    const section = this.dim === 'actor' ? 'ACTORS' : this.dim === 'object' ? 'PULL REQUESTS' : 'ACTIVITIES';
+    ctx.fillStyle = '#8A8D93';
+    const section = this.dim === 'actor' ? 'ACTORS' : this.dim === 'object' ? 'PULL REQUESTS' : 'QUEUES';
     ctx.fillText(`${section} · ${rows.length}`, g.gutter - 10, AXIS_H + HIST_H + 11);
 
     rows.forEach((row, i) => {
@@ -478,59 +697,171 @@ export class Timeline {
       ctx.lineTo(g.width, Math.round(y + g.laneH) - 0.5);
       ctx.stroke();
 
+      const hovered = this.hover && this.hover.laneKey === row.key;
       ctx.font = `500 ${g.label}px "JetBrains Mono", ui-monospace, monospace`;
-      ctx.fillStyle = this.hover && this.hover.laneKey === row.key ? COLORS.text1 : COLORS.text2;
+      ctx.fillStyle = hovered ? '#E8E9EB' : '#B9BBC0';
       ctx.textAlign = 'right';
-      const label = row.key;
-      ctx.fillText(label.length > 20 ? `${label.slice(0, 19)}…` : label, g.gutter - 10, y + g.laneH / 2);
+      const label = fit(ctx, row.label || row.key, g.gutter - 22);
+      ctx.fillText(label, g.gutter - 10, y + g.laneH / 2);
     });
 
-    // markers, with per-pixel aggregation
+    if (this.dim === 'queue') {
+      this.drawQueueLanes(ctx, g, rows);
+      return;
+    }
+    if (this.dim === 'object') {
+      this.drawObjectLanes(ctx, g, rows);
+      return;
+    }
+    this.drawActorLanes(ctx, g, rows);
+  }
+
+  drawActorLanes(ctx, g, rows) {
     const index = new Map(rows.map((r, i) => [r.key, i]));
     const perPixel = new Map();
-    for (const e of events) {
-      const lane = index.get(this.laneKey(e));
+    for (const event of this.events) {
+      if (event.t < this.view.start || event.t > this.view.end) continue;
+      const state = this.stateOf(event.activity);
+      if (state === 'hide') continue;
+      const lane = index.get(event.actor);
       if (lane == null) continue;
-      const x = Math.round(this.px(e.t));
+      const x = Math.round(this.px(event.t));
       const key = `${lane}:${x}`;
       const bucket = perPixel.get(key);
-      if (bucket) bucket.items.push(e);
-      else perPixel.set(key, { lane, x, items: [e] });
+      if (bucket) bucket.items.push(event);
+      else perPixel.set(key, { lane, x, items: [event], faint: state === 'faint' });
     }
     let aggregated = 0;
     for (const bucket of perPixel.values()) {
       const y = g.laneTop + bucket.lane * g.laneH + g.laneH / 2;
       if (bucket.items.length > 1) {
         aggregated += bucket.items.length;
-        const step = this.span() / g.plotW;
         const fromX = this.px(Math.min(...bucket.items.map((e) => e.t)));
         const toX = Math.max(this.px(Math.max(...bucket.items.map((e) => e.t))), fromX + 2);
-        ctx.fillStyle = rgba(COLORS.info, 0.7);
+        ctx.fillStyle = bucket.faint ? 'rgba(232,233,235,.16)' : 'rgba(232,233,235,.5)';
         ctx.fillRect(fromX, y - g.laneH / 2 + 3, Math.max(2, toX - fromX), g.laneH - 6);
-        this.hits.push({ kind: 'bucket', x0: fromX, x1: toX, y0: y - g.laneH / 2, y1: y + g.laneH / 2, items: bucket.items, step });
+        this.hits.push({
+          kind: 'bucket', x0: fromX, x1: toX, y0: y - g.laneH / 2, y1: y + g.laneH / 2,
+          items: bucket.items, step: this.span() / g.plotW,
+          laneKey: rows[bucket.lane].key,
+        });
         continue;
       }
       const event = bucket.items[0];
-      const color = ACTIVITY_COLOR[event.activity] || COLORS.cat7;
+      const color = ACTIVITY_COLOR[event.activity] || '#8A8D93';
       const r = g.marker;
       ctx.beginPath();
       ctx.arc(bucket.x, y, r, 0, Math.PI * 2);
-      ctx.fillStyle = color;
+      ctx.fillStyle = bucket.faint ? rgba(color, 0.2) : color;
       ctx.fill();
       if (this.hover && this.hover.event && this.hover.event.key === event.key) {
-        ctx.strokeStyle = COLORS.text1;
+        ctx.strokeStyle = '#E8E9EB';
         ctx.lineWidth = 1.5;
         ctx.stroke();
       }
-      this.hits.push({ kind: 'event', x: bucket.x, y, r: r + 4, event });
+      this.hits.push({ kind: 'event', x: bucket.x, y, r: r + 4, event, laneKey: rows[bucket.lane].key });
     }
     this.aggregated = aggregated;
+  }
+
+  drawObjectLanes(ctx, g, rows) {
+    rows.forEach((row, i) => {
+      const pr = row.pr;
+      if (!pr) return;
+      const y = g.laneTop + i * g.laneH;
+      const barY = y + 3;
+      const barH = g.laneH - 6;
+      this.paintLifecycle(ctx, g, pr, barY, barH);
+      if (barH >= 9) {
+        for (const event of pr.events) {
+          if (event.t < this.view.start || event.t > this.view.end) continue;
+          const state = this.stateOf(event.activity);
+          if (state === 'hide') continue;
+          const x = this.px(event.t);
+          ctx.fillStyle = rgba(ACTIVITY_COLOR[event.activity] || '#8A8D93', state === 'faint' ? 0.2 : 0.85);
+          ctx.fillRect(x, barY, 1.5, barH);
+        }
+      }
+      const end = pr.closed || this.now;
+      this.hits.push({
+        kind: 'bar', x0: this.px(pr.created), x1: Math.max(this.px(end), this.px(pr.created) + 2),
+        y0: y, y1: y + g.laneH, pr, laneKey: row.key,
+      });
+    });
+  }
+
+  drawQueueLanes(ctx, g, rows) {
+    const index = new Map(rows.map((r, i) => [r.key, i]));
+    for (const pr of this.prs) {
+      for (const seg of this.lifecycle(pr)) {
+        if (seg.to <= seg.from) continue;
+        const queue = this.queueOf(seg);
+        const lane = index.get(queue);
+        if (lane == null) continue;
+        if (seg.to < this.view.start || seg.from > this.view.end) continue;
+        const y = g.laneTop + lane * g.laneH;
+        const x0 = Math.max(g.gutter, this.px(seg.from));
+        const x1 = Math.min(g.gutter + g.plotW, this.px(seg.to));
+        if (x1 <= x0) continue;
+        const color = PHASE[seg.phase].color;
+        ctx.fillStyle = rgba(color, seg.phase === 'unobserved' ? 0.14 : 0.3);
+        ctx.fillRect(x0, y + 4, Math.max(1, x1 - x0), g.laneH - 8);
+        ctx.fillStyle = rgba(color, seg.phase === 'unobserved' ? 0.25 : 0.75);
+        ctx.fillRect(x0, y + 4, Math.min(2, x1 - x0), g.laneH - 8);
+        this.hits.push({
+          kind: 'interval', x0, x1, y0: y, y1: y + g.laneH, interval: seg, pr, queue,
+          laneKey: queue,
+        });
+      }
+    }
+  }
+
+  /** Bar segments + end caps, shared by the gantt section and object lanes. */
+  paintLifecycle(ctx, g, pr, barY, barH) {
+    const segments = this.lifecycle(pr);
+    for (const seg of segments) {
+      const width = seg.to - seg.from;
+      if (width <= 0) continue;
+      if (seg.to < this.view.start || seg.from > this.view.end) continue;
+      const x0 = Math.max(g.gutter, this.px(seg.from));
+      const x1 = Math.min(g.gutter + g.plotW, this.px(seg.to));
+      if (x1 <= x0) continue;
+      const color = PHASE[seg.phase].color;
+      if (seg.phase === 'unobserved') {
+        // hatched, because nothing was measured here
+        ctx.fillStyle = rgba(color, 0.10);
+        ctx.fillRect(x0, barY, Math.max(1, x1 - x0), barH);
+        ctx.fillStyle = rgba(color, 0.28);
+        for (let x = x0 + 2; x < x1; x += 6) ctx.fillRect(x, barY, 1, barH);
+        continue;
+      }
+      ctx.fillStyle = rgba(color, seg.phase === 'closed' ? 0.22 : 0.34);
+      ctx.fillRect(x0, barY, Math.max(1, x1 - x0), barH);
+      // saturated cap keeps phase boundaries legible without a solid block
+      ctx.fillStyle = rgba(color, 0.9);
+      ctx.fillRect(x0, barY, Math.min(2, x1 - x0), barH);
+    }
+    const end = pr.closed || this.now;
+    if (pr.closed) {
+      const x = Math.min(g.gutter + g.plotW, this.px(end));
+      ctx.fillStyle = rgba(PHASE.closed.color, 0.9);
+      ctx.fillRect(x - 2, barY, 2.5, barH);
+    } else {
+      const x = Math.min(g.gutter + g.plotW, this.px(end));
+      ctx.fillStyle = rgba('#FBCD58', 0.75);
+      ctx.beginPath();
+      ctx.moveTo(x, barY);
+      ctx.lineTo(x + 4, barY + barH / 2);
+      ctx.lineTo(x, barY + barH);
+      ctx.closePath();
+      ctx.fill();
+    }
   }
 
   drawBars(ctx, g, m) {
     ctx.font = `600 ${Math.max(10, g.label - 1)}px Inter, system-ui, sans-serif`;
     ctx.textAlign = 'right';
-    ctx.fillStyle = COLORS.text3;
+    ctx.fillStyle = '#8A8D93';
     ctx.fillText(`PR LIFECYCLE · ${g.barRows.length}`, g.gutter - 10, g.barTop - 11);
 
     g.barRows.forEach((pr, i) => {
@@ -543,79 +874,36 @@ export class Timeline {
 
       ctx.font = `500 ${g.label}px "JetBrains Mono", ui-monospace, monospace`;
       ctx.textAlign = 'right';
-      ctx.fillStyle = isHover ? COLORS.text1 : COLORS.text2;
+      ctx.fillStyle = isHover ? '#E8E9EB' : '#B9BBC0';
       const key = pr.keys[0] ? `${pr.keys[0]} ` : '';
       const label = `${key}#${pr.number} ${pr.repo}`;
-      ctx.fillText(label.length > 23 ? label.slice(0, 22) + '…' : label, g.gutter - 10, y + g.barH / 2);
+      ctx.fillText(fit(ctx, label, g.gutter - 22), g.gutter - 10, y + g.barH / 2);
 
-      const segments = this.segments(pr);
       const barY = y + 2;
       const barH = g.barH - 4;
-      for (const seg of segments) {
-        const x0 = Math.max(g.gutter, this.px(seg.from));
-        const x1 = Math.min(g.gutter + g.plotW, this.px(seg.to));
-        if (x1 <= x0) continue;
-        const color = PHASE[seg.phase].color;
-        ctx.fillStyle = rgba(color, seg.phase === 'done' ? 0.22 : 0.34);
-        ctx.fillRect(x0, barY, Math.max(1, x1 - x0), barH);
-        // a saturated cap on the left edge of the segment keeps phase
-        // boundaries legible without turning the bar into a solid block
-        ctx.fillStyle = rgba(color, 0.9);
-        ctx.fillRect(x0, barY, Math.min(2, x1 - x0), barH);
-      }
-      // event ticks inside the bar
+      this.paintLifecycle(ctx, g, pr, barY, barH);
+
       if (barH >= 9) {
         for (const event of pr.events) {
           if (event.t < this.view.start || event.t > this.view.end) continue;
-          if (this.hidden.has(event.activity)) continue;
+          const state = this.stateOf(event.activity);
+          if (state === 'hide') continue;
           const x = this.px(event.t);
-          ctx.fillStyle = rgba(ACTIVITY_COLOR[event.activity] || COLORS.cat7, 0.85);
+          ctx.fillStyle = rgba(ACTIVITY_COLOR[event.activity] || '#8A8D93', state === 'faint' ? 0.2 : 0.85);
           ctx.fillRect(x, barY, 1.5, barH);
         }
       }
-      // right-censored open PRs end with a triangle at the snapshot time
       const end = pr.closed || this.now;
-      if (!pr.closed) {
-        const x = Math.min(g.gutter + g.plotW, this.px(end));
-        ctx.fillStyle = rgba(COLORS.warning, 0.75);
-        ctx.beginPath();
-        ctx.moveTo(x, barY);
-        ctx.lineTo(x + 4, barY + barH / 2);
-        ctx.lineTo(x, barY + barH);
-        ctx.closePath();
-        ctx.fill();
-      }
       this.hits.push({
-        kind: 'bar', x0: this.px(pr.created), x1: this.px(end), y0: y, y1: y + g.barH, pr,
+        kind: 'bar', x0: this.px(pr.created), x1: Math.max(this.px(end), this.px(pr.created) + 2),
+        y0: y, y1: y + g.barH, pr,
       });
     });
   }
 
-  segments(pr) {
-    const events = pr.events.filter((e) => !this.hidden.has(e.activity));
-    if (!events.length) return [];
-    const segments = [];
-    let from = events[0].t;
-    let phase = phaseOf(events[0].activity) || 'review';
-    for (let i = 1; i < events.length; i++) {
-      const event = events[i];
-      const next = phaseOf(event.activity);
-      if (event.t <= from) {
-        if (next) phase = next;
-        continue;
-      }
-      segments.push({ from, to: event.t, phase });
-      from = event.t;
-      if (next) phase = next;
-    }
-    const end = pr.closed || this.now;
-    if (end > from) segments.push({ from, to: end, phase });
-    return segments;
-  }
-
   // ---------------------------------------------------------------- hover
   hitTest(cx, cy) {
-    for (let i = this.hits.length - 1; i >= 0; i--) {
+    for (let i = this.hits.length - 1; i >= 0; i -= 1) {
       const hit = this.hits[i];
       if (hit.kind === 'event') {
         if (Math.hypot(cx - hit.x, cy - hit.y) <= hit.r) return hit;
@@ -628,19 +916,23 @@ export class Timeline {
 
   showHover(hit, cx, cy) {
     if (!hit) {
-      this.tip.hidden = true;
-      this.hover = null;
+      this.clearHover();
       return;
     }
-    this.hover = hit.kind === 'bar' ? { pr: hit.pr } : hit.kind === 'event' ? { event: hit.event } : {};
+    this.hover = hit.kind === 'bar' ? { pr: hit.pr }
+      : hit.kind === 'event' ? { event: hit.event }
+        : hit.kind === 'interval' ? { interval: hit.interval, pr: hit.pr }
+          : { laneKey: hit.laneKey };
+    if (hit.laneKey) this.hover.laneKey = hit.laneKey;
+
     if (hit.kind === 'event') {
-      const e = hit.event;
-      const attrs = Object.entries(e.attributes || {});
+      const event = hit.event;
+      const attrs = Object.entries(event.attributes || {});
       this.tip.innerHTML = `
-        <div class="row"><span class="act" style="color:${ACTIVITY_COLOR[e.activity] || COLORS.cat7}">${esc(e.activity)}</span>
-          <span class="muted">${esc(fmtStamp(e.t))}</span></div>
-        <div class="row"><span class="k">actor</span><span class="v">${esc(e.actor)}</span></div>
-        <div class="row"><span class="k">objects</span><span class="v">${e.objects.map(esc).join('<br>')}</span></div>
+        <div class="row"><span class="act" style="color:${ACTIVITY_COLOR[event.activity] || '#8A8D93'}">${esc(event.activity)}</span>
+          <span class="muted">${esc(fmtStamp(event.t))}</span></div>
+        <div class="row"><span class="k">actor</span><span class="v">${esc(event.actor)}</span></div>
+        <div class="row"><span class="k">objects</span><span class="v">${event.objects.map(esc).join('<br>')}</span></div>
         ${attrs.length ? `<div class="row"><span class="k">attrs</span><span class="v">${attrs
           .map(([k, v]) => `${esc(k)}=${esc(v)}`).join('<br>')}</span></div>` : ''}`;
     } else if (hit.kind === 'bucket') {
@@ -649,23 +941,35 @@ export class Timeline {
       this.tip.innerHTML = `
         <div class="row"><span class="act">${hit.items.length} events</span>
           <span class="muted">≤ ${esc(fmtDuration(hit.step))} apart</span></div>
-        <div class="row"><span class="k">lane</span><span class="v">${esc(this.laneKey(first))}</span></div>
+        <div class="row"><span class="k">lane</span><span class="v">${esc(hit.laneKey || '')}</span></div>
         <div class="row"><span class="k">window</span><span class="v">${esc(fmtStamp(first.t))}<br>${esc(fmtStamp(last.t))}</span></div>
         <div class="row"><span class="k">zoom</span><span class="v">zoom in for individual events</span></div>`;
+    } else if (hit.kind === 'interval') {
+      const seg = hit.interval;
+      const pr = hit.pr;
+      this.tip.innerHTML = `
+        <div class="row"><span class="act" style="color:${PHASE[seg.phase].color}">${esc(PHASE[seg.phase].label)}</span>
+          <span class="muted">${esc(fmtDuration(seg.to - seg.from))}</span></div>
+        <div class="row"><span class="k">queue</span><span class="v">${esc(hit.queue)}</span></div>
+        <div class="row"><span class="k">pr</span><span class="v">#${esc(pr.number)} ${esc(pr.repo)}</span></div>
+        <div class="row"><span class="k">window</span><span class="v">${esc(fmtStamp(seg.from))}<br>${esc(fmtStamp(seg.to))}</span></div>
+        <div class="row"><span class="k">basis</span><span class="v">${esc(PHASE[seg.phase].hint)}</span></div>`;
     } else {
       const pr = hit.pr;
-      const segments = this.segments(pr);
-      const totals = new Map();
-      for (const seg of segments) totals.set(seg.phase, (totals.get(seg.phase) || 0) + (seg.to - seg.from));
+      const totals = this.phases(pr);
+      const segments = this.lifecycle(pr);
       const total = segments.length ? segments[segments.length - 1].to - segments[0].from : 0;
+      const measured = [...totals.entries()].filter(([phase]) => phase !== 'unobserved');
+      const unobserved = totals.get('unobserved') || 0;
       this.tip.innerHTML = `
         <div class="row"><span class="act">#${pr.number} ${esc(pr.repo)}</span>
           <span class="muted">${esc(pr.state)}${pr.closed ? '' : ' · right-censored'}</span></div>
         <div class="row"><span class="k">tickets</span><span class="v">${esc(pr.keys.join(' ')) || '—'}</span></div>
         <div class="row"><span class="k">author</span><span class="v">${esc(pr.actor)}</span></div>
         <div class="row"><span class="k">cycle</span><span class="v">${esc(fmtDuration(total))}</span></div>
-        ${[...totals.entries()].map(([phase, ms]) =>
-          `<div class="row"><span class="k"></span><span class="v" style="color:${PHASE[phase].color}">${esc(PHASE[phase].label)} ${esc(fmtDuration(ms))}</span></div>`).join('')}`;
+        ${measured.map(([phase, ms]) => `<div class="row"><span class="k">${esc(PHASE[phase].label)}</span>
+          <span class="v" style="color:${PHASE[phase].color}">${esc(fmtDuration(ms))}</span></div>`).join('')}
+        ${unobserved ? `<div class="row"><span class="k">no events</span><span class="v" style="color:${PHASE.unobserved.color}">${esc(fmtDuration(unobserved))} · not measured</span></div>` : ''}`;
     }
     this.tip.hidden = false;
     const stage = this.canvas.parentElement;
@@ -697,21 +1001,27 @@ export class Timeline {
     });
 
     canvas.addEventListener('mouseleave', () => {
-      this.hover = null;
-      this.tip.hidden = true;
+      this.clearHover();
       this.schedule();
     });
 
     canvas.addEventListener('mousedown', (ev) => {
       const rect = canvas.getBoundingClientRect();
-      this.drag = { x: ev.clientX - rect.left };
+      this.drag = { x: ev.clientX - rect.left, moved: false };
       canvas.classList.add('dragging');
     });
 
-    window.addEventListener('mouseup', () => {
+    window.addEventListener('mouseup', (ev) => {
       if (!this.drag) return;
+      const rect = canvas.getBoundingClientRect();
+      const moved = Math.abs((ev.clientX - rect.left) - this.drag.x) > 3;
       this.drag = null;
       this.canvas.classList.remove('dragging');
+      if (moved) return;
+      const hit = this.hitTest(ev.clientX - rect.left, ev.clientY - rect.top);
+      if (hit && (hit.kind === 'bar' || hit.kind === 'interval') && this.onSelect) {
+        this.onSelect(hit.pr, { phase: hit.interval ? hit.interval.phase : null, kind: hit.kind });
+      }
     });
 
     canvas.addEventListener('dblclick', (ev) => {
@@ -731,6 +1041,34 @@ export class Timeline {
       this.zoom(factor, ev.clientX - rect.left);
     }, { passive: false });
 
+    // B8: keyboard path — pan, zoom, fit, dismiss.
+    canvas.addEventListener('keydown', (ev) => {
+      const key = ev.key;
+      if (key === 'ArrowLeft') { this.panFraction(-0.12); ev.preventDefault(); }
+      else if (key === 'ArrowRight') { this.panFraction(0.12); ev.preventDefault(); }
+      else if (key === '+' || key === '=') { this.zoom(0.75); ev.preventDefault(); }
+      else if (key === '-' || key === '_') { this.zoom(1.32); ev.preventDefault(); }
+      else if (key === 'Home' || key === '0' || key === 'f' || key === 'F') { this.fit(); ev.preventDefault(); }
+      else if (key === 'Escape') { this.clearHover(); ev.preventDefault(); }
+    });
+
     new ResizeObserver(() => this.schedule()).observe(canvas.parentElement);
   }
 }
+
+function countBetween(times, start, end) {
+  if (!times || !times.length) return 0;
+  let n = 0;
+  for (const t of times) {
+    if (t > start && t <= end) n += 1;
+    else if (t > end) break;
+  }
+  return n;
+}
+
+function visibleWord(timeline) {
+  const n = timeline.visibleCount();
+  return `${n} of ${timeline.events.length}`;
+}
+
+export { fmtDay, fmtStamp, fmtClock } from './format.js';

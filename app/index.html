@@ -3,66 +3,192 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>megaspeed — timeline</title>
+<title>megaspeed — process miner</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
 <div class="app" id="app">
   <header class="topbar">
     <span class="brand">megaspeed</span>
-    <span class="ctx"><span class="ctx-k">scope</span> everything</span>
-    <span class="ctx"><span class="ctx-k">timeframe</span> <span id="range" class="mono">—</span></span>
-    <span class="grow"></span>
-    <label class="lanes">lanes
-      <select id="lanes" aria-label="swimlane dimension">
-        <option value="actor">actors</option>
-        <option value="object">PRs</option>
-        <option value="activity">activities</option>
-      </select>
+    <label class="ctx"><span class="ctx-k">scope</span>
+      <select id="scope" aria-label="scope everything by person or queue"></select>
     </label>
-    <div class="density" id="density" role="group" aria-label="density">
-      <button type="button" data-d="S" title="dense">S</button>
-      <button type="button" data-d="M" class="on" title="default">M</button>
-      <button type="button" data-d="L" title="roomy">L</button>
+    <div class="ctx"><span class="ctx-k">timeframe</span>
+      <div class="seg" id="timeframe" role="group" aria-label="timeframe">
+        <button type="button" data-tf="1w" aria-pressed="false">1w</button>
+        <button type="button" data-tf="4w" aria-pressed="false">4w</button>
+        <button type="button" data-tf="1q" aria-pressed="true">1q</button>
+        <button type="button" data-tf="all" aria-pressed="false">All</button>
+      </div>
+      <span id="range" class="mono">—</span>
     </div>
-    <span class="status" id="status">connecting</span>
+    <span class="grow"></span>
+    <div class="density" id="density" role="group" aria-label="density">
+      <button type="button" data-d="S" aria-pressed="false" title="dense">S</button>
+      <button type="button" data-d="M" aria-pressed="true" class="on" title="default">M</button>
+      <button type="button" data-d="L" aria-pressed="false" title="roomy">L</button>
+    </div>
+    <span class="status" id="status" role="status">connecting</span>
   </header>
 
-  <div class="pagehead">
-    <h1>Timeline</h1>
-    <p class="question">Where does the time go?</p>
-  </div>
+  <div class="body">
+    <nav class="sidebar" id="sidebar" aria-label="views">
+      <div class="nav-group"><span class="nav-label">React</span>
+        <button type="button" class="nav-item" data-page="overview">Overview</button>
+        <button type="button" class="nav-item" data-page="delivery">Delivery list</button>
+      </div>
+      <div class="nav-group"><span class="nav-label">Flow</span>
+        <button type="button" class="nav-item" data-page="timeline">Timeline</button>
+      </div>
+      <div class="nav-group"><span class="nav-label">Blocking</span>
+        <button type="button" class="nav-item" data-page="blocking">Blocking map</button>
+        <button type="button" class="nav-item" data-page="queue">Queue</button>
+      </div>
+      <div class="nav-group"><span class="nav-label">Policy</span>
+        <button type="button" class="nav-item" data-page="policy">Policy lab</button>
+      </div>
+      <div class="nav-group"><span class="nav-label">Workspace</span>
+        <button type="button" class="nav-item" data-page="sources">Sources</button>
+      </div>
+      <div class="nav-foot">
+        <span id="nav-count" class="mono">—</span>
+        <span class="nav-note">read-only · pseudonymised</span>
+      </div>
+    </nav>
 
-  <div class="toolbar">
-    <div class="zoom">
-      <button type="button" id="zoom-out" title="zoom out">−</button>
-      <button type="button" id="zoom-in" title="zoom in">+</button>
-      <button type="button" id="fit" title="fit the whole window">Fit</button>
-    </div>
-    <div class="legend" id="legend"></div>
-    <span class="phase-legend" title="PR lifecycle bar segments">
-      <span><i style="background:#63B1FF"></i>in review</span>
-      <span><i style="background:#FBCD58"></i>waiting on author</span>
-      <span><i style="background:#8A8D93"></i>closed</span>
-    </span>
-  </div>
+    <main class="main" id="main">
+      <div class="pagehead">
+        <h1 id="page-title">Timeline</h1>
+        <p class="question" id="page-question">Where does the time go?</p>
+      </div>
 
-  <div class="stage" id="stage">
-    <canvas id="timeline" aria-label="event timeline"></canvas>
-    <div class="tip" id="tip" hidden></div>
-    <div class="empty" id="empty" hidden>
-      <p>No events in this window.</p>
-      <p class="muted">Run <code>python3 -m ingest --fixture --n 50</code> and reload.</p>
-    </div>
-  </div>
+      <div class="scopebanner" id="scopebanner" hidden></div>
 
-  <footer class="foot">
-    <span id="provenance">loading…</span>
-    <span class="dot">·</span>
-    <span id="honesty"></span>
-    <span class="dot">·</span>
-    <span class="hint">drag to pan · wheel to zoom · click a legend key to hide an activity · double-click to zoom in</span>
-  </footer>
+      <div class="meta" id="meta">
+        <span id="provenance">loading…</span>
+        <span class="dot">·</span>
+        <span id="honesty"></span>
+        <span class="dot">·</span>
+        <span class="timebasis" title="prd/03 specifies a working-hours calendar; this slice measures elapsed time">wall-clock hours</span>
+      </div>
+
+      <!-- Timeline -->
+      <section class="page" id="page-timeline" aria-labelledby="page-title">
+        <div class="toolbar">
+          <div class="zoom">
+            <button type="button" id="zoom-out" title="zoom out (−)">−</button>
+            <button type="button" id="zoom-in" title="zoom in (+)">+</button>
+            <button type="button" id="fit" title="fit the whole window (Home)">Fit</button>
+          </div>
+          <label class="control">lanes
+            <select id="lanes" aria-label="swimlane dimension">
+              <option value="actor">actors</option>
+              <option value="object">PRs</option>
+              <option value="queue">queues</option>
+            </select>
+          </label>
+          <div class="legend" id="legend" role="group" aria-label="activity legend — click to de-emphasise, again to hide"></div>
+        </div>
+        <div class="toolbar sub">
+          <span class="legend-label">lifecycle</span>
+          <div class="phase-legend" id="phase-legend"></div>
+          <span class="grow"></span>
+          <span class="hint">drag to pan · wheel to zoom · arrows pan · +/− zoom · Home fits</span>
+        </div>
+        <div class="stage" id="stage">
+          <canvas id="timeline" tabindex="0" role="application" aria-label="event timeline"></canvas>
+          <div class="tip" id="tip" hidden></div>
+          <div class="empty" id="empty" hidden>
+            <p>No events in this window.</p>
+            <p class="muted">Run <code>python3 -m ingest --fixture --n 50</code> and reload.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- Delivery list -->
+      <section class="page" id="page-delivery" aria-labelledby="page-title" hidden>
+        <div class="toolbar">
+          <div class="tabs" id="delivery-tabs" role="tablist" aria-label="subset"></div>
+          <span class="grow"></span>
+          <span class="hint">click a row to inspect · every row is a doorway</span>
+        </div>
+        <div class="split">
+          <div class="table-wrap" id="delivery-table"></div>
+          <aside class="detail" id="delivery-detail" aria-live="polite">
+            <p class="empty-detail">Select a row to see its impact, facts and pivot chips.</p>
+          </aside>
+        </div>
+        <p class="assumption" id="delivery-assumption"></p>
+      </section>
+
+      <!-- Blocking map -->
+      <section class="page" id="page-blocking" aria-labelledby="page-title" hidden>
+        <div class="toolbar">
+          <label class="control">level
+            <select id="blocking-level" aria-label="graph level">
+              <option value="queue">role / queue</option>
+              <option value="person">people (pseudonyms)</option>
+            </select>
+          </label>
+          <div class="seg" id="blocking-lens" role="group" aria-label="lens"></div>
+          <span class="grow"></span>
+          <div class="stats-strip" id="blocking-stats"></div>
+        </div>
+        <div class="stage blocking-stage" id="blocking-stage">
+          <canvas id="blocking" tabindex="0" role="application" aria-label="blocking map"></canvas>
+          <div class="tip" id="blocking-tip" hidden></div>
+        </div>
+        <p class="assumption" id="blocking-assumption"></p>
+      </section>
+
+      <!-- Queue -->
+      <section class="page" id="page-queue" aria-labelledby="page-title" hidden>
+        <div class="toolbar">
+          <label class="control">level
+            <select id="queue-level" aria-label="queue level">
+              <option value="person">people</option>
+              <option value="queue">queues</option>
+            </select>
+          </label>
+          <span class="grow"></span>
+          <span class="hint">WIP = items waiting · completions in green · click a row to scope</span>
+        </div>
+        <div class="stage queue-stage" id="queue-stage">
+          <canvas id="queues" tabindex="0" role="application" aria-label="queue WIP over time"></canvas>
+          <div class="tip" id="queue-tip" hidden></div>
+        </div>
+        <p class="assumption" id="queue-assumption"></p>
+      </section>
+
+      <!-- Overview -->
+      <section class="page" id="page-overview" aria-labelledby="page-title" hidden>
+        <div id="overview"></div>
+      </section>
+
+      <!-- Policy lab (stub) -->
+      <section class="page" id="page-policy" aria-labelledby="page-title" hidden>
+        <div class="stub">
+          <h2>Not built in this slice</h2>
+          <p>The diagnosis views ship first: timeline, delivery list, blocking map and queues.
+            The Policy lab is the next slice (prd/09 view 4) — it configures a calibrated
+            simulation and compares predicted vs. historical cycle time.</p>
+          <p class="muted">Planned inputs: WIP limits · sentinel rotation · PR size cap ·
+            review SLA · stack depth · async-refinement cadence. Every predicted number
+            will be marked <code>≈</code> and calibrated from a stated window.</p>
+        </div>
+      </section>
+
+      <!-- Sources (stub) -->
+      <section class="page" id="page-sources" aria-labelledby="page-title" hidden>
+        <div class="stub">
+          <h2>Provenance</h2>
+          <div id="sources-body" class="facts-block"></div>
+        </div>
+      </section>
+
+      <aside class="drawer" id="drawer" hidden aria-live="polite"></aside>
+    </main>
+  </div>
 </div>
 <script type="module" src="/main.js"></script>
 </body>
