@@ -20,8 +20,8 @@ import {
   DAY, fmtAge, fmtBucket, fmtDay, fmtHours, fmtRange, fmtStamp, esc, whoLabel,
 } from '/format.js';
 import {
-  TABS, tabCounts, deliveryTable, overviewMarkup, detailMarkup,
-  impactSentence, entityMarkdown,
+  TABS, tabCounts, tabRows, deliveryTable, overviewMarkup, detailMarkup,
+  impactSentence, entityMarkdown, deliveryMarkdown,
 } from '/tables.js';
 
 const $ = (id) => document.getElementById(id);
@@ -268,9 +268,22 @@ function renderDeliveryPage() {
   $('delivery-assumption').textContent = data
     ? `${data.assumption} · snapshot ${fmtStamp(Date.parse(data.snapshot))} · ` +
       `${data.counts.open} open items, ${data.counts.waiting_over_week} of them waiting over a week. ` +
-      'Impact is dependents × current wait (≈).'
+      `${data.impact_note}.`
     : '';
   renderDeliveryDetail();
+}
+
+function matchesScopeRow(row) {
+  const scope = deliveryScope();
+  if (!scope) return true;
+  if (scope.kind === 'person') {
+    return row.author === scope.value || row.waiting_for === scope.value || row.ball === scope.value;
+  }
+  if (scope.kind === 'role') {
+    if (scope.value === 'author') return row.author === row.waiting_for;
+    if (scope.value === 'review') return row.phase === 'review' && row.author !== row.waiting_for;
+  }
+  return true;
 }
 
 function deliveryScope() {
@@ -316,7 +329,7 @@ function renderBlockingPage() {
   blockingMap.setData(data || { nodes: [], edges: [] });
   blockingMap.setLens(state.lens);
   $('blocking-assumption').textContent = data
-    ? `${data.assumption} · ${data.window.days} days in view · edge = “X waited on Y”. Direction colour is relative to the selected node.`
+    ? `${data.assumption} · ${data.window.days} days in view · edge = “X waited on Y” · ${data.attribution}. Direction colour is relative to the selected node.`
     : '';
   renderBlockingStats();
 }
@@ -360,7 +373,8 @@ function renderQueuePage() {
   queueChart.setData(data ? { ...data, streams } : { streams: [], buckets: 1, window: { start: '', end: '' } });
   $('queue-assumption').textContent = data
     ? `${data.assumption} · ${data.bucket_hours} h buckets over ${data.window.days} days. ` +
-      `Little's law: WIP ≈ throughput × wait. Overloaded = long wait and a standing queue; slow = long wait with little WIP.`
+      `Little's law: WIP ≈ throughput × wait. Overloaded = long wait and a standing queue; slow = long wait with little WIP. ` +
+      `${data.diagnosis_note}.`
     : '';
 }
 
@@ -456,6 +470,59 @@ function openDrawer(entity) {
 function closeDrawer() {
   state.drawerEntity = null;
   $('drawer').hidden = true;
+}
+
+// --------------------------------------------------------------- pivot menu
+function openMenu(x, y, entity, label) {
+  const menu = $('menu');
+  state.menuEntity = entity;
+  const author = entity && (entity.author || (entity.pr && entity.pr.actor) || (entity.row && entity.row.author));
+  const items = [
+    author ? ['person', `Scope to ${author}`] : null,
+    ['timeline', 'Open in timeline'],
+    ['copy', 'Copy as Markdown'],
+    ['sep', ''],
+    ['clear', 'Clear scope · whole team'],
+  ].filter(Boolean);
+  menu.innerHTML = `<div class="menu-head">${esc(label || 'pivot')}</div>` + items.map(([action, text]) =>
+    action === 'sep' ? '<div class="sep"></div>'
+      : `<button type="button" data-menu="${action}">${esc(text)}</button>`).join('');
+  menu.hidden = false;
+  const width = menu.offsetWidth || 232;
+  const height = menu.offsetHeight || 140;
+  menu.style.left = `${Math.min(x, window.innerWidth - width - 8)}px`;
+  menu.style.top = `${Math.min(y, window.innerHeight - height - 8)}px`;
+  const first = menu.querySelector('button');
+  if (first) first.focus();
+}
+
+function closeMenu() {
+  $('menu').hidden = true;
+  state.menuEntity = null;
+}
+
+function entityForTarget(target, point) {
+  const row = target.closest && target.closest('tr.row[data-id]');
+  if (row) {
+    const record = findDeliveryRow(row.dataset.id);
+    if (record) {
+      return {
+        entity: { row: record, author: record.author },
+        label: `${record.tickets.join(' ') || '—'} #${record.number} ${record.repo_short}`,
+      };
+    }
+  }
+  if (target.id === 'timeline' && point) {
+    const rect = target.getBoundingClientRect();
+    const hit = timeline.hitTest(point.x - rect.left, point.y - rect.top);
+    if (hit && (hit.kind === 'bar' || hit.kind === 'interval') && hit.pr) {
+      return {
+        entity: { pr: hit.pr, author: hit.pr.actor, row: findDeliveryRow(hit.pr.id) },
+        label: `${hit.pr.keys[0] ? `${hit.pr.keys[0]} ` : ''}#${hit.pr.number} ${hit.pr.repo}`,
+      };
+    }
+  }
+  return null;
 }
 
 // ------------------------------------------------------------------- scope
@@ -841,6 +908,28 @@ $('queue-level').addEventListener('change', async (event) => {
 });
 
 document.addEventListener('click', async (event) => {
+  const menuItem = event.target.closest('#menu [data-menu]');
+  if (menuItem) {
+    const entity = state.menuEntity;
+    const action = menuItem.dataset.menu;
+    closeMenu();
+    if (action === 'copy') await copyMarkdown(entity);
+    else if (action === 'clear') { setScope('all', 'all'); await showPage('timeline'); }
+    else if (action === 'person' && entity) {
+      const author = entity.author || (entity.pr && entity.pr.actor) || (entity.row && entity.row.author);
+      if (author) setScope('person', author);
+    } else if (action === 'timeline') {
+      await showPage('timeline');
+    }
+    return;
+  }
+  if (!event.target.closest('#menu')) closeMenu();
+  if (event.target.closest('#delivery-copy')) {
+    const data = state.delivery;
+    const rows = data ? tabRows(data, state.tab).filter((row) => matchesScopeRow(row)) : [];
+    await copyText(deliveryMarkdown(rows, data ? `${data.assumption}; snapshot ${data.snapshot}` : ''));
+    return;
+  }
   const nav = event.target.closest('.nav-item');
   if (nav) {
     await showPage(nav.dataset.page);
@@ -900,12 +989,32 @@ document.addEventListener('click', async (event) => {
   }
 });
 
+document.addEventListener('contextmenu', (event) => {
+  const found = entityForTarget(event.target, { x: event.clientX, y: event.clientY });
+  if (!found) return;
+  event.preventDefault();
+  openMenu(event.clientX, event.clientY, found.entity, found.label);
+});
+
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape') closeDrawer();
+  if (event.key === 'Escape') {
+    closeDrawer();
+    closeMenu();
+    return;
+  }
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  const row = event.target.closest && event.target.closest('tr.row[data-id]');
+  if (row) {
+    event.preventDefault();
+    selectRow(row.dataset.id);
+  }
 });
 
 async function copyMarkdown(entity) {
-  const text = entity ? entityMarkdown(entity) : '';
+  await copyText(entity ? entityMarkdown(entity) : '');
+}
+
+async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
     setStatus('copied as Markdown', 'live');

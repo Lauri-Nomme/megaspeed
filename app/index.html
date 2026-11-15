@@ -110,7 +110,8 @@
         <div class="toolbar">
           <div class="tabs" id="delivery-tabs" role="tablist" aria-label="subset"></div>
           <span class="grow"></span>
-          <span class="hint">click a row to inspect · every row is a doorway</span>
+          <button type="button" class="chip" id="delivery-copy">Copy as Markdown</button>
+          <span class="hint">click a row to inspect · right-click to pivot</span>
         </div>
         <div class="split">
           <div class="table-wrap" id="delivery-table"></div>
@@ -151,7 +152,7 @@
             </select>
           </label>
           <span class="grow"></span>
-          <span class="hint">WIP = items waiting · completions in green · click a row to scope</span>
+          <span class="hint">WIP = items waiting · completions in grey · click a row to scope</span>
         </div>
         <div class="stage queue-stage" id="queue-stage">
           <canvas id="queues" tabindex="0" role="application" aria-label="queue WIP over time"></canvas>
@@ -187,6 +188,7 @@
       </section>
 
       <aside class="drawer" id="drawer" hidden aria-live="polite"></aside>
+      <div class="menu" id="menu" role="menu" hidden></div>
     </main>
   </div>
 </div>

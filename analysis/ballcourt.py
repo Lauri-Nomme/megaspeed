@@ -461,6 +461,10 @@ def blocking_graph(bc: BallCourt, level: str = "queue", window: tuple[datetime, 
     return {
         "ok": True,
         "assumption": ASSUMPTION,
+        "attribution": (
+            "a wait is attributed to the party the ball was with; at person level "
+            "to the person whose action ended the wait"
+        ),
         "level": level,
         "window": {"start": iso(start), "end": iso(end), "days": round(days, 1)},
         "nodes": sorted(nodes.values(), key=lambda n: (-n["hours"], n["id"])),
@@ -591,6 +595,7 @@ def queue_series(
     return {
         "ok": True,
         "assumption": ASSUMPTION,
+        "diagnosis_note": "heuristic vs. the median wait in this window; ≈ because the calendar is wall-clock",
         "level": level,
         "window": {"start": iso(start), "end": iso(end), "days": round(days, 1)},
         "bucket_hours": bucket_hours,
@@ -672,6 +677,7 @@ def delivery_list(bc: BallCourt, window: tuple[datetime, datetime] | None = None
     return {
         "ok": True,
         "assumption": ASSUMPTION,
+        "impact_note": "impact = open PRs on the same ticket × current wait (≈)",
         "snapshot": iso(bc.snapshot),
         "window": {"start": iso(start), "end": iso(end)},
         "counts": {

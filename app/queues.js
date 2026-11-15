@@ -16,7 +16,7 @@ const AXIS_H = 26;
 const BOTTOM = 22;
 
 const WIP = '#63B1FF';
-const DONE = '#73CF55';
+const DONE = '#B9BBC0';   // neutral: green is reserved for the 'healthy' state
 
 export const DIAGNOSIS = {
   overloaded: { label: 'overloaded', color: '#F05C70', tint: 'rgba(240,92,112,.14)' },
@@ -211,7 +211,7 @@ export class QueueChart {
     ctx.fillStyle = '#8A8D93';
     ctx.textAlign = 'left';
     ctx.fillText(
-      `WIP sampled every ${fmtDuration(bucketMs)} · wall-clock · completions in green`,
+      `WIP sampled every ${fmtDuration(bucketMs)} · wall-clock · completions in grey`,
       GUTTER, g.height - 8,
     );
   }
