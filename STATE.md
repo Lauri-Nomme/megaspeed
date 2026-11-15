@@ -1,34 +1,28 @@
 # STATE — megaspeed · LIVE
 
-**Live**: `https://megaspeed.example.com` (nginx → `127.0.0.1:8766`).
-**GitHub**: `https://github.com/Lauri-Nomme/megaspeed` (private).
-Install config (nginx site + IP + cert layout) is **removed from the repo** — lives on the host only.
+Live behind nginx (→ `127.0.0.1:8766`). GitHub: `https://github.com/Lauri-Nomme/megaspeed` (private).
+Install details (nginx site, public IP, DNS zone) are **scrubbed from the repo and all history**.
 
 ## Working
 
-- **BB ingest** (airgap-ready split: `scrape` → tgz → `import`) — 131 PRs / 1316 events /
-  `reviewer_changed`=266 / bots classified / `--verify` OK / idempotent / zero raw content.
+- **BB ingest** (airgap split: `scrape` → tgz → `import`) — 131 PRs / 1316 events / `reviewer_changed`=266 /
+  bots classified / `--verify` OK / idempotent / zero raw content.
 - **Views**: Timeline, Delivery list, Blocking map, Queue, Overview, Sources, Policy stub.
   Shell: sidebar, scope/timeframe + scope banner, detail panel, pivot menu + Copy as Markdown, brush.
 - **Tenants**: one DuckDB store per dataset (`data/<name>.duckdb`); `/api/tenants`; `?tenant=` on all
-  read endpoints; top-bar switcher (switchable live, per-dataset scope memory). Default tenant = `del`.
-- **Tests** 63/63. Harness (eval + screenshot) wired; Playwright headless browser.
+  read endpoints; top-bar switcher. Live tenants: `del` / `live-probe` / `megaspeed`.
+- **Tests**: **84** (63 core + 21 tenant tests). Harness (eval + screenshot) + Playwright wired.
 
-## Airgap (prd/11, prd/13)
+## In progress
 
-- **Scrape** (airgapped): source → classify → pseudonymise → **tgz** (`manifest.json` + `events.jsonl` +
-  `objects.jsonl` + `sha256sums` + watermark). Watermark + identity map stay scrape-side; identity map
-  never crosses.
-- **Import**: tgz → DuckDB (idempotent by natural key).
-- **Build**: `scrape/build.sh` → PyInstaller `--onefile` `megaspeed-scrape` (works locally).
-- **CI**: `.github/workflows/build-scraper.yml` — builds on push/PR to `main`, path-filtered to the
-  scraper component.
+- [ ] **Scrape optimization** (prd/14): ticket-key pre-filter on the PR list + `updatedDate` watermark +
+      settled-PR finality + NEWEST-first. Subagent implementing + adding a request-count test.
 
 ## Next
 
-- [ ] Restart 8766 to activate tenants (del / live-probe / megaspeed) and the split.
-- [ ] Verify airgap e2e: scrape `bb-lab-b` `DEL` → tgz → import → store.
-- [ ] Push follow-up commits as they land.
+- [ ] Push the scrape-opt work when it lands; verify vs `bb-lab-b` `DEL` (correctness unchanged, requests cut).
+- [ ] (If going public) genericize the local dev paths `/vokk/home/lauri/...` and the hard-coded
+      `hans/lab/home/bb-lab-b` path in `corpus/backdate.py` — currently left as-is (see scrub caveats).
 
 ## Follow-ups (later slices)
 
