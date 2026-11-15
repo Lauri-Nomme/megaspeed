@@ -29,6 +29,14 @@ def _fixture_bundle(path: Path | None, n: int, seed: int) -> dict:
     return fixtures_mod.generate(n=n, seed=seed)
 
 
+def _bundle_pr_count(bundle: dict) -> int:
+    return sum(
+        len(repo.get("pull_requests") or [])
+        for project in bundle.get("projects", [])
+        for repo in project.get("repos", [])
+    )
+
+
 def _print_probe(report: dict) -> None:
     print(f"probe          {report['as_of']} · {report['requests']} requests · read-only, nothing written")
     print(
@@ -65,7 +73,9 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--live", action="store_true", help="call the real Bitbucket DC REST API")
     mode.add_argument("--verify", action="store_true", help="check the pseudonymisation contract of an existing store")
     mode.add_argument("--write-fixtures", action="store_true", help="write the synthetic bundle to fixtures/ and exit")
-    ap.add_argument("--n", type=int, default=50, help="fixture PRs to generate (default 50)")
+    ap.add_argument("--n", type=int, default=None,
+                    help="fixture PRs to generate (default 50); with --fixture-file, cap how many "
+                         "PRs are read (default: all of them)")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--db", default=None, help="override store path")
     ap.add_argument("--config", default=None)
@@ -78,6 +88,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", default=str(REPO_ROOT / "fixtures" / "bitbucket-dc-fixture.json"))
     ap.add_argument("--json", action="store_true", help="machine-readable output")
     args = ap.parse_args(argv)
+
+    if args.n is not None and args.n < 1:
+        print(f"--n must be at least 1 (got {args.n}): an empty ingest is not a green run", file=sys.stderr)
+        return 2
 
     cfg: Config = load_config(args.config)
     if args.db:
@@ -92,9 +106,10 @@ def main(argv: list[str] | None = None) -> int:
             repos.append((project, repo))
         cfg.repos = repos
     seed = args.seed if args.seed is not None else cfg.seed
+    generate_n = args.n if args.n is not None else 50
 
     if args.write_fixtures:
-        path = fixtures_mod.write_bundle(Path(args.out), n=args.n, seed=seed)
+        path = fixtures_mod.write_bundle(Path(args.out), n=generate_n, seed=seed)
         print(path)
         return 0
 
@@ -117,6 +132,7 @@ def main(argv: list[str] | None = None) -> int:
         print("--probe only makes sense with --live", file=sys.stderr)
         return 2
 
+    limit = None
     if args.live:
         if not cfg.base_url:
             print("live mode needs MEGASPEED_BB_BASE_URL (and MEGASPEED_BB_TOKEN)", file=sys.stderr)
@@ -141,11 +157,24 @@ def main(argv: list[str] | None = None) -> int:
                 _print_probe(report)
             return 0
     else:
-        bundle = _fixture_bundle(Path(args.fixture_file) if args.fixture_file else cfg.fixture_path, args.n, seed)
+        bundle = _fixture_bundle(Path(args.fixture_file) if args.fixture_file else cfg.fixture_path,
+                                 generate_n, seed)
         transport = FixtureTransport(bundle)
         source = "fixture"
+        # A replay of a bundle is bounded by the bundle, not by the generator
+        # default -- capping a 60-PR file at 50 silently dropped 10 PRs, and the
+        # limit used to fire after the counter incremented (51 seen, 50 read).
+        if args.fixture_file and args.n is not None:
+            available = _bundle_pr_count(bundle)
+            if args.n > available:
+                print(
+                    f"warning: --n {args.n} exceeds the {available} PR(s) in {args.fixture_file};"
+                    f" reading all {available}",
+                    file=sys.stderr,
+                )
+            limit = args.n
 
-    report = run(cfg, transport, source=source, limit=args.n if source == "fixture" else None)
+    report = run(cfg, transport, source=source, limit=limit)
     if args.json:
         print(json.dumps(report, indent=2, default=str))
     else:
