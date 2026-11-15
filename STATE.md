@@ -2,54 +2,50 @@
 
 ## Done
 
-- [x] Repo root moved to `megaspeed/` (was `megaspeed/prd/`); history retained.
-- [x] PRD complete (`prd/01..09`) + UX spec (`prd/10-ux-look-feel.md`).
+- [x] Repo root moved to `megaspeed/`; history retained.
+- [x] PRD (`prd/01..09`) + UX spec (`prd/10-ux-look-feel.md`).
 - [x] `PLAN.md`, `STATE.md`, `megaspeed.example.com`.
-- [x] **Deploy live**: nginx + DNS — `megaspeed.example.com → 203.0.113.10`, WebSocket
-      headers, upstream `127.0.0.1:8766`. Verified 200 through nginx.
-- [x] **bb-lab-a** resurrected (FIX/golden corpus; no Jira ticket keys).
-- [x] **Walking skeleton** (subagent) — ingest + server + app + tests, verified
-      end-to-end:
-  - Live at `https://megaspeed.example.com/` (HTTP 200), `/api/health`, `/api/events`, `/ws`.
-  - Fixture corpus: 50 PRs → 43 kept (ticket keys `ARCH-*`, `PROJ-*`, …), 420 events, 182 commits.
-  - Store: DuckDB, no free-text columns, canary tokens, `--verify` contract gate, 13 tests.
-  - Live lab (FIX/golden): 10 PRs → 48 events, **0 kept** (no keys) — filter working.
-  - Server runs via `nohup .venv/bin/python -m server` (pid varies; restart with `fuser -k 8766/tcp`).
+- [x] **Deploy live**: nginx + DNS — `megaspeed.example.com → 203.0.113.10`, upstream `127.0.0.1:8766`.
+- [x] **bb-lab-a** resurrected (FIX/golden corpus, no ticket keys).
+- [x] **Walking skeleton** (ingest + server + app + 13 tests), verified end-to-end:
+  - `https://megaspeed.example.com/` 200; `/api/health`, `/api/events`, `/ws`, `/api/eval`, `/api/screenshot`.
+  - Fixture: 50 PRs → 43 kept (ticket keys), 420 events, 182 commits. Store contract `--verify` green.
+  - Live FIX/golden: 10 PRs → 0 kept (no keys) — filter correct.
+- [x] **Playwright + browser harness** (`harness/`): playwright 1.62.0 (chromium-1234, cached), `browser.py` launcher, eval + screenshot verified (`harness/proof.png`).
 
-## In progress
+## In progress (subagents, fallback model `opencode-go/deepseek-v4.1-flash`)
 
-- [ ] **Corpus generation** (subagent): resurrect `bb-lab-b` as licensed + generate a
-      ~100-ticket, 5-person, ~3-month PR corpus with `DEL-*` ticket keys, into
-      `bb-lab-b` (:7991).
+- [ ] **QA ingest/server/store** → `docs/QA-REPORT.md` (read-only; temp DBs).
+- [ ] **QA timeline UI** (screenshot pipe) → `docs/QA-UI-REPORT.md`.
+- [ ] **Corpus** — resurrect `bb-lab-b` (licensed) + generate ~100-ticket / 5-person / ~3-month `DEL-*` corpus.
 
-## Deviations / notes (walking skeleton)
+## Next (dispatch on completion)
 
-- No SvelteKit yet — vanilla ES modules + canvas served by FastAPI (renderer can move
-  into a SvelteKit shell later unchanged).
-- `push_class` = `other` in live mode (no local git clone / `git patch-id` yet);
-  fixtures simulate it via a namespaced field.
-- `REVIEWED` / `UPDATED` DC activities are ignored by the closed vocabulary, but
-  `--probe` counts them so taxonomy gaps stay visible.
-- Screenshots need a browser connected to `/ws` (health reports `browsers: 0` now).
-  Playwright chromium is cached at `~/.cache/ms-playwright` (`chromium-1234`,
-  `chromium_headless_shell-1234`), but the `playwright` python package is not yet
-  installed.
+1. **Fix + build pass** — read both QA reports, fix bugs, and build the missing views
+   (blocking map, queue view, delivery list) + backend ball-in-court / handover-graph
+   / queue computation (prd/05-analysis.md, prd/09-web-ui.md views 2–4).
+2. **Wire real ingest** against `bb-lab-b` `DEL-*` corpus (set filter `DEL-\d+`), verify ticket-key ingest end-to-end.
+3. Update STATE.md after each.
 
-## Test lab (Bitbucket Data Center 9.4.18)
+## Deviations / notes
 
-- `bb-lab-a` (`sudo nerdctl`), `atlassian/bitbucket:9.4.18-jdk21`.
-  - HTTP `http://127.0.0.1:7990`, sysadmin `admin` / `admin-lab-pw`.
-  - Project `FIX` → repo `golden` (force-push/rescope/stacked/declined corpus, **no ticket keys**).
-- `bb-lab-b` (HTTP :7991, SSH :7998) — being resurrected+licensed by the corpus subagent.
-- Lab scripts: `~/dev/hans/lab/` (`lab-up.sh`, `wizard.sh`, `lab-down.sh`, `config.env`,
-  `SEED.md`); license `lab/license.txt` (+ `trial3h.txt`).
+- No SvelteKit yet — vanilla ES modules + canvas served by FastAPI (renderer is shell-agnostic).
+- `push_class` = `other` in live mode (no local git clone / `git patch-id` yet).
+- `REVIEWED`/`UPDATED` DC activities ignored by closed vocab; `--probe` surfaces them.
+- A real browser tab is already attached via `megaspeed.example.com` (health reports 2 browsers).
 
-## Open items (blockers for real production data)
+## Test lab (Bitbucket DC 9.4.18)
 
-- [ ] Production Bitbucket DC base URL + project/repo(s) + auth.
-- [ ] Jira ticket-key exact format for production + which projects to scope.
+- `bb-lab-a` :7990 (`admin`/`admin-lab-pw`) — FIX/golden (force-push/rescope corpus, no keys).
+- `bb-lab-b` :7991 — being resurrected + licensed by the corpus subagent.
+- Scripts: `~/dev/hans/lab/` (`lab-up.sh`, `wizard.sh`, `lab-down.sh`, `config.env`, `SEED.md`).
+
+## Open items (real production data)
+
+- [ ] Production Bitbucket DC URL + project/repo(s) + auth.
+- [ ] Jira ticket-key format for production.
 
 ## Subagent model
 
-- Primary: `opencode/deepseek-v4.1-flash-free`
+- Primary: `opencode/deepseek-v4.1-flash-free` (exhausted → fallback)
 - Fallback: `opencode-go/deepseek-v4.1-flash`
