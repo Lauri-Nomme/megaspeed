@@ -64,11 +64,21 @@ attributes — **never raw content** (see `02-pseudonymization.md`).
 
 ## Technology (with reasoning)
 
+**The principle: snappiness and density are won in the rendering core, not the
+framework.** The dense views (timeline, gantt, graph) are **canvas/WebGL
+islands** that bypass the DOM; the framework only hosts chrome (toolbars,
+filters, panels) and holds debounced selection state. Pan/zoom runs on a
+`requestAnimationFrame` loop, never through framework re-renders. "Intuitive +
+high density" is also partly a UX problem the stack can't buy: good defaults,
+progressive disclosure, and level-of-detail so we never dump 10k glyphs on
+screen at once.
+
 | Concern | Choice | Why |
 | --- | --- | --- |
 | Backend | thin **read-only** API (FastAPI) over DuckDB | exposes the pseudonymised store as JSON; no write path, so the UI cannot leak raw content |
-| Frontend | **React + D3** (or ECharts) | timeline/gantt + graph in one stack |
-| Timeline/gantt | custom D3/ECharts series with LOD | off-the-shelf gantt libs don't do semantic zoom or event LOD |
-| Graph | **Cytoscape.js / sigma.js / D3-force** | weighted directed graph with node drill-down |
+| App shell | **SvelteKit (TS)** — SolidJS or vanilla TS + Vite as equivalents | compiled, no VDOM, tiny runtime, fast startup; a small single-purpose tool doesn't need React's ecosystem, and the VDOM is the wrong fit for 60 fps pan/zoom |
+| Timeline + gantt | **custom Canvas 2D renderer** (own transform + LOD); escalate to **PixiJS/WebGL** only if profiling demands | off-the-shelf chart/gantt libs can't do semantic zoom + event LOD + swimlane intervals; canvas is where density and fps come from |
+| Blocking graph | **sigma.js** (WebGL) | weighted directed graphs with thousands of nodes/edges stay interactive; Cytoscape/D3-SVG choke at this density |
+| Queue / time-series | **uPlot** (canvas) | tiny, ultra-fast time-series; the correct default over ECharts for the snappy brief |
 | Simulation | Python **SimPy** behind the API | reuses the existing model; UI only configures + renders |
 | Zero-server fallback | **DuckDB-WASM** + static Parquet | fully local single-user option, no API at all |

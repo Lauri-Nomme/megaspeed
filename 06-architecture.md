@@ -33,7 +33,7 @@
 | Local classification LLM | **Ollama / llama.cpp**, qwen2.5/llama3.2 3B or gemma3/phi-class, temp 0, JSON-schema constrained | cheap, local; **this is what performs raw→generalised classification**; the schema enforces the closed vocabulary |
 | Analysis LLM (open-source) | any open model, on the pseudonymised view only | it never sees raw text because it never has it |
 | Simulation | **SimPy** (or Simod for BPMN) | discrete-event, calibrated from mined distributions |
-| Web UI | **React + D3/ECharts**, read-only **FastAPI** over DuckDB (DuckDB-WASM as zero-server fallback) | timeline/gantt/graph in one stack; read-only so the UI cannot leak raw content |
+| Web UI | **SvelteKit** shell + **Canvas 2D / WebGL** rendering core (sigma.js for graphs, uPlot for time-series), read-only **FastAPI** over DuckDB (DuckDB-WASM fallback) | canvas/WebGL for density + fps; read-only so the UI cannot leak raw content |
 | Scrapers | small per-source CLI (Python), rate-limited, resumable, **cursor/watermark-based incremental** | simple, auditable, run in the raw zone only |
 
 ## The boundary, enforced three ways

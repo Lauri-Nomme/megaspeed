@@ -25,8 +25,9 @@ flow efficiency), not individual throughput; revisit metrics as behaviour shifts
   closed attributes. The canary test extends to every rendered view (raw strings
   must never appear).
 - **Timeline performance at scale** — ~10k+ events need level-of-detail
-  aggregation (coarse zoom = counts/densities, fine zoom = events) or the UI
-  stalls. Zoom/pan are a load-bearing feature, not polish.
+  aggregation (coarse zoom = counts/densities, fine zoom = events) and a
+  canvas/WebGL renderer (not DOM/SVG), or the UI stalls. Zoom/pan are
+  load-bearing, not polish.
 
 ### Data quality
 
