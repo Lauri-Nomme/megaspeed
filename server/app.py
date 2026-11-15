@@ -5,14 +5,17 @@ and no import of anything under ``ingest/`` except the schema guard's read
 helpers. If the UI cannot leak raw text, it cannot leak raw text by accident.
 
     GET  /api/health                    store status + provenance summary
-    GET  /api/events?from=&to=&limit=   pseudonymised event log
-    GET  /api/objects?type=             PR / COMMIT / TICKET / PERSON objects
+    GET  /api/events?from=&to=&repo=&actor=&ticket=&activity=&pr_id=
+                     &limit=&offset=&order=          pseudonymised event log
+    GET  /api/events/counts?granularity=&…             histogram + window totals
+    GET  /api/objects?type=&repo=&pr_id=&actor=&ticket=&limit=&offset=
+                                                        PR / COMMIT / TICKET / … objects
     GET  /api/blocking?level=&days=     wait-hours handover graph (prd/05)
     GET  /api/queues?level=&days=       per-person WIP / throughput series
     GET  /api/delivery?days=            triage list: blocked / oldest waiting
     GET  /ws                            harness websocket (hello/changed/eval)
     POST /api/eval        {code, timeout}
-    POST /api/screenshot  {selector, out}
+    POST /api/screenshot  {selector, out, timeout}
     GET  /                              app/ (vanilla JS + canvas, no build)
 """
 
@@ -22,12 +25,13 @@ import asyncio
 import base64
 import contextlib
 import json
+import math
 import os
 import sys
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -39,6 +43,8 @@ DB_PATH = Path(os.environ.get("MEGASPEED_DB", REPO_ROOT / "data" / "megaspeed.du
 sys.path.insert(0, str(REPO_ROOT))
 from analysis import ballcourt as analyse  # noqa: E402  (read-only projections)
 from ingest import store as pstore  # noqa: E402  (read helpers + schema guard only)
+from ingest import taxonomy  # noqa: E402  (closed vocabularies, read-only)
+from server import query as query  # noqa: E402  (filters, paging, aggregation)
 from server.harness import BrowserBridge  # noqa: E402
 
 bridge = BrowserBridge()
@@ -50,7 +56,6 @@ LOG = os.environ.get("MEGASPEED_QUIET", "") not in ("1", "true")
 # for the current store stamp. Read-only; a store change invalidates it.
 _analysis_lock = threading.Lock()
 _analysis_cache: tuple[tuple, object] | None = None
-
 
 
 @contextlib.contextmanager
@@ -80,6 +85,56 @@ def _store_error(exc: Exception) -> JSONResponse:
     return JSONResponse(status_code=503, content={"ok": False, "error": str(exc)})
 
 
+def _bad_request(message: str, **extra) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"ok": False, "error": message, **extra})
+
+
+def _unknown_params(request: Request, valid: tuple[str, ...]) -> JSONResponse | None:
+    """Reject query parameters the endpoint does not implement (BUG-13)."""
+    unknown = sorted(set(request.query_params) - set(valid))
+    if not unknown:
+        return None
+    return _bad_request(
+        f"unknown query parameter(s): {', '.join(unknown)}",
+        valid=sorted(valid),
+        hint="every parameter is either honoured or rejected; nothing is silently ignored",
+    )
+
+
+def _int_param(request: Request, name: str, default=None, minimum: int = 0,
+               maximum: int | None = None) -> int | None:
+    raw = request.query_params.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be an integer") from None
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} must be <= {maximum}")
+    return value
+
+
+def _num_param(request: Request, name: str, default=None, minimum: float | None = None,
+               maximum: float | None = None) -> float | None:
+    raw = request.query_params.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a number") from None
+    if not math.isfinite(value):
+        raise ValueError(f"{name} must be a finite number")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}")
+    if maximum is not None and value > maximum:
+        raise ValueError(f"{name} must be <= {maximum}")
+    return value
+
+
 @contextlib.asynccontextmanager
 async def lifespan(_app: FastAPI):
     task = asyncio.create_task(_watch_store())
@@ -104,7 +159,10 @@ app.add_middleware(
 # read API
 # --------------------------------------------------------------------------- #
 @app.get("/api/health")
-def health():
+def health(request: Request):
+    unknown = _unknown_params(request, ())
+    if unknown is not None:
+        return unknown
     if not DB_PATH.exists():
         return _missing_store()
     try:
@@ -123,84 +181,135 @@ def health():
 
 
 @app.get("/api/events")
-def events(
-    from_: str | None = Query(default=None, alias="from"),
-    to: str | None = None,
-    limit: int | None = Query(default=None, ge=1, le=200_000),
-):
+def events(request: Request):
+    """A page of the event log.
+
+    ``limit``/``offset`` page it (GAP-04); ``X-Total-Count`` says how many rows
+    match so a client never has to download them to count them. Filters are
+    real: ``repo``, ``actor``, ``activity``, ``ticket`` and ``pr_id`` are
+    applied in SQL, and anything not listed is a 400 (BUG-13).
+    """
+    unknown = _unknown_params(request, query.EVENT_PARAMS)
+    if unknown is not None:
+        return unknown
+    try:
+        start, end = query.parse_range(
+            request.query_params.get("from"), request.query_params.get("to")
+        )
+        limit = _int_param(request, "limit", default=None, minimum=1, maximum=200_000)
+        offset = _int_param(request, "offset", default=0, minimum=0, maximum=1_000_000_000)
+        pr_id = _int_param(request, "pr_id", default=None, minimum=0)
+    except ValueError as exc:
+        return _bad_request(str(exc), valid=sorted(query.EVENT_PARAMS))
+    activity = request.query_params.get("activity") or None
+    if activity is not None and activity not in taxonomy.ACTIVITIES:
+        return _bad_request(
+            f"activity {activity!r} is outside the closed vocabulary",
+            valid=sorted(taxonomy.ACTIVITIES),
+        )
+    order = (request.query_params.get("order") or "asc").lower()
+    if order not in ("asc", "desc"):
+        return _bad_request("order must be 'asc' or 'desc'", valid=["asc", "desc"])
     if not DB_PATH.exists():
         return _missing_store()
     try:
-        start = pstore.to_naive_utc(from_) if from_ else None
-        end = pstore.to_naive_utc(to) if to else None
+        with store_conn() as con:
+            rows, total = query.list_events(
+                con, start, end, limit, offset or 0, order,
+                repo=request.query_params.get("repo") or None,
+                actor=request.query_params.get("actor") or None,
+                activity=activity,
+                pr_id=pr_id,
+                ticket=request.query_params.get("ticket") or None,
+            )
+    except Exception as exc:  # noqa: BLE001
+        return _store_error(exc)
+    return JSONResponse(
+        rows,
+        headers={
+            "X-Total-Count": str(total),
+            "X-Limit": str(limit or total),
+            "X-Offset": str(offset or 0),
+        },
+    )
+
+
+@app.get("/api/events/counts")
+def event_counts(request: Request):
+    """Per-bucket event counts plus window totals — no per-event rows (GAP-04)."""
+    unknown = _unknown_params(request, query.COUNT_PARAMS)
+    if unknown is not None:
+        return unknown
+    try:
+        start, end = query.parse_range(
+            request.query_params.get("from"), request.query_params.get("to")
+        )
+        pr_id = _int_param(request, "pr_id", default=None, minimum=0)
     except ValueError as exc:
-        return JSONResponse(status_code=400, content={"ok": False, "error": f"bad timestamp: {exc}"})
+        return _bad_request(str(exc), valid=sorted(query.COUNT_PARAMS))
+    activity = request.query_params.get("activity") or None
+    if activity is not None and activity not in taxonomy.ACTIVITIES:
+        return _bad_request(
+            f"activity {activity!r} is outside the closed vocabulary",
+            valid=sorted(taxonomy.ACTIVITIES),
+        )
+    if not DB_PATH.exists():
+        return _missing_store()
     try:
         with store_conn() as con:
-            return pstore.list_events(con, start, end, limit)
+            return query.event_counts(
+                con, start, end,
+                request.query_params.get("granularity") or "day",
+                repo=request.query_params.get("repo") or None,
+                actor=request.query_params.get("actor") or None,
+                activity=activity,
+                pr_id=pr_id,
+                ticket=request.query_params.get("ticket") or None,
+            )
+    except ValueError as exc:
+        return _bad_request(str(exc), valid=sorted(query.GRANULARITIES))
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
 
 
 @app.get("/api/objects")
-def objects(type: str | None = None):
+def objects(request: Request):
+    """A page of the object table; filterable by type/repo/pr_id/actor/ticket."""
+    unknown = _unknown_params(request, query.OBJECT_PARAMS)
+    if unknown is not None:
+        return unknown
+    object_type = request.query_params.get("type") or None
+    if object_type is not None and object_type not in taxonomy.OBJECT_TYPES:
+        return _bad_request(
+            f"type {object_type!r} is outside the closed vocabulary",
+            valid=sorted(taxonomy.OBJECT_TYPES),
+        )
+    try:
+        pr_id = _int_param(request, "pr_id", default=None, minimum=0)
+        limit = _int_param(request, "limit", default=None, minimum=1, maximum=200_000)
+        offset = _int_param(request, "offset", default=0, minimum=0, maximum=1_000_000_000)
+    except ValueError as exc:
+        return _bad_request(str(exc), valid=sorted(query.OBJECT_PARAMS))
     if not DB_PATH.exists():
         return _missing_store()
     try:
         with store_conn() as con:
-            return _list_objects(con, type)
+            rows, total = query.list_objects(
+                con,
+                object_type=object_type,
+                repo=request.query_params.get("repo") or None,
+                pr_id=pr_id,
+                actor=request.query_params.get("actor") or None,
+                ticket=request.query_params.get("ticket") or None,
+                limit=limit,
+                offset=offset or 0,
+            )
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
-
-
-def _list_objects(con, object_type: str | None = None) -> list[dict]:
-    """The object table, read directly.
-
-    ``ingest.store.list_objects`` is the canonical reader, but its column list
-    tracks whatever ingest is adding this week; this endpoint promises a stable
-    shape to the UI, so it reads the stable columns itself and treats newer
-    columns as optional.
-    """
-    columns = {
-        row[0]
-        for row in con.execute(
-            "SELECT column_name FROM information_schema.columns WHERE table_name = 'objects'"
-        ).fetchall()
-    }
-    extra = ", CAST(attributes AS VARCHAR) AS attributes" if "attributes" in columns else ", NULL AS attributes"
-    sql = (
-        "SELECT object_type, object_id, repo, pr_id, ticket_keys, actor, state,"
-        " created_at, closed_at, head_commit, message_class"
-        f"{extra} FROM objects"
+    return JSONResponse(
+        rows,
+        headers={"X-Total-Count": str(total), "X-Limit": str(limit or total), "X-Offset": str(offset or 0)},
     )
-    params: list = []
-    if object_type:
-        sql += " WHERE object_type = ?"
-        params.append(object_type)
-    sql += " ORDER BY object_type, object_id"
-    out = []
-    for row in con.execute(sql, params).fetchall():
-        (otype, oid, repo, pr_id, keys, actor, state, created, closed, head, mclass, attrs) = row
-        record = {
-            "object_type": otype,
-            "object_id": oid,
-            "repo": repo,
-            "pr_id": pr_id,
-            "ticket_keys": list(keys or []),
-            "actor": actor,
-            "state": state,
-            "created_at": pstore.iso(created) if created else None,
-            "closed_at": pstore.iso(closed) if closed else None,
-            "head_commit": head,
-            "message_class": mclass,
-        }
-        if attrs:
-            try:
-                record["attributes"] = json.loads(attrs) if isinstance(attrs, str) else attrs
-            except json.JSONDecodeError:
-                record["attributes"] = {}
-        out.append(record)
-    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -226,40 +335,73 @@ def _days(days: float | None) -> float | None:
 
 
 def _level(level: str) -> str:
-    return level if level in ("queue", "person") else "queue"
+    if level not in ("queue", "person"):
+        raise ValueError("level must be 'queue' or 'person'")
+    return level
+
+
+ANALYSIS_PARAMS = {
+    "blocking": ("level", "days"),
+    "queues": ("level", "days", "bucket_hours"),
+    "delivery": ("days",),
+}
 
 
 @app.get("/api/blocking")
-def blocking(level: str = "queue", days: float | None = None):
+def blocking(request: Request):
     """Weighted directed handover graph: ``X -> Y`` = X waited on Y for N hours."""
+    unknown = _unknown_params(request, ANALYSIS_PARAMS["blocking"])
+    if unknown is not None:
+        return unknown
+    try:
+        days = _num_param(request, "days", minimum=0, maximum=3650)
+        level = _level(request.query_params.get("level") or "queue")
+    except ValueError as exc:
+        return _bad_request(str(exc), valid=list(ANALYSIS_PARAMS["blocking"]))
     if not DB_PATH.exists():
         return _missing_store()
     try:
         with store_conn() as con:
             court = _ballcourt(con)
             window = analyse.window_from_events(court, _days(days))
-            return analyse.blocking_graph(court, _level(level), window)
+            return analyse.blocking_graph(court, level, window)
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
 
 
 @app.get("/api/queues")
-def queues(level: str = "person", days: float | None = None, bucket_hours: float | None = None):
+def queues(request: Request):
     """Per-person / per-queue WIP over time, arrivals and completions."""
+    unknown = _unknown_params(request, ANALYSIS_PARAMS["queues"])
+    if unknown is not None:
+        return unknown
+    try:
+        days = _num_param(request, "days", minimum=0, maximum=3650)
+        bucket_hours = _num_param(request, "bucket_hours", minimum=1, maximum=720)
+        level = _level(request.query_params.get("level") or "person")
+    except ValueError as exc:
+        return _bad_request(str(exc), valid=list(ANALYSIS_PARAMS["queues"]))
     if not DB_PATH.exists():
         return _missing_store()
     try:
         with store_conn() as con:
             court = _ballcourt(con)
             window = analyse.window_from_events(court, _days(days))
-            return analyse.queue_series(court, _level(level), window, bucket_hours)
+            return analyse.queue_series(court, level, window, bucket_hours)
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
 
 
 @app.get("/api/delivery")
-def delivery(days: float | None = None):
+def delivery(request: Request):
     """Triage list: open PRs, what they wait on, and for how long."""
+    unknown = _unknown_params(request, ANALYSIS_PARAMS["delivery"])
+    if unknown is not None:
+        return unknown
+    try:
+        days = _num_param(request, "days", minimum=0, maximum=3650)
+    except ValueError as exc:
+        return _bad_request(str(exc), valid=list(ANALYSIS_PARAMS["delivery"]))
     if not DB_PATH.exists():
         return _missing_store()
     try:
