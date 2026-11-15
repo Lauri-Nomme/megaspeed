@@ -287,6 +287,21 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .phase-legend .zero { color: var(--text-tertiary); }
 .phase-legend .zero i { opacity: .35; }
 
+.selection {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 4px 0 9px;
+  border: 1px solid rgba(104, 192, 252, .35);
+  background: var(--primary-tint-bg);
+  border-radius: var(--radius-pill);
+  font-size: 11px;
+  color: var(--primary-tint-fg);
+}
+.selection[hidden] { display: none; }
+.selection .chip { height: 20px; font-size: 11px; background: rgba(104, 192, 252, .14); }
+
 .tabs { display: inline-flex; gap: 4px; }
 .tabs button {
   background: transparent;

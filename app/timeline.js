@@ -121,12 +121,15 @@ function phaseFor(state, pr, next, commits) {
 }
 
 export class Timeline {
-  constructor({ canvas, tip, onStats, onSelect }) {
+  constructor({ canvas, tip, onStats, onSelect, onSelection }) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.tip = tip;
     this.onStats = onStats;
     this.onSelect = onSelect;
+    this.onSelection = onSelection;
+    this.selection = null;   // { start, end } picked by brushing the histogram
+    this.brushing = null;
     this.density = 'M';
     this.dim = 'actor';
     this.activityState = new Map();
@@ -474,6 +477,23 @@ export class Timeline {
     if (this.tip) this.tip.hidden = true;
   }
 
+  setSelection(start, end) {
+    if (!(end > start)) {
+      this.clearSelection();
+      return;
+    }
+    this.selection = { start, end };
+    this.schedule();
+    if (this.onSelection) this.onSelection(this.selection);
+  }
+
+  clearSelection() {
+    this.selection = null;
+    this.brushing = null;
+    this.schedule();
+    if (this.onSelection) this.onSelection(null);
+  }
+
   render() {
     this.dirty = false;
     const ctx = this.ctx;
@@ -669,11 +689,35 @@ export class Timeline {
       ctx.fillStyle = n > 1 ? 'rgba(99,177,255,.55)' : 'rgba(99,177,255,.30)';
       ctx.fillRect(x, top + height - h, 2, h);
     }
+    // brushed range: visible in the strip and faintly across the lanes
+    const range = this.brushing || this.selection;
+    if (range && range.end > range.start) {
+      const x0 = Math.max(g.gutter, this.px(range.start));
+      const x1 = Math.min(g.gutter + g.plotW, this.px(range.end));
+      if (x1 > x0) {
+        ctx.fillStyle = 'rgba(104,192,252,.14)';
+        ctx.fillRect(x0, AXIS_H, x1 - x0, g.height - AXIS_H - BOTTOM);
+        ctx.fillStyle = this.brushing ? 'rgba(104,192,252,.35)' : 'rgba(104,192,252,.22)';
+        ctx.fillRect(x0, top, x1 - x0, height);
+        ctx.strokeStyle = 'rgba(104,192,252,.7)';
+        ctx.lineWidth = 1;
+        for (const x of [x0, x1]) {
+          ctx.beginPath();
+          ctx.moveTo(Math.round(x) + 0.5, AXIS_H);
+          ctx.lineTo(Math.round(x) + 0.5, g.height - BOTTOM);
+          ctx.stroke();
+        }
+      }
+    }
     ctx.strokeStyle = 'rgba(255,255,255,.06)';
     ctx.beginPath();
     ctx.moveTo(g.gutter, AXIS_H + HIST_H - 0.5);
     ctx.lineTo(g.width, AXIS_H + HIST_H - 0.5);
     ctx.stroke();
+    this.hits.push({
+      kind: 'histogram', x0: g.gutter, x1: g.gutter + g.plotW,
+      y0: AXIS_H, y1: AXIS_H + HIST_H,
+    });
   }
 
   drawLanes(ctx, g, m) {
@@ -989,6 +1033,14 @@ export class Timeline {
       const rect = canvas.getBoundingClientRect();
       const x = ev.clientX - rect.left;
       const y = ev.clientY - rect.top;
+      if (this.brushing) {
+        this.brushing = {
+          start: Math.min(this.brushAnchor, this.timeAt(x)),
+          end: Math.max(this.brushAnchor, this.timeAt(x)),
+        };
+        this.schedule();
+        return;
+      }
       if (this.drag) {
         const dx = x - this.drag.x;
         this.drag.x = x;
@@ -1007,11 +1059,29 @@ export class Timeline {
 
     canvas.addEventListener('mousedown', (ev) => {
       const rect = canvas.getBoundingClientRect();
-      this.drag = { x: ev.clientX - rect.left, moved: false };
+      const x = ev.clientX - rect.left;
+      const y = ev.clientY - rect.top;
+      const onStrip = this.geom && y >= AXIS_H && y <= AXIS_H + HIST_H && x >= this.geom.gutter;
+      if (onStrip && ev.button === 0) {
+        const anchor = this.timeAt(x);
+        this.brushing = { start: anchor, end: anchor };
+        this.brushAnchor = anchor;
+        this.clearHover();
+        this.schedule();
+        return;
+      }
+      this.drag = { x, moved: false };
       canvas.classList.add('dragging');
     });
 
     window.addEventListener('mouseup', (ev) => {
+      if (this.brushing) {
+        const range = this.brushing;
+        this.brushing = null;
+        if (range.end - range.start > 2 * MINUTE) this.setSelection(range.start, range.end);
+        else this.schedule();
+        return;
+      }
       if (!this.drag) return;
       const rect = canvas.getBoundingClientRect();
       const moved = Math.abs((ev.clientX - rect.left) - this.drag.x) > 3;
@@ -1049,7 +1119,7 @@ export class Timeline {
       else if (key === '+' || key === '=') { this.zoom(0.75); ev.preventDefault(); }
       else if (key === '-' || key === '_') { this.zoom(1.32); ev.preventDefault(); }
       else if (key === 'Home' || key === '0' || key === 'f' || key === 'F') { this.fit(); ev.preventDefault(); }
-      else if (key === 'Escape') { this.clearHover(); ev.preventDefault(); }
+      else if (key === 'Escape') { this.clearHover(); this.clearSelection(); ev.preventDefault(); }
     });
 
     new ResizeObserver(() => this.schedule()).observe(canvas.parentElement);

@@ -80,6 +80,7 @@ const timeline = new Timeline({
     }
   },
   onSelect: (pr) => openPrDrawer(pr),
+  onSelection: (range) => renderSelection(range),
 });
 
 const blockingMap = new BlockingMap({
@@ -208,6 +209,19 @@ async function ensureData(page) {
 }
 
 // ----------------------------------------------------------------- timeline
+function renderSelection(range) {
+  const chip = $('selection');
+  if (!range) {
+    chip.hidden = true;
+    return;
+  }
+  chip.hidden = false;
+  $('selection-range').textContent =
+    `${fmtRange(range.start, range.end)} · ${fmtHours((range.end - range.start) / 3_600_000)}`;
+  chip.dataset.start = String(range.start);
+  chip.dataset.end = String(range.end);
+}
+
 function renderTimelinePage() {
   renderLegend();
   renderPhaseLegend();
@@ -877,6 +891,13 @@ window.__megaspeed = {
 $('zoom-in').addEventListener('click', () => timeline.zoom(0.6));
 $('zoom-out').addEventListener('click', () => timeline.zoom(1 / 0.6));
 $('fit').addEventListener('click', () => timeline.fit());
+$('selection-apply').addEventListener('click', () => {
+  const chip = $('selection');
+  const start = Number(chip.dataset.start);
+  const end = Number(chip.dataset.end);
+  if (end > start) timeline.setWindow(start, end);
+});
+$('selection-clear').addEventListener('click', () => timeline.clearSelection());
 $('lanes').addEventListener('change', (event) => {
   timeline.setLanes(event.target.value);
   renderPhaseLegend();
