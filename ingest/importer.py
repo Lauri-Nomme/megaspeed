@@ -55,6 +55,7 @@ def import_bundle(cfg: Config, path: str | Path, *, verify_contract: bool = True
     run_id = str(run_info.get("run_id") or f"import-{imported_at.strftime('%Y%m%dT%H%M%S')}")
     as_of = run_info.get("as_of") or bundle.manifest.get("created_at") or imported_at
     projects = bundle.ticket_projects or cfg.ticket_projects
+    keys = bundle.ticket_keys or cfg.ticket_keys
 
     cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
     con = connect(cfg.db_path)
@@ -86,7 +87,7 @@ def import_bundle(cfg: Config, path: str | Path, *, verify_contract: bool = True
             },
         )
         after = con.execute("SELECT count(*) FROM events").fetchone()[0]
-        report = verify(con, cfg.key_shape, projects) if verify_contract else None
+        report = verify(con, cfg.key_shape, projects, keys) if verify_contract else None
         totals = summary(con)
     finally:
         con.close()
@@ -102,6 +103,7 @@ def import_bundle(cfg: Config, path: str | Path, *, verify_contract: bool = True
         "classifier_version": bundle.classifier_version,
         "schema_version": bundle.manifest.get("schema_version"),
         "ticket_projects": list(projects),
+        "ticket_keys": list(keys),
         "watermark": bundle.manifest.get("watermark_ts"),
         "events_loaded": len(bundle.events),
         "events_new": int(after - before),

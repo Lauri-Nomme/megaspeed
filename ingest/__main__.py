@@ -26,7 +26,7 @@ import sys
 from pathlib import Path
 
 from . import fixtures as fixtures_mod
-from .config import Config, REPO_ROOT, load_config
+from .config import Config, REPO_ROOT, filter_scope, load_config
 from .live import run
 from .scrape import DEFAULT_OVERLAP_HOURS
 from .store import connect, verify
@@ -51,7 +51,7 @@ def _print_probe(report: dict) -> None:
     print(f"probe          {report['as_of']} · {report['requests']} requests · read-only, nothing written")
     print(
         f"ticket filter  {report['ticket_regex']}   (shape {report['key_shape']}"
-        f", projects {','.join(report['ticket_projects'])})"
+        f", {filter_scope(tuple(report['ticket_projects']), tuple(report.get('ticket_keys') or ()))})"
     )
     for repo in report["repos"]:
         states = ", ".join(f"{k}={v}" for k, v in sorted(repo["by_state"].items()))
@@ -159,7 +159,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         con = connect(cfg.db_path, read_only=True)
         try:
-            report = verify(con, cfg.key_shape, cfg.ticket_projects)
+            report = verify(con, cfg.key_shape, cfg.ticket_projects, cfg.ticket_keys)
         finally:
             con.close()
         if args.json:
@@ -266,7 +266,8 @@ def _print_run(r: dict) -> None:
     print(f"bundle         {r['bundle']}  ({r['bundle_bytes']} bytes)")
     print(f"store          {r['db']}")
     print(f"identity map   {r['identity_map']}  (raw zone, never served)")
-    print(f"ticket filter  {r['ticket_regex']}   (projects {','.join(r['ticket_projects'])})")
+    scope = filter_scope(tuple(r["ticket_projects"]), tuple(r.get("ticket_keys") or ()))
+    print(f"ticket filter  {r['ticket_regex']}   ({scope})")
     print(
         f"PRs            {r['prs_seen']} seen -> {r['prs_kept']} kept, {r['prs_dropped']} dropped "
         f"(no ticket key)"

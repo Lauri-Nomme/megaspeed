@@ -14,8 +14,8 @@ megaspeed-scrape --fixture --n 50 --out /tmp/fixture.tgz
 
 Credentials are **never baked into the artifact**: they come from the
 environment (``MEGASPEED_BB_BASE_URL`` + ``MEGASPEED_BB_TOKEN`` or
-``MEGASPEED_BB_USER``/``MEGASPEED_BB_PASSWORD``), and ticket projects / bot
-slugs / repos from the environment or a runtime ``--config`` TOML file.
+``MEGASPEED_BB_USER``/``MEGASPEED_BB_PASSWORD``), and ticket keys/projects /
+bot slugs / repos from the environment or a runtime ``--config`` TOML file.
 
 Also available as ``python3 -m ingest scrape ...``.
 """
@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 from . import __version__, classify
-from .config import REPO_ROOT, Config, load_config
+from .config import REPO_ROOT, Config, filter_scope, load_config
 from .progress import DEFAULT_INTERVAL as DEFAULT_PROGRESS_INTERVAL
 from .progress import ProgressReporter
 from .scrape import DEFAULT_OVERLAP_HOURS, default_state_dir, scrape
@@ -64,7 +64,8 @@ def _print_scrape(r: dict) -> None:
     print(f"sha256         {r['bundle_sha256']}")
     print(f"state          {r['state_dir']}  (watermark + prs + identity, raw zone, never transferred)")
     print(f"identity map   {r['identity_map']}")
-    print(f"ticket filter  {r['ticket_regex']}   (projects {','.join(r['ticket_projects'])})")
+    scope = filter_scope(tuple(r['ticket_projects']), tuple(r.get('ticket_keys') or ()))
+    print(f"ticket filter  {r['ticket_regex']}   ({scope})")
     print(
         f"PRs            {r['prs_seen']} seen -> {r['prs_kept']} kept, {r['prs_dropped']} dropped "
         f"(no ticket key)"

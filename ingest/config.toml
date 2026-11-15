@@ -32,6 +32,17 @@ ticket_projects = ["PROJ", "OPS", "ARCH"]
 #   MEGASPEED_TICKET_PROJECTS=DEL
 # `ingest --verify` reads the same setting: it checks every stored ticket key
 # against these prefixes, so point it at the project set that built the store.
+#
+# An explicit ticket-key set (prd/18) is the alternative to the prefix list: on
+# a shared Jira project a prefix matches *everyone's* tickets, so scope the run
+# to the team's keys instead. When a set is configured it replaces the prefix
+# list entirely (the prefix list is ignored, and need not be set at all):
+#   MEGASPEED_TICKET_KEYS=DEL-1234,DEL-5678
+#   MEGASPEED_TICKET_KEYS_FILE=var/del-tickets.txt   (one key per line, # comments)
+# Env and file are unioned; a malformed entry is a hard error. `--verify`
+# rejects any stored TICKET key outside the set when one is configured.
+ticket_keys = []
+# ticket_keys_file = "var/del-tickets.txt"
 
 [source]
 [[source.repos]]

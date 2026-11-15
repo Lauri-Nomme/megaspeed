@@ -85,4 +85,5 @@ def run(
         "summary": import_report["summary"],
         "ticket_regex": scrape_report["ticket_regex"],
         "ticket_projects": scrape_report["ticket_projects"],
+        "ticket_keys": scrape_report["ticket_keys"],
     }

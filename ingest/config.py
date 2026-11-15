@@ -33,6 +33,15 @@ DEFAULT_KEY_SHAPE = r"^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$"
 DEFAULT_TICKET_PROJECTS = ("PROJ", "OPS", "ARCH")
 _PROJECT_PREFIX = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
+# An explicit *ticket-key set* (prd/18). When non-empty it replaces the prefix
+# allowlist entirely: only these exact keys count, which is what a shared Jira
+# project needs (a prefix matches everyone's tickets). Configure it as
+#   MEGASPEED_TICKET_KEYS=DEL-1234,DEL-5678
+#   MEGASPEED_TICKET_KEYS_FILE=var/del-tickets.txt   (one key per line)
+# Both sources are unioned; a malformed entry is an error, never a silent skip.
+DEFAULT_TICKET_KEYS: tuple[str, ...] = ()
+_KEY_TOKEN = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,9}-\d{1,6}$")
+
 # Known non-human accounts (prd/02 "Bot vs human": deterministic, known account
 # set). DC's user type SERVICE is always a bot; these slugs catch CI/build
 # accounts that DC reports as NORMAL users.
@@ -54,6 +63,9 @@ class Config:
     key_shape: str
     repos: list[tuple[str, str]]
     ticket_projects: tuple[str, ...] = DEFAULT_TICKET_PROJECTS
+    #: An explicit ticket-key set (prd/18). Non-empty => the prefix list above is
+    #: ignored and only these exact keys match.
+    ticket_keys: tuple[str, ...] = DEFAULT_TICKET_KEYS
     bot_slugs: tuple[str, ...] = DEFAULT_BOT_SLUGS
     base_url: str = ""
     page_limit: int = 25
@@ -107,8 +119,12 @@ def _resolve(value: str | os.PathLike[str], base: Path) -> Path:
     return p if p.is_absolute() else (base / p)
 
 
-def parse_projects(value: str | list | tuple) -> tuple[str, ...]:
-    """Parse a project-prefix list (``DEL,FIX`` or ``["DEL", "FIX"]``)."""
+def parse_projects(value: str | list | tuple, *, required: bool = True) -> tuple[str, ...]:
+    """Parse a project-prefix list (``DEL,FIX`` or ``["DEL", "FIX"]``).
+
+    ``required=False`` allows an empty list: a run scoped to an explicit ticket
+    set (prd/18) ignores the prefixes, so it does not need any.
+    """
     items = value if isinstance(value, (list, tuple)) else str(value).split(",")
     projects: list[str] = []
     for item in items:
@@ -122,12 +138,69 @@ def parse_projects(value: str | list | tuple) -> tuple[str, ...]:
             )
         if prefix not in projects:
             projects.append(prefix)
-    if not projects:
+    if not projects and required:
         raise SystemExit(
             "no ticket project prefixes configured: set MEGASPEED_TICKET_PROJECTS=DEL,FIX "
             "(a bare key-shaped token like UTF-8 must never count as a ticket)"
         )
     return tuple(projects)
+
+
+def parse_ticket_keys(value: str | list | tuple) -> tuple[str, ...]:
+    """Parse an explicit ticket-key set (``DEL-100,DEL-101`` or a list).
+
+    Keys are matched as whole keys, so the list is normalised to upper case (the
+    same convention as the prefix list) and de-duplicated. A malformed entry is
+    an operator error: silently ignoring it would scope the run to a *smaller*
+    set than intended, which is the one failure mode that must not be quiet.
+    """
+    items = value if isinstance(value, (list, tuple)) else str(value).split(",")
+    keys: list[str] = []
+    for item in items:
+        key = str(item).strip().upper()
+        if not key:
+            continue
+        if not _KEY_TOKEN.fullmatch(key):
+            raise SystemExit(
+                f"bad ticket key {key!r}: expected PROJECT-123 "
+                "(MEGASPEED_TICKET_KEYS=DEL-100,DEL-101)"
+            )
+        if key not in keys:
+            keys.append(key)
+    return tuple(keys)
+
+
+def load_ticket_keys_file(path: str | os.PathLike[str]) -> tuple[str, ...]:
+    """Read an explicit key set: one key per line, blank lines and ``#`` allowed."""
+    source = Path(path).expanduser()
+    try:
+        text = source.read_text()
+    except OSError as exc:
+        raise SystemExit(f"cannot read ticket keys file {source}: {exc}") from exc
+    keys: list[str] = []
+    for number, line in enumerate(text.splitlines(), start=1):
+        key = line.partition("#")[0].strip().upper()
+        if not key:
+            continue
+        if not _KEY_TOKEN.fullmatch(key):
+            raise SystemExit(
+                f"bad ticket key {key!r} on line {number} of {source}: expected PROJECT-123"
+            )
+        if key not in keys:
+            keys.append(key)
+    return tuple(keys)
+
+
+def merge_ticket_keys(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    """Union of key sets, first occurrence wins (env + file, prd/18)."""
+    return tuple(dict.fromkeys(key for group in groups for key in group))
+
+
+def filter_scope(ticket_projects: tuple[str, ...], ticket_keys: tuple[str, ...]) -> str:
+    """One-line description of what the ticket filter accepts (prd/18)."""
+    if ticket_keys:
+        return f"keys {','.join(ticket_keys)}"
+    return f"projects {','.join(ticket_projects)}"
 
 
 def _parse_slugs(value: str | list | tuple) -> tuple[str, ...]:
@@ -183,6 +256,15 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
             repos.append((project, repo))
 
     fixture_path = os.environ.get("MEGASPEED_FIXTURE_PATH", fixture.get("path") or "")
+    # prd/18: an explicit ticket-key set replaces the prefix allowlist. Env wins
+    # over the config file per source, and env + file are unioned.
+    keys_file = os.environ.get(
+        "MEGASPEED_TICKET_KEYS_FILE", filt.get("ticket_keys_file", "") or ""
+    ).strip()
+    ticket_keys = merge_ticket_keys(
+        parse_ticket_keys(os.environ.get("MEGASPEED_TICKET_KEYS", filt.get("ticket_keys", []))),
+        load_ticket_keys_file(_resolve(keys_file, base)) if keys_file else (),
+    )
     config = Config(
         db_path=_resolve(os.environ.get("MEGASPEED_DB", store.get("db", "data/megaspeed.duckdb")), base),
         identity_path=_resolve(
@@ -191,8 +273,10 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         ticket_regex=os.environ.get("MEGASPEED_TICKET_REGEX", filt.get("ticket_regex", DEFAULT_TICKET_REGEX)),
         key_shape=os.environ.get("MEGASPEED_KEY_SHAPE", filt.get("key_shape", DEFAULT_KEY_SHAPE)),
         ticket_projects=parse_projects(
-            os.environ.get("MEGASPEED_TICKET_PROJECTS", filt.get("ticket_projects", list(DEFAULT_TICKET_PROJECTS)))
+            os.environ.get("MEGASPEED_TICKET_PROJECTS", filt.get("ticket_projects", list(DEFAULT_TICKET_PROJECTS))),
+            required=not ticket_keys,
         ),
+        ticket_keys=ticket_keys,
         bot_slugs=_parse_slugs(
             os.environ.get("MEGASPEED_BOT_SLUGS", actors.get("bot_slugs", list(DEFAULT_BOT_SLUGS)))
         ),

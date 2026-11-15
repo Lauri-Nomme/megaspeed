@@ -28,7 +28,9 @@ KNOWN_ACTIONS = frozenset(PR_ACTIVITY_MAP)
 
 def probe(cfg: Config, client: BitbucketClient, bypass_filter: bool = False) -> dict:
     as_of = datetime.now(timezone.utc).replace(tzinfo=None)
-    key_filter = KeyFilter.build(cfg.ticket_regex, cfg.key_shape, cfg.ticket_projects)
+    key_filter = KeyFilter.build(
+        cfg.ticket_regex, cfg.key_shape, cfg.ticket_projects, cfg.ticket_keys
+    )
     ident = IdentityTable(cfg.identity_path)
     reducer = Reducer(cfg, ident, key_filter, as_of)
     stats = Stats()
@@ -111,4 +113,5 @@ def probe(cfg: Config, client: BitbucketClient, bypass_filter: bool = False) -> 
         "ticket_regex": cfg.ticket_regex,
         "key_shape": cfg.key_shape,
         "ticket_projects": list(cfg.ticket_projects),
+        "ticket_keys": list(cfg.ticket_keys),
     }

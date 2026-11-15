@@ -376,16 +376,22 @@ def _scan(con, table: str, column: str, dtype: str, predicate: str, params: list
 
 
 def verify(con, key_shape: str = DEFAULT_KEY_SHAPE,
-           ticket_projects: tuple[str, ...] = DEFAULT_TICKET_PROJECTS) -> dict:
+           ticket_projects: tuple[str, ...] = DEFAULT_TICKET_PROJECTS,
+           ticket_keys: tuple[str, ...] = ()) -> dict:
     """Return a report; ``ok`` is False if any part of the contract is broken.
 
     The guard is deliberately about *content class*, not only container shape:
     every string column must hold something of a known shape (a pseudonym, a
-    hex hash, a repo slug, a key with a configured project prefix, a closed
+    hex hash, a repo slug, a key allowed by the configured scope, a closed
     label). The old whitespace check alone blessed camelCase names, prose-like
     hashes and garbage enum values.
+
+    ``ticket_keys`` is the explicit key set (prd/18): when non-empty it replaces
+    the prefix check, so a store built with ``MEGASPEED_TICKET_KEYS=DEL-100`` is
+    rejected if it holds ``DEL-101`` (and vice versa).
     """
     problems: list[str] = []
+    key_set = sorted({str(k).strip().upper() for k in ticket_keys or () if str(k).strip()})
 
     tables = {r[0] for r in con.execute(
         "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
@@ -487,20 +493,32 @@ def verify(con, key_shape: str = DEFAULT_KEY_SHAPE,
     if bad:
         problems.append(f"objects.message_class: {bad} value(s) outside the closed set")
 
-    # Ticket keys: shape **and** a configured project prefix (BUG-04's gate is
+    # Ticket keys: shape **and** the configured scope (BUG-04's gate is
     # re-asserted here, so a loosened config cannot be blessed by --verify).
+    # prd/18: an explicit key set replaces the prefix check.
     bad = _scan(con, "objects", "ticket_keys", "VARCHAR[]", "NOT regexp_matches(v, ?)", [key_shape])
     if bad:
         problems.append(f"objects.ticket_keys: {bad} value(s) do not match key_shape")
-    projects = sorted(str(p).upper() for p in ticket_projects)
-    prefix_predicate = (
-        f"split_part(v, '-', 1) NOT IN ({','.join('?' * len(projects))})" if projects else "TRUE"
-    )
-    bad = _scan(con, "objects", "ticket_keys", "VARCHAR[]", prefix_predicate, projects)
-    if bad:
-        problems.append(
-            f"objects.ticket_keys: {bad} value(s) outside the configured projects {projects}"
+    if key_set:
+        bad = _scan(
+            con, "objects", "ticket_keys", "VARCHAR[]",
+            f"upper(v) NOT IN ({','.join('?' * len(key_set))})", key_set,
         )
+        if bad:
+            problems.append(
+                f"objects.ticket_keys: {bad} value(s) outside the configured"
+                f" ticket keys {key_set}"
+            )
+    else:
+        projects = sorted(str(p).upper() for p in ticket_projects)
+        prefix_predicate = (
+            f"split_part(v, '-', 1) NOT IN ({','.join('?' * len(projects))})" if projects else "TRUE"
+        )
+        bad = _scan(con, "objects", "ticket_keys", "VARCHAR[]", prefix_predicate, projects)
+        if bad:
+            problems.append(
+                f"objects.ticket_keys: {bad} value(s) outside the configured projects {projects}"
+            )
     bad = con.execute(
         "SELECT count(*) FROM objects WHERE object_type = 'PR'"
         " AND (ticket_keys IS NULL OR len(ticket_keys) = 0)"
@@ -519,8 +537,14 @@ def verify(con, key_shape: str = DEFAULT_KEY_SHAPE,
             problems.append(f"PR object id without a numeric id: {oid!r}")
         elif otype == "COMMIT" and not re.fullmatch(r"COMMIT:[0-9a-f]{7,40}", str(oid)):
             problems.append(f"COMMIT object id is not a hash: {oid!r}")
-        elif otype == "TICKET" and not re.fullmatch(key_shape, str(oid).partition(":")[2]):
-            problems.append(f"TICKET object id is not a key: {oid!r}")
+        elif otype == "TICKET":
+            key = str(oid).partition(":")[2]
+            if not re.fullmatch(key_shape, key):
+                problems.append(f"TICKET object id is not a key: {oid!r}")
+            elif key_set and key.upper() not in key_set:
+                problems.append(
+                    f"TICKET object id is outside the configured ticket keys: {oid!r}"
+                )
         elif otype == "PERSON" and not re.fullmatch(ACTOR_RE, str(oid).partition(":")[2]):
             problems.append(f"PERSON object id is not a pseudonym: {oid!r}")
         elif otype in ("PRREV", "THREAD") and not re.fullmatch(

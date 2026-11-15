@@ -100,27 +100,49 @@ class KeyFilter:
     pattern: re.Pattern[str]
     shape: re.Pattern[str]
     projects: tuple[str, ...]
+    #: Explicit key set (prd/18). Non-empty => only these exact keys match and
+    #: ``projects`` is ignored. (Not ``keys``: that is the extraction method.)
+    key_set: frozenset[str] = frozenset()
 
     @classmethod
-    def build(cls, pattern: str, shape: str, projects: tuple[str, ...] | list[str]) -> "KeyFilter":
+    def build(
+        cls,
+        pattern: str,
+        shape: str,
+        projects: tuple[str, ...] | list[str],
+        keys: tuple[str, ...] | list[str] | frozenset[str] = (),
+    ) -> "KeyFilter":
         projects = tuple(str(p).strip().upper() for p in projects if str(p).strip())
-        if not projects:
+        explicit = frozenset(str(k).strip().upper() for k in keys if str(k).strip())
+        if not projects and not explicit:
             raise SystemExit(
-                "no ticket project prefixes configured: set MEGASPEED_TICKET_PROJECTS=DEL,FIX"
+                "no ticket filter configured: set MEGASPEED_TICKET_KEYS=DEL-1234 "
+                "or MEGASPEED_TICKET_PROJECTS=DEL,FIX"
             )
         try:
-            return cls(re.compile(pattern), re.compile(shape), projects)
+            return cls(re.compile(pattern), re.compile(shape), projects, explicit)
         except re.error as exc:
             raise SystemExit(f"bad ticket_regex/key_shape: {exc}") from exc
 
-    def accepts(self, candidate: str) -> bool:
-        """A candidate counts only if it is key-shaped *and* a configured project.
+    @property
+    def exact(self) -> bool:
+        """True when scoped to an explicit key set rather than project prefixes."""
+        return bool(self.key_set)
 
-        The project list is what stops ``UTF-8`` / ``SHA-256`` / ``ISO-8601``
-        from becoming tickets: they are perfectly key-shaped, and only the
-        prefix tells them apart from a real key.
+    def accepts(self, candidate: str) -> bool:
+        """A candidate counts only if it is key-shaped *and* allowed by the scope.
+
+        With an explicit key set (prd/18) only those exact keys count and the
+        project-prefix list is ignored -- a shared project's prefix would match
+        everyone's tickets. Otherwise the prefix allowlist is what stops
+        ``UTF-8`` / ``SHA-256`` / ``ISO-8601`` from becoming tickets: they are
+        perfectly key-shaped, and only the prefix tells them apart from a key.
         """
-        return bool(self.shape.fullmatch(candidate)) and candidate.partition("-")[0] in self.projects
+        if not self.shape.fullmatch(candidate):
+            return False
+        if self.key_set:
+            return candidate.upper() in self.key_set
+        return candidate.partition("-")[0] in self.projects
 
     def keys(self, *texts: str | None) -> list[str]:
         found: set[str] = set()

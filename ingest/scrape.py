@@ -268,6 +268,8 @@ class Collected:
     keys_by_placement: dict[str, int] = field(default_factory=dict)
     ticket_regex: str = ""
     ticket_projects: tuple[str, ...] = ()
+    #: Explicit ticket-key set the run was scoped to (prd/18); empty = prefixes.
+    ticket_keys: tuple[str, ...] = ()
     identity: IdentityTable | None = None
     #: repo label -> the PR-updatedDate cursor after this run (None = unknown)
     repo_watermarks: dict[str, datetime | None] = field(default_factory=dict)
@@ -327,7 +329,9 @@ def collect(
     """
     as_of = utcnow()
     run_id = f"{source}-{as_of.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:6]}"
-    key_filter = KeyFilter.build(cfg.ticket_regex, cfg.key_shape, cfg.ticket_projects)
+    key_filter = KeyFilter.build(
+        cfg.ticket_regex, cfg.key_shape, cfg.ticket_projects, cfg.ticket_keys
+    )
     ident = identity or IdentityTable(cfg.identity_path)
     client = BitbucketClient(
         transport, page_limit=cfg.page_limit, min_interval=0.0 if source == "fixture" else 0.2
@@ -341,6 +345,7 @@ def collect(
         stats=stats,
         ticket_regex=cfg.ticket_regex,
         ticket_projects=cfg.ticket_projects,
+        ticket_keys=cfg.ticket_keys,
         push_classifier=push_classifier,
         text_classifier=text_classifier,
     )
@@ -617,6 +622,7 @@ def build_manifest(collected: Collected, *, previous: datetime | None, watermark
         "sources": [collected.source],
         "classifier_version": taxonomy.CLASSIFIER_VERSION,
         "ticket_projects": list(collected.ticket_projects),
+        "ticket_keys": list(collected.ticket_keys),
         "ticket_regex": collected.ticket_regex,
         "projects": sorted({repo.partition("/")[0] for repo in repos}),
         "repos": repos,
@@ -799,6 +805,7 @@ def scrape(
         "classifier_version": taxonomy.CLASSIFIER_VERSION,
         "ticket_regex": cfg.ticket_regex,
         "ticket_projects": list(cfg.ticket_projects),
+        "ticket_keys": list(cfg.ticket_keys),
         "keys_by_placement": collected.keys_by_placement,
         "activities_by_action": dict(sorted(collected.stats.activities_by_action.items())),
         "push_class": (

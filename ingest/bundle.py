@@ -87,6 +87,11 @@ class Bundle:
     def ticket_projects(self) -> tuple[str, ...]:
         return tuple(str(p).upper() for p in self.manifest.get("ticket_projects") or ())
 
+    @property
+    def ticket_keys(self) -> tuple[str, ...]:
+        """The explicit key set this bundle was scraped with (prd/18), if any."""
+        return tuple(str(k).strip().upper() for k in self.manifest.get("ticket_keys") or ())
+
 
 # --------------------------------------------------------------------------- #
 # writing (scrape side)
