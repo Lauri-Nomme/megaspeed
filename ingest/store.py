@@ -31,6 +31,7 @@ ALLOWED: dict[str, set[str]] = {
     "objects": {
         "object_type", "object_id", "repo", "pr_id", "ticket_keys", "actor",
         "state", "created_at", "closed_at", "head_commit", "message_class",
+        "attributes",
     },
     "ingest_runs": {
         "run_id", "source", "as_of", "source_watermark", "classifier_version",
@@ -73,6 +74,9 @@ def connect(path: str | Path, read_only: bool = False):
 
 def ensure_schema(con) -> None:
     con.execute(SCHEMA_SQL.read_text())
+    # Additive migrations for stores created by earlier builds: the schema file
+    # is the contract, so a new allowlisted column must exist everywhere.
+    con.execute("ALTER TABLE objects ADD COLUMN IF NOT EXISTS attributes JSON")
 
 
 # --------------------------------------------------------------------------- #
@@ -95,8 +99,9 @@ INSERT_REL = "INSERT OR IGNORE INTO event_objects (event_key, object_type, objec
 
 INSERT_OBJECT = """
 INSERT OR REPLACE INTO objects
-    (object_type, object_id, repo, pr_id, ticket_keys, actor, state, created_at, closed_at, head_commit, message_class)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    (object_type, object_id, repo, pr_id, ticket_keys, actor, state, created_at, closed_at, head_commit,
+     message_class, attributes)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON))
 """
 
 INSERT_RUN = """
@@ -217,6 +222,7 @@ def write_objects(con, objects: list[dict]) -> None:
                     o.get("ticket_keys") or [], o.get("actor"), o.get("state"),
                     o.get("created_at"), o.get("closed_at"), o.get("head_commit"),
                     o.get("message_class"),
+                    json.dumps(o.get("attributes") or {}, separators=(",", ":"), sort_keys=True),
                 )
                 for o in objects
             ],
@@ -285,7 +291,7 @@ def list_events(con, start: datetime | None = None, end: datetime | None = None,
 def list_objects(con, object_type: str | None = None) -> list[dict]:
     sql = (
         "SELECT object_type, object_id, repo, pr_id, ticket_keys, actor, state,"
-        " created_at, closed_at, head_commit, message_class FROM objects"
+        " created_at, closed_at, head_commit, message_class, CAST(attributes AS VARCHAR) FROM objects"
     )
     params: list = []
     if object_type:
@@ -294,7 +300,7 @@ def list_objects(con, object_type: str | None = None) -> list[dict]:
     sql += " ORDER BY object_type, object_id"
     out = []
     for row in con.execute(sql, params).fetchall():
-        (otype, oid, repo, pr_id, keys, actor, state, created, closed, head, mclass) = row
+        (otype, oid, repo, pr_id, keys, actor, state, created, closed, head, mclass, attrs) = row
         out.append(
             {
                 "object_type": otype,
@@ -308,6 +314,7 @@ def list_objects(con, object_type: str | None = None) -> list[dict]:
                 "closed_at": iso(closed) if closed else None,
                 "head_commit": head,
                 "message_class": mclass,
+                "attributes": _json_attr(attrs),
             }
         )
     return out
@@ -411,6 +418,24 @@ def verify(con) -> dict:
     for (otype,) in con.execute("SELECT DISTINCT object_type FROM objects").fetchall():
         if otype not in taxonomy.OBJECT_TYPES:
             problems.append(f"object type outside vocabulary: {otype!r}")
+    for (attrs,) in con.execute("SELECT DISTINCT CAST(attributes AS VARCHAR) FROM objects").fetchall():
+        try:
+            payload = json.loads(attrs) if isinstance(attrs, str) else (attrs or {})
+            taxonomy.check_object_attributes(payload)
+        except (taxonomy.TaxonomyError, json.JSONDecodeError) as exc:
+            problems.append(f"invalid object attributes: {exc}")
+
+    # A pseudonym must not be a bot in one event and a human in another: the
+    # actor dimension is a property of the account, not of the activity.
+    kinds: dict[str, set[str]] = {}
+    for actor, kind in con.execute(
+        "SELECT actor, CAST(attributes->>'actor_kind' AS VARCHAR) FROM events"
+        " WHERE attributes->>'actor_kind' IS NOT NULL"
+    ).fetchall():
+        kinds.setdefault(actor, set()).add(kind)
+    for actor, seen in sorted(kinds.items()):
+        if len(seen) > 1:
+            problems.append(f"actor {actor!r} classified as both {sorted(seen)}")
 
     return {
         "ok": not problems,

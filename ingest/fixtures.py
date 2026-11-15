@@ -40,6 +40,17 @@ PEOPLE = [
 ]
 SENTINELS = {"toomas.bruno", "kristjan.saar"}
 
+# DC service accounts are user records with ``"type": "SERVICE"`` (no email).
+# Real DC calls the built-in one ``bitbucket.system-user`` ("Bitbucket"); it
+# comments on and auto-declines stale PRs, and must never count as a human.
+BOT_USER = {
+    "name": "bitbucket.system-user",
+    "slug": "bitbucket.system-user",
+    "displayName": "Bitbucket",
+    "type": "SERVICE",
+    "active": True,
+}
+
 REPOS = [("ENG", "platform"), ("ENG", "mobile")]
 
 TICKETS = [f"PROJ-{n}" for n in (101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112)]
@@ -323,7 +334,20 @@ def _make_pr(rng: random.Random, project: str, repo: str, pr_id: int, index: int
         merged["commit"] = merge_commit
         closed_at = merged["createdDate"]
     elif outcome == "declined":
-        declined = add("DECLINED", rng.randint(60, 900), user=author)
+        if rng.random() < 0.6:
+            # Stale auto-decline: the DC service user comments and declines.
+            comment = _comment(rng, prose, BOT_USER, comment_id, ticket, people)
+            comment_id += 1
+            # An inactivity notice is a new open thread, not a resolved one.
+            comment["threadResolved"] = False
+            comment["state"] = "OPEN"
+            activity = add("COMMENTED", rng.randint(30, 600), user=BOT_USER,
+                           comment=comment, commentAction="ADDED")
+            comment["createdDate"] = activity["createdDate"]
+            comment["updatedDate"] = activity["createdDate"]
+            declined = add("DECLINED", rng.randint(1, 60), user=BOT_USER)
+        else:
+            declined = add("DECLINED", rng.randint(60, 900), user=author)
         closed_at = declined["createdDate"]
 
     activities.sort(key=lambda a: (a["createdDate"], a["id"]))

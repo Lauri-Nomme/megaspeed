@@ -30,6 +30,18 @@ DEFAULT_KEY_SHAPE = r"^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$"
 DEFAULT_TICKET_PROJECTS = ("PROJ", "OPS", "ARCH")
 _PROJECT_PREFIX = re.compile(r"^[A-Z][A-Z0-9_]*$")
 
+# Known non-human accounts (prd/02 "Bot vs human": deterministic, known account
+# set). DC's user type SERVICE is always a bot; these slugs catch CI/build
+# accounts that DC reports as NORMAL users.
+DEFAULT_BOT_SLUGS = (
+    "bitbucket.system-user",
+    "stash.system-user",
+    "jenkins",
+    "bamboo",
+    "github-actions",
+    "gitlab-runner",
+)
+
 
 @dataclasses.dataclass
 class Config:
@@ -39,6 +51,7 @@ class Config:
     key_shape: str
     repos: list[tuple[str, str]]
     ticket_projects: tuple[str, ...] = DEFAULT_TICKET_PROJECTS
+    bot_slugs: tuple[str, ...] = DEFAULT_BOT_SLUGS
     base_url: str = ""
     page_limit: int = 25
     seed: int = 20261115
@@ -85,6 +98,11 @@ def parse_projects(value: str | list | tuple) -> tuple[str, ...]:
     return tuple(projects)
 
 
+def _parse_slugs(value: str | list | tuple) -> tuple[str, ...]:
+    items = value if isinstance(value, (list, tuple)) else str(value).split(",")
+    return tuple(dict.fromkeys(str(i).strip().lower() for i in items if str(i).strip()))
+
+
 def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     cfg_path = Path(path).expanduser() if path else Path(
         os.environ.get("MEGASPEED_CONFIG", DEFAULT_CONFIG_PATH)
@@ -100,6 +118,7 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     bb = raw.get("bitbucket", {})
     fixture = raw.get("fixture", {})
     review = raw.get("review", {})
+    actors = raw.get("actors", {})
 
     repos = [(str(r["project"]), str(r["repo"])) for r in source.get("repos", [])]
 
@@ -113,6 +132,9 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         key_shape=os.environ.get("MEGASPEED_KEY_SHAPE", filt.get("key_shape", DEFAULT_KEY_SHAPE)),
         ticket_projects=parse_projects(
             os.environ.get("MEGASPEED_TICKET_PROJECTS", filt.get("ticket_projects", list(DEFAULT_TICKET_PROJECTS)))
+        ),
+        bot_slugs=_parse_slugs(
+            os.environ.get("MEGASPEED_BOT_SLUGS", actors.get("bot_slugs", list(DEFAULT_BOT_SLUGS)))
         ),
         repos=repos,
         base_url=os.environ.get("MEGASPEED_BB_BASE_URL", bb.get("base_url", "")).rstrip("/"),

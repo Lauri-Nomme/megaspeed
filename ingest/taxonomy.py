@@ -57,6 +57,9 @@ CHANGE = frozenset({"added", "removed", "reviewed"})
 UN_APPROVE_CAUSE = frozenset({"push", "manual"})
 MESSAGE_CLASS = frozenset({"feature", "fix", "refactor", "test", "docs", "chore", "merge", "revert", "wip", "other"})
 OBJECT_STATE = frozenset({"open", "merged", "declined"})
+# prd/02 "Bot vs human": deterministic, from a known account set (DC user type
+# SERVICE plus configured CI/build slugs).
+ACTOR_KIND = frozenset({"bot", "human"})
 OBJECT_TYPES = frozenset({"PR", "COMMIT", "TICKET", "PERSON"})
 
 # attribute name -> allowed string values, or a python type for scalars.
@@ -70,6 +73,7 @@ ATTRIBUTE_SPEC: dict[str, Any] = {
     "cause": UN_APPROVE_CAUSE,
     "message_class": MESSAGE_CLASS,
     "state": OBJECT_STATE,
+    "actor_kind": ACTOR_KIND,
     "sentinel": bool,
     "stacked": bool,
     "approvals_lost": bool,
@@ -77,6 +81,12 @@ ATTRIBUTE_SPEC: dict[str, Any] = {
     "commits_removed": int,
     "review_rounds": int,
     "replies": int,
+}
+
+# Object attributes live in ``objects.attributes`` (JSON). Same rule: closed
+# values only, no free text.
+OBJECT_ATTRIBUTE_SPEC: dict[str, Any] = {
+    "actor_kind": ACTOR_KIND,
 }
 
 # Bitbucket DC activity action -> activity vocabulary (PRD 02).
@@ -112,20 +122,29 @@ def check_activity(activity: str) -> str:
 def check_attributes(attrs: dict[str, Any]) -> dict[str, Any]:
     """Validate an event's attribute bag; raises :class:`TaxonomyError` on any
     unknown key or non-enumerated value. Never widens, never stringifies."""
+    return _check_spec(attrs, ATTRIBUTE_SPEC, "attribute")
+
+
+def check_object_attributes(attrs: dict[str, Any]) -> dict[str, Any]:
+    """Validate an object's attribute bag (``objects.attributes``)."""
+    return _check_spec(attrs, OBJECT_ATTRIBUTE_SPEC, "object attribute")
+
+
+def _check_spec(attrs: dict[str, Any], spec_map: dict[str, Any], label: str) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, value in attrs.items():
-        spec = ATTRIBUTE_SPEC.get(key)
+        spec = spec_map.get(key)
         if spec is None:
-            raise TaxonomyError(f"attribute outside closed vocabulary: {key!r}")
+            raise TaxonomyError(f"{label} outside closed vocabulary: {key!r}")
         if isinstance(spec, frozenset):
             if value not in spec:
-                raise TaxonomyError(f"attribute {key!r} value outside closed vocabulary: {value!r}")
+                raise TaxonomyError(f"{label} {key!r} value outside closed vocabulary: {value!r}")
         elif isinstance(spec, type):
             # bool is a subclass of int in python; keep them strictly apart.
             if spec is int and isinstance(value, bool):
-                raise TaxonomyError(f"attribute {key!r} must be int, not bool")
+                raise TaxonomyError(f"{label} {key!r} must be int, not bool")
             if not isinstance(value, spec):
-                raise TaxonomyError(f"attribute {key!r} must be {spec.__name__}, got {type(value).__name__}")
+                raise TaxonomyError(f"{label} {key!r} must be {spec.__name__}, got {type(value).__name__}")
         out[key] = value
     return out
 

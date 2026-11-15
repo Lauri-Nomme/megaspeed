@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS objects (
     closed_at      TIMESTAMP,
     head_commit    VARCHAR,
     message_class  VARCHAR,                   -- COMMIT only: enumerated label
+    attributes     JSON,                      -- closed object attributes (actor_kind, ...)
     PRIMARY KEY (object_type, object_id)
 );
 

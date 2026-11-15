@@ -52,6 +52,31 @@ def classify_message(message: str) -> str:
     return "other"
 
 
+def classify_actor(user: dict | None, bot_slugs: tuple[str, ...] | set[str]) -> str:
+    """Deterministic ``bot`` | ``human`` for a DC user record (prd/02).
+
+    DC marks service accounts with ``"type": "SERVICE"``; CI/build accounts that
+    look like ordinary users are caught by the configured slug list and by
+    service-shaped slugs. A missing user is the synthetic ``system`` actor, which
+    is never a person.
+    """
+    if not user:
+        return "bot"
+    if str(user.get("type") or "").strip().upper() == "SERVICE":
+        return "bot"
+    slug = str(user.get("name") or user.get("slug") or "").strip().lower()
+    if not slug:
+        return "human"
+    known = {str(s).strip().lower() for s in bot_slugs if str(s).strip()}
+    if slug in known or "system-user" in slug:
+        return "bot"
+    if slug.endswith(("-bot", ".bot", "_bot", "[bot]")) or slug.startswith(
+        ("bot-", "bot.", "ci-", "ci.", "build-", "svc-", "service-")
+    ):
+        return "bot"
+    return "human"
+
+
 def _digest(payload: Any) -> str:
     return hashlib.blake2b(
         json.dumps(payload, sort_keys=True, default=str, separators=(",", ":")).encode(),
@@ -132,14 +157,25 @@ class Reducer:
         self.key_filter = key_filter
         self.as_of = as_of
         self.sentinels = set(cfg.sentinel_slugs)
+        self.bot_slugs = {str(s).strip().lower() for s in cfg.bot_slugs if str(s).strip()}
+        self.actor_kinds: dict[str, str] = {}
 
     # -- helpers ---------------------------------------------------------
+    def _actor_kind(self, user: dict | None) -> str:
+        """Deterministic ``bot`` | ``human`` (prd/02: known account set)."""
+        return classify_actor(user, self.cfg.bot_slugs)
+
     def _actor(self, user: dict | None, stats: Stats) -> str:
         if not user:
-            return SYSTEM_ACTOR
-        pseudonym = self.ident.pseudonym(user)
+            pseudonym = SYSTEM_ACTOR
+        else:
+            pseudonym = self.ident.pseudonym(user)
+        self.actor_kinds.setdefault(pseudonym, self._actor_kind(user))
         stats.people.add(pseudonym)
         return pseudonym
+
+    def actor_kind(self, pseudonym: str) -> str:
+        return self.actor_kinds.get(pseudonym, "human")
 
     def _is_sentinel(self, user: dict | None) -> bool:
         return bool(user) and str(user.get("name") or "") in self.sentinels
@@ -156,6 +192,8 @@ class Reducer:
         attributes: dict[str, Any],
         raw: Any,
     ) -> None:
+        attributes = dict(attributes)
+        attributes.setdefault("actor_kind", self.actor_kind(actor))
         attributes = taxonomy.check_attributes(attributes)
         key = f"{pr.project}/{pr.repo}#{pr.id}:{natural}"
         event = {
@@ -548,6 +586,7 @@ def _object(object_type: str, object_id: str, **kwargs) -> dict:
         "closed_at": None,
         "head_commit": None,
         "message_class": None,
+        "attributes": {},
     }
     record.update(kwargs)
     return record
@@ -591,7 +630,14 @@ def run(cfg: Config, transport, source: str, limit: int | None = None) -> dict:
             break
 
     for pseudonym in sorted(stats.people):
-        stats.objects.append(_object("PERSON", f"PERSON:{pseudonym}", actor=pseudonym))
+        stats.objects.append(
+            _object(
+                "PERSON",
+                f"PERSON:{pseudonym}",
+                actor=pseudonym,
+                attributes={"actor_kind": reducer.actor_kind(pseudonym)},
+            )
+        )
 
     cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
     con = connect(cfg.db_path)

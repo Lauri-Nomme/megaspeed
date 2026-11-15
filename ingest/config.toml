@@ -59,3 +59,12 @@ seed = 20261115
 # Known sentinel-team slugs. Membership is deterministic (known account set),
 # so `sentinel=true/false` is a label, not an inference.
 sentinel_slugs = ["toomas.bruno", "kristjan.saar"]
+
+[actors]
+# Known bot / service accounts (prd/02 "Bot vs human"). DC's user type SERVICE
+# is always classified as a bot regardless of this list; these slugs catch
+# CI/build accounts that DC reports as NORMAL users. Slugs not listed here but
+# shaped like a service account (…-bot, ci-, build-, system-user) are bots too.
+#   MEGASPEED_BOT_SLUGS=jenkins,bamboo   (env wins over this file)
+bot_slugs = ["bitbucket.system-user", "stash.system-user", "jenkins", "bamboo",
+             "github-actions", "gitlab-runner"]

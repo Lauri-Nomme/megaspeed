@@ -2,7 +2,7 @@
  "schema": "megaspeed.fixture/1",
  "note": "Synthetic Bitbucket Data Center payloads. No real people, tickets or text.",
  "seed": 20261115,
- "generated": "2026-11-15T16:48:54Z",
+ "generated": "2026-11-15T16:59:51Z",
  "projects": [
   {
    "key": "ENG",
@@ -714,16 +714,16 @@
       {
        "pull_request": {
         "id": 102,
-        "version": 7,
-        "title": "Backoff for shard",
-        "description": "backoff filter scheduler zzcanarya170b301\n\nparser cache shard session zzcanarya170b301\n\nchecklist zzcanarya170b301",
+        "version": 8,
+        "title": "Limiter for session",
+        "description": "index header ledger header limiter zzcanarya170b301\n\nlimiter index filter limiter throttle zzcanarya170b301\n\nchecklist zzcanarya170b301",
         "state": "DECLINED",
         "open": false,
         "closed": true,
         "draft": false,
         "createdDate": 1790097660000,
-        "updatedDate": 1790338080000,
-        "closedDate": 1790338080000,
+        "updatedDate": 1790336400000,
+        "closedDate": 1790336400000,
         "fromRef": {
          "id": "refs/heads/chore/PROJ-112-digest-cache",
          "displayId": "chore/PROJ-112-digest-cache",
@@ -1127,13 +1127,66 @@
         },
         {
          "id": 102036,
-         "createdDate": 1790338080000,
+         "createdDate": 1790335740000,
+         "action": "COMMENTED",
+         "user": {
+          "name": "bitbucket.system-user",
+          "slug": "bitbucket.system-user",
+          "displayName": "Bitbucket",
+          "type": "SERVICE",
+          "active": true
+         },
+         "comment": {
+          "id": 10202,
+          "version": 0,
+          "text": "PROJ-112: header schema retry header session zzcanarya170b301",
+          "author": {
+           "name": "bitbucket.system-user",
+           "slug": "bitbucket.system-user",
+           "displayName": "Bitbucket",
+           "type": "SERVICE",
+           "active": true
+          },
+          "createdDate": 1790335740000,
+          "updatedDate": 1790335740000,
+          "severity": "NORMAL",
+          "state": "OPEN",
+          "threadResolved": false,
+          "resolvedDate": null,
+          "resolver": null,
+          "comments": [
+           {
+            "id": 15202,
+            "version": 0,
+            "text": "PROJ-112: cache shard session snapshot zzcanarya170b301",
+            "author": {
+             "name": "anna.kask",
+             "displayName": "Anna Kask",
+             "emailAddress": "anna.kask@example.invalid",
+             "type": "NORMAL",
+             "active": true
+            },
+            "createdDate": null,
+            "updatedDate": null,
+            "severity": "NORMAL",
+            "state": "OPEN",
+            "comments": [],
+            "properties": {}
+           }
+          ],
+          "properties": {}
+         },
+         "commentAction": "ADDED"
+        },
+        {
+         "id": 102037,
+         "createdDate": 1790336400000,
          "action": "DECLINED",
          "user": {
-          "name": "liisa.rand",
-          "displayName": "Liisa Rand",
-          "emailAddress": "liisa.rand@example.invalid",
-          "type": "NORMAL",
+          "name": "bitbucket.system-user",
+          "slug": "bitbucket.system-user",
+          "displayName": "Bitbucket",
+          "type": "SERVICE",
           "active": true
          }
         }
@@ -2084,15 +2137,15 @@
        "pull_request": {
         "id": 105,
         "version": 9,
-        "title": "Webhook for snapshot",
-        "description": "scheduler backoff token banner retry ledger banner zzcanary0b8e9981\n\nheader stream retry webhook zzcanary0b8e9981\n\nchecklist zzcanary0b8e9981",
+        "title": "Snapshot for stream",
+        "description": "backoff token banner retry zzcanary0b8e9981\n\nheader stream retry webhook zzcanary0b8e9981\n\nchecklist zzcanary0b8e9981",
         "state": "DECLINED",
         "open": false,
         "closed": true,
         "draft": false,
         "createdDate": 1791383340000,
-        "updatedDate": 1791878640000,
-        "closedDate": 1791878640000,
+        "updatedDate": 1791808140000,
+        "closedDate": 1791808140000,
         "fromRef": {
          "id": "refs/heads/bugfix/worker-matrix",
          "displayId": "bugfix/worker-matrix",
@@ -2441,7 +2494,7 @@
         },
         {
          "id": 105104,
-         "createdDate": 1791878640000,
+         "createdDate": 1791808140000,
          "action": "DECLINED",
          "user": {
           "name": "anna.kask",
@@ -4252,16 +4305,16 @@
       {
        "pull_request": {
         "id": 110,
-        "version": 11,
-        "title": "Matrix for cache",
-        "description": "backoff digest ledger limiter worker token backoff zzcanary1ffc72e1\n\ncache payload backoff zzcanary1ffc72e1\n\nchecklist zzcanary1ffc72e1",
+        "version": 12,
+        "title": "Index for cursor",
+        "description": "throttle stream webhook digest zzcanary1ffc72e1\n\nindex header ledger session banner cursor zzcanary1ffc72e1\n\nchecklist zzcanary1ffc72e1",
         "state": "DECLINED",
         "open": false,
         "closed": true,
         "draft": false,
         "createdDate": 1788255720000,
-        "updatedDate": 1788452160000,
-        "closedDate": 1788452160000,
+        "updatedDate": 1788449100000,
+        "closedDate": 1788447420000,
         "fromRef": {
          "id": "refs/heads/feature/stream-filter",
          "displayId": "feature/stream-filter",
@@ -4728,13 +4781,47 @@
         },
         {
          "id": 110026,
-         "createdDate": 1788452160000,
+         "createdDate": 1788447000000,
+         "action": "COMMENTED",
+         "user": {
+          "name": "bitbucket.system-user",
+          "slug": "bitbucket.system-user",
+          "displayName": "Bitbucket",
+          "type": "SERVICE",
+          "active": true
+         },
+         "comment": {
+          "id": 11003,
+          "version": 0,
+          "text": "PROJ-105: worker token backoff retry cache payload zzcanary1ffc72e1",
+          "author": {
+           "name": "bitbucket.system-user",
+           "slug": "bitbucket.system-user",
+           "displayName": "Bitbucket",
+           "type": "SERVICE",
+           "active": true
+          },
+          "createdDate": 1788447000000,
+          "updatedDate": 1788447000000,
+          "severity": "NORMAL",
+          "state": "OPEN",
+          "threadResolved": false,
+          "resolvedDate": null,
+          "resolver": null,
+          "comments": [],
+          "properties": {}
+         },
+         "commentAction": "ADDED"
+        },
+        {
+         "id": 110027,
+         "createdDate": 1788447420000,
          "action": "DECLINED",
          "user": {
-          "name": "toomas.bruno",
-          "displayName": "Toomas Bruno",
-          "emailAddress": "toomas.bruno@example.invalid",
-          "type": "NORMAL",
+          "name": "bitbucket.system-user",
+          "slug": "bitbucket.system-user",
+          "displayName": "Bitbucket",
+          "type": "SERVICE",
           "active": true
          }
         }
@@ -4808,16 +4895,16 @@
       {
        "pull_request": {
         "id": 111,
-        "version": 16,
+        "version": 17,
         "title": "PROJ-101: Throttle for token",
-        "description": "ledger backoff upload index zzcanaryd325bfae\n\nfilter shard webhook retry snapshot token token zzcanaryd325bfae\n\nchecklist zzcanaryd325bfae",
+        "description": "filter matrix token webhook retry header zzcanaryd325bfae\n\nsession route banner throttle cursor shard queue zzcanaryd325bfae\n\nchecklist zzcanaryd325bfae",
         "state": "DECLINED",
         "open": false,
         "closed": true,
         "draft": false,
         "createdDate": 1789145400000,
-        "updatedDate": 1789664580000,
-        "closedDate": 1789664580000,
+        "updatedDate": 1789648980000,
+        "closedDate": 1789648980000,
         "fromRef": {
          "id": "refs/heads/feature/filter-cursor",
          "displayId": "feature/filter-cursor",
@@ -5473,13 +5560,47 @@
         },
         {
          "id": 111082,
-         "createdDate": 1789664580000,
+         "createdDate": 1789646640000,
+         "action": "COMMENTED",
+         "user": {
+          "name": "bitbucket.system-user",
+          "slug": "bitbucket.system-user",
+          "displayName": "Bitbucket",
+          "type": "SERVICE",
+          "active": true
+         },
+         "comment": {
+          "id": 11103,
+          "version": 0,
+          "text": "PROJ-101: filter shard webhook retry snapshot token token zzcanaryd325bfae",
+          "author": {
+           "name": "bitbucket.system-user",
+           "slug": "bitbucket.system-user",
+           "displayName": "Bitbucket",
+           "type": "SERVICE",
+           "active": true
+          },
+          "createdDate": 1789646640000,
+          "updatedDate": 1789646640000,
+          "severity": "BLOCKER",
+          "state": "OPEN",
+          "threadResolved": false,
+          "resolvedDate": null,
+          "resolver": null,
+          "comments": [],
+          "properties": {}
+         },
+         "commentAction": "ADDED"
+        },
+        {
+         "id": 111083,
+         "createdDate": 1789648980000,
          "action": "DECLINED",
          "user": {
-          "name": "peeter.mets",
-          "displayName": "Peeter Mets",
-          "emailAddress": "peeter.mets@example.invalid",
-          "type": "NORMAL",
+          "name": "bitbucket.system-user",
+          "slug": "bitbucket.system-user",
+          "displayName": "Bitbucket",
+          "type": "SERVICE",
           "active": true
          }
         }
@@ -9676,16 +9797,16 @@
       {
        "pull_request": {
         "id": 119,
-        "version": 16,
-        "title": "Index for stream",
-        "description": "queue cache digest zzcanaryec997157\n\ndigest session upload filter session zzcanaryec997157\n\nchecklist zzcanaryec997157",
+        "version": 17,
+        "title": "Session for worker",
+        "description": "banner header session shard rollback snapshot worker zzcanaryec997157\n\nretry stream upload banner zzcanaryec997157\n\nchecklist zzcanaryec997157",
         "state": "DECLINED",
         "open": false,
         "closed": true,
         "draft": false,
         "createdDate": 1788873060000,
-        "updatedDate": 1789575360000,
-        "closedDate": 1789575360000,
+        "updatedDate": 1789566480000,
+        "closedDate": 1789566480000,
         "fromRef": {
          "id": "refs/heads/feature/payload-index",
          "displayId": "feature/payload-index",
@@ -10363,13 +10484,66 @@
         },
         {
          "id": 119099,
-         "createdDate": 1789575360000,
+         "createdDate": 1789563120000,
+         "action": "COMMENTED",
+         "user": {
+          "name": "bitbucket.system-user",
+          "slug": "bitbucket.system-user",
+          "displayName": "Bitbucket",
+          "type": "SERVICE",
+          "active": true
+         },
+         "comment": {
+          "id": 11904,
+          "version": 0,
+          "text": "upload cursor digest route route zzcanaryec997157",
+          "author": {
+           "name": "bitbucket.system-user",
+           "slug": "bitbucket.system-user",
+           "displayName": "Bitbucket",
+           "type": "SERVICE",
+           "active": true
+          },
+          "createdDate": 1789563120000,
+          "updatedDate": 1789563120000,
+          "severity": "NORMAL",
+          "state": "OPEN",
+          "threadResolved": false,
+          "resolvedDate": null,
+          "resolver": null,
+          "comments": [
+           {
+            "id": 16904,
+            "version": 0,
+            "text": "digest session upload filter session zzcanaryec997157",
+            "author": {
+             "name": "lauri.nomme",
+             "displayName": "Lauri Nomme",
+             "emailAddress": "lauri.nomme@example.invalid",
+             "type": "NORMAL",
+             "active": true
+            },
+            "createdDate": null,
+            "updatedDate": null,
+            "severity": "NORMAL",
+            "state": "OPEN",
+            "comments": [],
+            "properties": {}
+           }
+          ],
+          "properties": {}
+         },
+         "commentAction": "ADDED"
+        },
+        {
+         "id": 119100,
+         "createdDate": 1789566480000,
          "action": "DECLINED",
          "user": {
-          "name": "lauri.nomme",
-          "displayName": "Lauri Nomme",
-          "emailAddress": "lauri.nomme@example.invalid",
-          "type": "NORMAL",
+          "name": "bitbucket.system-user",
+          "slug": "bitbucket.system-user",
+          "displayName": "Bitbucket",
+          "type": "SERVICE",
           "active": true
          }
         }
@@ -11318,16 +11492,16 @@
       {
        "pull_request": {
         "id": 122,
-        "version": 11,
-        "title": "Matrix for matrix",
-        "description": "PROJ-201: cursor queue limiter queue route limiter zzcanarycb5192ac\n\nindex cache upload stream session session zzcanarycb5192ac\n\nchecklist zzcanarycb5192ac",
+        "version": 12,
+        "title": "Queue for digest",
+        "description": "PROJ-201: queue header matrix schema snapshot shard backoff zzcanarycb5192ac\n\nlimiter snapshot index banner payload banner payload zzcanarycb5192ac\n\nchecklist zzcanarycb5192ac",
         "state": "DECLINED",
         "open": false,
         "closed": true,
         "draft": false,
         "createdDate": 1791556620000,
-        "updatedDate": 1792000080000,
-        "closedDate": 1792000080000,
+        "updatedDate": 1792065720000,
+        "closedDate": 1792065720000,
         "fromRef": {
          "id": "refs/heads/chore/shard-cursor",
          "displayId": "chore/shard-cursor",
@@ -11753,13 +11927,47 @@
         },
         {
          "id": 122026,
-         "createdDate": 1792000080000,
+         "createdDate": 1792064160000,
+         "action": "COMMENTED",
+         "user": {
+          "name": "bitbucket.system-user",
+          "slug": "bitbucket.system-user",
+          "displayName": "Bitbucket",
+          "type": "SERVICE",
+          "active": true
+         },
+         "comment": {
+          "id": 12201,
+          "version": 0,
+          "text": "PROJ-201: matrix limiter index cache upload stream zzcanarycb5192ac",
+          "author": {
+           "name": "bitbucket.system-user",
+           "slug": "bitbucket.system-user",
+           "displayName": "Bitbucket",
+           "type": "SERVICE",
+           "active": true
+          },
+          "createdDate": 1792064160000,
+          "updatedDate": 1792064160000,
+          "severity": "NORMAL",
+          "state": "OPEN",
+          "threadResolved": false,
+          "resolvedDate": null,
+          "resolver": null,
+          "comments": [],
+          "properties": {}
+         },
+         "commentAction": "ADDED"
+        },
+        {
+         "id": 122027,
+         "createdDate": 1792065720000,
          "action": "DECLINED",
          "user": {
-          "name": "lauri.nomme",
-          "displayName": "Lauri Nomme",
-          "emailAddress": "lauri.nomme@example.invalid",
-          "type": "NORMAL",
+          "name": "bitbucket.system-user",
+          "slug": "bitbucket.system-user",
+          "displayName": "Bitbucket",
+          "type": "SERVICE",
           "active": true
          }
         }
@@ -19405,16 +19613,16 @@
       {
        "pull_request": {
         "id": 113,
-        "version": 11,
-        "title": "Filter for queue",
-        "description": "banner webhook token cursor token zzcanary703a256e\n\nrollback cache matrix schema upload zzcanary703a256e\n\nchecklist zzcanary703a256e",
+        "version": 12,
+        "title": "Cache for matrix",
+        "description": "stream scheduler backoff rollback cursor token session zzcanary703a256e\n\nmatrix payload upload session upload snapshot zzcanary703a256e\n\nchecklist zzcanary703a256e",
         "state": "DECLINED",
         "open": false,
         "closed": true,
         "draft": false,
         "createdDate": 1791966960000,
-        "updatedDate": 1792486800000,
-        "closedDate": 1792486800000,
+        "updatedDate": 1792418400000,
+        "closedDate": 1792418400000,
         "fromRef": {
          "id": "refs/heads/chore/queue-ledger",
          "displayId": "chore/queue-ledger",
@@ -19939,13 +20147,47 @@
         },
         {
          "id": 113021,
-         "createdDate": 1792486800000,
+         "createdDate": 1792416300000,
+         "action": "COMMENTED",
+         "user": {
+          "name": "bitbucket.system-user",
+          "slug": "bitbucket.system-user",
+          "displayName": "Bitbucket",
+          "type": "SERVICE",
+          "active": true
+         },
+         "comment": {
+          "id": 11304,
+          "version": 0,
+          "text": "PROJ-106: cursor token matrix zzcanary703a256e",
+          "author": {
+           "name": "bitbucket.system-user",
+           "slug": "bitbucket.system-user",
+           "displayName": "Bitbucket",
+           "type": "SERVICE",
+           "active": true
+          },
+          "createdDate": 1792416300000,
+          "updatedDate": 1792416300000,
+          "severity": "NORMAL",
+          "state": "OPEN",
+          "threadResolved": false,
+          "resolvedDate": null,
+          "resolver": null,
+          "comments": [],
+          "properties": {}
+         },
+         "commentAction": "ADDED"
+        },
+        {
+         "id": 113022,
+         "createdDate": 1792418400000,
          "action": "DECLINED",
          "user": {
-          "name": "peeter.mets",
-          "displayName": "Peeter Mets",
-          "emailAddress": "peeter.mets@example.invalid",
-          "type": "NORMAL",
+          "name": "bitbucket.system-user",
+          "slug": "bitbucket.system-user",
+          "displayName": "Bitbucket",
+          "type": "SERVICE",
           "active": true
          }
         }
@@ -24136,16 +24378,16 @@
       {
        "pull_request": {
         "id": 119,
-        "version": 16,
-        "title": "Filter for session",
-        "description": "queue snapshot cache upload backoff zzcanaryf1ccd8b2\n\ntoken digest cache banner route throttle zzcanaryf1ccd8b2\n\nchecklist zzcanaryf1ccd8b2",
+        "version": 17,
+        "title": "Ledger for retry",
+        "description": "payload snapshot upload zzcanaryf1ccd8b2\n\nparser header header stream zzcanaryf1ccd8b2\n\nchecklist zzcanaryf1ccd8b2",
         "state": "DECLINED",
         "open": false,
         "closed": true,
         "draft": false,
         "createdDate": 1791374160000,
-        "updatedDate": 1792084020000,
-        "closedDate": 1792084020000,
+        "updatedDate": 1792140600000,
+        "closedDate": 1792140600000,
         "fromRef": {
          "id": "refs/heads/bugfix/PROJ-105-throttle-shard",
          "displayId": "bugfix/PROJ-105-throttle-shard",
@@ -24714,13 +24956,66 @@
         },
         {
          "id": 119044,
-         "createdDate": 1792084020000,
+         "createdDate": 1792086660000,
+         "action": "COMMENTED",
+         "user": {
+          "name": "bitbucket.system-user",
+          "slug": "bitbucket.system-user",
+          "displayName": "Bitbucket",
+          "type": "SERVICE",
+          "active": true
+         },
+         "comment": {
+          "id": 11902,
+          "version": 0,
+          "text": "PROJ-105: limiter session index backoff limiter session parser zzcanaryf1ccd8b2",
+          "author": {
+           "name": "bitbucket.system-user",
+           "slug": "bitbucket.system-user",
+           "displayName": "Bitbucket",
+           "type": "SERVICE",
+           "active": true
+          },
+          "createdDate": 1792086660000,
+          "updatedDate": 1792086660000,
+          "severity": "NORMAL",
+          "state": "OPEN",
+          "threadResolved": false,
+          "resolvedDate": null,
+          "resolver": null,
+          "comments": [
+           {
+            "id": 16902,
+            "version": 0,
+            "text": "PROJ-105: session token digest zzcanaryf1ccd8b2",
+            "author": {
+             "name": "toomas.bruno",
+             "displayName": "Toomas Bruno",
+             "emailAddress": "toomas.bruno@example.invalid",
+             "type": "NORMAL",
+             "active": true
+            },
+            "createdDate": null,
+            "updatedDate": null,
+            "severity": "NORMAL",
+            "state": "OPEN",
+            "comments": [],
+            "properties": {}
+           }
+          ],
+          "properties": {}
+         },
+         "commentAction": "ADDED"
+        },
+        {
+         "id": 119045,
+         "createdDate": 1792140600000,
          "action": "DECLINED",
          "user": {
-          "name": "liisa.rand",
-          "displayName": "Liisa Rand",
-          "emailAddress": "liisa.rand@example.invalid",
-          "type": "NORMAL",
+          "name": "bitbucket.system-user",
+          "slug": "bitbucket.system-user",
+          "displayName": "Bitbucket",
+          "type": "SERVICE",
           "active": true
          }
         }
