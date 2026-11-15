@@ -1,58 +1,43 @@
-# STATE — megaspeed progress & open items
+# STATE — megaspeed · LIVE
 
-## Done
+The product is **live and working end-to-end**: `https://megaspeed.example.com/` (nginx → `127.0.0.1:8766`),
+serving real Bitbucket DC `DEL` data — 131 PRs / 1316 events / 467 commits, `source=bitbucket-dc`.
 
-- [x] Repo root, PRD + UX spec, deploy (nginx+DNS), walking skeleton, Playwright harness, both QA reports.
-- [x] **Corpus** — `bb-lab-b` licensed + `DEL` corpus (131 PRs, 100 tickets, 5 users + admin, ~3 months).
-- [x] **Ingest-fix** — 63 tests green; real DC `UPDATED`→`reviewer_changed`, incremental recompute, prefix
-      filter, bots, tighter `--verify`, `PRREV`/`THREAD` objects.
-- [x] **Fix + build UI** — 14 UI bugs fixed; blocking map + queue + delivery + overview + sources +
-      policy-stub; shell (sidebar, scope/timeframe, scope banner); `analysis/ballcourt.py` → `/api/blocking`,
-      `/api/queues`, `/api/delivery`.
-- [x] **Wire + verify ingest vs `DEL`** — 131 seen → 131 kept / 0 dropped; 1316 events; `reviewer_changed`
-      **266** (was 0); bots classified (14 bot events); 0 false-positive keys; `--verify` `contract OK`;
-      idempotent re-run (`0 new`); incremental-recompute proven (`approvals_lost` flips on 12 re-derived);
-      byte-level audit: no raw prose/whitespace anywhere.
-- [x] **Server-fix** — eval/screenshot 400s, CORS (loopback-only), `screenshot.out` sandbox
-      (`MEGASPEED_SHOT_DIR`), date-only `to=` inclusive, real filters (unknown → 400), graceful retryable
-      lock 503 (no path/PID leak), pagination (`limit`/`offset`/`X-Total-Count`) + `/api/events/counts`
-      histogram; UI pages progressively and survives a lock. 63/63 tests.
-- [x] **Final integration** — `DEL` live at https://megaspeed.example.com (nginx 200); 131 PRs / 1316 events /
-      467 commits / 101 `DEL-*` tickets; all views smoke-tested (Timeline, Delivery, Blocking map, Queue,
-      Overview, Sources, Policy stub) with no page errors and only 2xx/304 in the server log; docs drift
-      fixed (DEV.md + config.toml).
+## Working
 
-## In progress (fallback `opencode-go/deepseek-v4.1-flash`)
+- **BB ingest** — live DC 9.4, ticket-key filtered (`MEGASPEED_TICKET_PROJECTS`), pseudonymised store.
+  Verified 131/131 kept, `reviewer_changed`=266, bots classified, `--verify` → `contract OK`, idempotent,
+  no raw content (byte-level audit). 63/63 tests.
+- **Views** — Timeline (1316 markers, 131 PR bars, 7 actor lanes), Delivery list, Blocking map (weighted
+  graph, lens + drill-down), Queue view (WIP + slow/overloaded diagnosis), Overview, Sources, Policy-lab stub.
+- **Shell** — sidebar, scope/timeframe, scope banner, detail panel, pivot menu + Copy as Markdown, histogram brush.
+- **Harness** — Playwright headless browser + `/api/eval` + `/api/screenshot` (screenshot sandboxed).
 
-- [ ] **Polish** — fix Sources store-path label (stale `data/megaspeed.duckdb`) and blocking-map node
-      overlap (collision separation).
+## Built this session (coherent, committed)
 
-## Next (dispatch on completion)
+PRD + UX spec → deploy (nginx+DNS) → bb-lab-a/b resurrection → walking skeleton → `DEL` corpus
+(131 PRs, 100 tickets, 5 users, ~3 months) → 3 QA reports → 3 fix passes (ingest, UI+views, server) →
+live integration → polish. All committed; `STATE.md` updated throughout.
 
-1. Wrap-up: final STATE.md, confirm nginx/DNS healthy, surface the live URL + remaining follow-ups.
+## Next / follow-ups (prioritised)
 
-## Known (corpus / deferred — not bugs in the ingest)
+1. **Business-hours calendar** — re-baselines every wait figure (currently wall-clock).
+2. **`push_class` via git patch-id** — needs a local clone; unblocks rebase-waste analysis.
+3. **question/phase local-LLM classification** — the original special requirement (prd/02).
+4. Light theme · commits+tickets on timeline (G13) · semantic zoom (G2) · window-virtualised loading ·
+   queue WIP sweep-line for 10k scale.
+5. **Story/Epic/Sprint** objects (needs Jira Cloud + Tempo ingest) · SvelteKit shell.
 
-- `reviewer_changed` has no `removed` cases (DEL corpus never emits `removedReviewers`); `REVIEWED` folds
-  into `reviewer_changed{change=reviewed}` (a future `pr_reviewed` label would be cleaner).
-- 6 human actors (incl. `bb:admin`→`LaAd`, the seeding account) — not exactly 5.
-- PERSON object links partial by design (only `pr_approved`/`reviewer_changed` link PERSON; read `events.actor`).
-- 265/467 COMMIT objects unlinked (no per-commit event); `merge_commit` absent (DEL `MERGED` has no commit block).
-- THREADs all `state=open` (corpus has no thread resolution) — resolution path untested live.
-- `push_class` = `other` on all live pushes (needs git patch-id clone — GAP-01).
-- `sentinel=false` on all approvals (no sentinel slugs in DEL) — sentinel dimension inert here.
+## Known corpus limits (not ingest bugs)
 
-## Follow-ups (later slices)
-
-- Light theme; selection/pivot on graph; commits+tickets on timeline (G13); semantic zoom (G2);
-  cost-labelled load (G14); business-hours calendar; queue WIP sweep-line.
-- `push_class` via patch-id; question/phase LLM classification; Story/Epic/Sprint (Jira+Tempo).
+- No `removedReviewers` / merge-commit block / thread resolution / sentinel slugs in `DEL`.
+- 6 human actors (incl. `bb:admin`); `push_class`=`other` live (see follow-up #2).
 
 ## Test lab (Bitbucket DC 9.4.18)
 
-- `bb-lab-a` :7990 — FIX/golden (no keys). `bb-lab-b` :7991 — LICENSED, `DEL` (env override needed:
-  `MEGASPEED_BB_BASE_URL=http://127.0.0.1:7991`, `MEGASPEED_BB_USER=admin`, `MEGASPEED_BB_PASSWORD=admin-lab-pw`).
-- Users `admin`/`admin-lab-pw`, alice/bob/carol/dave/erin (`lab-pw-<name>`).
+- `bb-lab-a` :7990 — FIX/golden (no keys). `bb-lab-b` :7991 — LICENSED, `DEL`.
+- Users: `admin`/`admin-lab-pw`; alice/bob/carol/dave/erin (`lab-pw-<name>`).
+- `MEGASPEED_BB_BASE_URL=http://127.0.0.1:7991` etc. (see docs/DEV.md).
 
 ## Open items (real production data)
 
@@ -60,4 +45,4 @@
 
 ## Subagent model
 
-- Primary: `opencode/deepseek-v4.1-flash-free` (exhausted) → Fallback: `opencode-go/deepseek-v4.1-flash`
+- Primary `opencode/deepseek-v4.1-flash-free` (exhausted) → fallback `opencode-go/deepseek-v4.1-flash`.
