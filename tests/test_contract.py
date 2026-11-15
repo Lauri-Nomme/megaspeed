@@ -42,7 +42,7 @@ class PseudonymTests(unittest.TestCase):
 
 class FilterTests(unittest.TestCase):
     def setUp(self):
-        self.filter = KeyFilter.build(r"\b[A-Z]+-\d+\b", r"^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$")
+        self.filter = KeyFilter.build(r"\b[A-Z]+-\d+\b", r"^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$", ("PROJ", "OPS", "ARCH"))
 
     def test_matches_branch_title_commit(self):
         self.assertEqual(self.filter.keys("feature/PROJ-101-retry"), ["PROJ-101"])
@@ -50,7 +50,7 @@ class FilterTests(unittest.TestCase):
 
     def test_rejects_non_keys_even_if_regex_matches(self):
         # a permissive regex must not be able to smuggle prose into the key column
-        loose = KeyFilter.build(r"\b\w+-\w+\b", r"^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$")
+        loose = KeyFilter.build(r"\b\w+-\w+\b", r"^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$", ("PROJ", "OPS", "ARCH"))
         self.assertEqual(loose.keys("see the foo-BAR thing"), [])
 
     def test_message_class_is_a_label(self):

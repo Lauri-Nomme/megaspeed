@@ -77,7 +77,7 @@ class ReducerShapeTests(unittest.TestCase):
         self.reducer = Reducer(
             self.cfg,
             IdentityTable(self.cfg.identity_path),
-            KeyFilter.build(self.cfg.ticket_regex, self.cfg.key_shape),
+            KeyFilter.build(self.cfg.ticket_regex, self.cfg.key_shape, self.cfg.ticket_projects),
             AS_OF,
         )
         self.stats = Stats()

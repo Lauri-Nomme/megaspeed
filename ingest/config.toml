@@ -18,6 +18,13 @@ identity = "var/identity_map.json"
 ticket_regex = '\b[A-Z]+-\d+\b'
 # Matches that do not look like a key are discarded rather than stored.
 key_shape = '^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$'
+# Accepted project prefixes. A key counts only when its prefix is listed here,
+# so technical tokens that look key-shaped (UTF-8, SHA-256, ISO-8601) never
+# become tickets. Set the real project keys for production:
+#   MEGASPEED_TICKET_PROJECTS=DEL,FIX     (env wins over this file)
+# The default below is the fixture/test project set; a live run should override
+# it with the real Jira project keys.
+ticket_projects = ["PROJ", "OPS", "ARCH"]
 
 [source]
 [[source.repos]]

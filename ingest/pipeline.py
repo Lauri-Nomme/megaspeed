@@ -71,13 +71,28 @@ def _ts(value: Any, default: datetime | None = None) -> datetime:
 class KeyFilter:
     pattern: re.Pattern[str]
     shape: re.Pattern[str]
+    projects: tuple[str, ...]
 
     @classmethod
-    def build(cls, pattern: str, shape: str) -> "KeyFilter":
+    def build(cls, pattern: str, shape: str, projects: tuple[str, ...] | list[str]) -> "KeyFilter":
+        projects = tuple(str(p).strip().upper() for p in projects if str(p).strip())
+        if not projects:
+            raise SystemExit(
+                "no ticket project prefixes configured: set MEGASPEED_TICKET_PROJECTS=DEL,FIX"
+            )
         try:
-            return cls(re.compile(pattern), re.compile(shape))
+            return cls(re.compile(pattern), re.compile(shape), projects)
         except re.error as exc:
             raise SystemExit(f"bad ticket_regex/key_shape: {exc}") from exc
+
+    def accepts(self, candidate: str) -> bool:
+        """A candidate counts only if it is key-shaped *and* a configured project.
+
+        The project list is what stops ``UTF-8`` / ``SHA-256`` / ``ISO-8601``
+        from becoming tickets: they are perfectly key-shaped, and only the
+        prefix tells them apart from a real key.
+        """
+        return bool(self.shape.fullmatch(candidate)) and candidate.partition("-")[0] in self.projects
 
     def keys(self, *texts: str | None) -> list[str]:
         found: set[str] = set()
@@ -87,8 +102,9 @@ class KeyFilter:
             for match in self.pattern.finditer(text):
                 candidate = match.group(0).strip()
                 # Second gate: a permissive regex must not be able to smuggle
-                # prose into the keys column.
-                if self.shape.fullmatch(candidate):
+                # prose into the keys column; third gate: the prefix must be a
+                # configured project.
+                if self.accepts(candidate):
                     found.add(candidate)
         return sorted(found)
 
@@ -541,7 +557,7 @@ def run(cfg: Config, transport, source: str, limit: int | None = None) -> dict:
     """Ingest every configured repo into the pseudonymised store."""
     as_of = utcnow()
     run_id = f"{source}-{as_of.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:6]}"
-    key_filter = KeyFilter.build(cfg.ticket_regex, cfg.key_shape)
+    key_filter = KeyFilter.build(cfg.ticket_regex, cfg.key_shape, cfg.ticket_projects)
     ident = IdentityTable(cfg.identity_path)
     client = BitbucketClient(transport, page_limit=cfg.page_limit, min_interval=0.0 if source == "fixture" else 0.2)
     reducer = Reducer(cfg, ident, key_filter, as_of)
@@ -631,6 +647,7 @@ def run(cfg: Config, transport, source: str, limit: int | None = None) -> dict:
         "problems": report["problems"],
         "summary": report["summary"],
         "ticket_regex": cfg.ticket_regex,
+        "ticket_projects": list(cfg.ticket_projects),
     }
 
 

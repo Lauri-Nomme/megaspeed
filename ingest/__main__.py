@@ -31,7 +31,10 @@ def _fixture_bundle(path: Path | None, n: int, seed: int) -> dict:
 
 def _print_probe(report: dict) -> None:
     print(f"probe          {report['as_of']} · {report['requests']} requests · read-only, nothing written")
-    print(f"ticket filter  {report['ticket_regex']}   (shape {report['key_shape']})")
+    print(
+        f"ticket filter  {report['ticket_regex']}   (shape {report['key_shape']}"
+        f", projects {','.join(report['ticket_projects'])})"
+    )
     for repo in report["repos"]:
         states = ", ".join(f"{k}={v}" for k, v in sorted(repo["by_state"].items()))
         actions = ", ".join(f"{k}={v}" for k, v in sorted(repo["actions"].items()))
@@ -159,7 +162,7 @@ def _print_run(r: dict) -> None:
     print(f"source         {r['source']} (run {r['run_id']})")
     print(f"store          {r['db']}")
     print(f"identity map   {r['identity_map']}  (raw zone, never served)")
-    print(f"ticket filter  {r['ticket_regex']}")
+    print(f"ticket filter  {r['ticket_regex']}   (projects {','.join(r['ticket_projects'])})")
     print(
         f"PRs            {r['prs_seen']} seen -> {r['prs_kept']} kept, {r['prs_dropped']} dropped "
         f"(no ticket key)"

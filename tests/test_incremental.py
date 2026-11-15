@@ -110,6 +110,7 @@ class IncrementalTests(unittest.TestCase):
             ticket_regex=r"\b[A-Z]+-\d+\b",
             key_shape=r"^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$",
             repos=[("QA", "qa")],
+            ticket_projects=("QA",),
         )
 
     def tearDown(self):

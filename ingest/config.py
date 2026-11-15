@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import re
 import tomllib
 from pathlib import Path
 
@@ -21,6 +22,14 @@ DEFAULT_TICKET_REGEX = r"\b[A-Z]+-\d+\b"
 # regex from smuggling prose into the keys column.
 DEFAULT_KEY_SHAPE = r"^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$"
 
+# The accepted *project prefixes*. A key only counts when its prefix is on this
+# list, so technical tokens that happen to look like keys (``UTF-8``,
+# ``SHA-256``, ``ISO-8601``) never become tickets. Configure the real projects:
+#   MEGASPEED_TICKET_PROJECTS=DEL,FIX  (or [filter].ticket_projects)
+# The default is the fixture/test project set; a live run should set it.
+DEFAULT_TICKET_PROJECTS = ("PROJ", "OPS", "ARCH")
+_PROJECT_PREFIX = re.compile(r"^[A-Z][A-Z0-9_]*$")
+
 
 @dataclasses.dataclass
 class Config:
@@ -29,6 +38,7 @@ class Config:
     ticket_regex: str
     key_shape: str
     repos: list[tuple[str, str]]
+    ticket_projects: tuple[str, ...] = DEFAULT_TICKET_PROJECTS
     base_url: str = ""
     page_limit: int = 25
     seed: int = 20261115
@@ -50,6 +60,29 @@ class Config:
 def _resolve(value: str | os.PathLike[str], base: Path) -> Path:
     p = Path(value).expanduser()
     return p if p.is_absolute() else (base / p)
+
+
+def parse_projects(value: str | list | tuple) -> tuple[str, ...]:
+    """Parse a project-prefix list (``DEL,FIX`` or ``["DEL", "FIX"]``)."""
+    items = value if isinstance(value, (list, tuple)) else str(value).split(",")
+    projects: list[str] = []
+    for item in items:
+        prefix = str(item).strip().upper()
+        if not prefix:
+            continue
+        if not _PROJECT_PREFIX.fullmatch(prefix):
+            raise SystemExit(
+                f"bad ticket project prefix {prefix!r}: expected [A-Z][A-Z0-9_]* "
+                "(MEGASPEED_TICKET_PROJECTS=DEL,FIX)"
+            )
+        if prefix not in projects:
+            projects.append(prefix)
+    if not projects:
+        raise SystemExit(
+            "no ticket project prefixes configured: set MEGASPEED_TICKET_PROJECTS=DEL,FIX "
+            "(a bare key-shaped token like UTF-8 must never count as a ticket)"
+        )
+    return tuple(projects)
 
 
 def load_config(path: str | os.PathLike[str] | None = None) -> Config:
@@ -78,6 +111,9 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         ),
         ticket_regex=os.environ.get("MEGASPEED_TICKET_REGEX", filt.get("ticket_regex", DEFAULT_TICKET_REGEX)),
         key_shape=os.environ.get("MEGASPEED_KEY_SHAPE", filt.get("key_shape", DEFAULT_KEY_SHAPE)),
+        ticket_projects=parse_projects(
+            os.environ.get("MEGASPEED_TICKET_PROJECTS", filt.get("ticket_projects", list(DEFAULT_TICKET_PROJECTS)))
+        ),
         repos=repos,
         base_url=os.environ.get("MEGASPEED_BB_BASE_URL", bb.get("base_url", "")).rstrip("/"),
         page_limit=int(os.environ.get("MEGASPEED_PAGE_LIMIT", bb.get("page_limit", 25))),
