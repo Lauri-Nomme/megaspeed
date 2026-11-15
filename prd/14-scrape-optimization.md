@@ -27,6 +27,18 @@ too slow and too request-heavy. The scrape must be cheap enough to run in the ai
 - `<state-dir>/watermark.json` — per-repo `updatedDate` cursor (never goes backwards).
 - `<state-dir>/prs.json` — per PR: `{state, updated_date, done}` (settled + fully scraped).
 
+## Progress reporting
+
+Long scrapes (huge projects) must report progress to **stderr**, by default every **30 s**
+(configurable, e.g. `--progress-interval`), a single line like:
+
+    [scrape] 02:15 elapsed · 3,214 PRs seen · 412 kept · 2,802 skipped · 1,041 req · 5.2 PR/s · 4.3 req/s
+
+- Fields: elapsed wall-clock, PRs seen / kept / dropped (or skipped-by-filter), requests made, events
+  emitted, and throughput (PR/s and req/s).
+- Goes to **stderr** (never the tgz or piped stdout); `--quiet` disables it.
+- Emitted on a timer, not per PR (so it doesn't flood); the final summary still prints at the end.
+
 ## Notes
 
 - **Boundary rule — use `<`, never `<=`.** `updatedDate` is not unique (ties are common), so a PR
