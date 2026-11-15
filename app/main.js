@@ -240,10 +240,12 @@ function renderPhaseLegend() {
       ? `<i class="hatch" style="--c:${PHASE[phase].color}"></i>`
       : `<i style="background:${PHASE[phase].color}"></i>`;
     // "closed" is an end cap, not usually a duration; say which it is
+    const short = (hours) => (hours >= 48 ? `${Math.round(hours / 24)} d` : `${Math.max(1, Math.round(hours))} h`);
     const value = phase === 'closed'
-      ? (zero ? 'end cap' : fmtHours(entry.hours))
-      : (zero ? '0' : fmtHours(entry.hours));
-    return `<span class="${zero ? 'zero' : ''}" title="${esc(PHASE[phase].hint)}">
+      ? (zero ? 'end cap' : short(entry.hours))
+      : (zero ? '0' : short(entry.hours));
+    const title = `${PHASE[phase].hint}${entry ? ` — ${fmtHours(entry.hours)} measured in this window` : ''}`;
+    return `<span class="${zero ? 'zero' : ''}" title="${esc(title)}">
       ${swatch}${esc(PHASE[phase].label)}
       <span class="mono muted">${value}</span></span>`;
   }).join('');
