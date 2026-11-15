@@ -1,0 +1,6 @@
+# Server + API deps. Ingest needs only DuckDB; the WebSocket harness needs
+# `websockets` explicitly (uvicorn does not bundle it).
+duckdb>=1.0
+fastapi>=0.110
+uvicorn>=0.30
+websockets>=12
