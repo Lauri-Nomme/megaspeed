@@ -148,6 +148,8 @@ class Stats:
     objects: list[dict] = field(default_factory=list)
     people: set[str] = field(default_factory=set)
     keys_by_placement: dict[str, int] = field(default_factory=dict)
+    #: ``push_class`` -> count for the rescopes classified in this run (prd/16).
+    push_classes: dict[str, int] = field(default_factory=dict)
     watermark: datetime | None = None
     activities_by_action: dict[str, int] = field(default_factory=dict)
 

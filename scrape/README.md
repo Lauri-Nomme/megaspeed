@@ -48,6 +48,7 @@ is not the production path (there is no airgap in one process).
   watermark.json   # per-source event cursor + per-repo updatedDate cursor
   prs.json         # per-PR cursor: {state, updated_date, done} (settled PRs)
   identity.json    # RAW ZONE: slug/email -> pseudonym
+  git/             # RAW ZONE: one shallow, partial bare repo per repo, for push_class
 ```
 
 * **Huge projects are cheap** (prd/14), in four layers:
@@ -80,6 +81,17 @@ is not the production path (there is no airgap in one process).
   A classifier upgrade is a scrape-side re-run, not a main-side re-analysis.
   The LLM is an external localhost service (Ollama/llama.cpp) — it is **not**
   bundled into the artifact.
+* **`push_class` (prd/16) is deterministic and local.** For every RESCOPED
+  activity the scrape compares `git patch-id --stable` of `target...old` vs
+  `target...new` in a **shallow, partial** bare repo under `<state-dir>/git/`
+  (`--depth`, `--filter=blob:none`, only the refs/commits the matching PRs
+  mention — never a mirror). Same patch id → `pure_rebase`; a different one is
+  read through `git range-diff` → `rebase_conflict` (same commits, only a few
+  changed lines) or `content`. The cache is incremental local state: the head a
+  PR had last run is still there when the next rescope reports it as
+  `previousFromHash`. Needs the `git` binary on the scrape box;
+  `--no-push-class` / `MEGASPEED_PUSH_CLASS=0` turns it off, and a head the
+  server no longer serves degrades that one push to `other` instead of failing.
 
 Import is idempotent by `event_key`, so overlapping overlaps and re-transfers
 are safe. A bundle is rejected (not merged) if the checksums, `schema_version`,

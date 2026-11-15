@@ -89,6 +89,16 @@ def _print_scrape(r: dict) -> None:
         print(f"early stop     {', '.join(r['early_stopped'])} (full page at/below the watermark)")
     placements = ", ".join(f"{k}={v}" for k, v in r["keys_by_placement"].items())
     print(f"key found in   {placements}")
+    push = r.get("push_class") or {}
+    if push.get("enabled"):
+        counts = ", ".join(f"{k}={v}" for k, v in (push.get("counts") or {}).items()) or "none"
+        reasons = ", ".join(f"{k}={v}" for k, v in (push.get("reasons") or {}).items())
+        print(f"push class     {counts}")
+        if reasons:
+            print(f"push reasons   {reasons}")
+    elif push:
+        why = "git not installed" if "git" in push and not push.get("git") else "off"
+        print(f"push class     {why} (no local git cache)")
 
 
 def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
@@ -111,6 +121,8 @@ def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
     ap.add_argument("--full", action="store_true", help="ignore the watermark and re-scrape everything")
     ap.add_argument("--no-prefilter", action="store_true",
                     help="fetch every PR's commits before filtering (old, slower path; prd/14)")
+    ap.add_argument("--no-push-class", action="store_true",
+                    help="skip the deterministic push_class (no local git cache; prd/16)")
     ap.add_argument("--progress-interval", type=float, default=None, metavar="SECONDS",
                     help="progress line on stderr every N seconds; 0 disables"
                          f" (default {DEFAULT_PROGRESS_INTERVAL:g})")
@@ -164,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
         cfg.repos = repos
     if args.no_prefilter:
         cfg.prefilter = False
+    if args.no_push_class:
+        cfg.push_class = False
 
     seed = args.seed if args.seed is not None else cfg.seed
     generate_n = args.n if args.n is not None else 50

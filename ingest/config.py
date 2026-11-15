@@ -70,6 +70,15 @@ class Config:
     prefilter: bool = True
     #: Seconds between progress lines on stderr; 0 disables (prd/14).
     progress_interval: float = 30.0
+    #: Deterministic ``push_class`` from a local shallow git cache (prd/16).
+    #: Live runs default to on; fixture bundles already carry their labels.
+    push_class: bool = True
+    #: Commits per fetched head, and the deepening ceiling for the merge base.
+    git_depth: int = 128
+    git_max_depth: int = 1024
+    #: Changed lines in ``git range-diff`` at or below which a changed patch is
+    #: read as a resolved conflict rather than real rework (prd/16).
+    push_conflict_lines: int = 20
 
     @property
     def live(self) -> bool:
@@ -192,6 +201,10 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         progress_interval=float(
             os.environ.get("MEGASPEED_PROGRESS_INTERVAL", DEFAULT_PROGRESS_INTERVAL)
         ),
+        push_class=_env_flag(os.environ.get("MEGASPEED_PUSH_CLASS"), True),
+        git_depth=int(os.environ.get("MEGASPEED_GIT_DEPTH", 128)),
+        git_max_depth=int(os.environ.get("MEGASPEED_GIT_MAX_DEPTH", 1024)),
+        push_conflict_lines=int(os.environ.get("MEGASPEED_PUSH_CONFLICT_LINES", 20)),
     )
     if not config.repos:
         raise SystemExit(

@@ -11,10 +11,12 @@ tickets and prose are made up, and every free-text field is planted with a
 ``zzcanary…`` token so the pipeline can prove it discarded the text.
 
 ``pull-requests/{id}/activities`` items may carry a namespaced
-``megaspeedPatchId`` block. That key is **not** a Bitbucket field: it stands in
-for the output of the local deterministic push classifier (``git patch-id``,
-prd/02) which needs a local clone we do not have in fixture mode. The live
-client never sets it, and the pipeline falls back to ``push_class="other"``.
+``megaspeedPatchId`` block. That key is **not** a Bitbucket field: it is where
+the deterministic push classifier (``git patch-id``, prd/02, prd/16) hands its
+label to the reducer. Fixture mode cannot run that classifier -- there is no
+server to fetch from -- so the generator writes the label directly. A live
+scrape fills the same block from :mod:`ingest.gitclass`; when neither does, the
+pipeline falls back to ``push_class="other"``.
 """
 
 from __future__ import annotations
@@ -258,8 +260,9 @@ def _make_pr(rng: random.Random, project: str, repo: str, pr_id: int, index: int
                 previousToHash=previous_to,
                 added={"commits": added, "total": len(added)},
                 removed={"commits": removed, "total": len(removed)},
-                # Not a DC field: stands in for the local deterministic push
-                # classifier (git patch-id), which needs a clone (GAP-01).
+                # Not a DC field: the deterministic push classifier's label
+                # (git patch-id, prd/16). Fixture mode writes it directly
+                # because there is no git endpoint to fetch from.
                 megaspeedPatchId={"push_class": kind},
             )
             if approved and rng.random() < 0.7:

@@ -13,10 +13,14 @@ Local state, kept **next to the output** and never inside the tgz (prd/11 §3,§
   watermark.json   # per-source event cursor + per-repo updatedDate cursor
   prs.json         # per-PR cursor: {state, updated_date, done} (settled)
   identity.json    # RAW ZONE: slug/email -> pseudonym. Back this up.
+  git/             # RAW ZONE: shallow/partial bare repo per PROJECT/repo,
+                   #   used only for the deterministic push_class (prd/16)
 ```
 
 The identity map is the one irreplaceable piece of scrape-side state: losing it
-breaks pseudonym continuity across incremental transfers.
+breaks pseudonym continuity across incremental transfers. The git cache is
+disposable -- losing it only costs a re-fetch (and an old force-pushed head
+becomes unclassifiable, see :mod:`ingest.gitclass`).
 
 A huge Bitbucket project is made affordable by four layers (prd/14):
 
@@ -39,6 +43,12 @@ A huge Bitbucket project is made affordable by four layers (prd/14):
 ``--full`` ignores all of the cursors and re-scrapes everything (a rebuild of
 the main side's store needs that); the pre-filter still applies, because a
 non-matching PR has nothing we would ever store.
+
+The push classifier (prd/16) runs here, between the activity fetch and the
+reduction: every RESCOPED activity is stamped with the deterministic
+``push_class`` before :class:`ingest.pipeline.Reducer` turns it into a
+``pr_pushed`` event. It needs a local shallow git cache, so it is on for live
+runs only (``--no-push-class`` / ``MEGASPEED_PUSH_CLASS=0`` turns it off).
 """
 
 from __future__ import annotations
@@ -50,7 +60,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import bundle as bundle_mod
-from . import taxonomy
+from . import gitclass, taxonomy
 from .bitbucket import BitbucketClient, PullRequest
 from .config import Config
 from .pipeline import KeyFilter, Reducer, Stats, _object
@@ -255,6 +265,8 @@ class Collected:
     repo_watermarks: dict[str, datetime | None] = field(default_factory=dict)
     #: repo label -> per-repo counters for the report / state file
     repos: dict[str, dict] = field(default_factory=dict)
+    #: the push classifier that ran (None when this source needs none)
+    push_classifier: gitclass.PushClassifier | None = None
 
     def counts(self) -> dict:
         stats = self.stats
@@ -288,13 +300,15 @@ def collect(
     pr_state: PullRequestState | None = None,
     full: bool = False,
     progress: ProgressReporter | None = None,
+    push_classifier: gitclass.PushClassifier | None = None,
 ) -> Collected:
     """Read the source and reduce it in memory. Nothing is written here.
 
     ``state`` / ``pr_state`` enable the incremental cursors; without them every
     PR that matches the filter is scraped (a plain full read). ``progress``
     emits interval-gated status lines to stderr (prd/14); nothing there can
-    reach the bundle.
+    reach the bundle. ``push_classifier`` (prd/16) may be ``None``: a fixture
+    bundle already carries its labels and needs no git cache.
     """
     as_of = utcnow()
     run_id = f"{source}-{as_of.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:6]}"
@@ -312,6 +326,7 @@ def collect(
         stats=stats,
         ticket_regex=cfg.ticket_regex,
         ticket_projects=cfg.ticket_projects,
+        push_classifier=push_classifier,
     )
     prefilter = getattr(cfg, "prefilter", True)
 
@@ -399,6 +414,12 @@ def collect(
                 _note_placements(reducer.key_filter, pr, stats)
                 # activities are fetched only for PRs that survived the filter
                 pr.activities = list(client.iter_activities(project, repo, pr.id))
+                if push_classifier is not None:
+                    # prd/16: classify the rescopes from the local git cache
+                    # before the reduction turns them into pr_pushed events.
+                    push_classifier.annotate(project, repo, pr.pr, pr.activities)
+                    for name, value in push_classifier.counts.items():
+                        stats.push_classes[name] = value
                 tick()
                 reducer.reduce(pr, keys, pr.activities, stats)
                 if pr_state is not None:
@@ -622,6 +643,7 @@ def scrape(
     full: bool = False,
     identity_path: str | Path | None = None,
     progress: ProgressReporter | None = None,
+    push_classifier: gitclass.PushClassifier | None = None,
 ) -> dict:
     """Scrape one source into ``out`` (a tgz) and update local state.
 
@@ -634,6 +656,11 @@ def scrape(
     :data:`ingest.progress.DEFAULT_INTERVAL` seconds; pass
     ``ProgressReporter(interval=0)`` to silence it. It never writes to stdout or
     into the bundle -- the tgz contract is unaffected.
+
+    ``push_classifier`` defaults to the one the config/source imply (a live run
+    gets a local shallow git cache under ``<state-dir>/git/``, prd/16); pass one
+    explicitly to point it somewhere else, or ``None`` after disabling
+    ``cfg.push_class``.
     """
     out = Path(out).expanduser()
     state_dir = Path(state_dir).expanduser() if state_dir else default_state_dir(out)
@@ -642,6 +669,11 @@ def scrape(
     ident_path = Path(identity_path).expanduser() if identity_path else state_dir / IDENTITY_FILE
     reporter = progress if progress is not None else ProgressReporter(
         interval=DEFAULT_PROGRESS_INTERVAL
+    )
+    classifier = (
+        push_classifier
+        if push_classifier is not None
+        else gitclass.PushClassifier.for_scrape(cfg, source, state_dir)
     )
 
     previous = None if full else state.watermark(source)
@@ -655,6 +687,7 @@ def scrape(
         pr_state=pr_state,
         full=full,
         progress=reporter,
+        push_classifier=classifier,
     )
 
     cutoff = previous - timedelta(hours=overlap_hours) if previous else None
@@ -728,4 +761,9 @@ def scrape(
         "ticket_projects": list(cfg.ticket_projects),
         "keys_by_placement": collected.keys_by_placement,
         "activities_by_action": dict(sorted(collected.stats.activities_by_action.items())),
+        "push_class": (
+            collected.push_classifier.report()
+            if collected.push_classifier is not None
+            else {"enabled": False, "counts": {}, "reasons": {}, "fetches": 0, "repos": []}
+        ),
     }
