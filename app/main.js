@@ -127,6 +127,13 @@ function timeframeQuery() {
   return days ? `days=${days}` : '';
 }
 
+/** Keep the sticky table header / detail panel below the (wrapping) meta line. */
+function syncChromeHeight() {
+  const meta = $('meta');
+  const bottom = 40 + meta.offsetHeight + 2;
+  document.documentElement.style.setProperty('--meta-bottom', `${bottom}px`);
+}
+
 function setStatus(text, cls = '') {
   $('status').textContent = text;
   $('status').className = `status ${cls}`.trim();
@@ -644,6 +651,7 @@ function setDensity(density) {
 function renderProvenance() {
   const meta = state.meta;
   if (!meta) return;
+  syncChromeHeight();
   $('provenance').textContent =
     `Snapshot from ${ageOf(meta.as_of)}: ${meta.events} events, ${meta.prs} PRs, ${meta.commits} commits · ` +
     `${meta.source || 'unknown source'}, ${meta.prs_dropped} PRs without a ticket key dropped`;
@@ -685,6 +693,7 @@ async function load() {
     renderPhaseLegend();
     if (state.page !== 'timeline') await ensureData(state.page);
     renderPage();
+    syncChromeHeight();
     setStatus(`live · ${state.events.length} events`, 'live');
     window.__megaspeedReady = true;
   } catch (err) {
@@ -1110,6 +1119,8 @@ function restoreUI() {
 
 // -------------------------------------------------------------------- boot
 restoreUI();
+syncChromeHeight();
+window.addEventListener('resize', syncChromeHeight);
 buildLensButtons();
 renderPage();
 load().then(() => {
