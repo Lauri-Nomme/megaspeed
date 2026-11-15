@@ -326,9 +326,13 @@ class FixtureScrapeTests(unittest.TestCase):
     def test_pseudonyms_are_stable_across_scrapes(self):
         scrape(self.cfg, FixtureTransport(self.bundle), "fixture", out=self.out)
         people_first = {o["object_id"] for o in read_bundle(self.out).objects if o["object_type"] == "PERSON"}
+        # A *full* re-scrape: an incremental one only re-emits the PRs that can
+        # still change (open / recently updated -- prd/14 §3), so it would not
+        # mention every person again. Pseudonym continuity is about the same
+        # person keeping the same pseudonym, so compare like with like.
         scrape(
             self.cfg, FixtureTransport(self.bundle), "fixture",
-            out=self.out, state_dir=self.out.parent / f"{self.out.stem}.state",
+            out=self.out, state_dir=self.out.parent / f"{self.out.stem}.state", full=True,
         )
         people_second = {o["object_id"] for o in read_bundle(self.out).objects if o["object_type"] == "PERSON"}
         self.assertEqual(people_first, people_second)

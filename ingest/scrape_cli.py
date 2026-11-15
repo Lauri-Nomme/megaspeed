@@ -29,6 +29,8 @@ from pathlib import Path
 
 from . import __version__
 from .config import REPO_ROOT, Config, load_config
+from .progress import DEFAULT_INTERVAL as DEFAULT_PROGRESS_INTERVAL
+from .progress import ProgressReporter
 from .scrape import DEFAULT_OVERLAP_HOURS, default_state_dir, scrape
 from .transport import BitbucketError, FixtureTransport, HttpTransport
 
@@ -60,7 +62,7 @@ def _print_scrape(r: dict) -> None:
     print(f"source         {r['source']} (run {r['run_id']})")
     print(f"bundle         {r['bundle']}  ({r['bundle_bytes']} bytes)")
     print(f"sha256         {r['bundle_sha256']}")
-    print(f"state          {r['state_dir']}  (watermark + identity map, raw zone, never transferred)")
+    print(f"state          {r['state_dir']}  (watermark + prs + identity, raw zone, never transferred)")
     print(f"identity map   {r['identity_map']}")
     print(f"ticket filter  {r['ticket_regex']}   (projects {','.join(r['ticket_projects'])})")
     print(
@@ -68,13 +70,23 @@ def _print_scrape(r: dict) -> None:
         f"(no ticket key)"
     )
     print(
+        f"settled        {r['prs_skipped_settled']} skipped (closed, unchanged)"
+        f" · {r['prs_settled']} marked done · {r['prs_settled_total']} in prs.json"
+    )
+    print(f"unchanged      {r['prs_skipped_watermark']} skipped (open/recent, at the watermark)")
+    print(
         f"events         {r['events']} emitted"
         + (f" (of {r['events_collected']} collected; watermark overlap)" if r["events"] != r["events_collected"] else "")
     )
     print(f"objects        {r['objects']}")
-    print(f"requests       {r['requests']}")
+    by_kind = ", ".join(f"{k}={v}" for k, v in r["requests_by_kind"].items())
+    print(f"requests       {r['requests']}" + (f"  ({by_kind})" if by_kind else ""))
     print(f"watermark      {r['previous_watermark'] or '—'} -> {r['watermark'] or '—'}"
           f"   (overlap {r['overlap_hours']}h{', full' if r['full'] else ''})")
+    cursors = ", ".join(f"{k}={v or '—'}" for k, v in r["repo_watermarks"].items())
+    print(f"repo cursors   {cursors}")
+    if r["early_stopped"]:
+        print(f"early stop     {', '.join(r['early_stopped'])} (full page at/below the watermark)")
     placements = ", ".join(f"{k}={v}" for k, v in r["keys_by_placement"].items())
     print(f"key found in   {placements}")
 
@@ -97,6 +109,13 @@ def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
     ap.add_argument("--overlap-hours", type=int, default=DEFAULT_OVERLAP_HOURS, metavar="N",
                     help=f"re-emit this far before the watermark (default {DEFAULT_OVERLAP_HOURS})")
     ap.add_argument("--full", action="store_true", help="ignore the watermark and re-scrape everything")
+    ap.add_argument("--no-prefilter", action="store_true",
+                    help="fetch every PR's commits before filtering (old, slower path; prd/14)")
+    ap.add_argument("--progress-interval", type=float, default=None, metavar="SECONDS",
+                    help="progress line on stderr every N seconds; 0 disables"
+                         f" (default {DEFAULT_PROGRESS_INTERVAL:g})")
+    ap.add_argument("--quiet", action="store_true",
+                    help="no progress lines on stderr (the final summary still prints)")
     ap.add_argument("--n", type=int, default=None,
                     help="fixture PRs to generate (default 50); with --fixture-file, cap how many are read")
     ap.add_argument("--seed", type=int, default=None)
@@ -125,6 +144,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.overlap_hours < 0:
         print("--overlap-hours must be >= 0", file=sys.stderr)
         return 2
+    if args.progress_interval is not None and args.progress_interval < 0:
+        print("--progress-interval must be >= 0 (0 disables)", file=sys.stderr)
+        return 2
 
     try:
         cfg = load_config(args.config)
@@ -140,11 +162,22 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             repos.append((project, repo))
         cfg.repos = repos
+    if args.no_prefilter:
+        cfg.prefilter = False
 
     seed = args.seed if args.seed is not None else cfg.seed
     generate_n = args.n if args.n is not None else 50
     out = Path(args.out).expanduser()
     state_dir = Path(args.state_dir).expanduser() if args.state_dir else default_state_dir(out)
+
+    # Progress goes to stderr only, so a piped --json report stays machine
+    # readable (prd/14 "Progress reporting").
+    interval = 0.0 if args.quiet else (
+        args.progress_interval
+        if args.progress_interval is not None
+        else cfg.progress_interval
+    )
+    progress = ProgressReporter(interval=interval)
 
     try:
         if args.live or args.probe:
@@ -190,6 +223,7 @@ def main(argv: list[str] | None = None) -> int:
             overlap_hours=args.overlap_hours,
             full=args.full,
             identity_path=args.identity,
+            progress=progress,
         )
     except BitbucketError as exc:
         print(f"bitbucket error: {exc}", file=sys.stderr)

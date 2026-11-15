@@ -138,6 +138,11 @@ class Stats:
     prs_seen: int = 0
     prs_kept: int = 0
     prs_dropped: int = 0
+    # Watermark / settled bookkeeping (prd/14 §2,§3): closed PRs marked done,
+    # closed PRs skipped as settled, and any other PR skipped as unchanged.
+    prs_settled: int = 0
+    prs_skipped_settled: int = 0
+    prs_skipped_watermark: int = 0
     events: list[dict] = field(default_factory=list)
     relations: list[tuple[str, str, str]] = field(default_factory=list)
     objects: list[dict] = field(default_factory=list)

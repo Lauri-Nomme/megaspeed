@@ -170,15 +170,22 @@ def _make_pr(rng: random.Random, project: str, repo: str, pr_id: int, index: int
     tickets = TICKETS + EXTRA_TICKETS
     ticket = rng.choice(tickets) if index % 7 != 3 else None  # ~1 in 7 has no key at all
     placement = ["branch", "title", "description", "commit", "branch", "title", "commit"][index % 7]
+    # prd/14 §1: the scrape recognises a ticket-bearing PR from the *cheap* list
+    # fields (title + source branch + description) and never pays for a commit
+    # request otherwise. The convention this fixture models is a key in branch +
+    # title + commit + description, so a key whose "home" is a commit message is
+    # carried by the title too -- the extra placement still exercises the
+    # "key found in …" accounting without hiding the PR from the pre-filter.
+    listed = placement if placement in ("branch", "title") else "title"
     canary = "zzcanary%08x" % rng.getrandbits(32)
     prose = _Prose(rng, canary)
 
     def key_in(where: str) -> str | None:
         return ticket if (ticket and placement == where) else None
 
-    branch_ticket = key_in("branch")
+    branch_ticket = ticket if listed == "branch" else None
     branch_slug = f"{rng.choice(['feature', 'bugfix', 'chore'])}/{(branch_ticket + '-') if branch_ticket else ''}{rng.choice(NOUNS)}-{rng.choice(NOUNS)}"
-    title_ticket = key_in("title")
+    title_ticket = ticket if listed == "title" else None
     desc_ticket = key_in("description")
 
     # Business-minute clock: a PR starts at a random point in the quarter and

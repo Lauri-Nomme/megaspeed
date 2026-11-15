@@ -13,6 +13,8 @@ import re
 import tomllib
 from pathlib import Path
 
+from .progress import DEFAULT_INTERVAL as DEFAULT_PROGRESS_INTERVAL
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = REPO_ROOT / "ingest" / "config.toml"
 
@@ -60,6 +62,14 @@ class Config:
     auth_user: str = ""
     auth_token: str = ""
     auth_password: str = ""
+    #: Filter on the cheap PR-list fields (title + source branch + description)
+    #: before paying for any per-PR request (prd/14 §1). Off = the old "fetch
+    #: commits for every PR, then filter" path, kept as an escape hatch for a
+    #: source whose conventions differ (``MEGASPEED_PREFILTER=0`` /
+    #: ``--no-prefilter``).
+    prefilter: bool = True
+    #: Seconds between progress lines on stderr; 0 disables (prd/14).
+    progress_interval: float = 30.0
 
     @property
     def live(self) -> bool:
@@ -101,6 +111,18 @@ def parse_projects(value: str | list | tuple) -> tuple[str, ...]:
 def _parse_slugs(value: str | list | tuple) -> tuple[str, ...]:
     items = value if isinstance(value, (list, tuple)) else str(value).split(",")
     return tuple(dict.fromkeys(str(i).strip().lower() for i in items if str(i).strip()))
+
+
+_FALSE = frozenset({"0", "false", "no", "off"})
+
+
+def _env_flag(value, default: bool = True) -> bool:
+    """TOML bool / env string -> bool (``MEGASPEED_PREFILTER=0`` turns it off)."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in _FALSE
 
 
 def load_config(path: str | os.PathLike[str] | None = None) -> Config:
@@ -166,6 +188,10 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         auth_user=os.environ.get("MEGASPEED_BB_USER", ""),
         auth_token=os.environ.get("MEGASPEED_BB_TOKEN", ""),
         auth_password=os.environ.get("MEGASPEED_BB_PASSWORD", ""),
+        prefilter=_env_flag(os.environ.get("MEGASPEED_PREFILTER"), filt.get("prefilter", True)),
+        progress_interval=float(
+            os.environ.get("MEGASPEED_PROGRESS_INTERVAL", DEFAULT_PROGRESS_INTERVAL)
+        ),
     )
     if not config.repos:
         raise SystemExit(
