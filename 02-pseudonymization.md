@@ -98,7 +98,10 @@ stringly-typed beyond keys and pseudonyms.
 
 ## Deterministic classification first, LLM second
 
-The default is **no LLM**. LLMs are for natural-language signals only:
+The **local cheap LLM is the component that does *raw → generalised
+classification***: it reads raw content locally and emits only labels from the
+closed vocabulary. But it is used for natural-language signals **only** — the
+default is **no LLM** wherever a deterministic method exists:
 
 | Signal | Method |
 | --- | --- |
