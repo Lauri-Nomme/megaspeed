@@ -158,6 +158,60 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .status.live::before { background: var(--healthy); }
 .status.stale::before { background: var(--warning); }
 
+/* --- tenant switcher (prd/12): the dataset the whole app is talking to ---
+ * A workspace-style pill, not a <select>: the active dataset is context, and
+ * its PR/event counts are what tell two environments apart at a glance.
+ */
+.tenant { position: relative; display: inline-flex; }
+.tenant-pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  height: 24px; padding: 0 9px 0 9px;
+  border-radius: var(--radius-pill);
+  background: var(--primary-tint-bg);
+  border: 1px solid rgba(104, 192, 252, .28);
+  color: var(--primary-tint-fg);
+  font-size: 11.5px;
+}
+.tenant-pill:hover { background: #22384f; border-color: rgba(104, 192, 252, .45); }
+.tenant-pill.empty { background: var(--bg-control); border-color: var(--border-control); color: var(--text-secondary); }
+.tenant-key {
+  font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
+  color: rgba(104, 192, 252, .72);
+}
+.tenant-pill.empty .tenant-key { color: var(--text-tertiary); }
+.tenant-name { font-weight: 600; letter-spacing: .01em; }
+.tenant-meta { color: var(--text-secondary); font-size: 10.5px; }
+.tenant-meta:empty { display: none; }
+.tenant-caret { font-size: 9px; color: var(--text-tertiary); line-height: 1; }
+
+.tenant-menu {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 30;
+  min-width: 300px; padding: 4px;
+  background: var(--popover-bg);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-popover);
+  box-shadow: var(--shadow-popover);
+}
+.tenant-menu[hidden] { display: none; }
+.tenant-menu button {
+  display: grid; grid-template-columns: minmax(72px, auto) 1fr 12px;
+  align-items: center; gap: 10px;
+  width: 100%; height: auto; padding: 5px 8px;
+  background: transparent; border: 0; border-radius: var(--radius-control);
+  text-align: left; font-size: 12px; white-space: nowrap;
+}
+.tenant-menu button:hover { background: var(--bg-hover); }
+.tenant-menu button.on { background: var(--bg-control-active); }
+.tenant-opt-name { font-weight: 600; color: var(--text-primary); }
+.tenant-opt-meta {
+  color: var(--text-secondary); font-size: 10.5px;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.tenant-opt-mark { color: var(--primary-tint-fg); font-size: 11px; }
+.tenant-menu .tenant-empty {
+  margin: 6px 8px; font-size: 11.5px; color: var(--text-secondary); line-height: 1.5;
+}
+
 /* --- sidebar ----------------------------------------------------------- */
 .sidebar {
   width: 180px;

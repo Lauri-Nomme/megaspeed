@@ -47,6 +47,9 @@ const TIMEFRAMES = {
 const state = {
   meta: null,
   stamp: '',
+  tenants: [],
+  tenant: null,
+  scopes: {},
   events: [],
   objects: [],
   counts: null,
@@ -151,6 +154,19 @@ function timeframeQuery() {
   return days ? `days=${days}` : '';
 }
 
+/* Every read is tenant-scoped (prd/12): the selected tenant is a query
+ * parameter, not a different server, so one tab can only ever see one dataset
+ * at a time and a switch is one refetch rather than a reload. */
+function tenantQuery() {
+  return state.tenant ? `tenant=${encodeURIComponent(state.tenant)}` : '';
+}
+
+function withTenant(url) {
+  const query = tenantQuery();
+  if (!query) return url;
+  return `${url}${url.includes('?') ? '&' : '?'}${query}`;
+}
+
 /** Keep the sticky table header / detail panel below the (wrapping) meta line. */
 function syncChromeHeight() {
   const meta = $('meta');
@@ -222,20 +238,142 @@ async function showPage(page) {
 async function ensureData(page) {
   const q = timeframeQuery();
   const stamp = state.meta ? state.meta.as_of : 'none';
+  const tenant = state.tenant || 'none';
   if (page === 'delivery' || page === 'overview') {
-    const key = `delivery:${state.timeframe}:${stamp}`;
-    if (!cached(key)) state.cache.set(key, await getJSON(`/api/delivery?${q}`));
+    const key = `delivery:${tenant}:${state.timeframe}:${stamp}`;
+    if (!cached(key)) state.cache.set(key, await getJSON(withTenant(`/api/delivery?${q}`)));
     state.delivery = cached(key);
   }
   if (page === 'blocking' || page === 'overview') {
-    const key = `blocking:${state.timeframe}:${state.blockingLevel}:${stamp}`;
-    if (!cached(key)) state.cache.set(key, await getJSON(`/api/blocking?level=${state.blockingLevel}&${q}`));
+    const key = `blocking:${tenant}:${state.timeframe}:${state.blockingLevel}:${stamp}`;
+    if (!cached(key)) state.cache.set(key, await getJSON(withTenant(`/api/blocking?level=${state.blockingLevel}&${q}`)));
     state.blocking = cached(key);
   }
   if (page === 'queue' || page === 'overview') {
-    const key = `queues:${state.timeframe}:${state.queueLevel}:${stamp}`;
-    if (!cached(key)) state.cache.set(key, await getJSON(`/api/queues?level=${state.queueLevel}&${q}`));
+    const key = `queues:${tenant}:${state.timeframe}:${state.queueLevel}:${stamp}`;
+    if (!cached(key)) state.cache.set(key, await getJSON(withTenant(`/api/queues?level=${state.queueLevel}&${q}`)));
     state.queues = cached(key);
+  }
+}
+
+// ------------------------------------------------------------------ tenants
+/* The tenant list is the server's `data/*.duckdb` directory, so a dataset that
+ * was just imported shows up here without a config edit. Each row carries its
+ * own PR/event counts: two environments with the same name pattern are only
+ * distinguishable by what is in them. */
+function currentTenant() {
+  return state.tenants.find((tenant) => tenant.name === state.tenant) || null;
+}
+
+function tenantSummary(tenant) {
+  if (!tenant) return '';
+  if (tenant.ok === false) return tenant.retryable ? 'ingest running' : 'unreadable';
+  return `${tenant.prs} PRs · ${tenant.events} events`;
+}
+
+function tenantTitle(tenant) {
+  if (!tenant) return 'dataset (tenant): one pseudonymised store per environment';
+  const store = String(tenant.store || '').replace(/\\/g, '/').split('/').slice(-2).join('/');
+  return `tenant ${tenant.name} — ${store}` +
+    (tenant.source ? ` · ${tenant.source}` : '') +
+    (tenant.last_ts ? ` · last event ${fmtDay(Date.parse(tenant.last_ts))}` : '');
+}
+
+async function loadTenants() {
+  const data = await getJSON('/api/tenants');
+  const list = Array.isArray(data.tenants) ? data.tenants : [];
+  state.tenants = list;
+  const names = new Set(list.map((tenant) => tenant.name));
+  if (!state.tenant || !names.has(state.tenant)) {
+    // No stored choice, or it was deleted: fall back to the server's default,
+    // which is the first tenant by name.
+    state.tenant = data.default && names.has(data.default)
+      ? data.default
+      : (list[0] ? list[0].name : null);
+  }
+  renderTenantSwitcher();
+  return list;
+}
+
+function renderTenantSwitcher() {
+  const tenant = currentTenant();
+  $('tenant-name').textContent = state.tenant || 'none';
+  $('tenant-meta').textContent = tenantSummary(tenant);
+  $('tenant-button').classList.toggle('empty', !tenant);
+  $('tenant-button').title = tenantTitle(tenant);
+  if (!$('tenant-menu').hidden) renderTenantMenu();
+}
+
+function renderTenantMenu() {
+  const menu = $('tenant-menu');
+  if (!state.tenants.length) {
+    menu.innerHTML = '<p class="tenant-empty">No datasets yet. An import lands in ' +
+      '<code>data/&lt;tenant&gt;.duckdb</code>; reload once it exists.</p>';
+    return;
+  }
+  menu.innerHTML = state.tenants.map((tenant) => `
+    <button type="button" role="menuitemradio" data-tenant="${esc(tenant.name)}"
+      aria-checked="${tenant.name === state.tenant}" class="${tenant.name === state.tenant ? 'on' : ''}"
+      title="${esc(tenantTitle(tenant))}">
+      <span class="tenant-opt-name mono">${esc(tenant.name)}</span>
+      <span class="tenant-opt-meta">${esc(tenantSummary(tenant))}</span>
+      <span class="tenant-opt-mark" aria-hidden="true">${tenant.name === state.tenant ? '✓' : ''}</span>
+    </button>`).join('');
+}
+
+function toggleTenantMenu(open) {
+  const menu = $('tenant-menu');
+  const next = open === undefined ? menu.hidden : Boolean(open);
+  if (next) renderTenantMenu();
+  menu.hidden = !next;
+  $('tenant-button').setAttribute('aria-expanded', String(next));
+  if (next) {
+    const first = menu.querySelector('button');
+    if (first) first.focus();
+  }
+}
+
+/** Drop every view's data so a stale row from another tenant cannot linger. */
+function resetTenantData() {
+  state.meta = null;
+  state.stamp = '';
+  state.events = [];
+  state.objects = [];
+  state.counts = null;
+  state.delivery = null;
+  state.blocking = null;
+  state.queues = null;
+  state.selection = null;
+  state.drawerEntity = null;
+  state.emptyReason = '';
+  state.cache.clear();
+  timeline.setData([], [], {});
+  blockingMap.setData({ nodes: [], edges: [] });
+  queueChart.setData({ streams: [], buckets: 1, window: { start: '', end: '' } });
+  $('nav-count').textContent = '—';
+}
+
+async function setTenant(name, { silent = false } = {}) {
+  if (!name) return;
+  toggleTenantMenu(false);
+  if (name === state.tenant && state.meta) return;
+  // Scope is per tenant (prd/12): pseudonyms are independent identity spaces,
+  // so a person scoped in one dataset means nothing in the next.
+  if (state.tenant) state.scopes[state.tenant] = state.scope;
+  state.tenant = name;
+  state.scope = state.scopes[name] || { kind: 'all', value: null, label: 'everything' };
+  resetTenantData();
+  closeDrawer();
+  renderTenantSwitcher();
+  renderScopeBanner();
+  saveUI();
+  setStatus(`loading ${name}…`, 'live');
+  await load({ force: true });
+  if (state.tenant !== name) return; // a later switch won
+  applyTimeframeToTimeline();
+  renderPage();
+  if (!silent && state.meta) {
+    setStatus(`live · ${state.events.length} events · ${name}`, 'live');
   }
 }
 
@@ -471,7 +609,9 @@ function storeLabel(meta) {
 
 function renderSourcesPage() {
   const meta = state.meta || {};
+  const tenant = currentTenant() || {};
   const rows = [
+    ['tenant', meta.tenant || state.tenant || '—'],
     ['store', storeLabel(meta)],
     ['source', meta.source || '—'],
     ['snapshot', meta.as_of ? `${fmtStamp(Date.parse(meta.as_of))} (${ageOf(meta.as_of)})` : '—'],
@@ -486,7 +626,13 @@ function renderSourcesPage() {
     `<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join('')}</dl>
     <p class="panel-note">The store holds ticket keys, PR ids, commit hashes, actor pseudonyms,
       timestamps and closed attribute labels only. No title, description, comment, message or diff
-      is stored, so no view can render one.</p>`;
+      is stored, so no view can render one.</p>
+    <p class="panel-note">A tenant is one dataset: <code>data/&lt;tenant&gt;.duckdb</code>. Tenants are
+      independent identity spaces — the same pseudonym in two datasets need not be the same person,
+      and no view joins across them.</p>` +
+    (state.tenants.length > 1
+      ? `<p class="panel-note">${state.tenants.length} datasets on this server${tenant.ok === false ? ' (this one is unreadable)' : ''}. Switch with the tenant pill in the top bar.</p>`
+      : '');
 }
 
 // --------------------------------------------------------------- selection
@@ -631,6 +777,14 @@ function scopedEvents() {
   return state.events.filter((event) => event.actor === state.scope.value);
 }
 
+/** A person scope is only meaningful inside one tenant's identity space. */
+function validateScope() {
+  if (state.scope.kind === 'person'
+      && !state.events.some((event) => event.actor === state.scope.value)) {
+    state.scope = { kind: 'all', value: null, label: 'everything' };
+  }
+}
+
 function scopedObjects(events) {
   if (state.scope.kind === 'all') return state.objects;
   if (state.scope.kind !== 'person') return state.objects;
@@ -690,18 +844,19 @@ function renderProvenance() {
   syncChromeHeight();
   const capped = state.objectCapped ? ` · objects capped at ${state.objects.length}` : '';
   $('provenance').textContent =
+    `${meta.tenant ? `${meta.tenant} · ` : ''}` +
     `Snapshot from ${ageOf(meta.as_of)}: ${meta.events} events, ${meta.prs} PRs, ${meta.commits} commits · ` +
     `${meta.source || 'unknown source'}, ${meta.prs_dropped} PRs without a ticket key dropped${capped}`;
   $('nav-count').textContent = `${meta.events} events · ${meta.prs} PRs`;
 }
 
-function setEmpty(reason) {
+function setEmpty(reason, hint) {
   state.emptyReason = reason || '';
   $('empty').hidden = !reason;
   if (reason) {
     $('empty').querySelector('p').textContent = reason;
     $('empty').querySelector('.muted').textContent =
-      'Run python3 -m ingest --fixture --n 50 and reload.';
+      hint || 'Run python3 -m ingest --fixture --n 50 and reload.';
   }
 }
 
@@ -762,7 +917,26 @@ async function load({ force = false } = {}) {
   const seq = ++loadSeq;
   let health;
   try {
-    health = await getJSON('/api/health');
+    await loadTenants();
+  } catch (err) {
+    setStatus('offline', 'stale');
+    $('provenance').textContent = err.status === 404
+      // A UI newer than the server it is served by (a long-running process
+      // started before tenants existed): say so instead of "404".
+      ? 'this server does not know about tenants yet — restart it, then reload'
+      : `could not reach the API: ${err.message}`;
+    return;
+  }
+  if (seq !== loadSeq) return;
+  if (!state.tenant) {
+    resetTenantData();
+    $('provenance').textContent = 'No datasets — import one into data/<tenant>.duckdb, then reload.';
+    setEmpty('No datasets yet.');
+    setStatus('no data', 'stale');
+    return;
+  }
+  try {
+    health = await getJSON(withTenant('/api/health'));
   } catch (err) {
     if (storeBusy(err)) {
       setStatus('ingest running — waiting for the store', 'stale');
@@ -773,6 +947,16 @@ async function load({ force = false } = {}) {
       $('provenance').textContent = err.body.error || 'store unavailable';
       setEmpty('No store yet.');
       setStatus('no store', 'stale');
+      return;
+    }
+    if (err.status === 404) {
+      // The tenant was deleted (or renamed) between the list and the read.
+      $('provenance').textContent = `dataset ${state.tenant} is gone — pick another dataset`;
+      setEmpty(`No dataset named ${state.tenant}.`);
+      setStatus('tenant missing', 'stale');
+      state.tenant = null;
+      try { await loadTenants(); } catch { /* offline: the store watcher retries */ }
+      if (state.tenant && seq === loadSeq) await load({ force: true });
       return;
     }
     setStatus('offline', 'stale');
@@ -789,7 +973,7 @@ async function load({ force = false } = {}) {
     return;
   }
 
-  const stamp = `${health.as_of || ''}|${health.events ?? ''}`;
+  const stamp = `${health.tenant || ''}|${health.as_of || ''}|${health.events ?? ''}`;
   if (!force && state.stamp === stamp && state.events.length) {
     // Same snapshot as last time (e.g. the store file was touched by a no-op
     // run): nothing to refetch, so nothing is refetched.
@@ -807,7 +991,7 @@ async function load({ force = false } = {}) {
   try {
     // Cheap first: window totals + activity histogram, no event rows.
     try {
-      state.counts = await getJSON('/api/events/counts?granularity=day');
+      state.counts = await getJSON(withTenant('/api/events/counts?granularity=day'));
     } catch (err) {
       if (storeBusy(err)) throw err;
       state.counts = null;
@@ -816,7 +1000,7 @@ async function load({ force = false } = {}) {
 
     state.events = [];
     state.eventCapped = false;
-    const events = await pageAll('/api/events', EVENT_PAGE, EVENT_MAX, async (page, loaded, total) => {
+    const events = await pageAll(withTenant('/api/events'), EVENT_PAGE, EVENT_MAX, async (page, loaded, total) => {
       if (seq !== loadSeq) return true;
       state.events.push(...page);
       state.eventCapped = loaded < total;
@@ -833,7 +1017,7 @@ async function load({ force = false } = {}) {
     state.eventCapped = events.loaded < events.total;
 
     state.objects = [];
-    const objects = await pageAll('/api/objects', OBJECT_PAGE, OBJECT_MAX, async (page) => {
+    const objects = await pageAll(withTenant('/api/objects'), OBJECT_PAGE, OBJECT_MAX, async (page) => {
       if (seq !== loadSeq) return true;
       state.objects.push(...page);
       return false;
@@ -853,9 +1037,22 @@ async function load({ force = false } = {}) {
   }
 
   state.cache.clear();
+  validateScope();
+  // A tenant with an empty store is a reachable screen (the switcher lists it),
+  // so say why it is empty instead of drawing a blank timeline.
+  if (state.events.length) {
+    setEmpty('');
+  } else {
+    setEmpty(
+      `Dataset ${state.tenant} holds no events.`,
+      `Nothing has been imported into data/${state.tenant}.duckdb yet, or that import is empty. ` +
+        'Switch datasets with the tenant pill in the top bar.',
+    );
+  }
   applyScopeToTimeline();
   if (previousView) timeline.restoreView(previousView);
   buildScopeOptions();
+  renderTenantSwitcher();
   renderProvenance();
   renderLegend();
   renderPhaseLegend();
@@ -1062,10 +1259,12 @@ window.__megaspeed = {
   blockingMap,
   queueChart,
   get state() { return state; },
+  get tenants() { return state.tenants; },
   refresh: load,
   setPage: showPage,
   setScope,
   setTimeframe,
+  setTenant,
   setLanes: (dim) => { $('lanes').value = dim; timeline.setLanes(dim); renderPhaseLegend(); },
   setDensity,
   stamp: fmtStamp,
@@ -1131,6 +1330,16 @@ document.addEventListener('click', async (event) => {
     return;
   }
   if (!event.target.closest('#menu')) closeMenu();
+  if (event.target.closest('#tenant-button')) {
+    toggleTenantMenu();
+    return;
+  }
+  const tenantOption = event.target.closest('#tenant-menu [data-tenant]');
+  if (tenantOption) {
+    await setTenant(tenantOption.dataset.tenant);
+    return;
+  }
+  if (!event.target.closest('#tenant-switcher')) toggleTenantMenu(false);
   if (event.target.closest('#delivery-copy')) {
     const data = state.delivery;
     const rows = data ? tabRows(data, state.tab).filter((row) => matchesScopeRow(row)) : [];
@@ -1207,6 +1416,7 @@ document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape') {
     closeDrawer();
     closeMenu();
+    toggleTenantMenu(false);
     return;
   }
   if (event.key !== 'Enter' && event.key !== ' ') return;
@@ -1250,6 +1460,9 @@ function saveUI() {
       queueLevel: state.queueLevel,
       activity: [...timeline.activityState.entries()],
       scope: state.scope,
+      tenant: state.tenant,
+      // scope is per tenant (prd/12): remember each dataset's own lens
+      scopes: state.scopes,
     }));
   } catch { /* private mode: not worth a banner */ }
 }
@@ -1261,6 +1474,14 @@ function restoreUI() {
     setDensity('M');
     return;
   }
+  // The tenant must be restored before anything reads state.scope: the scope
+  // stored at the top level belongs to that dataset.
+  if (typeof stored.tenant === 'string' && stored.tenant) state.tenant = stored.tenant;
+  if (stored.scopes && typeof stored.scopes === 'object') {
+    for (const [name, scope] of Object.entries(stored.scopes)) {
+      if (scope && scope.kind) state.scopes[name] = scope;
+    }
+  }
   if (PAGES[stored.page]) state.page = stored.page;
   if (TIMEFRAMES[stored.timeframe]) state.timeframe = stored.timeframe;
   if (stored.tab) state.tab = stored.tab;
@@ -1271,7 +1492,10 @@ function restoreUI() {
   if (Array.isArray(stored.activity)) {
     for (const [activity, value] of stored.activity) timeline.setActivityState(activity, value);
   }
-  if (stored.scope && stored.scope.kind) {
+  const scoped = state.tenant && state.scopes[state.tenant];
+  if (scoped && scoped.kind) {
+    state.scope = scoped;
+  } else if (stored.scope && stored.scope.kind) {
     state.scope = stored.scope;
   }
   if (stored.density) setDensity(stored.density);

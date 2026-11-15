@@ -10,6 +10,16 @@
 <div class="app" id="app">
   <header class="topbar">
     <span class="brand">megaspeed</span>
+    <div class="tenant" id="tenant-switcher">
+      <button type="button" class="tenant-pill" id="tenant-button" aria-haspopup="menu"
+              aria-expanded="false" title="dataset (tenant): one pseudonymised store per environment">
+        <span class="tenant-key">tenant</span>
+        <span class="tenant-name" id="tenant-name">—</span>
+        <span class="tenant-meta" id="tenant-meta"></span>
+        <span class="tenant-caret" aria-hidden="true">▾</span>
+      </button>
+      <div class="tenant-menu" id="tenant-menu" role="menu" aria-label="datasets (tenants)" hidden></div>
+    </div>
     <label class="ctx"><span class="ctx-k">scope</span>
       <select id="scope" aria-label="scope everything by person or queue"></select>
     </label>

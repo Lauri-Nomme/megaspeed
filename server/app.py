@@ -4,15 +4,24 @@ Read-only over the pseudonymised store: there is no write path, no credential,
 and no import of anything under ``ingest/`` except the schema guard's read
 helpers. If the UI cannot leak raw text, it cannot leak raw text by accident.
 
-    GET  /api/health                    store status + provenance summary
+**Tenants** (prd/12): one dataset per ``<tenants-dir>/<tenant>.duckdb``. The
+list is the directory itself (no registry file to drift), and every read
+endpoint takes an optional ``?tenant=<name>`` that selects the store; without
+it the first tenant (or ``MEGASPEED_TENANT``/``MEGASPEED_DB``) is used. An
+unknown name is a clean 404 that lists the real ones — never a fallback to
+another dataset, because silently answering about the wrong environment is the
+one failure this whole feature exists to prevent.
+
+    GET  /api/tenants                   datasets + per-tenant health
+    GET  /api/health?tenant=            store status + provenance summary
     GET  /api/events?from=&to=&repo=&actor=&ticket=&activity=&pr_id=
-                     &limit=&offset=&order=          pseudonymised event log
-    GET  /api/events/counts?granularity=&…             histogram + window totals
-    GET  /api/objects?type=&repo=&pr_id=&actor=&ticket=&limit=&offset=
+                     &limit=&offset=&order=&tenant=   pseudonymised event log
+    GET  /api/events/counts?granularity=&…&tenant=      histogram + window totals
+    GET  /api/objects?type=&repo=&pr_id=&actor=&ticket=&limit=&offset=&tenant=
                                                         PR / COMMIT / TICKET / … objects
-    GET  /api/blocking?level=&days=     wait-hours handover graph (prd/05)
-    GET  /api/queues?level=&days=       per-person WIP / throughput series
-    GET  /api/delivery?days=            triage list: blocked / oldest waiting
+    GET  /api/blocking?level=&days=&tenant=   wait-hours handover graph (prd/05)
+    GET  /api/queues?level=&days=&tenant=     per-person WIP / throughput series
+    GET  /api/delivery?days=&tenant=          triage list: blocked / oldest waiting
     GET  /ws                            harness websocket (hello/changed/eval)
     POST /api/eval        {code, timeout}
     POST /api/screenshot  {selector, out, timeout}
@@ -22,6 +31,9 @@ Every query parameter is either honoured or rejected with a 400 that lists the
 valid ones — a filter is never silently ignored (BUG-13). Malformed bodies are
 400 JSON, never a traceback (BUG-08). A store that an ingest run is writing is
 a retryable 503 with no path / PID / username in it (BUG-07).
+
+The paged endpoints echo the dataset they answered from in ``X-Tenant`` (next to
+``X-Total-Count``), so a client can prove which store a row came from.
 """
 
 from __future__ import annotations
@@ -45,7 +57,19 @@ from fastapi.staticfiles import StaticFiles
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 APP_DIR = Path(os.environ.get("MEGASPEED_APP_DIR", REPO_ROOT / "app")).resolve()
-DB_PATH = Path(os.environ.get("MEGASPEED_DB", REPO_ROOT / "data" / "megaspeed.duckdb")).resolve()
+
+# The store MEGASPEED_DB names is the *default tenant*: its directory is the
+# tenant directory and its stem is the preferred tenant name. With no env at
+# all, the default is the first ``data/*.duckdb`` by name.
+_ENV_DB = os.environ.get("MEGASPEED_DB")
+DB_PATH = Path(_ENV_DB or (REPO_ROOT / "data" / "megaspeed.duckdb")).resolve()
+TENANTS_DIR = Path(os.environ.get("MEGASPEED_TENANTS_DIR", DB_PATH.parent)).resolve()
+DEFAULT_TENANT = (
+    os.environ.get("MEGASPEED_TENANT") or (DB_PATH.stem if _ENV_DB else "")
+).strip()
+
+# The one extra query parameter every read endpoint accepts (prd/12).
+TENANT_PARAM = "tenant"
 
 # Screenshots may only ever be written *inside* this directory (BUG-08).
 SHOT_DIR = Path(
@@ -61,6 +85,7 @@ from analysis import ballcourt as analyse  # noqa: E402  (read-only projections)
 from ingest import store as pstore  # noqa: E402  (read helpers + schema guard only)
 from ingest import taxonomy  # noqa: E402  (closed vocabularies, read-only)
 from server import query as query  # noqa: E402  (filters, paging, aggregation)
+from server import tenants as tenantreg  # noqa: E402  (tenant = data/<name>.duckdb)
 from server.harness import BrowserBridge  # noqa: E402
 
 bridge = BrowserBridge()
@@ -69,7 +94,8 @@ LOG = os.environ.get("MEGASPEED_QUIET", "") not in ("1", "true")
 
 # Reconstructing the interval timeline is cheap (one pass over the log) but the
 # three analysis views ask for it on every page switch, so keep the last build
-# for the current store stamp. Read-only; a store change invalidates it.
+# for the current (tenant, store version). Read-only; a store change or a tenant
+# switch invalidates it.
 _analysis_lock = threading.Lock()
 _analysis_cache: tuple[tuple, object] | None = None
 
@@ -92,7 +118,7 @@ def _is_lock_error(exc: Exception) -> bool:
 
 
 @contextlib.contextmanager
-def store_conn():
+def store_conn(path: Path | None = None):
     """One short-lived read-only DuckDB connection per request.
 
     DuckDB allows many readers *or* one writer, so an ingest run makes every
@@ -101,12 +127,13 @@ def store_conn():
     caller a :class:`StoreBusy` (a clean, retryable 503) instead of DuckDB's raw
     message — which names the store path, the PID and the OS user.
     """
-    if not DB_PATH.exists():
-        raise FileNotFoundError(str(DB_PATH))
+    target = Path(path) if path is not None else DB_PATH
+    if not target.exists():
+        raise FileNotFoundError(target.name)
     con = None
     for attempt in range(STORE_RETRY_ATTEMPTS):
         try:
-            con = pstore.connect(DB_PATH, read_only=True)
+            con = pstore.connect(target, read_only=True)
             break
         except Exception as exc:  # noqa: BLE001
             if not _is_lock_error(exc):
@@ -122,19 +149,22 @@ def store_conn():
 
 
 def _missing_store() -> JSONResponse:
-    # The file name, not the absolute path: an error body is not the place to
-    # publish the server's home directory (BUG-07 / BUG-08).
+    # The directory name, not the absolute path: an error body is not the place
+    # to publish the server's home directory (BUG-07 / BUG-08).
     return JSONResponse(
         status_code=503,
         content={
             "ok": False,
-            "error": f"no store at {DB_PATH.name}",
-            "hint": "run: python3 -m ingest --fixture --n 50",
+            "error": f"no tenant stores in {TENANTS_DIR.name}/",
+            "hint": "run: python3 -m ingest --fixture --n 50 (writes data/megaspeed.duckdb), "
+                    "or drop a store in as data/<tenant>.duckdb",
         },
     )
 
 
 def _store_error(exc: Exception) -> JSONResponse:
+    if isinstance(exc, FileNotFoundError):
+        return _missing_store()
     if isinstance(exc, StoreBusy):
         return JSONResponse(
             status_code=503,
@@ -241,23 +271,155 @@ async def _unhandled(request: Request, exc: Exception):
 
 
 # --------------------------------------------------------------------------- #
+# tenants (prd/12): which store answers this request
+# --------------------------------------------------------------------------- #
+class UnknownTenant(LookupError):
+    """The request named a tenant that is not a store in the tenant directory."""
+
+
+def _tenant_paths() -> dict[str, Path]:
+    """Every tenant, derived from the directory (no registry file to drift)."""
+    return tenantreg.discover(TENANTS_DIR)
+
+
+def _tenant_default(paths: dict[str, Path]) -> str | None:
+    return tenantreg.default_name(paths, DEFAULT_TENANT)
+
+
+def _tenant_of(request: Request) -> tuple[str, Path]:
+    """The (name, store) this request reads.
+
+    ``?tenant=`` names one explicitly; otherwise the default tenant answers. A
+    name that is not a store in the directory raises :class:`UnknownTenant` —
+    the caller turns that into a 404 rather than quietly reading another
+    dataset, because answering about the wrong environment is exactly the
+    mistake tenants exist to prevent.
+    """
+    paths = _tenant_paths()
+    raw = request.query_params.get(TENANT_PARAM)
+    if raw is None or raw == "":
+        name = _tenant_default(paths)
+        if name is None:
+            raise UnknownTenant("")
+        return name, paths[name]
+    if raw not in paths:
+        raise UnknownTenant(raw)
+    return raw, paths[raw]
+
+
+def _tenant_error(name: str) -> JSONResponse:
+    """404 for an unknown tenant; 503 when there are no tenants at all."""
+    if not name:
+        return _missing_store()
+    return JSONResponse(
+        status_code=404,
+        content={
+            "ok": False,
+            "error": f"unknown tenant {name!r}",
+            "valid": sorted(_tenant_paths()),
+            "hint": "a tenant is one store: data/<tenant>.duckdb",
+        },
+    )
+
+
+def _params(*groups: tuple[str, ...]) -> tuple[str, ...]:
+    """An endpoint's own parameters plus the tenant selector."""
+    out: list[str] = []
+    for group in groups:
+        out.extend(group)
+    return (*out, TENANT_PARAM)
+
+
+def _file_stamp(path: Path):
+    """Cheap identity for a store file: any rewrite (or touch) changes it."""
+    try:
+        st = Path(path).stat()
+        return (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+# Per-tenant health is recomputed only when the file changes; a busy store is
+# never cached, so its row recovers as soon as the ingest run finishes.
+_health_lock = threading.Lock()
+_health_cache: dict[str, tuple] = {}
+
+
+def _tenant_health(path: Path) -> dict:
+    stamp = _file_stamp(path)
+    with _health_lock:
+        hit = _health_cache.get(str(path))
+    if hit is not None and hit[0] == stamp:
+        return hit[1]
+    try:
+        with store_conn(path) as con:
+            summary = pstore.summary(con)
+        payload = {
+            "ok": True,
+            "events": summary["events"],
+            "prs": summary["prs"],
+            "commits": summary["commits"],
+            "source": summary["source"],
+            "as_of": summary["as_of"],
+            "first_ts": summary["first_ts"],
+            "last_ts": summary["last_ts"],
+        }
+    except StoreBusy:
+        return {"ok": False, "error": "the store is being written right now", "retryable": True}
+    except FileNotFoundError:
+        return {"ok": False, "error": "the store file is gone"}
+    except Exception as exc:  # noqa: BLE001 - one bad store must not hide the rest
+        if LOG:
+            print(f"megaspeed: tenant probe failed: {type(exc).__name__}", file=sys.stderr)
+        return {"ok": False, "error": "store read failed", "reason": type(exc).__name__}
+    with _health_lock:
+        _health_cache[str(path)] = (stamp, payload)
+    return payload
+
+
+# --------------------------------------------------------------------------- #
 # read API
 # --------------------------------------------------------------------------- #
-@app.get("/api/health")
-def health(request: Request):
+@app.get("/api/tenants")
+def tenants(request: Request):
+    """Every dataset this server can read, with its health (prd/12).
+
+    ``default`` is the tenant that answers a request without ``?tenant=`` — the
+    UI uses it when nothing is remembered. Each entry carries enough to label a
+    switcher row honestly (PRs, events, source) without opening a second
+    connection per page.
+    """
     unknown = _unknown_params(request, ())
     if unknown is not None:
         return unknown
-    if not DB_PATH.exists():
-        return _missing_store()
+    paths = _tenant_paths()
+    default = _tenant_default(paths)
+    rows = []
+    for name, path in paths.items():
+        entry = {"name": name, "default": name == default, "store": str(path)}
+        entry.update(_tenant_health(path))
+        rows.append(entry)
+    return {"ok": True, "default": default, "count": len(rows), "tenants": rows}
+
+
+@app.get("/api/health")
+def health(request: Request):
+    unknown = _unknown_params(request, _params(()))
+    if unknown is not None:
+        return unknown
     try:
-        with store_conn() as con:
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    try:
+        with store_conn(path) as con:
             summary = pstore.summary(con)
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
     return {
         "ok": True,
-        "store": str(DB_PATH),
+        "tenant": tenant,
+        "store": str(path),
         "app": "megaspeed",
         "version": app.version,
         "browsers": bridge.clients,
@@ -274,7 +436,7 @@ def events(request: Request):
     real: ``repo``, ``actor``, ``activity``, ``ticket`` and ``pr_id`` are
     applied in SQL, and anything not listed is a 400 (BUG-13).
     """
-    unknown = _unknown_params(request, query.EVENT_PARAMS)
+    unknown = _unknown_params(request, _params(query.EVENT_PARAMS))
     if unknown is not None:
         return unknown
     try:
@@ -285,7 +447,7 @@ def events(request: Request):
         offset = _int_param(request, "offset", default=0, minimum=0, maximum=1_000_000_000)
         pr_id = _int_param(request, "pr_id", default=None, minimum=0)
     except ValueError as exc:
-        return _bad_request(str(exc), valid=sorted(query.EVENT_PARAMS))
+        return _bad_request(str(exc), valid=sorted(_params(query.EVENT_PARAMS)))
     activity = request.query_params.get("activity") or None
     if activity is not None and activity not in taxonomy.ACTIVITIES:
         return _bad_request(
@@ -295,10 +457,12 @@ def events(request: Request):
     order = (request.query_params.get("order") or "asc").lower()
     if order not in ("asc", "desc"):
         return _bad_request("order must be 'asc' or 'desc'", valid=["asc", "desc"])
-    if not DB_PATH.exists():
-        return _missing_store()
     try:
-        with store_conn() as con:
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    try:
+        with store_conn(path) as con:
             rows, total = query.list_events(
                 con, start, end, limit, offset or 0, order,
                 repo=request.query_params.get("repo") or None,
@@ -315,6 +479,7 @@ def events(request: Request):
             "X-Total-Count": str(total),
             "X-Limit": str(limit or total),
             "X-Offset": str(offset or 0),
+            "X-Tenant": tenant,
         },
     )
 
@@ -322,7 +487,7 @@ def events(request: Request):
 @app.get("/api/events/counts")
 def event_counts(request: Request):
     """Per-bucket event counts plus window totals — no per-event rows (GAP-04)."""
-    unknown = _unknown_params(request, query.COUNT_PARAMS)
+    unknown = _unknown_params(request, _params(query.COUNT_PARAMS))
     if unknown is not None:
         return unknown
     try:
@@ -331,18 +496,20 @@ def event_counts(request: Request):
         )
         pr_id = _int_param(request, "pr_id", default=None, minimum=0)
     except ValueError as exc:
-        return _bad_request(str(exc), valid=sorted(query.COUNT_PARAMS))
+        return _bad_request(str(exc), valid=sorted(_params(query.COUNT_PARAMS)))
     activity = request.query_params.get("activity") or None
     if activity is not None and activity not in taxonomy.ACTIVITIES:
         return _bad_request(
             f"activity {activity!r} is outside the closed vocabulary",
             valid=sorted(taxonomy.ACTIVITIES),
         )
-    if not DB_PATH.exists():
-        return _missing_store()
     try:
-        with store_conn() as con:
-            return query.event_counts(
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    try:
+        with store_conn(path) as con:
+            counts = query.event_counts(
                 con, start, end,
                 request.query_params.get("granularity") or "day",
                 repo=request.query_params.get("repo") or None,
@@ -355,12 +522,13 @@ def event_counts(request: Request):
         return _bad_request(str(exc), valid=sorted(query.GRANULARITIES))
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
+    return {**counts, "tenant": tenant}
 
 
 @app.get("/api/objects")
 def objects(request: Request):
     """A page of the object table; filterable by type/repo/pr_id/actor/ticket."""
-    unknown = _unknown_params(request, query.OBJECT_PARAMS)
+    unknown = _unknown_params(request, _params(query.OBJECT_PARAMS))
     if unknown is not None:
         return unknown
     object_type = request.query_params.get("type") or None
@@ -374,11 +542,13 @@ def objects(request: Request):
         limit = _int_param(request, "limit", default=None, minimum=1, maximum=200_000)
         offset = _int_param(request, "offset", default=0, minimum=0, maximum=1_000_000_000)
     except ValueError as exc:
-        return _bad_request(str(exc), valid=sorted(query.OBJECT_PARAMS))
-    if not DB_PATH.exists():
-        return _missing_store()
+        return _bad_request(str(exc), valid=sorted(_params(query.OBJECT_PARAMS)))
     try:
-        with store_conn() as con:
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    try:
+        with store_conn(path) as con:
             rows, total = query.list_objects(
                 con,
                 object_type=object_type,
@@ -393,23 +563,33 @@ def objects(request: Request):
         return _store_error(exc)
     return JSONResponse(
         rows,
-        headers={"X-Total-Count": str(total), "X-Limit": str(limit or total), "X-Offset": str(offset or 0)},
+        headers={
+            "X-Total-Count": str(total),
+            "X-Limit": str(limit or total),
+            "X-Offset": str(offset or 0),
+            "X-Tenant": tenant,
+        },
     )
 
 
 # --------------------------------------------------------------------------- #
 # analysis views (prd/05): read-only projections of the same event log
 # --------------------------------------------------------------------------- #
-def _ballcourt(con):
-    """Reconstruct the interval timeline once per store version."""
+def _ballcourt(con, tenant: str, path: Path):
+    """Reconstruct the interval timeline once per (tenant, store version).
+
+    One entry, not a dict: switching tenants rebuilds, but page switches within
+    a tenant never do. The stamp is per file, so another tenant's ingest run
+    cannot invalidate this one.
+    """
     global _analysis_cache
-    stamp = _stamp()
+    key = (tenant, _file_stamp(path))
     with _analysis_lock:
-        if _analysis_cache is not None and _analysis_cache[0] == stamp:
+        if _analysis_cache is not None and _analysis_cache[0] == key:
             return _analysis_cache[1]
     court = analyse.load(con)
     with _analysis_lock:
-        _analysis_cache = (stamp, court)
+        _analysis_cache = (key, court)
     return court
 
 
@@ -435,19 +615,21 @@ ANALYSIS_PARAMS = {
 @app.get("/api/blocking")
 def blocking(request: Request):
     """Weighted directed handover graph: ``X -> Y`` = X waited on Y for N hours."""
-    unknown = _unknown_params(request, ANALYSIS_PARAMS["blocking"])
+    unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["blocking"]))
     if unknown is not None:
         return unknown
     try:
         days = _num_param(request, "days", minimum=0, maximum=3650)
         level = _level(request.query_params.get("level") or "queue")
     except ValueError as exc:
-        return _bad_request(str(exc), valid=list(ANALYSIS_PARAMS["blocking"]))
-    if not DB_PATH.exists():
-        return _missing_store()
+        return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["blocking"])))
     try:
-        with store_conn() as con:
-            court = _ballcourt(con)
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    try:
+        with store_conn(path) as con:
+            court = _ballcourt(con, tenant, path)
             window = analyse.window_from_events(court, _days(days))
             return analyse.blocking_graph(court, level, window)
     except Exception as exc:  # noqa: BLE001
@@ -457,7 +639,7 @@ def blocking(request: Request):
 @app.get("/api/queues")
 def queues(request: Request):
     """Per-person / per-queue WIP over time, arrivals and completions."""
-    unknown = _unknown_params(request, ANALYSIS_PARAMS["queues"])
+    unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["queues"]))
     if unknown is not None:
         return unknown
     try:
@@ -465,12 +647,14 @@ def queues(request: Request):
         bucket_hours = _num_param(request, "bucket_hours", minimum=1, maximum=720)
         level = _level(request.query_params.get("level") or "person")
     except ValueError as exc:
-        return _bad_request(str(exc), valid=list(ANALYSIS_PARAMS["queues"]))
-    if not DB_PATH.exists():
-        return _missing_store()
+        return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["queues"])))
     try:
-        with store_conn() as con:
-            court = _ballcourt(con)
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    try:
+        with store_conn(path) as con:
+            court = _ballcourt(con, tenant, path)
             window = analyse.window_from_events(court, _days(days))
             return analyse.queue_series(court, level, window, bucket_hours)
     except Exception as exc:  # noqa: BLE001
@@ -480,18 +664,20 @@ def queues(request: Request):
 @app.get("/api/delivery")
 def delivery(request: Request):
     """Triage list: open PRs, what they wait on, and for how long."""
-    unknown = _unknown_params(request, ANALYSIS_PARAMS["delivery"])
+    unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["delivery"]))
     if unknown is not None:
         return unknown
     try:
         days = _num_param(request, "days", minimum=0, maximum=3650)
     except ValueError as exc:
-        return _bad_request(str(exc), valid=list(ANALYSIS_PARAMS["delivery"]))
-    if not DB_PATH.exists():
-        return _missing_store()
+        return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["delivery"])))
     try:
-        with store_conn() as con:
-            court = _ballcourt(con)
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    try:
+        with store_conn(path) as con:
+            court = _ballcourt(con, tenant, path)
             window = analyse.window_from_events(court, _days(days))
             return analyse.delivery_list(court, window)
     except Exception as exc:  # noqa: BLE001
@@ -657,22 +843,26 @@ async def websocket(ws: WebSocket):
 
 
 async def _watch_store() -> None:
-    """Poll the store mtime; tell connected browsers that data changed."""
-    last = _stamp()
+    """Poll every tenant's store; tell connected browsers which ones changed.
+
+    Polling the directory rather than a fixed file is what makes a newly
+    imported tenant appear (and a deleted one disappear) without a restart.
+    """
+    last = _all_stamps()
     while True:
         await asyncio.sleep(1.0)
-        stamp = _stamp()
-        if stamp != last:
-            last = stamp
-            await bridge.broadcast({"event": "changed", "store": str(DB_PATH)})
+        stamps = _all_stamps()
+        if stamps != last:
+            changed = sorted(name for name in stamps if stamps.get(name) != last.get(name))
+            removed = sorted(name for name in last if name not in stamps)
+            last = stamps
+            await bridge.broadcast(
+                {"event": "changed", "tenants": changed, "removed": removed}
+            )
 
 
-def _stamp():
-    try:
-        st = DB_PATH.stat()
-        return (st.st_mtime_ns, st.st_size)
-    except OSError:
-        return None
+def _all_stamps() -> dict:
+    return {name: _file_stamp(path) for name, path in _tenant_paths().items()}
 
 
 if APP_DIR.exists():
