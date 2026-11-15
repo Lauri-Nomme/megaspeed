@@ -84,6 +84,13 @@ INSERT OR IGNORE INTO events
 VALUES (?, ?, ?, ?, ?, ?, CAST(? AS JSON), ?, ?, ?)
 """
 
+UPDATE_EVENT = """
+UPDATE events SET
+    ts = ?, activity = ?, actor = ?, repo = ?, pr_id = ?,
+    attributes = CAST(? AS JSON), classifier_version = ?, content_hash = ?, as_of = ?
+WHERE event_key = ?
+"""
+
 INSERT_REL = "INSERT OR IGNORE INTO event_objects (event_key, object_type, object_id) VALUES (?, ?, ?)"
 
 INSERT_OBJECT = """
@@ -100,8 +107,61 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
-def write_events(con, events: list[dict], relations: list[tuple[str, str, str]]) -> int:
-    if events:
+def _json_attr(value) -> dict:
+    if isinstance(value, str):
+        return json.loads(value or "{}")
+    return dict(value or {})
+
+
+def write_events(con, events: list[dict], relations: list[tuple[str, str, str]]) -> tuple[int, int]:
+    """Upsert events by natural key; return ``(inserted, updated)``.
+
+    A row is only rewritten when its content actually changed. That gives two
+    things the old ``INSERT OR IGNORE`` could not:
+
+    * derived attributes computed after the fact (``approvals_lost``) converge
+      on re-ingest instead of being frozen at whatever run saw the row first;
+    * bumping ``classifier_version`` and replaying the same raw source
+      re-derives every existing row (`prd/02`: reproducible/tunable).
+    """
+    if not events:
+        if relations:
+            con.executemany(INSERT_REL, relations)
+        return 0, 0
+
+    existing: dict[str, tuple] = {}
+    keys = [e["event_key"] for e in events]
+    for start in range(0, len(keys), 500):
+        chunk = keys[start : start + 500]
+        placeholders = ",".join("?" * len(chunk))
+        for row in con.execute(
+            "SELECT event_key, ts, activity, actor, repo, pr_id, CAST(attributes AS VARCHAR),"
+            f" classifier_version, content_hash FROM events WHERE event_key IN ({placeholders})",
+            chunk,
+        ).fetchall():
+            existing[row[0]] = row
+
+    inserts: list[dict] = []
+    updates: list[dict] = []
+    for event in events:
+        row = existing.get(event["event_key"])
+        if row is None:
+            inserts.append(event)
+            continue
+        changed = (
+            row[1] != event["ts"]
+            or row[2] != event["activity"]
+            or row[3] != event["actor"]
+            or row[4] != event["repo"]
+            or row[5] != event["pr_id"]
+            or _json_attr(row[6]) != event["attributes"]
+            or row[7] != event["classifier_version"]
+            or row[8] != event["content_hash"]
+        )
+        if changed:
+            updates.append(event)
+
+    if inserts:
         con.executemany(
             INSERT_EVENT,
             [
@@ -110,12 +170,41 @@ def write_events(con, events: list[dict], relations: list[tuple[str, str, str]])
                     json.dumps(e["attributes"], separators=(",", ":"), sort_keys=True),
                     e["classifier_version"], e["content_hash"], e["as_of"],
                 )
-                for e in events
+                for e in inserts
             ],
         )
-    if relations:
-        con.executemany(INSERT_REL, relations)
-    return len(events)
+    if updates:
+        con.executemany(
+            UPDATE_EVENT,
+            [
+                (
+                    e["ts"], e["activity"], e["actor"], e["repo"], e["pr_id"],
+                    json.dumps(e["attributes"], separators=(",", ":"), sort_keys=True),
+                    e["classifier_version"], e["content_hash"], e["as_of"], e["event_key"],
+                )
+                for e in updates
+            ],
+        )
+        # Objects attached to a rewritten event may have changed too (e.g. a
+        # merge commit that only a later ingest knows about).
+        stale = [e["event_key"] for e in updates]
+        for start in range(0, len(stale), 500):
+            chunk = stale[start : start + 500]
+            placeholders = ",".join("?" * len(chunk))
+            chunk_set = set(chunk)
+            con.execute(
+                f"DELETE FROM event_objects WHERE event_key IN ({placeholders})", chunk
+            )
+            con.executemany(
+                INSERT_REL,
+                [rel for rel in relations if rel[0] in chunk_set],
+            )
+
+    rewritten = {e["event_key"] for e in updates}
+    fresh_relations = [rel for rel in relations if rel[0] not in rewritten]
+    if fresh_relations:
+        con.executemany(INSERT_REL, fresh_relations)
+    return len(inserts), len(updates)
 
 
 def write_objects(con, objects: list[dict]) -> None:

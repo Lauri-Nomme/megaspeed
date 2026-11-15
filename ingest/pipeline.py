@@ -225,7 +225,7 @@ class Reducer:
                             [pr_object_id, *ticket_objects], {}, activity)
 
             elif action == "RESCOPED":
-                self._push(stats, pr, natural, ts, activity, actor, ordered, index,
+                self._push(stats, pr, natural, ts, activity, actor,
                            pr_object_id, ticket_objects)
                 approvals.clear()
                 pushed_since = True
@@ -286,7 +286,7 @@ class Reducer:
                             {"change": change}, activity,
                         )
                 if not changed and self._has_rescope(activity):
-                    self._push(stats, pr, natural, ts, activity, actor, ordered, index,
+                    self._push(stats, pr, natural, ts, activity, actor,
                                pr_object_id, ticket_objects)
                     approvals.clear()
                     pushed_since = True
@@ -330,9 +330,14 @@ class Reducer:
             # so an unknown label is a taxonomy task, never a free-text fallback.
 
     def _push(self, stats: Stats, pr: PullRequest, natural: str, ts: datetime, activity: dict,
-              actor: str, ordered: list[dict], index: int,
-              pr_object_id: str, ticket_objects: list[str]) -> None:
-        """RESCOPED (or a rescope-shaped UPDATED) -> pr_pushed."""
+              actor: str, pr_object_id: str, ticket_objects: list[str]) -> None:
+        """RESCOPED (or a rescope-shaped UPDATED) -> pr_pushed.
+
+        ``approvals_lost`` is deliberately *not* computed here: whether the push
+        cost an approval depends on events that may only arrive in a later
+        ingest run, so it is derived from the stored event log after writing
+        (see :func:`derive_approvals_lost`).
+        """
         added = (activity.get("added") or {}).get("commits") or []
         removed = (activity.get("removed") or {}).get("commits") or []
         patch = activity.get("megaspeedPatchId") or {}
@@ -343,7 +348,6 @@ class Reducer:
                 "push_class": patch.get("push_class") or "other",
                 "commits_added": len(added),
                 "commits_removed": len(removed),
-                "approvals_lost": self._approvals_lost_after(ordered, index),
             },
             activity,
         )
@@ -381,21 +385,138 @@ class Reducer:
                         seen.setdefault(str(commit["id"]), commit)
         return sorted(seen.values(), key=lambda c: (c.get("authorTimestamp") or 0, c.get("id") or ""))
 
-    @staticmethod
-    def _approvals_lost_after(activities: list[dict], index: int) -> bool:
-        """Did this push immediately cost approvals?
 
-        Deterministic look-ahead: an UNAPPROVED before any new approval on the
-        same push. This is the signal behind the "pure rebase lost approvals"
-        finding in prd/04.
-        """
-        for activity in activities[index + 1 :]:
-            action = activity.get("action")
-            if action == "UNAPPROVED":
-                return True
-            if action in ("APPROVED", "RESCOPED", "MERGED", "DECLINED", "COMMENTED", "NEEDS_WORK", "OPENED"):
-                return False
-        return False
+# --------------------------------------------------------------------------- #
+# derived attributes — recomputed over the *stored* log on every run
+# --------------------------------------------------------------------------- #
+# Events that end the window in which an approval can be attributed to a push.
+# A later approval, another push, merge/decline, or new dialogue means the push
+# did not itself cost an approval.
+APPROVAL_LOSS_BOUNDARIES = frozenset(
+    {
+        "pr_approved",
+        "pr_pushed",
+        "pr_merged",
+        "pr_declined",
+        "pr_needs_work",
+        "comment_added",
+        "pr_opened",
+    }
+)
+
+_ACTIVITY_ORDER = re.compile(r":act:(\d+)(?::(\w+?)(\d+))?$")
+
+
+def _event_order(event_key: str) -> tuple[int, str, int]:
+    """Tiebreak for events with the same timestamp.
+
+    Natural keys embed the DC activity id (``…:act:387``; reviewer changes add
+    ``:added0``), so ordering by it matches the order the activities happened in.
+    """
+    match = _ACTIVITY_ORDER.search(event_key or "")
+    if not match:
+        return (0, "", 0)
+    return (int(match.group(1)), match.group(2) or "", int(match.group(3) or 0))
+
+
+def derive_approvals_lost(events: list[dict]) -> dict[str, bool]:
+    """``event_key -> did this push cost an approval?`` over one PR's events.
+
+    Deterministic look-ahead in the closed vocabulary: an ``pr_unapproved``
+    before any other boundary event means the push itself lost the approval.
+    This is the signal behind the "pure rebase lost approvals" finding
+    (prd/04). It is computed from whatever the store *now* knows, so a re-run
+    after the UNAPPROVED arrives converges on the right answer.
+    """
+    ordered = sorted(events, key=lambda e: (e["ts"], _event_order(e["event_key"])))
+    out: dict[str, bool] = {}
+    for index, event in enumerate(ordered):
+        if event["activity"] != "pr_pushed":
+            continue
+        lost = False
+        for later in ordered[index + 1 :]:
+            if later["activity"] == "pr_unapproved":
+                lost = True
+                break
+            if later["activity"] in APPROVAL_LOSS_BOUNDARIES:
+                break
+        out[event["event_key"]] = lost
+    return out
+
+
+def fill_derived(con, events: list[dict]) -> None:
+    """Set derived attributes on *this run's* events before they are written.
+
+    The union of the stored log and the new events is the complete history for
+    the touched PRs, so the derivation can happen once, in memory. Doing it
+    before the write keeps re-runs true no-ops: the row a run writes is already
+    the converged row, so an unchanged PR is not rewritten on every ingest.
+    """
+    scope = {(e["repo"], e["pr_id"]) for e in events}
+    run_events = {(e["repo"], e["pr_id"], e["event_key"]): e for e in events}
+    for repo, pr_id in sorted(scope):
+        rows = con.execute(
+            "SELECT event_key, ts, activity, CAST(attributes AS VARCHAR) FROM events"
+            " WHERE repo = ? AND pr_id = ? ORDER BY ts ASC, event_key ASC",
+            [repo, pr_id],
+        ).fetchall()
+        union: dict[str, dict] = {
+            key: {"event_key": key, "ts": ts, "activity": activity,
+                  "attributes": json.loads(attrs or "{}")}
+            for key, ts, activity, attrs in rows
+        }
+        for (event_repo, event_pr, key), event in run_events.items():
+            if (event_repo, event_pr) != (repo, pr_id):
+                continue
+            union[key] = {
+                "event_key": key,
+                "ts": event["ts"],
+                "activity": event["activity"],
+                "attributes": event["attributes"],
+            }
+        for key, lost in derive_approvals_lost(list(union.values())).items():
+            event = run_events.get((repo, pr_id, key))
+            if event is not None:
+                event["attributes"]["approvals_lost"] = lost
+
+
+def recompute_derived(con, scope: set[tuple[str, int]]) -> int:
+    """Recompute derived attributes for the PRs touched by this run.
+
+    Scope is the (repo, pr_id) pairs the run emitted events for -- their event
+    history is complete in the store, so anything derived from look-ahead can be
+    re-derived exactly. Returns the number of rows rewritten. Normally 0: the
+    values were already converged by :func:`fill_derived` before the write; this
+    is the safety net for rows the reducer did not re-emit.
+    """
+    rewritten = 0
+    for repo, pr_id in sorted(scope):
+        rows = con.execute(
+            "SELECT event_key, ts, activity, CAST(attributes AS VARCHAR) FROM events"
+            " WHERE repo = ? AND pr_id = ? ORDER BY ts ASC, event_key ASC",
+            [repo, pr_id],
+        ).fetchall()
+        events = [
+            {
+                "event_key": key,
+                "ts": ts,
+                "activity": activity,
+                "attributes": json.loads(attrs or "{}"),
+            }
+            for key, ts, activity, attrs in rows
+        ]
+        by_key = {event["event_key"]: event for event in events}
+        for key, lost in derive_approvals_lost(events).items():
+            event = by_key[key]
+            if event["attributes"].get("approvals_lost") is lost:
+                continue
+            event["attributes"]["approvals_lost"] = lost
+            con.execute(
+                "UPDATE events SET attributes = CAST(? AS JSON) WHERE event_key = ?",
+                [json.dumps(event["attributes"], separators=(",", ":"), sort_keys=True), key],
+            )
+            rewritten += 1
+    return rewritten
 
 
 def _object(object_type: str, object_id: str, **kwargs) -> dict:
@@ -429,10 +550,13 @@ def run(cfg: Config, transport, source: str, limit: int | None = None) -> dict:
     stop = False
     for project, repo in cfg.repos:
         for pr in client.pull_requests(project, repo):
-            stats.prs_seen += 1
-            if limit is not None and stats.prs_seen > limit:
+            if limit is not None and stats.prs_seen >= limit:
                 stop = True
                 break
+            stats.prs_seen += 1
+            if pr.updated_ms:
+                stamp = to_naive_utc(pr.updated_ms)
+                stats.watermark = stamp if stats.watermark is None else max(stats.watermark, stamp)
             keys = reducer.key_filter.keys(
                 (pr.pr.get("fromRef") or {}).get("displayId"),
                 pr.pr.get("title"),
@@ -447,9 +571,6 @@ def run(cfg: Config, transport, source: str, limit: int | None = None) -> dict:
             # activities are fetched only for PRs that survived the filter
             pr.activities = list(client.iter_activities(project, repo, pr.id))
             reducer.reduce(pr, keys, pr.activities, stats)
-            if pr.updated_ms:
-                stamp = to_naive_utc(pr.updated_ms)
-                stats.watermark = stamp if stats.watermark is None else max(stats.watermark, stamp)
         if stop:
             break
 
@@ -461,8 +582,13 @@ def run(cfg: Config, transport, source: str, limit: int | None = None) -> dict:
     try:
         ensure_schema(con)
         before = con.execute("SELECT count(*) FROM events").fetchone()[0]
-        write_events(con, stats.events, stats.relations)
+        fill_derived(con, stats.events)
+        written, rewritten = write_events(con, stats.events, stats.relations)
         write_objects(con, stats.objects)
+        # Derived attributes are a function of the *whole* stored event log, not
+        # of this run's look-ahead: recompute them for every PR we touched so a
+        # fact that arrives in a later ingest rewrites the earlier events too.
+        derived = recompute_derived(con, {(e["repo"], e["pr_id"]) for e in stats.events})
         write_run(
             con,
             {
@@ -474,8 +600,8 @@ def run(cfg: Config, transport, source: str, limit: int | None = None) -> dict:
                 "prs_seen": stats.prs_seen,
                 "prs_kept": stats.prs_kept,
                 "prs_dropped": stats.prs_dropped,
-                "events_written": len(stats.events),
-                "events_skipped": 0,
+                "events_written": written,
+                "events_skipped": len(stats.events) - written,
             },
         )
         after = con.execute("SELECT count(*) FROM events").fetchone()[0]
@@ -496,6 +622,8 @@ def run(cfg: Config, transport, source: str, limit: int | None = None) -> dict:
         "prs_dropped": stats.prs_dropped,
         "events_emitted": len(stats.events),
         "events_new": int(after - before),
+        "events_rewritten": rewritten,
+        "events_derived": derived,
         "objects": len(stats.objects),
         "activities_by_action": dict(sorted(stats.activities_by_action.items())),
         "keys_by_placement": dict(sorted(stats.keys_by_placement.items())),

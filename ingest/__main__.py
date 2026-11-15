@@ -164,7 +164,10 @@ def _print_run(r: dict) -> None:
         f"PRs            {r['prs_seen']} seen -> {r['prs_kept']} kept, {r['prs_dropped']} dropped "
         f"(no ticket key)"
     )
-    print(f"events         {r['events_emitted']} emitted, {r['events_new']} new (idempotent by natural key)")
+    print(
+        f"events         {r['events_emitted']} emitted, {r['events_new']} new, "
+        f"{r['events_rewritten']} rewritten, {r['events_derived']} re-derived"
+    )
     print(f"objects        {r['objects']}")
     print(f"requests       {r['requests']}")
     placements = ", ".join(f"{k}={v}" for k, v in r["keys_by_placement"].items())

@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from .bitbucket import BitbucketClient
 from .config import Config
-from .pipeline import KeyFilter, Reducer, Stats
+from .pipeline import KeyFilter, Reducer, Stats, derive_approvals_lost
 from .pseudonym import IdentityTable
 from .taxonomy import PR_ACTIVITY_MAP
 
@@ -77,6 +77,17 @@ def probe(cfg: Config, client: BitbucketClient, bypass_filter: bool = False) -> 
         repos.append(entry)
 
     sample = []
+    if bypass_filter:
+        # Approvals-lost is derived from a PR's whole event stream, exactly as
+        # the store does it after a write (no store is touched in a probe).
+        groups: dict[tuple[str, int], list[dict]] = {}
+        for event in stats.events:
+            groups.setdefault((event["repo"], event["pr_id"]), []).append(event)
+        for group in groups.values():
+            derived = derive_approvals_lost(group)
+            for event in group:
+                if event["event_key"] in derived:
+                    event["attributes"]["approvals_lost"] = derived[event["event_key"]]
     for event in stats.events[:8]:
         sample.append(
             {
