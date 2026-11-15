@@ -13,17 +13,19 @@
       **266** (was 0); bots classified (14 bot events); 0 false-positive keys; `--verify` `contract OK`;
       idempotent re-run (`0 new`); incremental-recompute proven (`approvals_lost` flips on 12 re-derived);
       byte-level audit: no raw prose/whitespace anywhere.
+- [x] **Server-fix** — eval/screenshot 400s, CORS (loopback-only), `screenshot.out` sandbox
+      (`MEGASPEED_SHOT_DIR`), date-only `to=` inclusive, real filters (unknown → 400), graceful retryable
+      lock 503 (no path/PID leak), pagination (`limit`/`offset`/`X-Total-Count`) + `/api/events/counts`
+      histogram; UI pages progressively and survives a lock. 63/63 tests.
 
 ## In progress (fallback `opencode-go/deepseek-v4.1-flash`)
 
-- [ ] **Server-fix** (`server/` + `app/`): eval/screenshot 400s, CORS, `screenshot.out` path restriction,
-      date-only `to=` inclusive, unknown filters, graceful lock 503, pagination/aggregation.
+- [ ] **Final integration** — ingest `DEL` into `data/del.duckdb`, restart 8766 on the new code, smoke-test
+      all views, fix docs drift (DEV.md + config.toml).
 
 ## Next (dispatch on completion)
 
-1. **Final integration** — restart 8766 on the new code, ingest `DEL` into the live store
-   (`MEGASPEED_TICKET_PROJECTS=DEL`), point the UI at real data, smoke-test every view via the harness.
-2. **Docs drift** — `docs/DEV.md` + `ingest/config.toml` still say port 7990 and "REVIEWED/UPDATED ignored".
+1. Wrap-up: final STATE.md, confirm nginx/DNS healthy, surface the live URL + remaining follow-ups.
 
 ## Known (corpus / deferred — not bugs in the ingest)
 
