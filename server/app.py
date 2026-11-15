@@ -22,6 +22,7 @@ one failure this whole feature exists to prevent.
     GET  /api/blocking?level=&days=&tenant=   wait-hours handover graph (prd/05)
     GET  /api/queues?level=&days=&tenant=     per-person WIP / throughput series
     GET  /api/delivery?days=&tenant=          triage list: blocked / oldest waiting
+    GET  /api/insights?level=&days=&tenant=   ranked "change this" rules (prd/17)
     GET  /ws                            harness websocket (hello/changed/eval)
     POST /api/eval        {code, timeout}
     POST /api/screenshot  {selector, out, timeout}
@@ -82,6 +83,7 @@ STORE_RETRY_DELAY = max(0.0, float(os.environ.get("MEGASPEED_STORE_RETRY_DELAY",
 
 sys.path.insert(0, str(REPO_ROOT))
 from analysis import ballcourt as analyse  # noqa: E402  (read-only projections)
+from analysis import rules as insights_rules  # noqa: E402  (prd/17 suggestions)
 from ingest import store as pstore  # noqa: E402  (read helpers + schema guard only)
 from ingest import taxonomy  # noqa: E402  (closed vocabularies, read-only)
 from server import query as query  # noqa: E402  (filters, paging, aggregation)
@@ -605,10 +607,17 @@ def _level(level: str) -> str:
     return level
 
 
+def _insight_level(level: str) -> str:
+    if level not in ("team", "person"):
+        raise ValueError("level must be 'team' or 'person'")
+    return level
+
+
 ANALYSIS_PARAMS = {
     "blocking": ("level", "days"),
     "queues": ("level", "days", "bucket_hours"),
     "delivery": ("days",),
+    "insights": ("level", "days"),
 }
 
 
@@ -682,6 +691,43 @@ def delivery(request: Request):
             return analyse.delivery_list(court, window)
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
+
+
+@app.get("/api/insights")
+def insights(request: Request):
+    """Ranked "change this" rules with evidence and severity (prd/17).
+
+    ``level=team`` is the flow tax (no names); ``level=person`` adds per-person
+    rules, which carry a pseudonym in ``scope`` and nothing else. Ranking is
+    impact hours × confidence, and ``hours_mode`` is wall-clock until the
+    working-hours calendar exists.
+    """
+    unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["insights"]))
+    if unknown is not None:
+        return unknown
+    try:
+        days = _num_param(request, "days", minimum=0, maximum=3650)
+        level = _insight_level(request.query_params.get("level") or "team")
+    except ValueError as exc:
+        return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["insights"])))
+    try:
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    try:
+        with store_conn(path) as con:
+            court = _ballcourt(con, tenant, path)
+            window = insights_rules.window_for(court, _days(days))
+            threads = insights_rules.load_threads(con)
+            bots = insights_rules.load_bots(con)
+            sizes = insights_rules.load_pr_sizes(con)
+            payload = insights_rules.insights(
+                court, threads, window, level=level, bots=bots, sizes=sizes
+            )
+    except Exception as exc:  # noqa: BLE001
+        return _store_error(exc)
+    payload["tenant"] = tenant
+    return payload
 
 
 # --------------------------------------------------------------------------- #

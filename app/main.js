@@ -10,7 +10,8 @@
  *   timeline   Where does the time go?   stream explorer (canvas)
  *   blocking   Who is blocking whom?     weighted handover graph (canvas)
  *   queue      Who is slow vs overloaded? WIP per person (canvas)
- *   policy     What should we change first? (stub, next slice)
+ *   rules      What should we change first? ranked, evidence-backed rules
+ *   policy     What should we change first? (simulation stub, next slice)
  */
 
 import { Timeline, ACTIVITY_ORDER, ACTIVITY_COLOR, PHASE, PHASE_ORDER } from '/timeline.js';
@@ -23,6 +24,7 @@ import {
   TABS, tabCounts, tabRows, deliveryTable, overviewMarkup, detailMarkup,
   impactSentence, entityMarkdown, deliveryMarkdown,
 } from '/tables.js';
+import { rulesMarkup, rulesStats, rulesMarkdown } from '/rules.js';
 
 const $ = (id) => document.getElementById(id);
 const LS_KEY = 'megaspeed.ui.v1';
@@ -33,6 +35,7 @@ const PAGES = {
   timeline: { title: 'Timeline', question: 'Where does the time go?' },
   blocking: { title: 'Blocking map', question: 'Who is blocking whom?' },
   queue: { title: 'Queue', question: 'Who is overloaded, and who is merely slow?' },
+  rules: { title: 'Rules', question: 'What should we change first?' },
   policy: { title: 'Policy lab', question: 'What should we change first?' },
   sources: { title: 'Sources', question: 'What is this screen made of?' },
 };
@@ -62,6 +65,8 @@ const state = {
   delivery: null,
   queues: null,
   blocking: null,
+  rules: null,
+  rulesLevel: 'team',
   blockingLevel: 'queue',
   queueLevel: 'person',
   lens: 'hours',
@@ -217,6 +222,7 @@ function renderPage() {
   if (page === 'delivery') renderDeliveryPage();
   if (page === 'blocking') renderBlockingPage();
   if (page === 'queue') renderQueuePage();
+  if (page === 'rules') renderRulesPage();
   if (page === 'overview') renderOverviewPage();
   if (page === 'sources') renderSourcesPage();
   saveUI();
@@ -253,6 +259,11 @@ async function ensureData(page) {
     const key = `queues:${tenant}:${state.timeframe}:${state.queueLevel}:${stamp}`;
     if (!cached(key)) state.cache.set(key, await getJSON(withTenant(`/api/queues?level=${state.queueLevel}&${q}`)));
     state.queues = cached(key);
+  }
+  if (page === 'rules') {
+    const key = `rules:${tenant}:${state.timeframe}:${state.rulesLevel}:${stamp}`;
+    if (!cached(key)) state.cache.set(key, await getJSON(withTenant(`/api/insights?level=${state.rulesLevel}&${q}`)));
+    state.rules = cached(key);
   }
 }
 
@@ -343,6 +354,7 @@ function resetTenantData() {
   state.delivery = null;
   state.blocking = null;
   state.queues = null;
+  state.rules = null;
   state.selection = null;
   state.drawerEntity = null;
   state.emptyReason = '';
@@ -583,6 +595,53 @@ function queueMatchesScope(stream) {
     if (state.scope.value === 'author') return stream.id === 'author';
   }
   return true;
+}
+
+// -------------------------------------------------------------------- rules
+/* The Policy-lab page (prd/17): a ranked list of "change this" rules. Team
+ * level is the flow tax; people level adds per-person rules, which carry a
+ * pseudonym and never a raw name (the store cannot hold one). */
+function buildRulesLevels() {
+  const levels = [['team', 'team'], ['person', 'people (pseudonyms)']];
+  $('rules-level').innerHTML = levels.map(([id, label]) => `
+    <button type="button" data-rule-level="${id}" aria-pressed="${state.rulesLevel === id}"
+      class="${state.rulesLevel === id ? 'on' : ''}">${esc(label)}</button>`).join('');
+}
+
+function renderRulesPage() {
+  buildRulesLevels();
+  const data = state.rules;
+  $('rules-list').innerHTML = data
+    ? rulesMarkup(data)
+    : '<div class="empty-row">Loading the rule engine…</div>';
+  $('rules-stats').innerHTML = data ? rulesStats(data) : '';
+  // The shared honesty line is the timeline's by default; on this page say what
+  // the cohort is, so "aggregated into 2 h buckets" never describes a rule.
+  $('honesty').textContent = data
+    ? `${data.sample.prs} PRs opened in the window are the cohort · ` +
+      `${data.sample.threads} classified threads · impact is an estimate (≈)`
+    : '';
+  $('rules-assumption').textContent = data
+    ? `${data.assumption} · snapshot ${fmtStamp(Date.parse(data.as_of))} · ` +
+      `targets: first review < ${fmtHours(data.targets.first_review_hours)}, ` +
+      `cycle < ${fmtHours(data.targets.cycle_hours)}, ` +
+      `${data.targets.max_review_rounds} rounds max · ` +
+      `size cap ${data.targets.size_commit_cap} commits / ${data.targets.size_line_cap} lines · ` +
+      `one review round ≈ ${fmtHours(data.targets.hours_per_round)} ` +
+      `(${data.targets.hours_per_round_basis}) · ranked by impact × confidence.` +
+      (data.metrics && data.metrics.pr_size && data.metrics.pr_size.diff_size.pending
+        ? ' Diff size is not captured yet, so the size metric uses commit count only.'
+        : '')
+    : '';
+}
+
+async function setRulesLevel(level) {
+  if (level === state.rulesLevel) return;
+  state.rulesLevel = level;
+  state.cache.clear();
+  await ensureData('rules');
+  renderRulesPage();
+  saveUI();
 }
 
 // ----------------------------------------------------------------- overview
@@ -1267,6 +1326,7 @@ window.__megaspeed = {
   setTenant,
   setLanes: (dim) => { $('lanes').value = dim; timeline.setLanes(dim); renderPhaseLegend(); },
   setDensity,
+  setRulesLevel,
   stamp: fmtStamp,
 };
 
@@ -1344,6 +1404,15 @@ document.addEventListener('click', async (event) => {
     const data = state.delivery;
     const rows = data ? tabRows(data, state.tab).filter((row) => matchesScopeRow(row)) : [];
     await copyText(deliveryMarkdown(rows, data ? `${data.assumption}; snapshot ${data.snapshot}` : ''));
+    return;
+  }
+  if (event.target.closest('#rules-copy')) {
+    await copyText(rulesMarkdown(state.rules));
+    return;
+  }
+  const ruleLevel = event.target.closest('[data-rule-level]');
+  if (ruleLevel) {
+    await setRulesLevel(ruleLevel.dataset.ruleLevel);
     return;
   }
   const nav = event.target.closest('.nav-item');
@@ -1458,6 +1527,7 @@ function saveUI() {
       lens: state.lens,
       blockingLevel: state.blockingLevel,
       queueLevel: state.queueLevel,
+      rulesLevel: state.rulesLevel,
       activity: [...timeline.activityState.entries()],
       scope: state.scope,
       tenant: state.tenant,
@@ -1488,6 +1558,9 @@ function restoreUI() {
   if (LENSES[stored.lens]) state.lens = stored.lens;
   if (stored.blockingLevel) state.blockingLevel = stored.blockingLevel;
   if (stored.queueLevel) state.queueLevel = stored.queueLevel;
+  if (stored.rulesLevel === 'team' || stored.rulesLevel === 'person') {
+    state.rulesLevel = stored.rulesLevel;
+  }
   if (stored.lanes) { $('lanes').value = stored.lanes; timeline.setLanes(stored.lanes); }
   if (Array.isArray(stored.activity)) {
     for (const [activity, value] of stored.activity) timeline.setActivityState(activity, value);

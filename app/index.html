@@ -55,6 +55,7 @@
         <button type="button" class="nav-item" data-page="queue">Queue</button>
       </div>
       <div class="nav-group"><span class="nav-label">Policy</span>
+        <button type="button" class="nav-item" data-page="rules">Rules</button>
         <button type="button" class="nav-item" data-page="policy">Policy lab</button>
       </div>
       <div class="nav-group"><span class="nav-label">Workspace</span>
@@ -179,6 +180,18 @@
       <!-- Overview -->
       <section class="page" id="page-overview" aria-labelledby="page-title" hidden>
         <div id="overview"></div>
+      </section>
+
+      <!-- Rules (prd/17): ranked, evidence-backed suggestions -->
+      <section class="page" id="page-rules" aria-labelledby="page-title" hidden>
+        <div class="toolbar">
+          <div class="seg" id="rules-level" role="group" aria-label="rule level"></div>
+          <span class="grow"></span>
+          <div class="stats-strip" id="rules-stats"></div>
+          <button type="button" class="chip" id="rules-copy">Copy as Markdown</button>
+        </div>
+        <div id="rules-list" class="rules-wrap"></div>
+        <p class="assumption" id="rules-assumption"></p>
       </section>
 
       <!-- Policy lab (stub) -->

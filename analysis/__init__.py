@@ -7,6 +7,7 @@ pseudonyms, PR ids, commit hashes, timestamps and closed attribute labels.
     blocking   — weighted directed handover graph from those intervals
     queues     — per-person WIP / throughput series (Little's law)
     delivery   — the triage list ("what needs attention?")
+    rules      — metrics + ranked, evidence-backed "change this" suggestions
 
 Duration assumption for this slice: **wall-clock hours**. The per-person
 working-hours calendar (prd/03) does not exist yet, so every "hours waited" is
