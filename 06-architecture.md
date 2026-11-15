@@ -32,7 +32,7 @@
 | Local classification LLM | **Ollama / llama.cpp**, qwen2.5/llama3.2 3B or gemma3/phi-class, temp 0, JSON-schema constrained | cheap, local; **this is what performs raw→generalised classification**; the schema enforces the closed vocabulary |
 | Analysis LLM (open-source) | any open model, on the pseudonymised view only | it never sees raw text because it never has it |
 | Simulation | **SimPy** (or Simod for BPMN) | discrete-event, calibrated from mined distributions |
-| Scrapers | small per-source CLI (Python), rate-limited, resumable | simple, auditable, run in the raw zone only |
+| Scrapers | small per-source CLI (Python), rate-limited, resumable, **cursor/watermark-based incremental** | simple, auditable, run in the raw zone only |
 
 ## The boundary, enforced three ways
 
@@ -52,6 +52,28 @@ One machine (or one container) for the raw zone, one for the pseudonymised
 zone. No multi-tenant, no external services in v1. This is a single-team,
 single-company, self-hosted tool.
 
+## Incremental ingest & re-analysis
+
+The system is **append-only over time**, not a one-shot export. Two concerns:
+
+**Incremental ingest.** Each scraper keeps a cursor/watermark (`updatedAt` per
+issue, the Bitbucket activities-stream cursor, `dateStarted` per Tempo worklog,
+Slack `ts`) and fetches only what changed since the last run. Idempotency by
+natural key (issue key + changelog ID, PR + activity ID, worklog ID, Slack
+`ts`) so a re-run never double-counts events.
+
+**Re-analysis as time passes.** New data doesn't invalidate the pipeline, it
+extends it:
+
+- the event log is immutable-append; derived tables are rebuilt from it;
+- survival analysis treats open items as *right-censored* at each analysis
+  `as_of` date, so metrics stay correct as items close over time;
+- the classifier is versioned (`classifier_version`), so a new classifier
+  version can be re-run over re-fetched raw data and produce a new column of
+  labels without mutating history;
+- snapshots carry an `as_of` watermark so "what did we know on day T" is
+  reproducible.
+
 ## Failure modes the design must survive
 
 - **Classifier drift** — taxonomy versioning; `other` bucket queues cases for
@@ -60,5 +82,5 @@ single-company, self-hosted tool.
   (a label outside the set is dropped, not stored).
 - **Identity churn** — people leave/rename; pseudonyms are stable per person via
   the raw-zone resolution table.
-- **Partial scrapes** — resumable scrapers + `as_of` watermark so a re-run
-  doesn't double-count events.
+- **Partial/duplicate ingest** — resumable scrapers + cursor/watermark +
+  idempotency-by-natural-key so a re-run never double-counts events.

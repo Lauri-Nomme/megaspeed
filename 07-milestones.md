@@ -69,9 +69,17 @@ S1 ─┬─► S2 ─► S3 ─► S4 (pseudonymisation gate) ─► S6 ─► 
 S4 is the hard dependency for everything that touches an LLM; S1–S3 and S5 can
 proceed in parallel behind it.
 
+## Cross-cutting: incremental ingest & re-analysis
+
+Every slice's scraper is **incremental** (cursor/watermark, idempotent by
+natural key), and the event log is **immutable-append** with `as_of`-reproducible
+snapshots, so the system can be re-run and re-analysed as more time passes —
+not just exported once. See `06-architecture.md`.
+
 ## Definition of done (per slice)
 
 - pseudonymisation contract holds (schema + canary tests green),
 - SQL event-building is auditable,
 - output is reproducible from `classifier_version` + content hash,
-- report is at role/queue level with pseudonyms.
+- report is at role/queue level with pseudonyms,
+- ingest is incremental and re-analysis is `as_of`-reproducible.

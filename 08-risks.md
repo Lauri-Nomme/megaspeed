@@ -24,7 +24,10 @@ flow efficiency), not individual throughput; revisit metrics as behaviour shifts
 - **Bot accounts** — filter before any human-latency metric.
 - **Mixed identities** — a person with two accounts must resolve to one pseudonym.
 - **Reopened/retargeted PRs** — must not double-count or corrupt the DAG.
-- **Worklog noise** — measured directly (created − started gap), never trusted.
+- **Incremental re-analysis** — incremental ingest must be idempotent (natural
+  keys) or re-runs double-count; snapshots must be `as_of`-reproducible so
+  metrics stay correct as items close over time.
+- **Worklog noise** — measured directly (createdAt − dateStarted gap), never trusted.
 
 ### Classification risk
 
