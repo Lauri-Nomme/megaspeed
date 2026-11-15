@@ -17,3 +17,6 @@ dist/
 build/
 .playwright/
 *.log
+
+# nginx deploy config lives on the host, not in the repo
+megaspeed.example.com

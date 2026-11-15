@@ -12,7 +12,7 @@ State/progress lives in `STATE.md`.
 | Store | **DuckDB** (+ Parquet) | schema is the pseudonymisation contract: no free-text content columns |
 | Ingest | **Python**, per-source | Bitbucket DC first (see below) |
 | Harness | mosaic-style **eval/screenshot bridge** | `/ws` + `POST /api/eval` + `POST /api/screenshot`, curl-drivable, for fast UI iteration |
-| Deploy | **nginx** via `megaspeed.example.com` | reverse proxy to the local dev server |
+| Deploy | **nginx** reverse proxy to the local dev server | config lives on the host (not in this repo) |
 
 ## Repository layout (target)
 
@@ -20,7 +20,6 @@ State/progress lives in `STATE.md`.
 megaspeed/
   prd/                    # design docs (read-only for implementation)
   PLAN.md, STATE.md
-  megaspeed.example.com     # nginx site config
   ingest/                 # Python: Bitbucket DC -> DuckDB (pseudonymised)
   server/                 # Python: FastAPI + WS + eval/screenshot harness
   app/                    # SvelteKit: timeline UI (#1), then blocking/labs
@@ -75,9 +74,7 @@ stored, never sent to any LLM. No free-text content columns in the schema.
 
 ## Deploy (live)
 
-- `megaspeed.example.com` deployed to `/etc/nginx/sites-enabled/`; `server_name
-  megaspeed.example.com`; TLS via the `example.com` wildcard cert; WebSocket upgrade
-  headers. Upstream → `127.0.0.1:8766` (this host).
-- DNS `megaspeed.example.com → 203.0.113.10` added to `/etc/bind/example.com.zone`, reloaded
-  via `dnsserver` SIGHUP.
-- The dev server must bind `127.0.0.1:8766` so nginx can reach it.
+- nginx reverse proxy → local dev server; DNS + TLS are configured on the host.
+  The exact site config and DNS zone live on the host, **not in this repo** — no
+  public address or upstream layout is recorded here.
+- The dev server binds `127.0.0.1:8766`.
