@@ -34,7 +34,7 @@ on:
       - "Makefile"
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: build-scraper-${{ github.ref }}
@@ -81,10 +81,21 @@ jobs:
           print(f"smoke: {report['events']} events, {report['counts']['objects']} objects")
           PY
 
-      - name: Upload scraper artifact
+      - name: Upload scraper artifact (PR preview)
+        if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@v4
         with:
           name: megaspeed-scrape-${{ github.sha }}
           path: scrape/dist/megaspeed-scrape
           if-no-files-found: error
           retention-days: 30
+
+      - name: Create release + tag (main push)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: scraper-${{ github.sha }}
+          name: megaspeed-scrape ${{ github.sha }}
+          generate_release_notes: true
+          files: scrape/dist/megaspeed-scrape
+          fail_on_unmatched_files: true
