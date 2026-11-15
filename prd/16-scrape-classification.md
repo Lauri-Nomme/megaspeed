@@ -1,16 +1,20 @@
 # 16 — Scrape-side classification: `push_class` + local LLM
 
-The scrape must produce a **complete, finished, pseudonymised tgz in one pass** — the airgapped
-env is visited once, and nothing downstream (import/analysis) ever needs a re-scrape.
+The scrape produces a **complete, finished, pseudonymised tgz in one pass** — REST fetch + git
+patch-id + LLM classification all happen together, so the first run already yields full value (no
+need to re-visit the airgapped env just because a feature wasn't captured). Incremental re-scrapes
+(watermark-driven) are normal and simply extend the data over time.
 
-## The "one finished" guarantee
+## One pass, full value
 
 - The scrape already fetches raw comment text + PR descriptions (it reads them to extract ticket
-  keys). It now, **before discarding them**, (a) computes `push_class` (deterministic, from a local
-  git clone) and (b) runs the local-LLM classifier over that same text.
-- Local state (scrape-side, never transferred) keeps: watermark, identity map, the **git clone**
-  (for incremental patch-id), and a **raw-text cache** — so a future classifier upgrade re-classifies
-  from cache, not from a source re-fetch.
+  keys). It now, **before discarding them**, (a) computes `push_class` (deterministic, from the
+  shallow git fetch) and (b) runs the local-LLM classifier over that same text — so the first scrape
+  already contains everything. Incremental re-scrapes via the watermark are expected and just extend
+  the data; nothing here implies "scrape once and never again".
+- Local state (scrape-side, never transferred) keeps: watermark, identity map, and the shallow git
+  repo (for incremental patch-id). A raw-text cache is **optional** — it only avoids re-fetching raw
+  text if the classifier is later upgraded; re-scraping is an acceptable alternative.
 - The tgz carries only the finished labels (closed vocabulary) — never raw text.
 
 ## `push_class` — deterministic, via `git patch-id`
