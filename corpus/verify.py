@@ -61,7 +61,7 @@ def main() -> int:
 
     users = pages("/rest/api/1.0/users", {"limit": 100})
     team = {u["name"] for u in users if u["name"] in
-            {"alice", "bob", "carol", "dave", "erin"}}
+            {"alice", "bob", "carol", "dave", "erin", "frank"}}
 
     summary = {"users": sorted(team), "repos": {}, "prs": [], "problems": []}
     states = collections.Counter()
@@ -71,6 +71,11 @@ def main() -> int:
     action_counts = collections.Counter()
     ticket_prs: dict[str, int] = collections.Counter()
     opened_all, closed_all, commit_dates = [], [], []
+    threads_resolved = threads_open = 0
+    resolvers = collections.Counter()
+    reviewer_additions = reviewer_removals = 0
+    merged_with_commit = merged_without_commit = 0
+    commits_per_pr: list[int] = []
 
     for repo in REPOS:
         prs = list(pages(f"/rest/api/1.0/projects/{PROJECT}/repos/{repo}/pull-requests",
@@ -103,8 +108,29 @@ def main() -> int:
                               f"/pull-requests/{pr['id']}/activities"))
             for a in acts:
                 action_counts[a["action"]] += 1
+                if a["action"] == "COMMENTED":
+                    c = a.get("comment") or {}
+                    if c.get("id") is not None:
+                        resolved = (bool(c.get("threadResolved"))
+                                    or str(c.get("state") or "OPEN").upper() != "OPEN")
+                        if resolved:
+                            threads_resolved += 1
+                            resolver = (c.get("resolver") or {}).get("name")
+                            if resolver:
+                                resolvers[resolver] += 1
+                        else:
+                            threads_open += 1
+                elif a["action"] == "UPDATED":
+                    reviewer_additions += len(a.get("addedReviewers") or [])
+                    reviewer_removals += len(a.get("removedReviewers") or [])
+                elif a["action"] == "MERGED":
+                    if (a.get("commit") or {}).get("id"):
+                        merged_with_commit += 1
+                    else:
+                        merged_without_commit += 1
             commits = list(pages(f"/rest/api/1.0/projects/{PROJECT}/repos/{repo}"
                                  f"/pull-requests/{pr['id']}/commits"))
+            commits_per_pr.append(len(commits))
             for c in commits:
                 commit_dates.append(c["authorTimestamp"])
             opened_all.append(pr["createdDate"])
@@ -130,6 +156,24 @@ def main() -> int:
         "reviewers": dict(reviewers),
         "approvals": dict(approvals),
         "activity_types": dict(action_counts),
+        "threads": {
+            "resolved": threads_resolved,
+            "open": threads_open,
+            "resolvers": dict(resolvers),
+        },
+        "reviewer_changes": {
+            "added": reviewer_additions,
+            "removed": reviewer_removals,
+        },
+        "merge_commits": {
+            "with_commit": merged_with_commit,
+            "without_commit": merged_without_commit,
+        },
+        "commits_per_pr": {
+            "max": max(commits_per_pr) if commits_per_pr else 0,
+            "over_10": sum(1 for n in commits_per_pr if n > 10),
+            "total": sum(commits_per_pr),
+        },
         "tickets_with_prs": len(ticket_prs),
         "epic_reference_in_all_descriptions": not any(
             "no epic line" in p for p in summary["problems"]),
@@ -157,6 +201,10 @@ def main() -> int:
     print("reviewers:    ", out["reviewers"])
     print("approvals:    ", out["approvals"])
     print("activities:   ", out["activity_types"])
+    print("threads:      ", out["threads"])
+    print("reviewer chg: ", out["reviewer_changes"])
+    print("merge commits:", out["merge_commits"])
+    print("commits/PR:   ", out["commits_per_pr"])
     print("tickets:      ", out["tickets_with_prs"], "ticket range", out["ticket_range"])
     print("PR opened:    ", out["pr_opened_range"])
     print("PR closed:    ", out["pr_closed_range"])

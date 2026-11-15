@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import random
@@ -71,11 +72,26 @@ USERS = [
     ("carol", "Carol Osei", "carol.osei@delivery.example", "lab-pw-carol"),
     ("dave", "Dave Kowalski", "dave.kowalski@delivery.example", "lab-pw-dave"),
     ("erin", "Erin Lindqvist", "erin.lindqvist@delivery.example", "lab-pw-erin"),
+    ("frank", "Frank Moreau", "frank.moreau@delivery.example", "lab-pw-frank"),
 ]
 USER_BY_NAME = {u[0]: u for u in USERS}
 
-# alice is the team lead -> sentinel approver unless she authored the PR.
-SENTINEL = "alice"
+# The five engineers author PRs; frank is the release captain / sentinel.
+# Keeping the sentinel out of the author rotation is what makes the mandatory
+# approval a real second pair of eyes rather than a self-approval.
+AUTHORS = USERS[:5]
+
+# Every PR needs frank's approval before it can merge.  The ingest side only
+# knows that role from config (``[review] sentinel_slugs`` / env
+# ``MEGASPEED_SENTINEL_SLUGS``), so a live scrape of this corpus must set
+# ``MEGASPEED_SENTINEL_SLUGS=frank`` (see corpus/README.md).
+SENTINEL = "frank"
+
+# A handful of PRs are deliberately oversized so ``analysis.rules.pr_size``
+# has something to fire on: three with >10 commits and three with a >400-line
+# diff.  Indices are ticket offsets (DEL-100 + index).
+LARGE_COMMIT_INDICES = {17, 45, 73}   # DEL-117, DEL-145, DEL-173
+LARGE_DIFF_INDICES = {31, 59, 87}     # DEL-131, DEL-159, DEL-187
 
 REPOS = {
     "delivery-api": {
@@ -342,15 +358,15 @@ def build_tickets() -> list[dict]:
         tickets.append({
             "key": key, "index": i, "area": area, "slug": SLUGS[area],
             "title": title, "detail": detail, "repo": repo,
-            "author": USERS[(i * 7 + 2) % len(USERS)][0],
+            "author": AUTHORS[(i * 7 + 2) % len(AUTHORS)][0],
             "open_at": iso(open_at), "prs": [],
         })
     return tickets
 
 
 def _reviewers(author: str, rng: random.Random) -> tuple[str, str]:
-    sentinel = SENTINEL if author != SENTINEL else "bob"
-    pool = [u[0] for u in USERS if u[0] not in (author, sentinel)]
+    sentinel = SENTINEL if author != SENTINEL else AUTHORS[0][0]
+    pool = [u[0] for u in AUTHORS if u[0] not in (author, sentinel)]
     normal = pool[rng.randrange(len(pool))]
     return sentinel, normal
 
@@ -373,7 +389,8 @@ def build_prs(tickets: list[dict]) -> list[dict]:
                 "id": f"{t['key']}#{j + 1}",
                 "ticket": t["key"],
                 "repo": t["repo"],
-                "author": t["author"] if j == 0 else USERS[(t["index"] + 3) % 5][0],
+                "author": t["author"] if j == 0
+                          else AUTHORS[(t["index"] + 3) % len(AUTHORS)][0],
                 "branch": f"{t['key']}-{t['title'].lower().replace(' ', '-')}"
                           + ("-followup" if j else ""),
                 "outcome": outcome,
@@ -383,6 +400,9 @@ def build_prs(tickets: list[dict]) -> list[dict]:
                 "slug": t["slug"],
                 "detail": t["detail"],
                 "number": j + 1,
+                # pr_size: a few deliberately oversized PRs (first PR only).
+                "large_commits": j == 0 and t["index"] in LARGE_COMMIT_INDICES,
+                "large_diff": j == 0 and t["index"] in LARGE_DIFF_INDICES,
             })
         if follow:
             if stacked:
@@ -394,6 +414,27 @@ def build_prs(tickets: list[dict]) -> list[dict]:
     return prs
 
 
+def primary_path(repo: str, slug: str, ticket: str, rev: int) -> str:
+    """The first file ``file_bundle`` creates for a revision (the anchor path)."""
+    if repo == "delivery-api":
+        tag = ticket.lower().replace("-", "_")
+        return f"src/delivery_api/{slug}/{tag}_rev{rev}.py"
+    stem = f"{ticket.replace('-', '_').lower()}-rev{rev}"
+    return f"src/features/{slug}/{stem}.js"
+
+
+def _thread_disposition(rng: random.Random) -> str:
+    """What becomes of the first review thread (prd/15 Q4 / prd/16)."""
+    roll = rng.random()
+    if roll < 0.22:
+        return "walked_back"   # the reviewer resolves their own remark
+    if roll < 0.44:
+        return "rejected"      # the author closes it without a change
+    if roll < 0.74:
+        return "acted_on"      # the author changes the anchored code
+    return "unresolved"        # still open when the corpus snapshot ends
+
+
 def plan_pr(pr: dict, open_at: datetime, actions_from: datetime,
             rng: random.Random, needs_work: bool = False) -> dict:
     author = pr["author"]
@@ -403,7 +444,12 @@ def plan_pr(pr: dict, open_at: datetime, actions_from: datetime,
     if outcome == "open":
         rounds = 0 if needs_work else rng.choices([1, 2], [0.75, 0.25])[0]
 
-    n_commits = rng.randint(1, 3)
+    if pr.get("large_commits"):
+        n_commits = rng.randint(12, 16)   # > pr_size's 10-commit cap
+    elif pr.get("large_diff"):
+        n_commits = 1                     # one commit carries a >400-line file
+    else:
+        n_commits = rng.randint(1, 3)
     commits, t = [], open_at
     for c in range(n_commits):
         t = rewind(t, rng.uniform(1.0, 7.0) if c else rng.uniform(0.2, 1.5))
@@ -424,6 +470,10 @@ def plan_pr(pr: dict, open_at: datetime, actions_from: datetime,
         elif kind == "unapprove":
             approved.discard(actor)
 
+    # -- review thread ----------------------------------------------------
+    anchor_path = primary_path(pr["repo"], pr["slug"], pr["ticket"],
+                               (pr["number"] - 1) * 10 + 1)
+    disposition = None
     if rng.random() < 0.90:
         cur = advance(cur, rng.uniform(1.0, 6.0))
         blocking = rng.random() < 0.35
@@ -431,33 +481,86 @@ def plan_pr(pr: dict, open_at: datetime, actions_from: datetime,
             [COMMENTS_SUGGESTION, COMMENTS_QUESTION, COMMENTS_PRISE])
         text = pool[rng.randrange(len(pool))].format(
             helper="resolve_zone()", subject="the courier")
+        disposition = _thread_disposition(rng)
+        if rounds == 0:
+            # no push answers this thread before the snapshot: keep it open
+            disposition = "unresolved"
         add("comment", cur, normal, text=text,
-            severity="BLOCKER" if blocking else "NORMAL")
+            severity="BLOCKER" if blocking else "NORMAL",
+            anchor=anchor_path, thread=True, disposition=disposition)
+
+    # -- rebase instead of a content push (real force-pushes) -------------
+    # The classification is deterministic: same patch id -> pure_rebase, a
+    # small conflict resolution -> rebase_conflict.  A rebase that also changes
+    # the anchored code would be a content push, so acted_on threads keep the
+    # content mode (the anchor must actually move).
+    rebase_mode = None
+    if (rounds >= 1 and not pr.get("stacked_on") and disposition != "acted_on"):
+        bucket = int(hashlib.sha1(pr["id"].encode()).hexdigest()[:8], 16) % 100
+        if bucket < 26:
+            rebase_mode = "pure_rebase"
+        elif bucket < 36:
+            rebase_mode = "rebase_conflict"
+
+    # -- optional reviewer swap (exercises removedReviewers) --------------
+    active_normal = normal
+    replacement = None
+    swap = (outcome != "declined" and rounds >= 1 and not pr.get("stacked_on")
+            and rng.random() < 0.12)
+    if swap:
+        pool = [u[0] for u in AUTHORS if u[0] not in (author, sentinel, normal)]
+        replacement = pool[rng.randrange(len(pool))]
 
     for r in range(rounds):
         cur = advance(cur, rng.uniform(1.0, 8.0))
-        add("push", cur, author, commit=r)
-        if normal in approved and rng.random() < 0.45:
+        mode = rebase_mode if r == 0 and rebase_mode else "content"
+        # acted_on: the push must touch the file the reviewer anchored on.
+        touch = bool(disposition == "acted_on" and r == 0 and mode == "content")
+        add("push", cur, author, commit=r, mode=mode, touch=touch)
+        if active_normal in approved and rng.random() < 0.45:
             # "reset approvals on push" is on for some projects: the reviewer's
             # approval is dismissed and has to be given again.
-            add("unapprove", cur, normal)
+            add("unapprove", cur, active_normal)
         cur = advance(cur, rng.uniform(0.3, 1.5))
-        add("comment", cur, author,
-            text=AUTHOR_REPLIES[rng.randrange(len(AUTHOR_REPLIES))], severity="NORMAL")
+        if mode == "pure_rebase":
+            reply = "Rebased onto main to pick up the latest changes."
+        elif mode == "rebase_conflict":
+            reply = "Rebased onto main and resolved the conflict in the shared module."
+        else:
+            reply = AUTHOR_REPLIES[rng.randrange(len(AUTHOR_REPLIES))]
+        add("comment", cur, author, text=reply, severity="NORMAL")
+
+        if r == 0 and disposition in ("walked_back", "rejected", "acted_on"):
+            cur = advance(cur, rng.uniform(0.3, 1.5))
+            resolver = normal if disposition != "rejected" else author
+            add("resolve_thread", cur, resolver, thread=0)
+
+        if r == 0 and swap:
+            cur = advance(cur, rng.uniform(0.2, 0.8))
+            add("remove_reviewer", cur, sentinel, reviewer=active_normal)
+            approved.discard(active_normal)
+            cur = advance(cur, rng.uniform(0.2, 0.8))
+            add("add_reviewer", cur, author, reviewer=replacement)
+            active_normal = replacement
+            cur = advance(cur, rng.uniform(0.5, 2.0))
+            add("comment", cur, active_normal,
+                text="Taking over this review from the previous reviewer.",
+                severity="NORMAL")
+
         if rng.random() < 0.45:
             cur = advance(cur, rng.uniform(0.5, 3.0))
-            add("approve", cur, normal)
+            add("approve", cur, active_normal)
     if rounds == 0:
         cur = advance(cur, rng.uniform(1.0, 5.0))
         add("needs_work", cur, normal, text=NEEDS_WORK[rng.randrange(len(NEEDS_WORK))])
         add("needs_work_status", cur, normal)
 
     if outcome == "merged":
-        if normal not in approved:
+        if active_normal not in approved:
             cur = advance(cur, rng.uniform(1.5, 10.0))
-            add("approve", cur, normal)
+            add("approve", cur, active_normal)
         cur = advance(cur, rng.uniform(1.0, 12.0))
-        add("approve", cur, sentinel)          # sentinel approval last
+        add("approve", cur, sentinel)          # mandatory sentinel approval last
         cur = advance(cur, rng.uniform(0.5, 8.0))
         add("merge", cur, author)
     elif outcome == "declined":
@@ -468,7 +571,7 @@ def plan_pr(pr: dict, open_at: datetime, actions_from: datetime,
     elif rounds > 0:  # open, under review
         if rng.random() < 0.5:
             cur = advance(cur, rng.uniform(1.0, 8.0))
-            add("approve", cur, normal)
+            add("approve", cur, active_normal)
             if rng.random() < 0.6:
                 cur = advance(cur, rng.uniform(0.5, 6.0))
                 add("approve", cur, sentinel)
@@ -483,7 +586,9 @@ def plan_pr(pr: dict, open_at: datetime, actions_from: datetime,
 
     return {**pr, "open_at": iso(open_at), "commits": commits,
             "actions": actions, "reviewers": [sentinel, normal],
-            "sentinel": sentinel}
+            "sentinel": sentinel, "anchor_path": anchor_path,
+            "thread_disposition": disposition, "replacement": replacement,
+            "rebase_mode": rebase_mode}
 
 
 # ---------------------------------------------------------------------------
@@ -509,12 +614,16 @@ class RepoGit:
                 "GIT_AUTHOR_DATE": when, "GIT_COMMITTER_DATE": when}
 
     def make_branch(self, branch: str, base_ref: str, commits: list[dict],
-                    author: str, files: list[tuple[str, str]]) -> None:
+                    author: str, files: list[tuple[str, str]],
+                    extra_first: list[tuple[str, str]] | None = None) -> None:
         sh(["git", "fetch", "-q", "origin", "--prune"], cwd=self.path)
         sh(["git", "checkout", "-q", "-B", branch, f"origin/{base_ref}"], cwd=self.path)
         sh(["git", "reset", "-q", "--hard", f"origin/{base_ref}"], cwd=self.path)
         for i, c in enumerate(commits):
-            for path, content in files[i * 2:(i + 1) * 2] or files:
+            batch = files[i * 2:(i + 1) * 2] or files
+            if i == 0 and extra_first:
+                batch = list(batch) + list(extra_first)
+            for path, content in batch:
                 p = self.path / path
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(content)
@@ -524,8 +633,13 @@ class RepoGit:
                env=self._ident_env(author, c["at"]))
 
     def add_commit(self, branch: str, subject: str, when: str, author: str,
-                   files: list[tuple[str, str]]) -> None:
+                   files: list[tuple[str, str]],
+                   touch: str | None = None, touch_suffix: str = "") -> None:
         sh(["git", "checkout", "-q", branch], cwd=self.path)
+        if touch:
+            path = self.path / touch
+            existing = path.read_text() if path.exists() else ""
+            files = list(files) + [(touch, existing + touch_suffix)]
         for path, content in files:
             p = self.path / path
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -534,12 +648,56 @@ class RepoGit:
         sh(["git", "commit", "-q", "-m", subject + "\n\nEpic: DEL-1"], cwd=self.path,
            env=self._ident_env(author, when))
 
-    def merge_to_main(self, branch: str, pr_id: int, actor: str, when: str) -> None:
+    def commit_to_main(self, subject: str, when: str, author: str,
+                       files: list[tuple[str, str]]) -> None:
+        """Move ``main`` forward (the base a rebase lands on)."""
+        sh(["git", "fetch", "-q", "origin", "--prune"], cwd=self.path)
+        sh(["git", "checkout", "-q", "main"], cwd=self.path)
+        sh(["git", "reset", "-q", "--hard", "origin/main"], cwd=self.path)
+        for path, content in files:
+            p = self.path / path
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(content)
+            sh(["git", "add", path], cwd=self.path)
+        sh(["git", "commit", "-q", "--allow-empty", "-m",
+            subject + "\n\nEpic: DEL-1"], cwd=self.path,
+           env=self._ident_env(author, when))
+        self.push("main", author)
+
+    def rebase_branch(self, branch: str, author: str, when: str,
+                      resolved: tuple[str, str] | None = None) -> None:
+        """Rebase ``branch`` onto ``origin/main`` (optionally resolving a conflict).
+
+        A clean rebase keeps the patch id (``pure_rebase``); writing the
+        resolved content changes only a handful of lines (``rebase_conflict``).
+        """
+        display, email = USER_BY_NAME[author][1], USER_BY_NAME[author][2]
+        committer_env = {"GIT_COMMITTER_NAME": display, "GIT_COMMITTER_EMAIL": email,
+                         "GIT_COMMITTER_DATE": when, "GIT_EDITOR": "true"}
+        sh(["git", "fetch", "-q", "origin", "--prune"], cwd=self.path)
+        sh(["git", "checkout", "-q", branch], cwd=self.path)
+        p = sh(["git", "rebase", "origin/main"], cwd=self.path,
+               env=committer_env, check=False)
+        if p.returncode != 0:
+            if resolved is None:
+                sh(["git", "rebase", "--abort"], cwd=self.path, check=False)
+                raise RuntimeError(
+                    f"unexpected rebase conflict on {branch}:\n{p.stderr or p.stdout}")
+            path, content = resolved
+            target = self.path / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+            sh(["git", "add", path], cwd=self.path)
+            sh(["git", "rebase", "--continue"], cwd=self.path, env=committer_env)
+
+    def merge_to_main(self, branch: str, pr_id: int, actor: str, when: str) -> str:
         """Merge the PR branch locally with a backdated merge commit, push main.
 
         Bitbucket detects that the branch is contained in main and flips the PR
         to MERGED (recording a MERGED activity) without creating a server-side
-        merge commit, so the whole history keeps the planned timestamps.
+        merge commit, so the whole history keeps the planned timestamps.  The
+        returned commit is written into ``STA_PR_MERGE_ACTIVITY`` by
+        ``backdate.py`` so the MERGED activity carries a real merge commit.
         """
         sh(["git", "fetch", "-q", "origin", "--prune"], cwd=self.path)
         sh(["git", "checkout", "-q", "main"], cwd=self.path)
@@ -548,7 +706,9 @@ class RepoGit:
                f"from {branch} to main")
         sh(["git", "merge", "-q", "--no-ff", f"origin/{branch}", "-m", msg],
            cwd=self.path, env=self._ident_env(actor, when))
+        merge_commit = sh(["git", "rev-parse", "HEAD"], cwd=self.path).stdout.strip()
         self.push("main", actor)
+        return merge_commit
 
     def push(self, branch: str, user: str) -> None:
         pw = USER_BY_NAME[user][3]
@@ -613,6 +773,76 @@ def file_bundle(repo: str, area: str, slug: str, ticket: str, rev: int,
         "});\n"
     )
     return [(mod, src), (test, tst)]
+
+
+def shared_bundle(repo: str, slug: str, ticket: str,
+                  variant: str = "") -> tuple[str, str, str, str]:
+    """A file both the branch and a base move touch (the rebase conflict).
+
+    ``(path, branch_content, main_content, resolved_content)``: the branch adds
+    the first, main adds the second, and the rebase resolution keeps both sides.
+    The difference between branch and resolved is a handful of lines, which is
+    exactly what ``git range-diff`` reads as ``rebase_conflict``.
+    """
+    tag = ticket.lower().replace("-", "_") + variant
+    if repo == "delivery-api":
+        path = f"src/delivery_api/{slug}/{tag}_shared.py"
+        branch = (
+            f'"""Shared configuration for {ticket} (branch)."""\n\n'
+            'SHARED = "branch"\n'
+            "BRANCH_ONLY = True\n"
+        )
+        main = (
+            f'"""Shared configuration for {ticket} (main)."""\n\n'
+            'SHARED = "main"\n'
+            "MAIN_ONLY = True\n"
+            "EXTRA = 3\n"
+        )
+        resolved = (
+            f'"""Shared configuration for {ticket} (merged)."""\n\n'
+            'SHARED = "main+branch"\n'
+            "MAIN_ONLY = True\n"
+            "EXTRA = 3\n"
+            "BRANCH_ONLY = True\n"
+        )
+        return path, branch, main, resolved
+    path = f"src/features/{slug}/{tag}-shared.js"
+    branch = (
+        f"// Shared configuration for {ticket} (branch).\n"
+        "export const SHARED = 'branch';\n"
+        "export const BRANCH_ONLY = true;\n"
+    )
+    main = (
+        f"// Shared configuration for {ticket} (main).\n"
+        "export const SHARED = 'main';\n"
+        "export const MAIN_ONLY = true;\n"
+        "export const EXTRA = 3;\n"
+    )
+    resolved = (
+        f"// Shared configuration for {ticket} (merged).\n"
+        "export const SHARED = 'main+branch';\n"
+        "export const MAIN_ONLY = true;\n"
+        "export const EXTRA = 3;\n"
+        "export const BRANCH_ONLY = true;\n"
+    )
+    return path, branch, main, resolved
+
+
+def big_file_bundle(repo: str, slug: str, ticket: str,
+                    variant: str = "") -> tuple[str, str]:
+    """One ~460-line file so a single-commit PR still exceeds the 400-line cap."""
+    tag = ticket.lower().replace("-", "_") + variant
+    if repo == "delivery-api":
+        path = f"src/delivery_api/{slug}/{tag}_report.py"
+        head = [f'"""Generated report fields for {ticket}."""', ""]
+        body = [f"REPORT_FIELD_{i} = {i}" for i in range(455)]
+        tail = ["", "", "def render(payload: dict) -> dict:", "    return dict(payload)"]
+        return path, "\n".join(head + body + tail) + "\n"
+    path = f"src/features/{slug}/{tag}-report.js"
+    head = [f"// Generated report fields for {ticket}.", ""]
+    body = [f"export const REPORT_FIELD_{i} = {i};" for i in range(455)]
+    tail = ["", "export function render(payload) {", "  return { ...payload };", "}"]
+    return path, "\n".join(head + body + tail) + "\n"
 
 
 # ---------------------------------------------------------------------------
@@ -746,26 +976,38 @@ def ensure_pr(api: Api, pr: dict) -> dict:
 def add_reviewers(api: Api, pr: dict, pr_id: int) -> None:
     base = f"/rest/api/1.0/projects/{PROJECT}/repos/{pr['repo']}/pull-requests/{pr_id}"
     have = {p["user"]["name"] for p in api.call("GET", base + "/participants")["values"]}
+    auth = (pr["author"], USER_BY_NAME[pr["author"]][3])
     for name in dict.fromkeys(pr["reviewers"]):
         if name in have:
             continue
-        api.call("POST", base + "/participants",
+        api.call("POST", base + "/participants", user=auth,
                  data={"user": {"name": name}, "role": "REVIEWER"}, ok=(200, 201))
         log(f"  {pr['id']} reviewer {name}")
 
 
 def execute_pr(api: Api, git: RepoGit, pr: dict, pr_id: int | None,
-               timeline: list[str]) -> int:
+               timeline: list[str]) -> dict:
     base = f"/rest/api/1.0/projects/{PROJECT}/repos/{pr['repo']}/pull-requests"
+    rev_base = (pr["number"] - 1) * 10
+    variant = f"_p{pr['number']}"
+    shared = shared_bundle(pr["repo"], pr["slug"], pr["ticket"], variant) \
+        if pr.get("rebase_mode") == "rebase_conflict" else None
     if pr_id is None:
         files: list[tuple[str, str]] = []
-        rev_base = (pr["number"] - 1) * 10
         for c in pr["commits"]:
             rev = rev_base + c["n"] + 1
             files.extend(file_bundle(pr["repo"], pr["area"], pr["slug"], pr["ticket"],
                                      rev, pr["detail"]))
+        extra_first: list[tuple[str, str]] = []
+        if shared:
+            # the branch adds the same path the base move will add (conflict)
+            extra_first.append((shared[0], shared[1]))
+        if pr.get("large_diff"):
+            extra_first.append(big_file_bundle(pr["repo"], pr["slug"], pr["ticket"],
+                                               variant))
         base_ref = pr.get("base_branch", "main")
-        git.make_branch(pr["branch"], base_ref, pr["commits"], pr["author"], files)
+        git.make_branch(pr["branch"], base_ref, pr["commits"], pr["author"], files,
+                        extra_first=extra_first)
         git.push(pr["branch"], pr["author"])
         created = ensure_pr(api, pr)
         pr_id = created["id"]
@@ -786,23 +1028,79 @@ def execute_pr(api: Api, git: RepoGit, pr: dict, pr_id: int | None,
 
     add_reviewers(api, pr, pr_id)
 
+    threads: list[int] = []
+    resolved: list[dict] = []
+    merge_commit: str | None = None
+    touch_suffix = ("\n# review feedback applied\n" if pr["repo"] == "delivery-api"
+                    else "\n// review feedback applied\n")
+
     for action in pr["actions"]:
         kind = action["kind"]
         actor = action["actor"]
         auth = (actor, USER_BY_NAME[actor][3])
         cur = api.call("GET", f"{base}/{pr_id}")
         if kind == "comment":
-            api.call("POST", f"{base}/{pr_id}/comments", user=auth, ok=(200, 201), data={
-                "text": action["text"], "severity": action.get("severity", "NORMAL"),
-                "version": cur["version"]})
+            data = {"text": action["text"],
+                    "severity": action.get("severity", "NORMAL"),
+                    "version": cur["version"]}
+            if action.get("anchor"):
+                data["anchor"] = {"path": action["anchor"], "line": 3,
+                                  "lineType": "ADDED", "fileType": "TO"}
+            created = api.call("POST", f"{base}/{pr_id}/comments", user=auth,
+                               ok=(200, 201), data=data)
+            if action.get("thread"):
+                threads.append(created["id"])
         elif kind == "push":
-            part = action.get("commit", 0) + 2
-            rev = rev_base + len(pr["commits"]) + part - 1
-            files = file_bundle(pr["repo"], pr["area"], pr["slug"], pr["ticket"], rev,
-                                pr["detail"])
-            subject = f"{pr['ticket']}: address review feedback (rev {part - 1})"
-            git.add_commit(pr["branch"], subject, action["at"], pr["author"], files)
-            git.push(pr["branch"], pr["author"])
+            mode = action.get("mode", "content")
+            when = action["at"]
+            if mode == "pure_rebase":
+                marker = (f"docs/sync/{pr['ticket'].lower()}-p{pr['number']}-"
+                          f"{action.get('commit', 0)}.md")
+                git.commit_to_main(
+                    f"chore: sync main before {pr['ticket']} rebase",
+                    when, SENTINEL,
+                    [(marker, f"# main moved\n\n{pr['ticket']} rebased onto this tip.\n")])
+                git.rebase_branch(pr["branch"], pr["author"], when)
+                git.push(pr["branch"], pr["author"])
+                log(f"  {pr['id']} pure rebase onto main")
+            elif mode == "rebase_conflict":
+                assert shared is not None
+                path, _branch, main_content, resolved_content = shared
+                git.commit_to_main(
+                    f"chore: main-side {pr['ticket']} configuration",
+                    when, SENTINEL, [(path, main_content)])
+                git.rebase_branch(pr["branch"], pr["author"], when,
+                                  resolved=(path, resolved_content))
+                git.push(pr["branch"], pr["author"])
+                log(f"  {pr['id']} rebase with conflict resolution")
+            else:
+                part = action.get("commit", 0) + 2
+                rev = rev_base + len(pr["commits"]) + part - 1
+                files = file_bundle(pr["repo"], pr["area"], pr["slug"], pr["ticket"],
+                                    rev, pr["detail"])
+                subject = f"{pr['ticket']}: address review feedback (rev {part - 1})"
+                git.add_commit(
+                    pr["branch"], subject, when, pr["author"], files,
+                    touch=pr["anchor_path"] if action.get("touch") else None,
+                    touch_suffix=touch_suffix)
+                git.push(pr["branch"], pr["author"])
+        elif kind == "resolve_thread":
+            cid = threads[action["thread"]]
+            comment = api.call("GET", f"{base}/{pr_id}/comments/{cid}", user=auth)
+            api.call("PUT", f"{base}/{pr_id}/comments/{cid}", user=auth,
+                     data={"version": comment["version"], "state": "RESOLVED"},
+                     ok=(200, 204))
+            resolved.append({"comment": cid, "at": action["at"]})
+            log(f"  {pr['id']} thread {cid} resolved by {actor}")
+        elif kind == "remove_reviewer":
+            api.call("DELETE", f"{base}/{pr_id}/participants/{action['reviewer']}",
+                     user=auth, ok=(200, 204))
+            log(f"  {pr['id']} reviewer {action['reviewer']} removed")
+        elif kind == "add_reviewer":
+            api.call("POST", f"{base}/{pr_id}/participants", user=auth,
+                     data={"user": {"name": action["reviewer"]}, "role": "REVIEWER"},
+                     ok=(200, 201))
+            log(f"  {pr['id']} reviewer {action['reviewer']} added")
         elif kind == "approve":
             api.call("POST", f"{base}/{pr_id}/approve", user=auth,
                      data={"lastReviewedCommit": ""}, ok=(200, 204))
@@ -815,7 +1113,7 @@ def execute_pr(api: Api, git: RepoGit, pr: dict, pr_id: int | None,
             api.call("PUT", f"{base}/{pr_id}/participants/{actor}", user=auth,
                      data={"status": "NEEDS_WORK"}, ok=(200, 204))
         elif kind == "merge":
-            git.merge_to_main(pr["branch"], pr_id, actor, action["at"])
+            merge_commit = git.merge_to_main(pr["branch"], pr_id, actor, action["at"])
             for _ in range(40):
                 cur = api.call("GET", f"{base}/{pr_id}")
                 if cur["state"] == "MERGED":
@@ -823,7 +1121,7 @@ def execute_pr(api: Api, git: RepoGit, pr: dict, pr_id: int | None,
                 time.sleep(0.5)
             else:
                 raise RuntimeError(f"PR {pr_id} did not auto-merge after pushing main")
-            log(f"  {pr['id']} merged into main (backdated merge commit)")
+            log(f"  {pr['id']} merged into main (backdated merge commit {merge_commit[:8]})")
         elif kind == "decline":
             api.call("POST", f"{base}/{pr_id}/comments", user=auth, ok=(200, 201), data={
                 "text": action["text"], "version": cur["version"]})
@@ -835,7 +1133,8 @@ def execute_pr(api: Api, git: RepoGit, pr: dict, pr_id: int | None,
             raise RuntimeError(f"unknown action {kind}")
         timeline.append(action["at"])
         log(f"  {pr['id']} {kind} by {actor}")
-    return pr_id
+    return {"pr_id": pr_id, "merge_commit": merge_commit,
+            "thread_ids": threads, "resolved": resolved}
 
 
 # ---------------------------------------------------------------------------
@@ -911,18 +1210,24 @@ def main() -> int:
         git = RepoGit(pr["repo"])
         git.ensure()
         timeline = st.get("timeline", [])
-        pr_id = execute_pr(api, git, pr, st.get("pr_id"), timeline)
+        result = execute_pr(api, git, pr, st.get("pr_id"), timeline)
         if pr["outcome"] == "merged":
             git.ensure()  # pick up the merge on main
-        state[key] = {"done": True, "pr_id": pr_id, "timeline": timeline,
-                      "repo": pr["repo"], "outcome": pr["outcome"]}
+        state[key] = {"done": True, "pr_id": result["pr_id"], "timeline": timeline,
+                      "repo": pr["repo"], "outcome": pr["outcome"],
+                      "merge_commit": result["merge_commit"],
+                      "thread_ids": result["thread_ids"],
+                      "resolved": result["resolved"]}
         STATE_FILE.write_text(json.dumps(state, indent=1))
-        log(f"  {key} done (PR #{pr_id})")
+        log(f"  {key} done (PR #{result['pr_id']})")
 
     for p in plan_out["prs"]:
         s = state.get(p["id"], {})
         p["pr_id"] = s.get("pr_id")
         p["timeline"] = s.get("timeline", [])
+        p["merge_commit"] = s.get("merge_commit")
+        p["thread_ids"] = s.get("thread_ids", [])
+        p["resolved"] = s.get("resolved", [])
     PLAN_FILE.write_text(json.dumps(plan_out, indent=1))
     log(f"generated {sum(1 for v in state.values() if v.get('done'))}/{len(planned)} PRs")
     return 0

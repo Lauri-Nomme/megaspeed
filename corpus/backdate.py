@@ -28,6 +28,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -140,12 +141,23 @@ def plan_events(pr: dict) -> dict:
             approvals.append(at_of(a))
         elif a["kind"] == "unapprove":
             approved.discard(a["actor"])
+    # DC writes one UPDATED activity per reviewer added/removed.  The two
+    # reviewers added when the PR opens come first; a later reviewer swap adds
+    # one removal + one addition at their planned times.
+    reviewer_changes = [parse_ts_iso(pr["open_at"])] * len(pr.get("reviewers") or [])
+    for a in actions:
+        if a["kind"] in ("add_reviewer", "remove_reviewer"):
+            reviewer_changes.append(at_of(a))
+    resolves = [(int(a.get("thread", 0)), at_of(a)) for a in actions
+                if a["kind"] == "resolve_thread"]
     closes = [at_of(a) for a in actions if a["kind"] in ("merge", "decline")]
     return {
         "opened": parse_ts_iso(pr["open_at"]),
         "comments": comments,
         "pushes": pushes,
         "approvals": approvals,
+        "reviewer_changes": reviewer_changes,
+        "resolves": resolves,
         "close": closes[-1] if closes else None,
     }
 
@@ -229,9 +241,11 @@ def do_backdate(db: Path, plan: list[dict]) -> None:
         "SELECT ba.ACTIVITY_ID, ba.COMMENT_ID, c.THREAD_ID, c.CREATED_TIMESTAMP "
         "FROM BB_PR_COMMENT_ACTIVITY ba JOIN BB_COMMENT c ON c.ID = ba.COMMENT_ID"))
     comment_by_activity = {int(c["ACTIVITY_ID"]): c for c in comments}
+    thread_by_comment = {int(c["COMMENT_ID"]): int(c["THREAD_ID"]) for c in comments}
 
     updates: list[str] = []
     timeline_rows: list[str] = []
+    resolved_threads: dict[int, datetime] = {}
     mapped = skipped = 0
     for pr in plan:
         slug = pr["repo"]
@@ -249,6 +263,7 @@ def do_backdate(db: Path, plan: list[dict]) -> None:
         q_comments = deque(ev["comments"])
         q_pushes = deque(ev["pushes"])
         q_approvals = deque(ev["approvals"])
+        q_reviewers = deque(ev["reviewer_changes"])
         times: list[tuple[int, datetime]] = []
         prev = ev["opened"]
         for a in rows:
@@ -262,19 +277,22 @@ def do_backdate(db: Path, plan: list[dict]) -> None:
                 t = q_pushes.popleft() if q_pushes else prev
             elif action == A_APPROVED:
                 t = q_approvals.popleft() if q_approvals else prev
+            elif action == A_UPDATED:
+                # reviewer roster change: one row per added/removed reviewer
+                t = q_reviewers.popleft() if q_reviewers else prev
             elif action in (A_MERGED, A_DECLINED):
                 t = ev["close"] or prev
-            else:  # UPDATED / REVIEWED / anything else: sit with its neighbour
+            else:  # REVIEWED / anything else: sit with its neighbour
                 t = prev
             if t < prev:
                 t = prev
             prev = t
             times.append((int(a["ACTIVITY_ID"]), t))
 
-        if q_comments or q_pushes or q_approvals:
+        if q_comments or q_pushes or q_approvals or q_reviewers:
             log(f"  WARN {pr['id']}: unmatched planned events "
                 f"(comments={len(q_comments)} pushes={len(q_pushes)} "
-                f"approvals={len(q_approvals)})")
+                f"approvals={len(q_approvals)} reviewers={len(q_reviewers)})")
 
         last = prev
         rescoped = None
@@ -291,6 +309,31 @@ def do_backdate(db: Path, plan: list[dict]) -> None:
                 updates.append(f"UPDATE BB_COMMENT SET CREATED_TIMESTAMP = {sql_ts(t)}, "
                                f"UPDATED_TIMESTAMP = {sql_ts(t)} "
                                f"WHERE ID = {int(c['COMMENT_ID'])};")
+
+        # Thread resolution happens through PUT .../comments/{id}; DC records no
+        # extra activity, only the comment/thread resolved timestamp.
+        thread_ids = pr.get("thread_ids") or []
+        for thread_index, when in ev["resolves"]:
+            if thread_index >= len(thread_ids):
+                continue
+            cid = int(thread_ids[thread_index])
+            tid = thread_by_comment.get(cid)
+            updates.append(f"UPDATE BB_COMMENT SET RESOLVED_TIMESTAMP = {sql_ts(when)} "
+                           f"WHERE ID = {cid};")
+            if tid:
+                resolved_threads[tid] = when
+
+        # The MERGED activity row exists with a NULL hash for a detected merge;
+        # point it at the backdated local merge commit so the REST activity (and
+        # the ingest's merge_commit extraction) carries a real commit block.
+        merge_commit = pr.get("merge_commit")
+        if merge_commit and re.fullmatch(r"[0-9a-f]{40}", str(merge_commit)):
+            for (aid, _t), a in zip(times, rows):
+                if int(a["PR_ACTION"]) == A_MERGED:
+                    updates.append(
+                        "UPDATE STA_PR_MERGE_ACTIVITY SET HASH = "
+                        f"'{merge_commit}' WHERE ACTIVITY_ID = {aid};")
+
         updates.append(
             "UPDATE STA_PULL_REQUEST SET "
             f"CREATED_TIMESTAMP = {sql_ts(ev['opened'])}, "
@@ -303,7 +346,8 @@ def do_backdate(db: Path, plan: list[dict]) -> None:
             f"{ev['opened'].isoformat()}\t{last.isoformat()}")
         mapped += 1
 
-    # thread timestamps follow their comments (min/max of the assigned times)
+    # thread timestamps follow their comments (min/max of the assigned times,
+    # including the resolution timestamp)
     threads: dict[int, list[datetime]] = {}
     assigned = {}
     for line in updates:
@@ -315,9 +359,14 @@ def do_backdate(db: Path, plan: list[dict]) -> None:
         cid = int(c["COMMENT_ID"])
         if cid in assigned:
             threads.setdefault(int(c["THREAD_ID"]), []).append(assigned[cid])
+    for tid, when in resolved_threads.items():
+        threads.setdefault(tid, []).append(when)
     for tid, ts in threads.items():
         updates.append(f"UPDATE BB_COMMENT_THREAD SET CREATED_TIMESTAMP = {sql_ts(min(ts))}, "
                        f"UPDATED_TIMESTAMP = {sql_ts(max(ts))} WHERE ID = {tid};")
+    for tid, when in resolved_threads.items():
+        updates.append(f"UPDATE BB_COMMENT_THREAD SET RESOLVED_TIMESTAMP = {sql_ts(when)} "
+                       f"WHERE ID = {tid};")
 
     log(f"mapped {mapped} PRs, skipped {skipped}, {len(updates)} SQL statements")
     (WORK / "timeline.tsv").write_text(
