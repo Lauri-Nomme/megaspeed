@@ -13,7 +13,20 @@ text is recorded here** — only labels, counts and latencies (prd/02).
 | Decoding | `/api/chat`, `format` = the closed-vocabulary JSON schema, `temperature: 0`, `seed: 0`, `num_predict: 128` |
 | Corpus | bb-lab-b `DEL/delivery-api` + `DEL/delivery-web` via the normal scrape client: **340 comments, 131 PR descriptions** |
 | Sample | every *k*-th comment of the corpus walk (deterministic spread), 20 comments + the first 6 descriptions |
-| Harness | throwaway script in `/tmp` (not committed); it prints labels/latency only, raw text died with the process |
+| Harness | `scrape/bench/llm-bench.py` (re-runnable; aggregates only, raw text never written) |
+
+Re-run against the live model (the script walks the same corpus through the
+normal scrape client, times each `OllamaClassifier.classify` call, and prints
+latency / fallbacks / schema violations / label counts):
+
+```sh
+python3 scrape/bench/llm-bench.py --n 5              # quick check
+python3 scrape/bench/llm-bench.py --n 20 --desc-n 6  # the numbers below
+python3 scrape/bench/llm-bench.py --n 20 --append-md # append aggregates to this file
+```
+
+`--append-md` writes counts and timings only; raw text is never written to a
+tracked file (prd/02).
 
 ## Latency
 
