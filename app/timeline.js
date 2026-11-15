@@ -16,7 +16,7 @@
  */
 
 import {
-  MINUTE, HOUR, DAY, fmtDay, fmtClock, fmtStamp, fmtDuration, fmtTick, esc, rgba,
+  MINUTE, HOUR, DAY, fmtDay, fmtClock, fmtStamp, fmtDuration, fmtTick, fmtCompact, esc, rgba,
 } from './format.js';
 
 export const ACTIVITY_ORDER = [
@@ -407,8 +407,8 @@ export class Timeline {
     if (this.dim === 'queue') {
       return QUEUE_ORDER.map((key) => {
         const hours = this.queueHours(key);
-        return { key, count: Math.round(hours), label: `${key} · ${fmtDuration(hours * HOUR)}` };
-      }).filter((row) => row.count > 0);
+        return { key, hours, count: Math.round(hours), label: `${key} · ${fmtCompact(hours)} h` };
+      }).filter((row) => row.hours > 0);
     }
     // B4: rows come from ALL events, so toggling a legend key never re-sorts
     // the lanes. Counts are totals, not "visible" counts.
