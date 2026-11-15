@@ -1,6 +1,6 @@
 """Local dev server entrypoint: ``python3 -m server``.
 
-    python3 -m server --host 127.0.0.1 --port 8765
+    python3 -m server --host 127.0.0.1 --port 8766
     python3 -m server --reload            # for UI work
 
 Serves the read-only API, the WebSocket eval/screenshot bridge, and ``app/``.
@@ -11,7 +11,7 @@ from __future__ import annotations
 import argparse
 import os
 
-DEFAULT_PORT = int(os.environ.get("MEGASPEED_PORT", "8765"))
+DEFAULT_PORT = int(os.environ.get("MEGASPEED_PORT", "8766"))
 
 
 def main(argv: list[str] | None = None) -> int:
