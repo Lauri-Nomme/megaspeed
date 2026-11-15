@@ -49,6 +49,14 @@ reduction: every RESCOPED activity is stamped with the deterministic
 ``push_class`` before :class:`ingest.pipeline.Reducer` turns it into a
 ``pr_pushed`` event. It needs a local shallow git cache, so it is on for live
 runs only (``--no-push-class`` / ``MEGASPEED_PUSH_CLASS=0`` turns it off).
+
+The **text classifier** (prd/16) runs in the same window, on the same PR: the
+raw comment bodies and the PR description are read, projected onto the closed
+vocabulary by :mod:`ingest.classify` (local Ollama on a live run, deterministic
+mock for a fixture), and dropped. Only ``comment_type`` / ``thread_outcome`` on
+the THREAD objects and the ``question_raised`` / ``question_answered`` events
+leave the raw zone. The git cache also answers "did the diff move at this
+comment's anchor?" -- the deterministic half of ``thread_outcome``.
 """
 
 from __future__ import annotations
@@ -60,7 +68,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import bundle as bundle_mod
-from . import gitclass, taxonomy
+from . import classify, gitclass, taxonomy
 from .bitbucket import BitbucketClient, PullRequest
 from .config import Config
 from .pipeline import KeyFilter, Reducer, Stats, _object
@@ -267,6 +275,8 @@ class Collected:
     repos: dict[str, dict] = field(default_factory=dict)
     #: the push classifier that ran (None when this source needs none)
     push_classifier: gitclass.PushClassifier | None = None
+    #: the prd/16 text classifier (None when text classification is off)
+    text_classifier: classify.Classifier | None = None
 
     def counts(self) -> dict:
         stats = self.stats
@@ -301,6 +311,7 @@ def collect(
     full: bool = False,
     progress: ProgressReporter | None = None,
     push_classifier: gitclass.PushClassifier | None = None,
+    text_classifier: classify.Classifier | None = None,
 ) -> Collected:
     """Read the source and reduce it in memory. Nothing is written here.
 
@@ -309,6 +320,10 @@ def collect(
     emits interval-gated status lines to stderr (prd/14); nothing there can
     reach the bundle. ``push_classifier`` (prd/16) may be ``None``: a fixture
     bundle already carries its labels and needs no git cache.
+
+    ``text_classifier`` (prd/16) reads the raw comment bodies and PR
+    descriptions **before they are discarded** and hands back only closed
+    labels; ``None`` disables text classification entirely (no text is read).
     """
     as_of = utcnow()
     run_id = f"{source}-{as_of.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:6]}"
@@ -317,7 +332,7 @@ def collect(
     client = BitbucketClient(
         transport, page_limit=cfg.page_limit, min_interval=0.0 if source == "fixture" else 0.2
     )
-    reducer = Reducer(cfg, ident, key_filter, as_of)
+    reducer = Reducer(cfg, ident, key_filter, as_of, classifier=text_classifier)
     stats = Stats()
     out = Collected(
         source=source,
@@ -327,6 +342,7 @@ def collect(
         ticket_regex=cfg.ticket_regex,
         ticket_projects=cfg.ticket_projects,
         push_classifier=push_classifier,
+        text_classifier=text_classifier,
     )
     prefilter = getattr(cfg, "prefilter", True)
 
@@ -420,6 +436,12 @@ def collect(
                     push_classifier.annotate(project, repo, pr.pr, pr.activities)
                     for name, value in push_classifier.counts.items():
                         stats.push_classes[name] = value
+                    if text_classifier is not None:
+                        # ... and whether the diff moved at each comment anchor,
+                        # which is the deterministic half of thread_outcome.
+                        push_classifier.annotate_threads(
+                            project, repo, pr.pr, pr.activities, pr.commits
+                        )
                 tick()
                 reducer.reduce(pr, keys, pr.activities, stats)
                 if pr_state is not None:
@@ -604,6 +626,11 @@ def build_manifest(collected: Collected, *, previous: datetime | None, watermark
         "overlap_hours": overlap_hours,
         "full": bool(full),
         "counts": counts,
+        "text_classifier": (
+            collected.text_classifier.report()
+            if collected.text_classifier is not None
+            else {"enabled": False}
+        ),
         "run": {
             "run_id": collected.run_id,
             "as_of": iso_precise(collected.as_of),
@@ -644,6 +671,7 @@ def scrape(
     identity_path: str | Path | None = None,
     progress: ProgressReporter | None = None,
     push_classifier: gitclass.PushClassifier | None = None,
+    text_classifier: classify.Classifier | None = None,
 ) -> dict:
     """Scrape one source into ``out`` (a tgz) and update local state.
 
@@ -661,6 +689,12 @@ def scrape(
     gets a local shallow git cache under ``<state-dir>/git/``, prd/16); pass one
     explicitly to point it somewhere else, or ``None`` after disabling
     ``cfg.push_class``.
+
+    ``text_classifier`` is the local-LLM classifier (prd/16) that labels
+    comment bodies and PR descriptions before they are discarded. It defaults to
+    what the config/source imply: the deterministic mock for ``--fixture``, the
+    local Ollama box for a live run, ``None`` when ``cfg.text_classify`` is off.
+    Raw text never crosses into the bundle -- only the labels do.
     """
     out = Path(out).expanduser()
     state_dir = Path(state_dir).expanduser() if state_dir else default_state_dir(out)
@@ -675,6 +709,11 @@ def scrape(
         if push_classifier is not None
         else gitclass.PushClassifier.for_scrape(cfg, source, state_dir)
     )
+    text = (
+        text_classifier
+        if text_classifier is not None
+        else classify.for_scrape(cfg, source)
+    )
 
     previous = None if full else state.watermark(source)
     collected = collect(
@@ -688,6 +727,7 @@ def scrape(
         full=full,
         progress=reporter,
         push_classifier=classifier,
+        text_classifier=text,
     )
 
     cutoff = previous - timedelta(hours=overlap_hours) if previous else None
@@ -765,5 +805,17 @@ def scrape(
             collected.push_classifier.report()
             if collected.push_classifier is not None
             else {"enabled": False, "counts": {}, "reasons": {}, "fetches": 0, "repos": []}
+        ),
+        "text_classify": (
+            {
+                **collected.text_classifier.report(),
+                "comment_types": dict(sorted(collected.stats.comment_types.items())),
+                "thread_outcomes": dict(sorted(collected.stats.thread_outcomes.items())),
+                "questions_raised": collected.stats.questions_raised,
+                "questions_answered": collected.stats.questions_answered,
+                "bot_comments_skipped": collected.stats.bot_comments_skipped,
+            }
+            if collected.text_classifier is not None
+            else {"enabled": False}
         ),
     }

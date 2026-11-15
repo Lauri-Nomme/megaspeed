@@ -198,6 +198,8 @@ class PushClassifier:
         #: push_class -> count, and reason -> count (both for the scrape report).
         self.counts: Counter[str] = Counter()
         self.reasons: Counter[str] = Counter()
+        #: did the diff move at a comment anchor? (prd/16 Q4 thread outcomes)
+        self.thread_counts: Counter[str] = Counter()
         #: git fetch invocations, so the report can show what the cache cost.
         self.fetches = 0
         self._repos: dict[str, Path] = {}
@@ -246,6 +248,7 @@ class PushClassifier:
             "state": str(self.root),
             "counts": dict(sorted(self.counts.items())),
             "reasons": dict(sorted(self.reasons.items())),
+            "thread_changes": dict(sorted(self.thread_counts.items())),
             "fetches": self.fetches,
             "repos": sorted(self._repos),
         }
@@ -298,6 +301,127 @@ class PushClassifier:
         path = self._repo(project, repo)
         self._ensure_heads(path, [], [target, old, new])
         return self._classify(path, target, old, new)
+
+    # -- prd/16 Q4: did the diff move at a comment anchor? ----------------
+    def annotate_threads(
+        self,
+        project: str,
+        repo: str,
+        pr_record: dict,
+        activities: list[dict],
+        commits: list[dict] | tuple[dict, ...] = (),
+    ) -> None:
+        """Stamp ``megaspeedThreadChange`` on comment activities (prd/15 Q4).
+
+        The thread-outcome classifier needs to know whether the code the
+        reviewer pointed at actually changed. The REST payload has no diff, so
+        this compares the **anchor path** between the PR head at comment time
+        and the head after the next push -- one local ``git diff`` per thread
+        against the same shallow cache ``push_class`` already uses.
+
+        Only a decided answer is stamped: a missing anchor path, a head the
+        server no longer serves, or no git cache leaves the activity untouched
+        and the reducer falls back to the classifier's read of the text.
+        """
+        cases: list[tuple[dict, str, int]] = []
+        for activity in activities:
+            if str(activity.get("action") or "") != "COMMENTED":
+                continue
+            if "megaspeedThreadChange" in activity:
+                continue  # already decided (fixture bundle or a second pass)
+            comment = activity.get("comment") or {}
+            anchor = activity.get("commentAnchor") or comment.get("anchor") or {}
+            anchor_path = str(anchor.get("path") or "")
+            if not anchor_path:
+                self.thread_counts["no_anchor"] += 1
+                continue
+            cases.append((activity, anchor_path, int(activity.get("createdDate") or 0)))
+        if not cases:
+            return
+        if not self.available:
+            self.thread_counts["git_unavailable"] += len(cases)
+            return
+
+        timeline = self._head_timeline(pr_record, activities, commits)
+        try:
+            path = self._repo(project, repo)
+            wants = [sha for _ts, sha in timeline]
+            head = self._pr_head(pr_record)
+            self._ensure_heads(path, self._refspecs(pr_record), [*wants, head])
+        except GitError:
+            self.thread_counts["repo_unavailable"] += len(cases)
+            return
+
+        for activity, anchor_path, ts in cases:
+            old = self._head_at(timeline, ts)
+            new = self._head_after(timeline, ts) or self._pr_head(pr_record)
+            changed = self._changed_at(path, old, new, anchor_path)
+            if changed is None:
+                self.thread_counts["unknown"] += 1
+                continue
+            activity["megaspeedThreadChange"] = {"changed": changed}
+            self.thread_counts["changed" if changed else "unchanged"] += 1
+
+    @staticmethod
+    def _head_timeline(
+        pr_record: dict, activities: list[dict], commits: list[dict] | tuple[dict, ...]
+    ) -> list[tuple[int, str]]:
+        """``(epoch_ms, head_sha)`` for every moment the PR head is known.
+
+        Commit timestamps and rescope activities both mark a head; sorted, they
+        let a comment dated anywhere in the PR's life be pinned to the code that
+        was on the branch when it was written.
+        """
+        points: list[tuple[int, str]] = []
+        for commit in commits:
+            ts, sha = commit.get("authorTimestamp"), commit.get("id")
+            if ts and sha:
+                points.append((int(ts), str(sha)))
+        for activity in activities:
+            if str(activity.get("action") or "") != "RESCOPED":
+                continue
+            ts, sha = activity.get("createdDate"), activity.get("fromHash")
+            if ts and sha:
+                points.append((int(ts), str(sha)))
+        points.sort()
+        return points
+
+    @staticmethod
+    def _head_at(timeline: list[tuple[int, str]], ts: int) -> str:
+        """The head as of ``ts`` (the newest known head at or before it)."""
+        head = ""
+        for point_ts, sha in timeline:
+            if point_ts > ts:
+                break
+            head = sha
+        return head or (timeline[0][1] if timeline else "")
+
+    @staticmethod
+    def _head_after(timeline: list[tuple[int, str]], ts: int) -> str:
+        """The first head *after* ``ts`` (the push that answered the comment)."""
+        for point_ts, sha in timeline:
+            if point_ts > ts:
+                return sha
+        return ""
+
+    @staticmethod
+    def _pr_head(pr_record: dict) -> str:
+        return str((pr_record.get("fromRef") or {}).get("latestCommit") or "")
+
+    def _changed_at(self, path: Path, old: str, new: str, anchor_path: str) -> bool | None:
+        """Did the range ``old..new`` touch ``anchor_path``? ``None`` = unknown."""
+        if not (old and new and anchor_path):
+            return None
+        if old == new:
+            return False
+        if not (self._present(path, old) and self._present(path, new)):
+            return None
+        result = self._run(
+            path, ["diff", "--numstat", "--no-renames", old, new, "--", anchor_path], check=False
+        )
+        if result.code != 0:
+            return None
+        return bool(result.text.strip())
 
     # -- cache management ------------------------------------------------
     def _repo(self, project: str, repo: str) -> Path:

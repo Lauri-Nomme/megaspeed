@@ -13,6 +13,7 @@ import re
 import tomllib
 from pathlib import Path
 
+from . import classify
 from .progress import DEFAULT_INTERVAL as DEFAULT_PROGRESS_INTERVAL
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -79,6 +80,18 @@ class Config:
     #: Changed lines in ``git range-diff`` at or below which a changed patch is
     #: read as a resolved conflict rather than real rework (prd/16).
     push_conflict_lines: int = 20
+    #: Scrape-side text classification (prd/16): comment_type / thread_outcome /
+    #: question events from the raw comment + description text before it is
+    #: discarded. On by default; the local LLM is a provisioned localhost
+    #: service, so a run without one degrades to the deterministic mock.
+    text_classify: bool = True
+    #: ``ollama`` (default for live runs) or ``mock`` (deterministic, no model).
+    text_backend: str = ""
+    #: The local Ollama box on the precision network (prd/16). No key: it is a
+    #: local service on the raw side, never reachable from the analysis zone.
+    llm_url: str = classify.DEFAULT_URL
+    llm_model: str = classify.DEFAULT_MODEL
+    llm_timeout: float = classify.DEFAULT_TIMEOUT
 
     @property
     def live(self) -> bool:
@@ -150,6 +163,7 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     fixture = raw.get("fixture", {})
     review = raw.get("review", {})
     actors = raw.get("actors", {})
+    classify_cfg = raw.get("classify", {})
 
     repos = [(str(r["project"]), str(r["repo"])) for r in source.get("repos", [])]
 
@@ -205,6 +219,13 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         git_depth=int(os.environ.get("MEGASPEED_GIT_DEPTH", 128)),
         git_max_depth=int(os.environ.get("MEGASPEED_GIT_MAX_DEPTH", 1024)),
         push_conflict_lines=int(os.environ.get("MEGASPEED_PUSH_CONFLICT_LINES", 20)),
+        text_classify=_env_flag(
+            os.environ.get("MEGASPEED_TEXT_CLASSIFY"), classify_cfg.get("enabled", True)
+        ),
+        text_backend=str(os.environ.get("MEGASPEED_TEXT_BACKEND", classify_cfg.get("backend", "")) or ""),
+        llm_url=str(os.environ.get("MEGASPEED_LLM_URL", classify_cfg.get("llm_url", classify.DEFAULT_URL))),
+        llm_model=str(os.environ.get("MEGASPEED_LLM_MODEL", classify_cfg.get("llm_model", classify.DEFAULT_MODEL))),
+        llm_timeout=float(os.environ.get("MEGASPEED_LLM_TIMEOUT", classify_cfg.get("llm_timeout", classify.DEFAULT_TIMEOUT))),
     )
     if not config.repos:
         raise SystemExit(

@@ -73,6 +73,21 @@ page_limit = 25
 seed = 20261115
 # path = "fixtures/bitbucket-dc-fixture.json"   # load a committed bundle instead of generating
 
+[classify]
+# Scrape-side text classification (prd/16): comment bodies + PR descriptions are
+# read locally, projected onto the closed vocabulary (comment_type,
+# thread_outcome, question phase) and then discarded. Only the labels cross.
+enabled = true
+# backend: "ollama" (live runs) or "mock" (deterministic, no model). Fixture
+# runs always use the mock. Environment wins:
+#   MEGASPEED_TEXT_CLASSIFY=0   MEGASPEED_TEXT_BACKEND=mock
+backend = "ollama"
+# The local Ollama box on the precision network (k3s home-iot/ollama-moe).
+# CPU-only, Qwen3 30B MoE (~3B active, Q4_K_M). No API key: local net only.
+llm_url = "http://10.43.36.10:11434"
+llm_model = "qwen3-30b-a3b:2507"
+llm_timeout = 180
+
 [review]
 # Known sentinel-team slugs. Membership is deterministic (known account set),
 # so `sentinel=true/false` is a label, not an inference.

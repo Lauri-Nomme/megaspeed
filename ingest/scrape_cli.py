@@ -27,7 +27,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import __version__
+from . import __version__, classify
 from .config import REPO_ROOT, Config, load_config
 from .progress import DEFAULT_INTERVAL as DEFAULT_PROGRESS_INTERVAL
 from .progress import ProgressReporter
@@ -99,6 +99,31 @@ def _print_scrape(r: dict) -> None:
     elif push:
         why = "git not installed" if "git" in push and not push.get("git") else "off"
         print(f"push class     {why} (no local git cache)")
+    text = r.get("text_classify") or {}
+    if text.get("enabled"):
+        detail = " ".join(
+            str(part) for part in (text.get("backend"), text.get("model") or text.get("version"))
+            if part
+        )
+        print(
+            f"text classify  {detail}"
+            + f" · {text.get('calls', 0)} calls"
+            + (f", {text['fallbacks']} fallback(s)" if text.get("fallbacks") else "")
+        )
+        kinds = ", ".join(f"{k}={v}" for k, v in (text.get("comment_types") or {}).items())
+        if kinds:
+            print(f"comment types  {kinds}")
+        outcomes = ", ".join(f"{k}={v}" for k, v in (text.get("thread_outcomes") or {}).items())
+        if outcomes:
+            print(f"thread outcome {outcomes}")
+        print(
+            f"questions      {text.get('questions_raised', 0)} raised · "
+            f"{text.get('questions_answered', 0)} answered"
+        )
+        if text.get("bot_comments_skipped"):
+            print(f"bot notices    {text['bot_comments_skipped']} skipped (not dialogue)")
+    elif text:
+        print("text classify  off (no comment/description labels)")
 
 
 def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
@@ -123,6 +148,15 @@ def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
                     help="fetch every PR's commits before filtering (old, slower path; prd/14)")
     ap.add_argument("--no-push-class", action="store_true",
                     help="skip the deterministic push_class (no local git cache; prd/16)")
+    ap.add_argument("--no-text-classify", action="store_true",
+                    help="skip comment/description classification (no local LLM; prd/16)")
+    ap.add_argument("--text-backend", choices=("ollama", "mock"), default=None,
+                    help="classifier for comment text (default: mock for --fixture, ollama for --live)")
+    ap.add_argument("--llm-url", default=None, metavar="URL",
+                    help="local Ollama base URL (default MEGASPEED_LLM_URL, "
+                         f"{classify.DEFAULT_URL})")
+    ap.add_argument("--llm-model", default=None, metavar="MODEL",
+                    help=f"local Ollama model (default MEGASPEED_LLM_MODEL, {classify.DEFAULT_MODEL})")
     ap.add_argument("--progress-interval", type=float, default=None, metavar="SECONDS",
                     help="progress line on stderr every N seconds; 0 disables"
                          f" (default {DEFAULT_PROGRESS_INTERVAL:g})")
@@ -178,6 +212,14 @@ def main(argv: list[str] | None = None) -> int:
         cfg.prefilter = False
     if args.no_push_class:
         cfg.push_class = False
+    if args.no_text_classify:
+        cfg.text_classify = False
+    if args.text_backend:
+        cfg.text_backend = args.text_backend
+    if args.llm_url:
+        cfg.llm_url = args.llm_url
+    if args.llm_model:
+        cfg.llm_model = args.llm_model
 
     seed = args.seed if args.seed is not None else cfg.seed
     generate_n = args.n if args.n is not None else 50

@@ -55,6 +55,19 @@ ACTIVITIES = frozenset(
 
 QUESTION_PHASE = frozenset({"breakdown", "refinement", "sprint", "implementation", "review"})
 SEVERITY = frozenset({"mandatory", "suggestion"})
+# prd/16 "Local LLM classification": what a comment *is*, projected onto a
+# closed set (never a summary, never a paraphrase -- prd/02).
+COMMENT_TYPE = frozenset(
+    {"blocker", "suggestion", "question", "nit", "out_of_scope", "optimization"}
+)
+# What became of a review thread: resolution state + whether the diff moved at
+# the anchor + the classifier's read of a "won't fix" (prd/15 Q4).
+THREAD_OUTCOME = frozenset({"acted_on", "rejected", "walked_back", "unresolved"})
+# The classifier's internal read of a thread's *intent*. It never crosses into
+# the store; it is one of the inputs to :func:`ingest.classify.thread_outcome`.
+THREAD_INTENT = frozenset({"acted", "rejected", "withdrawn", "unclear"})
+# How a question got answered: a reply comment, or the thread being resolved.
+ANSWER_SOURCE = frozenset({"reply", "resolution"})
 PUSH_CLASS = frozenset({"content", "pure_rebase", "rebase_conflict", "other"})
 ANCHOR_CLASS = frozenset({"file", "general"})
 THREAD_STATE = frozenset({"open", "resolved"})
@@ -69,6 +82,10 @@ OBJECT_TYPES = frozenset({"PR", "COMMIT", "TICKET", "PERSON", "PRREV", "THREAD"}
 
 # A commit hash: DC uses full 40-hex, abbreviated forms are still hashes.
 HASH = re.compile(r"^[0-9a-f]{7,40}$")
+# A classifier version / model tag: one token, no whitespace (``mock-v1``,
+# ``ollama-v1``, ``qwen3-30b-a3b:2507``). Shape-validated like a hash, so a
+# well-meaning "notes" field can never be smuggled in next to a label.
+CLASSIFIER_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,63}$")
 
 # attribute name -> allowed string values, or a python type for scalars.
 ATTRIBUTE_SPEC: dict[str, Any] = {
@@ -77,6 +94,7 @@ ATTRIBUTE_SPEC: dict[str, Any] = {
     "push_class": PUSH_CLASS,
     "anchor_class": ANCHOR_CLASS,
     "thread_state": THREAD_STATE,
+    "answer_source": ANSWER_SOURCE,
     "change": CHANGE,
     "cause": UN_APPROVE_CAUSE,
     "message_class": MESSAGE_CLASS,
@@ -102,6 +120,12 @@ OBJECT_ATTRIBUTE_SPEC: dict[str, Any] = {
     "commits_removed": int,
     "severity": SEVERITY,
     "anchor_class": ANCHOR_CLASS,
+    # prd/16: the text classifier's projection of a review thread. Both are
+    # closed labels; ``classifier_version`` records *which* classifier produced
+    # them so a re-classification is replayable (prd/02, data lifecycle).
+    "comment_type": COMMENT_TYPE,
+    "thread_outcome": THREAD_OUTCOME,
+    "classifier_version": CLASSIFIER_TOKEN,
     "merge_commit": HASH,
 }
 

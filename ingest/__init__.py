@@ -20,4 +20,5 @@ __version__ = "0.2.0"
 __all__ = [
     "config", "taxonomy", "timeutil", "pseudonym", "fixtures", "bitbucket",
     "transport", "pipeline", "bundle", "scrape", "importer", "store", "live",
+    "classify", "gitclass",
 ]

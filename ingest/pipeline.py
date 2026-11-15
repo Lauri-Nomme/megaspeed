@@ -1,12 +1,16 @@
 """Bitbucket DC payloads -> pseudonymised OCEL-ish event log.
 
-The reduction happens entirely in memory. Raw fields are read for exactly two
+The reduction happens entirely in memory. Raw fields are read for exactly three
 purposes and then dropped:
 
 1. **the ticket-key filter** (branch, PR title, PR description, commit
    messages) — only the matched *keys* survive;
 2. **deterministic classification** of a commit message into one label from
-   ``taxonomy.MESSAGE_CLASS`` (keyword rules, no model, no summary).
+   ``taxonomy.MESSAGE_CLASS`` (keyword rules, no model, no summary);
+3. **text classification** of a comment body / PR description into
+   ``comment_type``, ``thread_outcome`` and question events (prd/16): the raw
+   text goes to the local classifier (:mod:`ingest.classify`) and only the
+   labels come back. With no classifier configured, no text is read at all.
 
 Everything else that leaves this module is a key, a pseudonym, a timestamp or
 an enum label.
@@ -21,7 +25,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from . import taxonomy
+from . import classify, taxonomy
 from .bitbucket import PullRequest
 from .config import Config
 from .pseudonym import IdentityTable
@@ -150,6 +154,13 @@ class Stats:
     keys_by_placement: dict[str, int] = field(default_factory=dict)
     #: ``push_class`` -> count for the rescopes classified in this run (prd/16).
     push_classes: dict[str, int] = field(default_factory=dict)
+    #: Text labels emitted in this run (prd/16): comment_type / thread_outcome.
+    comment_types: dict[str, int] = field(default_factory=dict)
+    thread_outcomes: dict[str, int] = field(default_factory=dict)
+    questions_raised: int = 0
+    questions_answered: int = 0
+    #: Bot notices that were never sent to the classifier (prd/16).
+    bot_comments_skipped: int = 0
     watermark: datetime | None = None
     activities_by_action: dict[str, int] = field(default_factory=dict)
 
@@ -157,11 +168,21 @@ class Stats:
 class Reducer:
     """One PR in, pseudonymised events out."""
 
-    def __init__(self, cfg: Config, ident: IdentityTable, key_filter: KeyFilter, as_of: datetime):
+    def __init__(
+        self,
+        cfg: Config,
+        ident: IdentityTable,
+        key_filter: KeyFilter,
+        as_of: datetime,
+        classifier: classify.Classifier | None = None,
+    ):
         self.cfg = cfg
         self.ident = ident
         self.key_filter = key_filter
         self.as_of = as_of
+        #: prd/16: the local text classifier. ``None`` = no text is read (and no
+        #: text labels are emitted); the scrape always passes one in practice.
+        self.classifier = classifier
         self.sentinels = set(cfg.sentinel_slugs)
         self.bot_slugs = {str(s).strip().lower() for s in cfg.bot_slugs if str(s).strip()}
         self.actor_kinds: dict[str, str] = {}
@@ -250,6 +271,11 @@ class Reducer:
         for key in keys:
             stats.objects.append(_object("TICKET", f"TICKET:{key}", ticket_keys=[key]))
 
+        # prd/16: the PR description is read *here*, classified, and dropped.
+        # A description that raises a question is the cheapest place to catch
+        # one (it costs a refinement round, not a review round).
+        self._description_questions(pr, pr_object_id, ticket_objects, author, created, stats)
+
         for commit in commits:
             cid = str(commit.get("id") or "")
             if not cid:
@@ -305,13 +331,17 @@ class Reducer:
                 anchor_class = "file" if anchor else "general"
                 resolved = bool(comment.get("threadResolved")) or str(comment.get("state") or "OPEN").upper() != "OPEN"
                 thread_objects: list[str] = []
+                labels: dict | None = None
                 if comment.get("id") is not None:
                     thread_id = f"THREAD:{repo_label}#{pr.id}:{comment['id']}"
                     thread_objects.append(thread_id)
                     # A thread's state is cumulative: ADDED opens it, a later
                     # COMMENTED/UPDATED activity may resolve it. Keep the
                     # earliest timestamp and the latest resolution.
-                    entry = threads.setdefault(thread_id, {"created": ts})
+                    entry = threads.setdefault(
+                        thread_id, {"created": ts, "cid": comment["id"]}
+                    )
+                    entry.setdefault("commenter", actor)
                     entry["severity"] = severity
                     entry["anchor_class"] = anchor_class
                     entry["resolved"] = resolved
@@ -320,6 +350,33 @@ class Reducer:
                         else (ts if resolved else None)
                     )
                     entry["resolver"] = (comment.get("resolver") or {}) if resolved else {}
+                    # prd/16: one label set per thread, taken from the comment
+                    # that opened it. The raw body never leaves this branch.
+                    if comment_action != "UPDATED" and self.classifier is not None:
+                        labels = self._comment_labels(
+                            actor, comment.get("text"), severity, stats
+                        )
+                    if labels is not None:
+                        entry.setdefault("comment_type", labels["comment_type"])
+                        entry.setdefault("thread_intent", labels["thread_intent"])
+                        entry.setdefault("question", labels["question"])
+                        entry["phase"] = labels["phase"]
+                        if activity.get("megaspeedThreadChange"):
+                            # The scrape's git cache diffed the anchor path
+                            # between this comment and the next push (prd/16).
+                            entry.setdefault(
+                                "anchor_changed",
+                                (activity["megaspeedThreadChange"] or {}).get("changed"),
+                            )
+                        if labels["answered"]:
+                            entry.setdefault("answer", (ts, actor))
+                        if labels["question"]:
+                            # A reply inside a question thread is the answer --
+                            # classify only those replies (one call per thread,
+                            # not one per reply everywhere).
+                            answer = self._reply_answer(comment, ts, stats)
+                            if answer is not None:
+                                entry.setdefault("answer", answer)
                 if comment_action == "UPDATED":
                     # Edits and thread-resolution updates change the ReviewThread
                     # object, not the dialogue log.
@@ -335,6 +392,13 @@ class Reducer:
                     },
                     activity,
                 )
+                if labels and labels["question"]:
+                    stats.questions_raised += 1
+                    self._event(
+                        stats, pr, f"{natural}:q", ts, "question_raised", actor,
+                        [pr_object_id, *ticket_objects, *thread_objects],
+                        {"phase": labels["phase"]}, {"kind": classify.KIND_COMMENT},
+                    )
 
             elif action == "APPROVED":
                 approvals[actor] = {"ts": ts, "user": user}
@@ -416,6 +480,30 @@ class Reducer:
 
         for thread_id, entry in sorted(threads.items()):
             resolver = entry.get("resolver") or {}
+            resolver_actor = self._actor(resolver, stats) if resolver else None
+            attributes = {
+                "severity": entry["severity"],
+                "anchor_class": entry["anchor_class"],
+            }
+            resolver_is_commenter = bool(
+                resolver_actor and resolver_actor == entry.get("commenter")
+            )
+            if entry.get("comment_type"):
+                # prd/16: comment_type + thread_outcome are the labels the
+                # "comment tax" analysis (prd/15 Q4) joins on.
+                outcome = classify.thread_outcome(
+                    resolved=bool(entry.get("resolved")),
+                    anchor_changed=entry.get("anchor_changed"),
+                    resolver_is_commenter=resolver_is_commenter,
+                    thread_intent=entry.get("thread_intent", "unclear"),
+                )
+                attributes["comment_type"] = entry["comment_type"]
+                attributes["thread_outcome"] = outcome
+                attributes["classifier_version"] = self.classifier.version
+                stats.comment_types[entry["comment_type"]] = (
+                    stats.comment_types.get(entry["comment_type"], 0) + 1
+                )
+                stats.thread_outcomes[outcome] = stats.thread_outcomes.get(outcome, 0) + 1
             stats.objects.append(
                 _object(
                     "THREAD",
@@ -423,16 +511,129 @@ class Reducer:
                     repo=repo_label,
                     pr_id=pr.id,
                     ticket_keys=keys,
-                    actor=self._actor(resolver, stats) if resolver else None,
+                    actor=resolver_actor,
                     state="resolved" if entry.get("resolved") else "open",
                     created_at=entry.get("created"),
                     closed_at=entry.get("resolved_at"),
-                    attributes={
-                        "severity": entry["severity"],
-                        "anchor_class": entry["anchor_class"],
-                    },
+                    attributes=attributes,
                 )
             )
+            self._question_answer(
+                pr, thread_id, entry, resolver_actor, resolver_is_commenter,
+                pr_object_id, ticket_objects, stats,
+            )
+
+    # -- prd/16 text classification --------------------------------------
+    def _comment_labels(self, actor: str, text: Any, severity: str, stats: Stats) -> dict | None:
+        """Raw comment body -> closed labels (the body is not retained).
+
+        ``None`` means "this comment is not dialogue worth labelling": a bot
+        notice (a stale-PR auto-decline, a build account) is not a review
+        remark, and classifying it would put noise in the comment-tax metric.
+        Bot-vs-human is deterministic (prd/02), so it is decided before the
+        model is ever asked.
+        """
+        assert self.classifier is not None
+        if self.actor_kind(actor) == "bot":
+            stats.bot_comments_skipped += 1
+            return None
+        body = str(text or "").strip()
+        if not body:
+            # An attachment-only or empty comment: the residual label, decided
+            # deterministically instead of asking the model about nothing.
+            return {
+                "comment_type": (
+                    "blocker" if severity == "mandatory" else classify.DEFAULT_COMMENT_TYPE
+                ),
+                "thread_intent": classify.DEFAULT_INTENT,
+                "question": False,
+                "answered": False,
+                "phase": classify.PHASES_BY_KIND[classify.KIND_COMMENT][0],
+            }
+        labels = self.classifier.classify(body, classify.KIND_COMMENT)
+        if severity == "mandatory" and labels["comment_type"] != "blocker":
+            # DC's own BLOCKER marker is deterministic evidence (prd/02:
+            # "comment severity -- or Bitbucket task-type where available") and
+            # outranks a model that read the prose as a mere suggestion.
+            labels = {**labels, "comment_type": "blocker"}
+        return labels
+
+    def _reply_answer(
+        self, comment: dict, ts: datetime, stats: Stats
+    ) -> tuple[datetime, str] | None:
+        """The first reply the classifier reads as an answer, or ``None``."""
+        assert self.classifier is not None
+        for reply in comment.get("comments") or []:
+            reply = reply or {}
+            body = str(reply.get("text") or "").strip()
+            if not body:
+                continue
+            labels = self.classifier.classify(body, classify.KIND_COMMENT)
+            if not labels["answered"]:
+                continue
+            return (_ts(reply.get("createdDate"), ts), self._actor(reply.get("author"), stats))
+        return None
+
+    def _description_questions(
+        self,
+        pr: PullRequest,
+        pr_object_id: str,
+        ticket_objects: list[str],
+        author: str,
+        created: datetime,
+        stats: Stats,
+    ) -> None:
+        """Classify the PR description; emit a ``question_raised`` if it asks one."""
+        if self.classifier is None:
+            return
+        body = str(pr.pr.get("description") or "").strip()
+        if not body:
+            return
+        labels = self.classifier.classify(body, classify.KIND_DESCRIPTION)
+        if not labels["question"]:
+            return
+        stats.questions_raised += 1
+        self._event(
+            stats, pr, "desc:q", created, "question_raised", author,
+            [pr_object_id, *ticket_objects],
+            {"phase": labels["phase"]}, {"kind": classify.KIND_DESCRIPTION},
+        )
+
+    def _question_answer(
+        self,
+        pr: PullRequest,
+        thread_id: str,
+        entry: dict,
+        resolver_actor: str | None,
+        resolver_is_commenter: bool,
+        pr_object_id: str,
+        ticket_objects: list[str],
+        stats: Stats,
+    ) -> None:
+        """``question_answered`` for a thread that raised a question (prd/16).
+
+        Two closed sources, in order: a reply the classifier read as an answer,
+        or the thread's own resolution by someone other than the asker. A thread
+        the asker resolved themselves is a withdrawal, not an answer.
+        """
+        if not entry.get("question") or not entry.get("phase"):
+            return
+        answer = entry.get("answer")
+        if answer is not None:
+            ts, actor = answer
+            source = "reply"
+        elif entry.get("resolved") and entry.get("resolved_at") and resolver_actor \
+                and not resolver_is_commenter:
+            ts, actor, source = entry["resolved_at"], resolver_actor, "resolution"
+        else:
+            return
+        stats.questions_answered += 1
+        self._event(
+            stats, pr, f"t{entry.get('cid')}:a", ts, "question_answered", actor,
+            [pr_object_id, *ticket_objects, thread_id],
+            {"phase": entry["phase"], "answer_source": source},
+            {"thread": str(entry.get("cid"))},
+        )
 
     def _push(self, stats: Stats, pr: PullRequest, natural: str, ts: datetime, activity: dict,
               actor: str, pr_object_id: str, ticket_objects: list[str], push_index: int) -> None:
