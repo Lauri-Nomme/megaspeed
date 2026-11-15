@@ -24,8 +24,8 @@ business hours"**. This is a more honest version of van der Aalst's
 handover-of-work network: it captures not just "who handed to whom" but *who sat
 waiting on whom*.
 
-Presented at **role/queue level** with pseudonyms — never as a public
-person-by-person ranking (see `08-risks.md`).
+The graph is offered at role/queue and person (pseudonym) levels; the store
+holds only pseudonyms, never raw names.
 
 ## Queue view per person
 

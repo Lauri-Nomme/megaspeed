@@ -59,7 +59,7 @@ couldn't account for tens of thousands of GPUs.
 | `05-analysis.md` | Ball-in-court, blocking graphs, queueing, rework, drivers, simulation |
 | `06-architecture.md` | Components, tech choices, raw↔pseudonymised boundary |
 | `07-milestones.md` | Delivery slices, ingest & output priorities |
-| `08-risks.md` | GDPR, works council, Goodhart, data quality, open questions |
+| `08-risks.md` | Risks: pseudonymisation/opsec, Goodhart, data quality, open questions |
 | `09-web-ui.md` | Web interface: timeline viz (#1), blocking/queue views, simulation UI (#2) |
 
 ## Status

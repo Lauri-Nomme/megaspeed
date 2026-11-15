@@ -75,9 +75,8 @@ See `09-web-ui.md`.
 
 ## Non-goals
 
-- **Not a people-ranking tool.** Output is presented at role/queue level with
-  pseudonyms. The tool must be defensible to HR and the works council, not a
-  stack-rank.
+- **Not a people-ranking tool.** Output uses pseudonyms throughout (the store
+  never holds raw actor names); it optimises flow, not individuals.
 - **Not real-time alerting** (a "PR has waited 3h" pager). A future phase, not
   this one.
 - **Not a general BI/reporting warehouse.** Narrowly about delivery flow.

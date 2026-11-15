@@ -2,21 +2,18 @@
 
 ## Risks
 
-### Privacy / legal (the big one)
+### Pseudonymisation / opsec (the big one)
 
-- **GDPR + works council.** Person-level blocking graphs are sensitive. Mitigate
-  by: agreeing scope with HR and the works council *before* scraping; presenting
-  at role/queue level; pseudonyms everywhere; framing as *system* improvement,
-  never people-ranking.
-- **Works councils are the norm** in an Austrian company context. This project
-  must be a transparent, opt-in, process-improvement initiative — the works
-  council is an ally here, not an obstacle, but only if approached first.
+- Raw content — descriptions, comments, diffs, commit messages — can hold secrets,
+  IP, and re-identifiable phrasing. The contract (prd/02) keeps it from ever
+  entering the store or any LLM view; `--verify` enforces it. This is the core
+  requirement, not an afterthought.
 
 ### Goodhart's law
 
-Once people know what's measured, they optimise it. Mitigate by: role-level
-presentation, not individual dashboards; measure system outcomes (cycle time,
-flow efficiency), not individual throughput; revisit metrics as behaviour shifts.
+Once people know what's measured, they optimise it. Mitigate by: measure system
+outcomes (cycle time, flow efficiency), not individual throughput; revisit
+metrics as behaviour shifts.
 
 ### User interface
 
@@ -62,17 +59,15 @@ flow efficiency), not individual throughput; revisit metrics as behaviour shifts
    needs a small benchmark on *our* comment/question data (run locally, on
    sample text that never leaves the raw zone).
 2. **Raw retention policy** — immediate delete vs short-TTL encrypted vault for
-   re-tuning the classifier. Needs legal sign-off either way.
+   re-tuning the classifier. Needs a decision either way.
 3. **Slack DMs** — in scope (metadata-only, with consent) or out? They hold
    blocking context but are the most sensitive source.
-4. **Works-council approval process** — what does it actually require here, and
-   what's the timeline? This gates slices 1–5.
-5. **Project-key canonicalisation** — ticket keys are allowed, but a project key
+4. **Project-key canonicalisation** — ticket keys are allowed, but a project key
    can reveal a product. Accept for v1, or canonicalise `PROJ→P1`? Trade-off:
    readability vs a little more privacy.
-6. **Working-hours calendar source** — how do we source holiday/part-time data
+5. **Working-hours calendar source** — how do we source holiday/part-time data
    without a new data-collection burden?
-7. **Refinement calendar source** — manual list, or infer from recurring
+6. **Refinement calendar source** — manual list, or infer from recurring
    meetings?
-8. **Merge-condition fidelity** — can we reconstruct the exact sentinel
+7. **Merge-condition fidelity** — can we reconstruct the exact sentinel
    merge-check config from Bitbucket, or do we need it documented by the team?

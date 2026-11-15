@@ -1,7 +1,7 @@
 # 02 — Pseudonymisation (the special requirement)
 
 This is the load-bearing wall of the whole design. Everything else is standard
-process mining; this is the part that makes it legal, defensible, and safe to
+process mining; this is the part that makes it safe to
 run analysis with an open-source LLM.
 
 ## The rule, stated plainly
@@ -33,8 +33,8 @@ Two subtleties worth writing down before they bite us:
 The raw content (descriptions, comments, commit messages, diffs, Slack text)
 contains three kinds of things we must not put in front of an open-source LLM:
 
-- **Personal data** — names, the kind of thing GDPR and the works council care
-  about, and the reason people-level output must be pseudonymised anyway.
+- **Personal data** — raw names/emails re-identify people and projects; pseudonyms
+  keep the analysis from leaking who-is-who.
 - **Secrets / IP** — design rationale, incident details, credentials pasted into
   a comment, unreleased product decisions in a diff.
 - **Linkability** — even without names, distinctive phrasing re-identifies a

@@ -2,7 +2,7 @@
 
 Maps the "how do I …" questions to (a) what megaspeed can answer **today**, (b) the gap, and
 (c) the rule/suggestion the metric is meant to inform. Everything routes through the pseudonymised,
-closed-vocabulary event log; person-level results are presented at role/queue level (prd/08).
+closed-vocabulary event log (pseudonyms only — never raw names).
 
 ## Q1 — Is a reviewer slow / do they prefer their own PR work?
 
@@ -46,10 +46,11 @@ closed-vocabulary event log; person-level results are presented at role/queue le
      resolution state (`resolvedDate`/`resolver`) + whether the diff changed at the comment's anchor.
   Then measure **review-cycle cost by comment type**: a *rejected* or *walked-back* nit/question costs a full
   review round for zero value.
-- **On "blame the poster":** we *can* classify the outcome, but we should **not** attribute it to individuals
-  — that's a GDPR/works-council/Goodhart landmine (prd/08). The principled form is a **system metric**: the
-  share of review cycles consumed by each comment type, aggregated at role/queue level, so the *rule* is
-  "nits/out-of-scope go on the ticket, not the PR" and "questions get resolved in refinement, not review".
+- **On "blame the poster":** we *can* classify the outcome, and attribution to the poster is possible. The
+  only caveat is Goodhart — people game what's measured, so present it as a flow tax, not a personal score.
+  The metric is the **share of review cycles consumed by each comment type** (a rejected or walked-back nit
+  costs a full review round for zero value), so the *rule* is "nits/out-of-scope go on the ticket, not the
+  PR" and "questions get resolved in refinement, not review".
 - **Suggestion it informs**: comment guidelines; nit/out-of-scope → ticket; question → refinement; a
   "comment-type → cycle-time" heatmap to prove which class of comment is the tax.
 
