@@ -37,11 +37,14 @@ need to re-visit the airgapped env just because a feature wasn't captured). Incr
 ## Local LLM classification
 
 - A pluggable `classify(text, kind) -> {closed labels}` interface with two backends:
-  - **OpenAI-compatible endpoint** (real) — the "precision box" at `http://10.222.1.99:4000/v1`
-    (an OpenAI-compatible gateway; `GET /` answers `{"error":"Unknown channel requested"}` = it needs
-    a known model/channel name + key). temperature 0, JSON-schema/grammar-constrained decoding.
-    Configured via `MEGASPEED_LLM_URL` / `MEGASPEED_LLM_KEY` / `MEGASPEED_LLM_MODEL` (exact model name
-    TBD — the gateway routes by channel name). Use it to test/iterate/benchmark.
+  - **Ollama** (real) — on the precision box (k3s `home-iot/ollama-moe` pod), model
+    **`qwen3-30b-a3b:2507`** (Qwen3 30B MoE / ~3B active, Q4_K_M, CPU). Reachable on the flannel
+    network at `http://10.43.36.10:11434` (k3s service) or `http://10.42.5.219:11434` (pod IP);
+    a `logproxy` sidecar on `:11435` proxies and logs chats to JSONL. Use Ollama's native `/api/chat`
+    with `format` (JSON schema) for constrained decoding, temperature 0. Configured via
+    `MEGASPEED_LLM_URL` / `MEGASPEED_LLM_MODEL` (no key on the local net). Use it to
+    test/iterate/benchmark. Weak/no GPU → CPU inference; the MoE (3B active) is the right size —
+    only small models if installing more. (`:4000`/`:3000` on that box are Mastodon, not the LLM.)
   - **Mock** (deterministic) — for tests and no-LLM environments; must satisfy the same schema.
 - Closed vocabulary (extends prd/02; `--verify` accepts it):
   - `comment_type ∈ {blocker, suggestion, question, nit, out_of_scope, optimization}`
