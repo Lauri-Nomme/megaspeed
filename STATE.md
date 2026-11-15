@@ -1,39 +1,33 @@
 # STATE — megaspeed · LIVE
 
-Live behind nginx (→ `127.0.0.1:8766`). GitHub: `https://github.com/Lauri-Nomme/megaspeed` (private).
-Install details (nginx site, public IP, DNS zone) are **scrubbed from the repo and all history**.
+Live behind nginx (→ `127.0.0.1:8766`), 3 tenants. GitHub: `Lauri-Nomme/megaspeed` (private, install-details scrubbed).
+Tests: **102** (`tests/`) + **46** (`scrape/tests`) green.
 
-## Working
+## Working (scrape side, airgapped)
 
-- **BB ingest** (airgap split: `scrape` → tgz → `import`) — 131 PRs / 1316 events / `reviewer_changed`=266 /
-  bots classified / `--verify` OK / idempotent / zero raw content.
-- **Views**: Timeline, Delivery list, Blocking map, Queue, Overview, Sources, Policy stub.
-  Shell: sidebar, scope/timeframe + scope banner, detail panel, pivot menu + Copy as Markdown, brush.
-- **Tenants**: one DuckDB store per dataset (`data/<name>.duckdb`); `/api/tenants`; `?tenant=` on all
-  read endpoints; top-bar switcher. Live tenants: `del` / `live-probe` / `megaspeed`.
-- **Tests**: **84** (63 core + 21 tenant tests). Harness (eval + screenshot) + Playwright wired.
+- **BB ingest** — scrape → tgz → import; ticket pre-filter + `updatedDate` watermark + settled-PR finality +
+  early termination (strict `<`), progress reporting. 131/131 DEL, `--verify` OK.
+- **`push_class`** — deterministic via shallow/partial git cache (`git patch-id` + `range-diff`);
+  DEL → 199 content / 3 pure_rebase / 0 conflict; falls back to `other`, never crashes.
+- **LLM classification** (in progress) — comment_type / thread_outcome / question+phase via local LLM.
 
-## In progress
+## LLM (precision box)
 
-- [ ] **Scrape optimization** (prd/14): ticket-key pre-filter on the PR list + `updatedDate` watermark +
-      settled-PR finality + NEWEST-first. Subagent implementing + adding a request-count test.
+Ollama `qwen3-30b-a3b:2507` (30B MoE / ~3B active, Q4_K_M, CPU) in k3s `home-iot/ollama-moe`;
+`http://10.43.36.10:11434` (svc) / `10.42.5.219:11434` (pod); `logproxy` sidecar on `:11435`.
+`:3000`/`:4000` are Mastodon (not the LLM). Weak GPU → small models only if adding more.
+
+## In progress (fallback `opencode-go/deepseek-v4.1-flash`)
+
+- [ ] **LLM classifier** (`ingest/classify.py`): mock + Ollama backends, closed vocab
+      (comment_type / thread_outcome / question+phase), tgz emit, `--verify`, mock-first tests, benchmark.
 
 ## Next
 
-- [ ] Push the scrape-opt work when it lands; verify vs `bb-lab-b` `DEL` (correctness unchanged, requests cut).
-- [ ] (If going public) genericize the local dev paths `/vokk/home/lauri/...` and the hard-coded
-      `hans/lab/home/bb-lab-b` path in `corpus/backdate.py` — currently left as-is (see scrub caveats).
+- [ ] Analysis → suggested-rules layer (prd/15): reviewer responsiveness, time-to-first-review,
+      PR-size vs latency, sentinel queue.
+- [ ] Business-hours calendar. [ ] Story/Epic/Sprint (Jira+Tempo).
 
-## Follow-ups (later slices)
+## Open (production)
 
-business-hours calendar · `push_class` via git patch-id · question/phase local-LLM classification
-(prd/02) · light theme · commits+tickets on timeline · semantic zoom · Story/Epic/Sprint (Jira+Tempo).
-
-## Lab (Bitbucket DC 9.4.18)
-
-`bb-lab-a` :7990 (FIX/golden, no keys) · `bb-lab-b` :7991 (DEL, licensed).
-
-## Subagent model
-
-Primary `opencode/deepseek-v4.1-flash-free` (daily quota, resets 00:00 UTC) → fallback
-`opencode-go/deepseek-v4.1-flash`.
+- [ ] Production Bitbucket DC URL + auth. [ ] Jira key format.
