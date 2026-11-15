@@ -32,7 +32,8 @@ Users (all with `PROJECT_WRITE`); passwords are `lab-pw-<name>`:
 | `erin` | Erin Lindqvist | erin.lindqvist@delivery.example |
 
 (`admin` / `admin-lab-pw` is the lab sysadmin; alice doubles as the *sentinel*
-approver, i.e. the team lead whose approval every merged PR needs.)
+approver, i.e. the team lead whose approval every merged PR needs — bob stands
+in when alice is the author.)
 
 ### PR mix (actual run)
 
