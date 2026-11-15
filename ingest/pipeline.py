@@ -579,7 +579,9 @@ def fill_derived(con, events: list[dict]) -> None:
     the converged row, so an unchanged PR is not rewritten on every ingest.
     """
     scope = {(e["repo"], e["pr_id"]) for e in events}
-    run_events = {(e["repo"], e["pr_id"], e["event_key"]): e for e in events}
+    run_events: dict[tuple[str, int], dict[str, dict]] = {}
+    for event in events:
+        run_events.setdefault((event["repo"], event["pr_id"]), {})[event["event_key"]] = event
     for repo, pr_id in sorted(scope):
         rows = con.execute(
             "SELECT event_key, ts, activity, CAST(attributes AS VARCHAR) FROM events"
@@ -591,17 +593,9 @@ def fill_derived(con, events: list[dict]) -> None:
                   "attributes": json.loads(attrs or "{}")}
             for key, ts, activity, attrs in rows
         }
-        for (event_repo, event_pr, key), event in run_events.items():
-            if (event_repo, event_pr) != (repo, pr_id):
-                continue
-            union[key] = {
-                "event_key": key,
-                "ts": event["ts"],
-                "activity": event["activity"],
-                "attributes": event["attributes"],
-            }
+        union.update(run_events.get((repo, pr_id), {}))
         for key, lost in derive_approvals_lost(list(union.values())).items():
-            event = run_events.get((repo, pr_id, key))
+            event = run_events[(repo, pr_id)].get(key)
             if event is not None:
                 event["attributes"]["approvals_lost"] = lost
 
