@@ -225,20 +225,8 @@ class Reducer:
                             [pr_object_id, *ticket_objects], {}, activity)
 
             elif action == "RESCOPED":
-                added = (activity.get("added") or {}).get("commits") or []
-                removed = (activity.get("removed") or {}).get("commits") or []
-                patch = activity.get("megaspeedPatchId") or {}
-                self._event(
-                    stats, pr, natural, ts, "pr_pushed", actor,
-                    [pr_object_id, *ticket_objects, *[f"COMMIT:{c['id']}" for c in added if c.get("id")]],
-                    {
-                        "push_class": patch.get("push_class") or "other",
-                        "commits_added": len(added),
-                        "commits_removed": len(removed),
-                        "approvals_lost": self._approvals_lost_after(ordered, index),
-                    },
-                    activity,
-                )
+                self._push(stats, pr, natural, ts, activity, actor, ordered, index,
+                           pr_object_id, ticket_objects)
                 approvals.clear()
                 pushed_since = True
                 rounds += 1
@@ -248,13 +236,17 @@ class Reducer:
                 if activity.get("commentAction") not in (None, "ADDED"):
                     continue  # edits/deletes are not new dialogue
                 severity = "mandatory" if str(comment.get("severity") or "").upper() == "BLOCKER" else "suggestion"
+                # Real DC 9.x puts the anchor on the *activity* (``commentAnchor``),
+                # not inside the comment; accept both shapes.
+                anchor = activity.get("commentAnchor") or comment.get("anchor")
+                resolved = bool(comment.get("threadResolved")) or str(comment.get("state") or "OPEN").upper() != "OPEN"
                 self._event(
                     stats, pr, natural, ts, "comment_added", actor,
                     [pr_object_id, *ticket_objects],
                     {
                         "severity": severity,
-                        "anchor_class": "file" if comment.get("anchor") else "general",
-                        "thread_state": "open" if str(comment.get("state") or "OPEN").upper() == "OPEN" else "resolved",
+                        "anchor_class": "file" if anchor else "general",
+                        "thread_state": "resolved" if resolved else "open",
                         "replies": len(comment.get("comments") or []),
                     },
                     activity,
@@ -279,9 +271,13 @@ class Reducer:
                 self._event(stats, pr, natural, ts, "pr_needs_work", actor,
                             [pr_object_id, *ticket_objects], {"severity": "mandatory"}, activity)
 
-            elif action == "REVIEWER_UPDATED":
+            elif action == "UPDATED":
+                # DC 9.x: reviewer roster changes. Some versions/forges also
+                # report a raw rescope through UPDATED instead of RESCOPED.
+                changed = False
                 for change, field_name in (("added", "addedReviewers"), ("removed", "removedReviewers")):
                     for offset, reviewer in enumerate(activity.get(field_name) or []):
+                        changed = True
                         pseudonym = self._actor(reviewer, stats)
                         self._event(
                             stats, pr, f"{natural}:{change}{offset}", ts,
@@ -289,10 +285,42 @@ class Reducer:
                             [pr_object_id, *ticket_objects, f"PERSON:{pseudonym}"],
                             {"change": change}, activity,
                         )
+                if not changed and self._has_rescope(activity):
+                    self._push(stats, pr, natural, ts, activity, actor, ordered, index,
+                               pr_object_id, ticket_objects)
+                    approvals.clear()
+                    pushed_since = True
+                    rounds += 1
+
+            elif action == "REVIEWED":
+                # A reviewer completed their review (DC: PUT .../review). The
+                # closed vocabulary has no ``pr_reviewed``, so this is carried as
+                # a reviewer-state change; the ReviewThread object (a later
+                # slice) breaks it down per thread.
+                self._event(stats, pr, natural, ts, "reviewer_changed", actor,
+                            [pr_object_id, *ticket_objects, f"PERSON:{actor}"],
+                            {"change": "reviewed"}, activity)
 
             elif action == "MERGED":
+                commit = activity.get("commit") or {}
+                merge_objects = [f"COMMIT:{commit['id']}"] if commit.get("id") else []
+                if commit.get("id"):
+                    stats.objects.append(
+                        _object(
+                            "COMMIT",
+                            f"COMMIT:{commit['id']}",
+                            repo=repo_label,
+                            pr_id=pr.id,
+                            ticket_keys=keys,
+                            actor=self._actor(commit.get("committer") or commit.get("author"), stats),
+                            created_at=_ts(commit.get("committerTimestamp") or commit.get("authorTimestamp"), ts),
+                            head_commit=str(commit["id"]),
+                            message_class=classify_message(commit.get("message") or ""),
+                        )
+                    )
                 self._event(stats, pr, natural, ts, "pr_merged", actor,
-                            [pr_object_id, *ticket_objects], {"review_rounds": rounds}, activity)
+                            [pr_object_id, *ticket_objects, *merge_objects],
+                            {"review_rounds": rounds}, activity)
 
             elif action == "DECLINED":
                 self._event(stats, pr, natural, ts, "pr_declined", actor,
@@ -300,6 +328,43 @@ class Reducer:
 
             # Unknown actions are ignored on purpose: the vocabulary is closed,
             # so an unknown label is a taxonomy task, never a free-text fallback.
+
+    def _push(self, stats: Stats, pr: PullRequest, natural: str, ts: datetime, activity: dict,
+              actor: str, ordered: list[dict], index: int,
+              pr_object_id: str, ticket_objects: list[str]) -> None:
+        """RESCOPED (or a rescope-shaped UPDATED) -> pr_pushed."""
+        added = (activity.get("added") or {}).get("commits") or []
+        removed = (activity.get("removed") or {}).get("commits") or []
+        patch = activity.get("megaspeedPatchId") or {}
+        self._event(
+            stats, pr, natural, ts, "pr_pushed", actor,
+            [pr_object_id, *ticket_objects, *[f"COMMIT:{c['id']}" for c in added if c.get("id")]],
+            {
+                "push_class": patch.get("push_class") or "other",
+                "commits_added": len(added),
+                "commits_removed": len(removed),
+                "approvals_lost": self._approvals_lost_after(ordered, index),
+            },
+            activity,
+        )
+
+    @staticmethod
+    def _has_rescope(activity: dict) -> bool:
+        """True when the activity reports a moved source/target head.
+
+        DC's RESCOPED shape is ``previousFromHash -> fromHash`` (source) and
+        ``previousToHash -> toHash`` (target). A reviewer-only UPDATED carries
+        none of these.
+        """
+        previous_from = activity.get("previousFromHash")
+        new_from = activity.get("fromHash")
+        if previous_from and new_from:
+            return previous_from != new_from
+        previous_to = activity.get("previousToHash")
+        new_to = activity.get("toHash")
+        if previous_to and new_to:
+            return previous_to != new_to
+        return bool(new_from and new_to)
 
     # -- internals -------------------------------------------------------
     def _collect_commits(self, pr: PullRequest) -> list[dict]:

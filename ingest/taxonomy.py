@@ -53,7 +53,7 @@ SEVERITY = frozenset({"mandatory", "suggestion"})
 PUSH_CLASS = frozenset({"content", "pure_rebase", "rebase_conflict", "other"})
 ANCHOR_CLASS = frozenset({"file", "general"})
 THREAD_STATE = frozenset({"open", "resolved"})
-CHANGE = frozenset({"added", "removed"})
+CHANGE = frozenset({"added", "removed", "reviewed"})
 UN_APPROVE_CAUSE = frozenset({"push", "manual"})
 MESSAGE_CLASS = frozenset({"feature", "fix", "refactor", "test", "docs", "chore", "merge", "revert", "wip", "other"})
 OBJECT_STATE = frozenset({"open", "merged", "declined"})
@@ -80,15 +80,22 @@ ATTRIBUTE_SPEC: dict[str, Any] = {
 }
 
 # Bitbucket DC activity action -> activity vocabulary (PRD 02).
+#
+# The keys are the *real* DC 9.x action names, verified against a DC 9.4.18
+# instance (``/rest/api/1.0/.../pull-requests/{id}/activities``): there is no
+# ``REVIEWER_UPDATED`` action -- DC emits ``UPDATED`` with ``addedReviewers`` /
+# ``removedReviewers``. ``REVIEWED`` is a reviewer completing their review.
 PR_ACTIVITY_MAP = {
     "OPENED": "pr_opened",
     "RESCOPED": "pr_pushed",
+    "COMMENTED": "comment_added",
     "APPROVED": "pr_approved",
     "UNAPPROVED": "pr_unapproved",
     "NEEDS_WORK": "pr_needs_work",
     "MERGED": "pr_merged",
     "DECLINED": "pr_declined",
-    "REVIEWER_UPDATED": "reviewer_changed",
+    "UPDATED": "reviewer_changed",
+    "REVIEWED": "reviewer_changed",
 }
 
 

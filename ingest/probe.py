@@ -20,9 +20,10 @@ from .bitbucket import BitbucketClient
 from .config import Config
 from .pipeline import KeyFilter, Reducer, Stats
 from .pseudonym import IdentityTable
+from .taxonomy import PR_ACTIVITY_MAP
 
-KNOWN_ACTIONS = {"OPENED", "RESCOPED", "COMMENTED", "APPROVED", "UNAPPROVED", "NEEDS_WORK",
-                 "REVIEWER_UPDATED", "MERGED", "DECLINED"}
+# Real DC 9.x action names; anything else is taxonomy drift worth surfacing.
+KNOWN_ACTIONS = frozenset(PR_ACTIVITY_MAP)
 
 
 def probe(cfg: Config, client: BitbucketClient, bypass_filter: bool = False) -> dict:

@@ -1,7 +1,7 @@
 # Fixtures — synthetic Bitbucket Data Center data
 
 `bitbucket-dc-fixture.json` is a generated bundle of **50 pull requests** across
-two repos (`ENG/platform`, `ENG/mobile`), with 481 PR activities and 207 commits.
+two repos (`ENG/platform`, `ENG/mobile`), with 489 PR activities and 199 commits.
 It exists so the whole pipeline runs end-to-end with no credentials.
 
 Everything in it is fabricated: people (`lauri.nomme` … `mart.sepp`), tickets
@@ -34,10 +34,23 @@ The bundle is shaped like the DC REST API — paging envelopes, `user` objects,
 - Ticket keys appear in **branch**, **PR title**, **PR description** and
   **commit message** — and ~1 in 7 PRs has no key at all, so the filter has
   something to drop.
-- All PR activity types: `OPENED`, `RESCOPED`, `COMMENTED`, `APPROVED`,
-  `UNAPPROVED`, `NEEDS_WORK`, `REVIEWER_UPDATED`, `MERGED`, `DECLINED`.
+- The **real DC 9.x activity names**, verified against a DC 9.4 instance:
+  `OPENED`, `RESCOPED`, `COMMENTED`, `APPROVED`, `UNAPPROVED`, `NEEDS_WORK`,
+  `REVIEWED`, `MERGED`, `DECLINED`, `UPDATED`.
+  - Reviewer roster changes are `UPDATED` + `addedReviewers` / `removedReviewers`
+    (DC never sends a `REVIEWER_UPDATED` action).
+  - `RESCOPED` carries `fromHash` / `toHash` / `previousFromHash` /
+    `previousToHash` plus `added` / `removed` commit buckets.
+  - `MERGED` carries the merge `commit` record.
+  - `REVIEWED` is a reviewer completing their review.
+  - Comments carry `threadResolved` / `resolvedDate` / `resolver` and nested
+    replies; the file anchor is on the activity (`commentAnchor`), as in DC.
 - Outcomes: merged, declined, still open (right-censored in the UI).
 - Timestamps are business minutes only (Mon–Fri, 08:00–18:00 UTC), Sept–Nov 2026.
+
+`tests/test_reducer.py` pins these shapes, precisely because the previous
+fixtures invented `REVIEWER_UPDATED` and the suite stayed green while live
+ingest dropped every reviewer change.
 
 ## Regenerate
 

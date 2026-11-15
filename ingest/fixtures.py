@@ -2,9 +2,13 @@
 
 The fixture is *shaped like the DC REST API* (paging envelopes, user objects,
 ``fromRef``, activity actions, commit records) so that the fixture transport and
-the live transport share one client and one parsing path. Nothing here is real:
-names, tickets and prose are made up, and every free-text field is planted with
-a ``zzcanary…`` token so the pipeline can prove it discarded the text.
+the live transport share one client and one parsing path. Action names and
+fields are the real DC 9.x ones (``UPDATED`` + ``addedReviewers`` for reviewer
+changes, ``RESCOPED`` + ``fromHash``/``toHash``, ``MERGED`` + ``commit``,
+``REVIEWED``, ``commentAnchor`` on the activity, ``threadResolved`` /
+``resolvedDate`` / ``resolver`` on comments). Nothing here is real: names,
+tickets and prose are made up, and every free-text field is planted with a
+``zzcanary…`` token so the pipeline can prove it discarded the text.
 
 ``pull-requests/{id}/activities`` items may carry a namespaced
 ``megaspeedPatchId`` block. That key is **not** a Bitbucket field: it stands in
@@ -102,9 +106,33 @@ class _Prose:
         return "\n\n".join(parts)
 
 
-def _comment(rng: random.Random, prose: _Prose, author: dict, cid: int, ticket: str | None) -> dict:
+def _comment(rng: random.Random, prose: _Prose, author: dict, cid: int, ticket: str | None,
+             people: list[dict]) -> dict:
+    """A DC 9.x comment record.
+
+    Real shape: the *activity* carries ``commentAnchor``; the comment carries
+    ``threadResolved`` / ``resolvedDate`` / ``resolver`` and nested ``comments``
+    for replies. ``createdDate`` etc. are filled in by the caller once the
+    surrounding activity has a timestamp.
+    """
     severity = "BLOCKER" if rng.random() < 0.22 else "NORMAL"
     thread_open = rng.random() < 0.35
+    replies = []
+    if rng.random() < 0.3:
+        replies.append(
+            {
+                "id": cid + 5000,
+                "version": 0,
+                "text": prose.sentence(ticket),
+                "author": rng.choice(people),
+                "createdDate": None,  # filled by caller (relative to parent)
+                "updatedDate": None,
+                "severity": "NORMAL",
+                "state": "OPEN",
+                "comments": [],
+                "properties": {},
+            }
+        )
     return {
         "id": cid,
         "version": 0,
@@ -114,10 +142,10 @@ def _comment(rng: random.Random, prose: _Prose, author: dict, cid: int, ticket: 
         "updatedDate": None,
         "severity": severity,
         "state": "OPEN" if thread_open else "RESOLVED",
-        "anchor": {"path": "src/main.py", "line": rng.randint(1, 400), "lineType": "ADDED"}
-        if rng.random() < 0.6
-        else None,
-        "comments": [],
+        "threadResolved": not thread_open,
+        "resolvedDate": None,  # filled by caller
+        "resolver": None,      # filled by caller
+        "comments": replies,
         "properties": {},
     }
 
@@ -187,41 +215,80 @@ def _make_pr(rng: random.Random, project: str, repo: str, pr_id: int, index: int
 
     opened = add("OPENED", rng.randint(0, 30), user=author)
     make_commits(rng.randint(1, 2), 0, "feature")
+    target_hash = _hash(rng)  # main's head; moves occasionally (target rescope)
 
     approved: set[str] = set()
     review_round = 0
     for round_index in range(rounds):
         if round_index > 0:
             kind = rng.choices(["content", "pure_rebase", "rebase_conflict"], weights=[60, 28, 12])[0]
+            previous_from = commits[-1]["id"] if commits else None
+            removed: list[dict] = []
+            if previous_from and rng.random() < 0.35:
+                removed = [next(c for c in commits if c["id"] == previous_from)]
             added = make_commits(rng.randint(1, 3), rng.randint(20, 180), "fix")
-            push_class = kind
+            previous_to = target_hash
+            if rng.random() < 0.25:
+                target_hash = _hash(rng)  # target branch itself moved
             add(
                 "RESCOPED",
                 rng.randint(60, 900),
                 user=author,
-                added={"commits": added},
-                removed={"commits": []},
-                megaspeedPatchId={"push_class": push_class},
+                fromHash=added[-1]["id"],
+                toHash=target_hash,
+                previousFromHash=previous_from,
+                previousToHash=previous_to,
+                added={"commits": added, "total": len(added)},
+                removed={"commits": removed, "total": len(removed)},
+                # Not a DC field: stands in for the local deterministic push
+                # classifier (git patch-id), which needs a clone (GAP-01).
+                megaspeedPatchId={"push_class": kind},
             )
             if approved and rng.random() < 0.7:
                 loser = rng.choice(sorted(approved))
                 approved.discard(loser)
                 add("UNAPPROVED", rng.randint(1, 40), user=_person(people, loser))
 
-        if round_index == 0 and rng.random() < 0.25:
-            newcomer = rng.choice([p for p in others if p not in reviewers])
-            reviewers.append(newcomer)
-            add("REVIEWER_UPDATED", rng.randint(5, 60), user=author,
-                addedReviewers=[newcomer], removedReviewers=[])
+        if round_index == 0:
+            # DC 9.x reviewer roster changes arrive as ACTION=UPDATED with
+            # addedReviewers / removedReviewers (never "REVIEWER_UPDATED").
+            if rng.random() < 0.3:
+                newcomer = rng.choice([p for p in others if p not in reviewers])
+                reviewers.append(newcomer)
+                add("UPDATED", rng.randint(5, 60), user=author,
+                    addedReviewers=[newcomer], removedReviewers=[])
+            elif len(reviewers) > 1 and rng.random() < 0.2:
+                leaver = rng.choice(reviewers)
+                reviewers.remove(leaver)
+                approved.discard(leaver["name"])
+                add("UPDATED", rng.randint(5, 60), user=author,
+                    addedReviewers=[], removedReviewers=[leaver])
 
         for _ in range(rng.randint(0, 2)):
             reviewer = rng.choice(reviewers)
-            comment = _comment(rng, prose, reviewer, comment_id, ticket)
+            comment = _comment(rng, prose, reviewer, comment_id, ticket, people)
             comment_id += 1
-            activity = add("COMMENTED", rng.randint(10, 240), user=reviewer,
-                           comment=comment, commentAction="ADDED")
+            anchor = (
+                {"path": "src/main.py", "line": rng.randint(1, 400), "lineType": "ADDED"}
+                if rng.random() < 0.6
+                else None
+            )
+            activity = add(
+                "COMMENTED",
+                rng.randint(10, 240),
+                user=reviewer,
+                comment=comment,
+                commentAction="ADDED",
+                **({"commentAnchor": anchor} if anchor else {}),
+            )
             comment["createdDate"] = activity["createdDate"]
             comment["updatedDate"] = activity["createdDate"]
+            for reply in comment["comments"]:
+                reply["createdDate"] = activity["createdDate"] + rng.randint(1, 120) * 60_000
+                reply["updatedDate"] = reply["createdDate"]
+            if comment["threadResolved"]:
+                comment["resolver"] = rng.choice(people)
+                comment["resolvedDate"] = activity["createdDate"] + rng.randint(5, 300) * 60_000
             if rng.random() < 0.18:
                 add("NEEDS_WORK", rng.randint(1, 15), user=reviewer)
 
@@ -230,18 +297,40 @@ def _make_pr(rng: random.Random, project: str, repo: str, pr_id: int, index: int
                 continue
             approved.add(reviewer["name"])
             add("APPROVED", rng.randint(20, 500), user=reviewer)
+
+        # A reviewer completing their review (DC: PUT .../review -> REVIEWED).
+        if rng.random() < 0.3:
+            add("REVIEWED", rng.randint(5, 120), user=rng.choice(reviewers))
         review_round += 1
 
+    merge_commit = None
     closed_at = None
     if outcome == "merged":
-        merged = add("MERGED", rng.randint(60, 1200), user=rng.choice(reviewers))
+        merged = add("MERGED", rng.randint(60, 1200), user=rng.choice(reviewers), autoMerge=False)
+        merge_commit = {
+            "id": _hash(rng),
+            "displayId": "",
+            "author": author,
+            "authorTimestamp": merged["createdDate"],
+            "committer": author,
+            "committerTimestamp": merged["createdDate"],
+            "message": (
+                f"Merge pull request #{pr_id} in {project}/{repo} from {branch_slug} to main"
+                f"\n\n{canary} merge body."
+            ),
+        }
+        merge_commit["displayId"] = merge_commit["id"][:7]
+        merged["commit"] = merge_commit
         closed_at = merged["createdDate"]
     elif outcome == "declined":
         declined = add("DECLINED", rng.randint(60, 900), user=author)
         closed_at = declined["createdDate"]
 
     activities.sort(key=lambda a: (a["createdDate"], a["id"]))
-    last_ts = activities[-1]["createdDate"] if activities else opened["createdDate"]
+    last_ts = max(
+        [a["createdDate"] for a in activities]
+        + [(a.get("comment") or {}).get("resolvedDate") or 0 for a in activities]
+    )
 
     pr = {
         "id": pr_id,
@@ -266,7 +355,7 @@ def _make_pr(rng: random.Random, project: str, repo: str, pr_id: int, index: int
             "id": "refs/heads/main",
             "displayId": "main",
             "type": "BRANCH",
-            "latestCommit": _hash(rng),
+            "latestCommit": target_hash,
             "repository": {"slug": repo, "project": {"key": project}},
         },
         "author": {"user": author, "role": "AUTHOR", "approved": False},
@@ -274,7 +363,9 @@ def _make_pr(rng: random.Random, project: str, repo: str, pr_id: int, index: int
             {"user": r, "role": "REVIEWER", "approved": r["name"] in approved} for r in reviewers
         ],
         "participants": [{"user": p, "role": "PARTICIPANT", "approved": False} for p in people],
-        "properties": {"mergeCommit": {"id": commits[-1]["id"]}} if outcome == "merged" else {},
+        "properties": (
+            {"mergeCommit": {"id": merge_commit["id"]}} if merge_commit else {}
+        ),
         "links": {"self": [{"href": f"https://bitbucket.example.invalid/projects/{project}/repos/{repo}/pull-requests/{pr_id}"}]},
     }
     return {"pull_request": pr, "activities": activities, "commits": commits}
