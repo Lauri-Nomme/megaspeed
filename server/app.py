@@ -23,6 +23,7 @@ one failure this whole feature exists to prevent.
     GET  /api/queues?level=&days=&tenant=     per-person WIP / throughput series
     GET  /api/delivery?days=&tenant=          triage list: blocked / oldest waiting
     GET  /api/insights?level=&days=&tenant=   ranked "change this" rules (prd/17)
+    GET  /api/calendar?tenant=          effective business-hours calendar (prd/19)
     GET  /ws                            harness websocket (hello/changed/eval)
     POST /api/eval        {code, timeout}
     POST /api/screenshot  {selector, out, timeout}
@@ -72,6 +73,13 @@ DEFAULT_TENANT = (
 # The one extra query parameter every read endpoint accepts (prd/12).
 TENANT_PARAM = "tenant"
 
+# The committed default business-hours calendar (prd/19). A tenant extends it in
+# ``<tenants-dir>/<tenant>/calendar.yaml``. No default file means wall-clock
+# hours, which is what every endpoint used before the calendar existed.
+CALENDAR_CONFIG = Path(
+    os.environ.get("MEGASPEED_CALENDAR_CONFIG", REPO_ROOT / "config" / "calendar.default.yaml")
+).expanduser()
+
 # Screenshots may only ever be written *inside* this directory (BUG-08).
 SHOT_DIR = Path(
     os.environ.get("MEGASPEED_SHOT_DIR", Path(tempfile.gettempdir()) / "megaspeed-shots")
@@ -83,6 +91,7 @@ STORE_RETRY_DELAY = max(0.0, float(os.environ.get("MEGASPEED_STORE_RETRY_DELAY",
 
 sys.path.insert(0, str(REPO_ROOT))
 from analysis import ballcourt as analyse  # noqa: E402  (read-only projections)
+from analysis import calendar as workcal  # noqa: E402  (prd/19 business hours)
 from analysis import rules as insights_rules  # noqa: E402  (prd/17 suggestions)
 from ingest import store as pstore  # noqa: E402  (read helpers + schema guard only)
 from ingest import taxonomy  # noqa: E402  (closed vocabularies, read-only)
@@ -425,8 +434,38 @@ def health(request: Request):
         "app": "megaspeed",
         "version": app.version,
         "browsers": bridge.clients,
+        "calendar": _calendar_brief(tenant),
         **summary,
     }
+
+
+@app.get("/api/calendar")
+def calendar(request: Request):
+    """The effective business-hours calendar for a tenant (prd/19).
+
+    Shows exactly what the analysis is using — timezone, working window,
+    per-person overrides, resolved holidays, vacations — and where it came from,
+    so a surprising number can be traced to a config line instead of guessed at.
+    ``hours_mode`` is ``business`` when a calendar applies, ``wall-clock`` when
+    the default file is missing or broken.
+    """
+    unknown = _unknown_params(request, _params(()))
+    if unknown is not None:
+        return unknown
+    try:
+        tenant, _path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    calendar_obj, error = _calendar_for(tenant)
+    if calendar_obj is None:
+        return {
+            "ok": False,
+            "tenant": tenant,
+            "hours_mode": "wall-clock",
+            "error": error or f"no calendar config at {CALENDAR_CONFIG.name}",
+            "sources": [str(CALENDAR_CONFIG)],
+        }
+    return {"ok": True, "tenant": tenant, **calendar_obj.summary()}
 
 
 @app.get("/api/events")
@@ -578,21 +617,92 @@ def objects(request: Request):
 # analysis views (prd/05): read-only projections of the same event log
 # --------------------------------------------------------------------------- #
 def _ballcourt(con, tenant: str, path: Path):
-    """Reconstruct the interval timeline once per (tenant, store version).
+    """Reconstruct the interval timeline once per (tenant, store + calendar version).
 
     One entry, not a dict: switching tenants rebuilds, but page switches within
     a tenant never do. The stamp is per file, so another tenant's ingest run
-    cannot invalidate this one.
+    cannot invalidate this one — and the calendar files are part of the key, so
+    editing ``data/<tenant>/calendar.yaml`` takes effect without a restart.
     """
     global _analysis_cache
-    key = (tenant, _file_stamp(path))
+    key = (tenant, _file_stamp(path), _calendar_key(tenant))
     with _analysis_lock:
         if _analysis_cache is not None and _analysis_cache[0] == key:
             return _analysis_cache[1]
-    court = analyse.load(con)
+    calendar, error = _calendar_for(tenant)
+    court = analyse.load(con, calendar=calendar, calendar_error=error)
     with _analysis_lock:
         _analysis_cache = (key, court)
     return court
+
+
+# --------------------------------------------------------------------------- #
+# business-hours calendar (prd/19): per tenant, cached by file version
+# --------------------------------------------------------------------------- #
+_calendar_lock = threading.Lock()
+_calendar_cache: dict[str, tuple] = {}
+
+
+def _tenant_calendar_path(tenant: str) -> Path:
+    return TENANTS_DIR / tenant / workcal.TENANT_FILE
+
+
+def _calendar_key(tenant: str) -> tuple:
+    """Identity of the effective calendar: the committed file + the tenant file."""
+    tenant_file = _tenant_calendar_path(tenant)
+    return (
+        str(CALENDAR_CONFIG), _file_stamp(CALENDAR_CONFIG),
+        str(tenant_file), _file_stamp(tenant_file),
+    )
+
+
+def _calendar_for(tenant: str) -> tuple[object | None, str | None]:
+    """The tenant's effective calendar and, if its config is broken, why.
+
+    A malformed calendar is never silently ignored (every number would be
+    quietly wrong) and never a 500 either: the analysis falls back to
+    wall-clock, says so in ``hours_mode``, and ``/api/calendar`` reports the
+    error next to the file it came from.
+    """
+    key = _calendar_key(tenant)
+    with _calendar_lock:
+        hit = _calendar_cache.get(tenant)
+    if hit is not None and hit[0] == key:
+        return hit[1], hit[2]
+    try:
+        calendar, error = workcal.load(
+            tenant=tenant, tenants_dir=TENANTS_DIR, config_path=CALENDAR_CONFIG
+        ), None
+    except workcal.CalendarError as exc:
+        calendar, error = None, str(exc)
+        if LOG:
+            print(f"megaspeed: calendar config ignored: {error}", file=sys.stderr)
+    with _calendar_lock:
+        _calendar_cache[tenant] = (key, calendar, error)
+    return calendar, error
+
+
+def _calendar_brief(tenant: str) -> dict:
+    """Enough calendar for a label: mode, timezone, window, counts, sources."""
+    calendar, error = _calendar_for(tenant)
+    if calendar is None:
+        return {
+            "hours_mode": "wall-clock",
+            "error": error,
+            "sources": [str(CALENDAR_CONFIG)],
+        }
+    summary = calendar.summary()
+    return {
+        "hours_mode": summary["hours_mode"],
+        "timezone": summary["timezone"],
+        "working_hours": summary["working_hours"],
+        "weekdays": summary["weekdays"],
+        "holidays": summary["holidays"]["count"],
+        "overrides": len(summary["overrides"]),
+        "vacations": len(summary["vacations"]),
+        "sources": summary["sources"],
+        "assumption": summary["assumption"],
+    }
 
 
 def _days(days: float | None) -> float | None:
@@ -699,8 +809,8 @@ def insights(request: Request):
 
     ``level=team`` is the flow tax (no names); ``level=person`` adds per-person
     rules, which carry a pseudonym in ``scope`` and nothing else. Ranking is
-    impact hours × confidence, and ``hours_mode`` is wall-clock until the
-    working-hours calendar exists.
+    impact hours × confidence, and ``hours_mode`` is ``business`` when the
+    tenant's calendar applies (prd/19), ``wall-clock`` otherwise.
     """
     unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["insights"]))
     if unknown is not None:

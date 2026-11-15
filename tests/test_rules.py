@@ -873,7 +873,10 @@ class InsightsApiTests(unittest.TestCase):
         body = reply.json()
         self.assertTrue(body["ok"])
         self.assertEqual(body["tenant"], "del")
-        self.assertEqual(body["hours_mode"], "wall-clock")
+        # the server attaches the committed calendar (prd/19), so durations are
+        # business hours; a court loaded without one stays wall-clock
+        self.assertEqual(body["hours_mode"], "business")
+        self.assertIn("business hours", body["assumption"])
         self.assertEqual(body["level"], "team")
         self.assertEqual(body["sample"]["prs"], 3)
         self.assertIn("generated_at", body)

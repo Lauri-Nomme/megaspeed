@@ -1,0 +1,44 @@
+# config/calendar.default.yaml — the committed default business-hours calendar
+# (prd/19). Committed, so every dataset gets the same honest baseline; a tenant
+# extends it in data/<tenant>/calendar.yaml (see calendar.tenant.example.yaml).
+#
+# The analysis converts every "hours waited" number with this calendar and says
+# hours_mode: "business". Delete/rename this file and the analysis falls back to
+# wall-clock hours (hours_mode: "wall-clock"), which is what it did before.
+#
+# Out of scope (prd/19): per-person timezones (one `timezone` here) and
+# non-Estonian holidays (add them per tenant).
+
+timezone: Europe/Tallinn
+
+# ISO weekday numbers: 1 = Monday … 7 = Sunday.
+weekdays: [1, 2, 3, 4, 5]
+
+working_hours:
+  # One window for everyone. A tenant overrides it per person under `overrides`
+  # or for everybody under `working_hours.default`. "off" means never working.
+  default: "09:00–17:00"
+
+# Easter moves every year, so its years are listed rather than its dates:
+# this yields Easter Sunday and Good Friday (Easter − 2 days) as full holidays.
+# Extend the list when you plan past the last year here.
+easter: [2025, 2026, 2027, 2028]
+
+# Estonian public holidays. `month_day` recurs every year; `date` is a one-off.
+# `type: half` keeps the *first half* of the working window (24 Dec and 31 Dec
+# are shortened working days in Estonia, not days off).
+holidays:
+  - {month_day: "01-01", type: full, name: uusaasta}
+  - {month_day: "02-24", type: full, name: iseseisvuspäev}
+  - {month_day: "05-01", type: full, name: kevadpüha}
+  - {month_day: "06-23", type: full, name: võidupüha}
+  - {month_day: "06-24", type: full, name: jaanipäev}
+  - {month_day: "08-20", type: full, name: taasiseseisvumispäev}
+  - {month_day: "12-24", type: half, name: jõululaupäev}
+  - {month_day: "12-25", type: full, name: esimene jõulupüha}
+  - {month_day: "12-26", type: full, name: teine jõulupüha}
+  - {month_day: "12-31", type: half, name: aastavahetus}
+
+# No vacations by default: a vacation is tenant/person data, never a committed
+# default. Add them under `vacations` in data/<tenant>/calendar.yaml.
+vacations: {}

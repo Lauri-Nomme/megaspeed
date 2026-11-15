@@ -1,0 +1,35 @@
+# Copy this to data/<tenant>/calendar.yaml and edit it — it is the per-tenant,
+# user-editable half of prd/19. It EXTENDS config/calendar.default.yaml: the
+# default holidays stay, and anything set here wins.
+#
+#   cp config/calendar.tenant.example.yaml data/<tenant>/calendar.yaml
+#
+# data/ is git-ignored: a calendar names pseudonyms and vacation dates, which is
+# local data, not a committed default.
+
+# Optional: one timezone for the whole tenant (per-person timezones are out of
+# scope). Defaults to the committed calendar's timezone.
+timezone: Europe/Tallinn
+
+working_hours:
+  # Optional: replace the default window for everybody.
+  default: "09:00–17:00"
+
+# Per-person working hours, by pseudonym. This is the case the PRD calls out:
+# someone starts at noon and finishes late, so a 09:00–17:00 calendar would
+# overstate their morning waits. "off" means the person is not working at all.
+overrides:
+  LaNo: "12:00–20:00"
+
+# Extra or overriding holidays. `date` is a one-off (company day off); a
+# `month_day` would recur every year. Same date here overrides the default's
+# type (e.g. make 24 Dec a full day off for this tenant).
+holidays:
+  - {date: 2026-12-30, type: full, name: company day off}
+
+# Vacations per person, inclusive date ranges. Days in a vacation count zero
+# business hours, and the vacation-blocking insight reports what waited on the
+# person meanwhile.
+vacations:
+  LaNo:
+    - {start: 2026-07-06, end: 2026-07-17}

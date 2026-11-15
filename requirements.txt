@@ -1,6 +1,8 @@
 # Server + API deps. Ingest needs only DuckDB; the WebSocket harness needs
-# `websockets` explicitly (uvicorn does not bundle it).
+# `websockets` explicitly (uvicorn does not bundle it). PyYAML reads the
+# business-hours calendar config (config/calendar*.yaml, prd/19).
 duckdb>=1.0
 fastapi>=0.110
 uvicorn>=0.30
 websockets>=12
+pyyaml>=6.0

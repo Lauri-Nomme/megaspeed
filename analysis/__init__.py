@@ -3,15 +3,17 @@
 Read-only, and it only ever sees what the store already restricts to: keys,
 pseudonyms, PR ids, commit hashes, timestamps and closed attribute labels.
 
+    calendar   — business hours: windows, holidays, vacations (prd/19)
     ballcourt  — reconstruct "who has the ball" for every PR, as intervals
     blocking   — weighted directed handover graph from those intervals
     queues     — per-person WIP / throughput series (Little's law)
     delivery   — the triage list ("what needs attention?")
     rules      — metrics + ranked, evidence-backed "change this" suggestions
 
-Duration assumption for this slice: **wall-clock hours**. The per-person
-working-hours calendar (prd/03) does not exist yet, so every "hours waited" is
-elapsed time, weekends and nights included. Every response says so.
+Duration assumption: **business hours** when a calendar is attached (the server
+loads ``config/calendar.default.yaml`` plus ``data/<tenant>/calendar.yaml``),
+**wall-clock hours** when none is. Every response says which mode answered
+(``hours_mode``), so a weekend-heavy wait can never be read as working time.
 """
 
 from .ballcourt import (
@@ -23,12 +25,16 @@ from .ballcourt import (
     load,
     queue_series,
 )
+from .calendar import Calendar, CalendarError, business_hours
 
 __all__ = [
     "ASSUMPTION",
     "BallCourt",
+    "Calendar",
+    "CalendarError",
     "Interval",
     "blocking_graph",
+    "business_hours",
     "delivery_list",
     "load",
     "queue_series",

@@ -8,7 +8,7 @@ estimated cost in hours.
     events/objects ──► metrics ──► rule templates ──► ranked suggestions
                        (prd/17 §Metrics)  (threshold+severity)
 
-Eight metrics are computed from the store exactly as prd/17 lists them:
+Every metric prd/17 lists is computed from the store, in one pass:
 
 ======================  ==========================================================
 ``time_to_first_review`` first reviewer action (comment/approval) − ``pr_opened``
@@ -20,6 +20,7 @@ Eight metrics are computed from the store exactly as prd/17 lists them:
 ``conformance``          merged with 0 approvals; PRs over N rounds
 ``sentinel_queue``       median wait on the mandatory approval (when roles exist)
 ``pr_size``              commits per PR (+ diff size when captured) vs review latency
+``vacation_blocking``    per vacation: items that waited on the person, no delegation
 ======================  ==========================================================
 
 Every suggestion is ``{id, metric, title, evidence, suggestion, severity,
@@ -37,9 +38,12 @@ capture (prd/16) is a separate task, so until ``PR.attributes`` carries
 ``lines_added``/``lines_removed`` (or ``diff_size``) the size metric uses commit
 count alone and reports ``diff_size_pending: true``.
 
-Duration assumption: **wall-clock hours**, inherited from ``ballcourt``. The
-working-hours calendar (prd/03) does not exist yet, so every number is elapsed
-time and the response says ``hours_mode: "wall-clock"``.
+Duration assumption: **business hours** when a calendar is attached (prd/19,
+``analysis.calendar``), **wall-clock hours** otherwise. Every metric that turns
+two timestamps into hours goes through ``court.business_hours(person, t1, t2)``,
+so a wait over a weekend or a vacation no longer counts idle days; the response
+says which mode answered (``hours_mode``). The calendar is attached by the
+server per tenant (``data/<tenant>/calendar.yaml``), never by this module.
 
 Read-only: this module reads the schema directly, like ``ballcourt``, so the
 analysis views never depend on ingest refactors.
@@ -50,13 +54,10 @@ from __future__ import annotations
 import json
 import math
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from analysis import ballcourt
 from ingest.store import iso, to_naive_utc, utcnow
-
-ASSUMPTION = ballcourt.ASSUMPTION
-HOURS_MODE = "wall-clock"
 
 # v1 targets. Stated in every response that uses them (never a hidden constant).
 TARGET_FIRST_REVIEW_HOURS = 24.0
@@ -80,6 +81,18 @@ REVIEW_ACTIONS = ("comment_added", "pr_approved")
 # --------------------------------------------------------------------------- #
 def _hours(seconds: float) -> float:
     return round(max(0.0, seconds) / 3600.0, 2)
+
+
+def _span_hours(court: ballcourt.BallCourt, person: str | None,
+                t1: datetime, t2: datetime) -> float:
+    """Business hours between two timestamps, for the person who held the ball.
+
+    One helper for every metric that turns a duration into hours, so
+    ``hours_mode`` cannot drift between metrics: the calendar is applied in
+    exactly one place (``BallCourt.business_hours``) and falls back to elapsed
+    time when the tenant has none.
+    """
+    return _hours(court.business_hours(person, t1, t2) * 3600.0)
 
 
 def _median(values: list[float]) -> float | None:
@@ -184,7 +197,7 @@ def round_cost_hours(court: ballcourt.BallCourt, window: tuple[datetime, datetim
         if rounds <= 0:
             continue
         per_round.append(
-            _hours((pr["closed_ts"] - pr["created_ts"]).total_seconds()) / rounds
+            _span_hours(court, None, pr["created_ts"], pr["closed_ts"]) / rounds
         )
     if per_round:
         return max(1.0, _median(per_round) or DEFAULT_ROUND_HOURS)
@@ -322,7 +335,7 @@ def time_to_first_review(court: ballcourt.BallCourt, window) -> dict:
         if first is None:
             missing += 1
             continue
-        hours = _hours((first["_ts"] - pr["created_ts"]).total_seconds())
+        hours = _span_hours(court, first["actor"], pr["created_ts"], first["_ts"])
         samples.append(hours)
         by_reviewer[first["actor"]].append(hours)
     return {
@@ -346,7 +359,7 @@ def cycle_time(court: ballcourt.BallCourt, window) -> dict:
         pr = state.pr
         if pr["state"] != "merged" or pr["closed_ts"] is None:
             continue
-        samples.append(_hours((pr["closed_ts"] - pr["created_ts"]).total_seconds()))
+        samples.append(_span_hours(court, None, pr["created_ts"], pr["closed_ts"]))
     return {
         "n": len(samples),
         "median_hours": _median(samples),
@@ -592,7 +605,7 @@ def pr_size(court: ballcourt.BallCourt, window, sizes: dict[str, dict] | None = 
                 or (diff_size is not None and diff_size > SIZE_LINE_CAP)
             ),
             "first_review_hours": (
-                _hours((first["_ts"] - pr["created_ts"]).total_seconds())
+                _span_hours(court, first["actor"], pr["created_ts"], first["_ts"])
                 if first is not None else None
             ),
             "rounds": len(pushes) + len(unapprovals),
@@ -677,6 +690,91 @@ def sentinel_queue(court: ballcourt.BallCourt, window) -> dict:
     }
 
 
+def vacation_blocking(court: ballcourt.BallCourt, window) -> dict:
+    """Vacation-blocking signal (prd/19): what waited on a person while away.
+
+    For each configured vacation, the items whose ball sat with that person
+    during the vacation are the ones the absence blocked. ``hours`` is the
+    working time those items lost — business hours with the vacation ignored,
+    because a vacation's own business hours are zero by definition — and an item
+    counts as *delegated* when someone else held its ball during the same
+    period. ``blocked_*`` is what nobody picked up: the pattern the PRD wants
+    surfaced ("someone goes on vacation and things block").
+    """
+    start, end = window
+    calendar = court.calendar
+    if calendar is None:
+        return {
+            "available": False,
+            "vacations": [],
+            "n": 0,
+            "items": 0,
+            "hours": 0.0,
+            "blocked_items": 0,
+            "blocked_hours": 0.0,
+            "delegated_items": 0,
+            "note": "no calendar configured, so no vacations are known",
+        }
+
+    pseudo = {ballcourt.REVIEW, ballcourt.CI, ballcourt.CALENDAR}
+    rows: list[dict] = []
+    for vacation in calendar.vacation_list():
+        person = vacation["person"]
+        v_start, v_end = calendar.day_bounds(
+            date.fromisoformat(vacation["start"]), date.fromisoformat(vacation["end"])
+        )
+        if v_end <= start or v_start >= end:
+            continue  # outside the window
+        blocked = [
+            interval for interval in court.intervals
+            if interval.measured
+            and interval.waited_on == person
+            and interval.start < v_end and interval.end > v_start
+            and _overlap(interval, start, end)
+        ]
+        per_item: dict[str, float] = defaultdict(float)
+        for interval in blocked:
+            low = max(interval.start, v_start)
+            high = min(interval.end, v_end)
+            per_item[interval.object_id] += calendar.business_hours(
+                person, low, high, ignore_vacations=True
+            )
+        delegated = {
+            interval.object_id for interval in court.intervals
+            if interval.measured
+            and interval.waited_on not in pseudo
+            and interval.waited_on != person
+            and interval.object_id in per_item
+            and interval.start < v_end and interval.end > v_start
+        }
+        blocked_items = [oid for oid in per_item if oid not in delegated]
+        rows.append({
+            **vacation,
+            "items": len(per_item),
+            "hours": round(sum(per_item.values()), 1),
+            "delegated_items": len(set(per_item) & delegated),
+            "blocked_items": len(blocked_items),
+            "blocked_hours": round(sum(per_item[oid] for oid in blocked_items), 1),
+            "prs": sorted(per_item)[:10],
+        })
+
+    rows.sort(key=lambda row: (-row["blocked_hours"], row["person"], row["start"]))
+    return {
+        "available": True,
+        "vacations": rows,
+        "n": len(rows),
+        "items": sum(row["items"] for row in rows),
+        "hours": round(sum(row["hours"] for row in rows), 1),
+        "blocked_items": sum(row["blocked_items"] for row in rows),
+        "blocked_hours": round(sum(row["blocked_hours"] for row in rows), 1),
+        "delegated_items": sum(row["delegated_items"] for row in rows),
+        "note": (
+            "hours are the working time an item lost while it waited on the "
+            "person, priced with that person's vacation ignored"
+        ),
+    }
+
+
 def metrics(court: ballcourt.BallCourt, threads: list[dict], window,
             sizes: dict[str, dict] | None = None) -> dict:
     """Every prd/17 metric, in one deterministic pass."""
@@ -690,6 +788,7 @@ def metrics(court: ballcourt.BallCourt, threads: list[dict], window,
         "conformance": conformance(court, window),
         "sentinel_queue": sentinel_queue(court, window),
         "pr_size": pr_size(court, window, sizes),
+        "vacation_blocking": vacation_blocking(court, window),
         "review_cost": {"hours_per_round": round_cost_hours(court, window)},
     }
 
@@ -1036,6 +1135,76 @@ def templates(
                     suggestion, severity, impact, ps["large_prs"],
                 ))
 
+    # 10. vacation_blocking — the "someone goes on vacation and things block"
+    # pattern (prd/19). A vacation is a person fact, so the team-level rule
+    # aggregates periods without naming anyone; the person level names the
+    # pseudonym it already has in scope.
+    vb = m["vacation_blocking"]
+    if vb["available"] and vb["blocked_items"] > 0:
+        if level == "person":
+            for vacation in vb["vacations"]:
+                if vacation["blocked_items"] <= 0 or vacation["person"] in bots:
+                    continue
+                severity = (
+                    "critical"
+                    if vacation["blocked_hours"] >= 40 or vacation["blocked_items"] >= 5
+                    else "warning"
+                )
+                out.append(_suggestion(
+                    f"vacation-{vacation['person']}-{vacation['start']}",
+                    "vacation_blocking",
+                    f"{vacation['person']} on vacation {vacation['start']} → "
+                    f"{vacation['end']}: {vacation['blocked_items']} "
+                    f"item{'s' if vacation['blocked_items'] != 1 else ''} waited "
+                    f"{_human_hours(vacation['blocked_hours'])} with no delegation",
+                    {
+                        "person": vacation["person"],
+                        "start": vacation["start"],
+                        "end": vacation["end"],
+                        "business_days": vacation["business_days"],
+                        "items": vacation["items"],
+                        "blocked_items": vacation["blocked_items"],
+                        "blocked_hours": vacation["blocked_hours"],
+                        "delegated_items": vacation["delegated_items"],
+                    },
+                    f"Name a delegate before {vacation['person']} goes away: hand open "
+                    "review requests to a backup reviewer on the last working day, and "
+                    "add the backup to the PR's reviewers so the ball moves while they "
+                    "are on vacation.",
+                    severity, vacation["blocked_hours"], vacation["items"],
+                    scope={"kind": "person", "person": vacation["person"]},
+                ))
+        else:
+            worst = max(
+                (v for v in vb["vacations"] if v["blocked_items"] > 0),
+                key=lambda v: (v["blocked_hours"], v["person"]),
+            )
+            severity = (
+                "critical"
+                if vb["blocked_hours"] >= 40 or vb["blocked_items"] >= 5
+                else "warning"
+            )
+            out.append(_suggestion(
+                "vacation-blocking", "vacation_blocking",
+                f"{vb['blocked_items']} items waited "
+                f"{_human_hours(vb['blocked_hours'])} on someone on vacation "
+                "with no delegation",
+                {
+                    "vacations": vb["n"],
+                    "blocked_items": vb["blocked_items"],
+                    "blocked_hours": vb["blocked_hours"],
+                    "delegated_items": vb["delegated_items"],
+                    "worst_business_days": worst["business_days"],
+                    "worst_blocked_hours": worst["blocked_hours"],
+                    "worst_blocked_items": worst["blocked_items"],
+                },
+                "Make delegation part of taking leave: before a vacation, hand open "
+                "review requests to a named backup and add them to the PR's reviewers. "
+                "An item whose ball sits with someone who is away waits for their "
+                "return, not for a decision.",
+                severity, vb["blocked_hours"], vb["blocked_items"],
+            ))
+
     return out
 
 
@@ -1072,8 +1241,9 @@ def insights(
         "ok": True,
         "generated_at": iso(generated_at or utcnow()),
         "as_of": iso(court.snapshot),
-        "hours_mode": HOURS_MODE,
-        "assumption": ASSUMPTION,
+        "hours_mode": court.hours_mode,
+        "assumption": court.assumption,
+        **court.calendar_warning(),
         "level": level,
         "window": {"start": iso(start), "end": iso(end), "days": days},
         "sample": {
@@ -1095,8 +1265,9 @@ def insights(
         "metrics": computed,
         "suggestions": suggestions,
         "note": (
-            "impact_hours estimates the wait the rule would remove, using wall-clock "
-            "hours and the measured review-round cost in this window; ranking is "
-            "impact × confidence (sample size). Person rules carry pseudonyms only."
+            "impact_hours estimates the wait the rule would remove, in "
+            f"{court.hours_mode} hours, using the measured review-round cost in "
+            "this window; ranking is impact × confidence (sample size). Person "
+            "rules carry pseudonyms only."
         ),
     }

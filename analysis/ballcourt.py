@@ -14,10 +14,13 @@ Everything downstream (the gantt phases in the timeline, the blocking graph, the
 queue series, the delivery list) is a projection of these intervals, so all four
 views agree by construction.
 
-Assumption, stated in every API response: durations are **wall-clock hours**.
-prd/03 specifies a per-person working-hours calendar; it does not exist yet, so a
-weekend counts as two days of wait. That biases every number *upwards*; the UI
-labels the numbers accordingly rather than pretending otherwise.
+Assumption, stated in every API response: durations are **business hours** when a
+calendar is attached (prd/19, ``analysis.calendar``) and **wall-clock hours**
+otherwise. Business hours exclude nights, weekends, holidays and the person's
+vacations, so a wait that spans a weekend no longer counts two idle days. The
+calendar is opt-in at load time: without one, the numbers are elapsed time and
+the response says ``hours_mode: "wall-clock"``. The UI labels whichever mode
+answered rather than pretending the two are the same.
 
 Measured vs. inferred (the honesty line for this module):
 
@@ -37,8 +40,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from ingest.store import iso, to_naive_utc
+from analysis.calendar import Calendar
 
-ASSUMPTION = "wall-clock hours (no working-hours calendar yet)"
+ASSUMPTION = "wall-clock hours (no working-hours calendar configured)"
 
 SNAPSHOT_PHASE = "unobserved"
 REVIEW = "review"
@@ -77,6 +81,9 @@ class Interval:
     evidence: str | None    # commits | push | approval | none
     commits: int
     open: bool
+    # business hours (prd/19): seconds inside the person's working time, set by
+    # ``load`` when a calendar is attached. ``None`` means wall-clock.
+    business_seconds: float | None = None
 
     @property
     def seconds(self) -> float:
@@ -84,6 +91,8 @@ class Interval:
 
     @property
     def hours(self) -> float:
+        if self.business_seconds is not None:
+            return _hours(self.business_seconds)
         return _hours(self.seconds)
 
     @property
@@ -117,10 +126,41 @@ class BallCourt:
     snapshot: datetime
     sentinels: set[str]
     events: int
+    calendar: Calendar | None = None
+    calendar_error: str | None = None
 
     @property
     def open_prs(self) -> list[PRState]:
         return [pr for pr in self.prs if not pr.pr.get("closed_at")]
+
+    @property
+    def hours_mode(self) -> str:
+        """``business`` with a calendar (prd/19), ``wall-clock`` without one."""
+        return "business" if self.calendar is not None else "wall-clock"
+
+    @property
+    def assumption(self) -> str:
+        if self.calendar is not None:
+            return self.calendar.describe()
+        return ASSUMPTION
+
+    def business_hours(self, person: str | None, t1: datetime, t2: datetime) -> float:
+        """Working hours in ``[t1, t2)`` for ``person``; wall-clock without a calendar."""
+        if self.calendar is None:
+            if t1 is None or t2 is None or t2 <= t1:
+                return 0.0
+            return (t2 - t1).total_seconds() / 3600.0
+        return self.calendar.business_hours(person, t1, t2)
+
+    def calendar_warning(self) -> dict:
+        """A broken calendar config, for the payload to carry next to the numbers.
+
+        Empty when the config loaded (or when no config exists at all): the
+        fallback to wall-clock is then the intended behaviour, not an error.
+        """
+        if self.calendar_error:
+            return {"calendar_error": self.calendar_error}
+        return {}
 
     def role_of(self, actor: str) -> str:
         """Coarse role for graph grouping: sentinel or reviewer."""
@@ -282,12 +322,17 @@ def _snapshot(conn) -> datetime:
     return to_naive_utc(row[0]) if row and row[0] else datetime.utcnow()
 
 
-def load(conn) -> BallCourt:
+def load(conn, calendar: Calendar | None = None, calendar_error: str | None = None) -> BallCourt:
     """Read the store and reconstruct every PR's ball-in-court timeline.
 
     Reads the tables directly (rather than through ``ingest.store``'s read
     helpers) so the analysis views depend only on the schema — the
     pseudonymisation contract — and not on ingest refactors.
+
+    ``calendar`` (prd/19) converts each interval to business hours, using the
+    person the ball was with: a reviewer's own override, or the default window
+    for an unattributed queue/CI wait. Without it every duration stays
+    wall-clock and ``hours_mode`` says so.
     """
     snapshot = _snapshot(conn)
     events = []
@@ -353,9 +398,14 @@ def load(conn) -> BallCourt:
 
     intervals = [i for s in states for i in s.intervals]
     intervals.sort(key=lambda i: (i.start, i.object_id))
+    if calendar is not None:
+        for interval in intervals:
+            interval.business_seconds = calendar.business_hours(
+                interval.waited_on, interval.start, interval.end
+            ) * 3600.0
     return BallCourt(
         intervals=intervals, prs=states, snapshot=snapshot, sentinels=sentinels,
-        events=len(events),
+        events=len(events), calendar=calendar, calendar_error=calendar_error,
     )
 
 
@@ -457,7 +507,9 @@ def blocking_graph(bc: BallCourt, level: str = "queue", window: tuple[datetime, 
     total = round(sum(e["hours"] for e in out_edges), 1)
     return {
         "ok": True,
-        "assumption": ASSUMPTION,
+        "hours_mode": bc.hours_mode,
+        "assumption": bc.assumption,
+        **bc.calendar_warning(),
         "attribution": (
             "a wait is attributed to the party the ball was with; at person level "
             "to the person whose action ended the wait"
@@ -485,11 +537,14 @@ def queue_series(
     """Per-person (or per-role) WIP over time, arrivals and completions.
 
     Little's law: ``W = L / λ``. A high mean wait with high WIP is an
-    *overloaded* server; the same wait with low WIP is a *slow* server. Both
-    readings are estimates — the calendar does not exist yet.
+    *overloaded* server; the same wait with low WIP is a *slow* server. Waits are
+    business hours when a calendar is attached (prd/19); the WIP sampling stays
+    on the wall clock, so a weekend shows a flat queue — which is what it is.
     """
     start, end = window or (bc.intervals[0].start if bc.intervals else bc.snapshot, bc.snapshot)
     span_hours = max(1.0, (end - start).total_seconds() / 3600.0)
+    # Little's law divides by the hours the queue could actually be served in.
+    service_hours = max(1e-9, bc.business_hours(None, start, end))
     if bucket_hours is None:
         bucket_hours = 24.0 if span_hours > 24 * 12 else max(1.0, round(span_hours / 60.0, 1))
     buckets = max(1, int(span_hours // bucket_hours) + 1)
@@ -557,7 +612,7 @@ def queue_series(
         items = len(entry["prs"])
         mean_hours = entry["hours"] / items if items else 0.0
         mean_wip = sum(entry["wip"]) / max(1, len(entry["wip"]))
-        queue_length = entry["hours"] / (span_hours if span_hours else 1.0)
+        queue_length = entry["hours"] / service_hours
         served = len(entry.get("served") or ())
         per_day = served / days if days else 0.0
         if mean_hours > baseline * 1.25 and queue_length >= 1.0:
@@ -591,10 +646,18 @@ def queue_series(
     out.sort(key=lambda s: (-s["summary"]["mean_wait_hours"], s["id"]))
     return {
         "ok": True,
-        "assumption": ASSUMPTION,
-        "diagnosis_note": "heuristic vs. the median wait in this window; ≈ because the calendar is wall-clock",
+        "hours_mode": bc.hours_mode,
+        "assumption": bc.assumption,
+        **bc.calendar_warning(),
+        "diagnosis_note": (
+            "heuristic vs. the median wait in this window; queue length divides "
+            "wait-hours by the hours the queue could be served in"
+        ),
         "level": level,
-        "window": {"start": iso(start), "end": iso(end), "days": round(days, 1)},
+        "window": {
+            "start": iso(start), "end": iso(end), "days": round(days, 1),
+            "service_hours": round(service_hours, 1),
+        },
         "bucket_hours": bucket_hours,
         "buckets": buckets,
         "baseline_mean_wait_hours": round(baseline, 1),
@@ -639,8 +702,12 @@ def delivery_list(bc: BallCourt, window: tuple[datetime, datetime] | None = None
         # the current wait starts when the last event handed the ball over
         waiting_since = tail.start if tail else (current.start if current else pr["created_ts"])
         waiting_for = (tail.waited_on if tail else None) or (current.waited_on if current else None)
-        waiting_hours = _hours((bc.snapshot - waiting_since).total_seconds())
-        age_hours = _hours((bc.snapshot - pr["created_ts"]).total_seconds())
+        waiting_hours = _hours(
+            bc.business_hours(waiting_for, waiting_since, bc.snapshot) * 3600.0
+        )
+        age_hours = _hours(
+            bc.business_hours(None, pr["created_ts"], bc.snapshot) * 3600.0
+        )
         dependents = sum(len(tickets[key]) - 1 for key in (pr.get("ticket_keys") or []))
         kind = (tail.kind if tail else None) or "no_events"
         rows.append({
@@ -673,7 +740,9 @@ def delivery_list(bc: BallCourt, window: tuple[datetime, datetime] | None = None
     oldest = [r for r in rows if not r["blocked"] and r["waiting_hours"] >= 72]
     return {
         "ok": True,
-        "assumption": ASSUMPTION,
+        "hours_mode": bc.hours_mode,
+        "assumption": bc.assumption,
+        **bc.calendar_warning(),
         "impact_note": "impact = open PRs on the same ticket × current wait (≈)",
         "snapshot": iso(bc.snapshot),
         "window": {"start": iso(start), "end": iso(end)},
