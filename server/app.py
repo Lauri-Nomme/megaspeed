@@ -7,6 +7,9 @@ helpers. If the UI cannot leak raw text, it cannot leak raw text by accident.
     GET  /api/health                    store status + provenance summary
     GET  /api/events?from=&to=&limit=   pseudonymised event log
     GET  /api/objects?type=             PR / COMMIT / TICKET / PERSON objects
+    GET  /api/blocking?level=&days=     wait-hours handover graph (prd/05)
+    GET  /api/queues?level=&days=       per-person WIP / throughput series
+    GET  /api/delivery?days=            triage list: blocked / oldest waiting
     GET  /ws                            harness websocket (hello/changed/eval)
     POST /api/eval        {code, timeout}
     POST /api/screenshot  {selector, out}
@@ -21,6 +24,7 @@ import contextlib
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
@@ -33,12 +37,20 @@ APP_DIR = Path(os.environ.get("MEGASPEED_APP_DIR", REPO_ROOT / "app")).resolve()
 DB_PATH = Path(os.environ.get("MEGASPEED_DB", REPO_ROOT / "data" / "megaspeed.duckdb")).resolve()
 
 sys.path.insert(0, str(REPO_ROOT))
+from analysis import ballcourt as analyse  # noqa: E402  (read-only projections)
 from ingest import store as pstore  # noqa: E402  (read helpers + schema guard only)
 from server.harness import BrowserBridge  # noqa: E402
 
 bridge = BrowserBridge()
 
 LOG = os.environ.get("MEGASPEED_QUIET", "") not in ("1", "true")
+
+# Reconstructing the interval timeline is cheap (one pass over the log) but the
+# three analysis views ask for it on every page switch, so keep the last build
+# for the current store stamp. Read-only; a store change invalidates it.
+_analysis_lock = threading.Lock()
+_analysis_cache: tuple[tuple, object] | None = None
+
 
 
 @contextlib.contextmanager
@@ -136,7 +148,125 @@ def objects(type: str | None = None):
         return _missing_store()
     try:
         with store_conn() as con:
-            return pstore.list_objects(con, type)
+            return _list_objects(con, type)
+    except Exception as exc:  # noqa: BLE001
+        return _store_error(exc)
+
+
+def _list_objects(con, object_type: str | None = None) -> list[dict]:
+    """The object table, read directly.
+
+    ``ingest.store.list_objects`` is the canonical reader, but its column list
+    tracks whatever ingest is adding this week; this endpoint promises a stable
+    shape to the UI, so it reads the stable columns itself and treats newer
+    columns as optional.
+    """
+    columns = {
+        row[0]
+        for row in con.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_name = 'objects'"
+        ).fetchall()
+    }
+    extra = ", CAST(attributes AS VARCHAR) AS attributes" if "attributes" in columns else ", NULL AS attributes"
+    sql = (
+        "SELECT object_type, object_id, repo, pr_id, ticket_keys, actor, state,"
+        " created_at, closed_at, head_commit, message_class"
+        f"{extra} FROM objects"
+    )
+    params: list = []
+    if object_type:
+        sql += " WHERE object_type = ?"
+        params.append(object_type)
+    sql += " ORDER BY object_type, object_id"
+    out = []
+    for row in con.execute(sql, params).fetchall():
+        (otype, oid, repo, pr_id, keys, actor, state, created, closed, head, mclass, attrs) = row
+        record = {
+            "object_type": otype,
+            "object_id": oid,
+            "repo": repo,
+            "pr_id": pr_id,
+            "ticket_keys": list(keys or []),
+            "actor": actor,
+            "state": state,
+            "created_at": pstore.iso(created) if created else None,
+            "closed_at": pstore.iso(closed) if closed else None,
+            "head_commit": head,
+            "message_class": mclass,
+        }
+        if attrs:
+            try:
+                record["attributes"] = json.loads(attrs) if isinstance(attrs, str) else attrs
+            except json.JSONDecodeError:
+                record["attributes"] = {}
+        out.append(record)
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# analysis views (prd/05): read-only projections of the same event log
+# --------------------------------------------------------------------------- #
+def _ballcourt(con):
+    """Reconstruct the interval timeline once per store version."""
+    global _analysis_cache
+    stamp = _stamp()
+    with _analysis_lock:
+        if _analysis_cache is not None and _analysis_cache[0] == stamp:
+            return _analysis_cache[1]
+    court = analyse.load(con)
+    with _analysis_lock:
+        _analysis_cache = (stamp, court)
+    return court
+
+
+def _days(days: float | None) -> float | None:
+    if days is None:
+        return None
+    return max(0.1, min(float(days), 3650.0))
+
+
+def _level(level: str) -> str:
+    return level if level in ("queue", "person") else "queue"
+
+
+@app.get("/api/blocking")
+def blocking(level: str = "queue", days: float | None = None):
+    """Weighted directed handover graph: ``X -> Y`` = X waited on Y for N hours."""
+    if not DB_PATH.exists():
+        return _missing_store()
+    try:
+        with store_conn() as con:
+            court = _ballcourt(con)
+            window = analyse.window_from_events(court, _days(days))
+            return analyse.blocking_graph(court, _level(level), window)
+    except Exception as exc:  # noqa: BLE001
+        return _store_error(exc)
+
+
+@app.get("/api/queues")
+def queues(level: str = "person", days: float | None = None, bucket_hours: float | None = None):
+    """Per-person / per-queue WIP over time, arrivals and completions."""
+    if not DB_PATH.exists():
+        return _missing_store()
+    try:
+        with store_conn() as con:
+            court = _ballcourt(con)
+            window = analyse.window_from_events(court, _days(days))
+            return analyse.queue_series(court, _level(level), window, bucket_hours)
+    except Exception as exc:  # noqa: BLE001
+        return _store_error(exc)
+
+
+@app.get("/api/delivery")
+def delivery(days: float | None = None):
+    """Triage list: open PRs, what they wait on, and for how long."""
+    if not DB_PATH.exists():
+        return _missing_store()
+    try:
+        with store_conn() as con:
+            court = _ballcourt(con)
+            window = analyse.window_from_events(court, _days(days))
+            return analyse.delivery_list(court, window)
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
 
