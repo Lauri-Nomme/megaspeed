@@ -17,6 +17,11 @@ helpers. If the UI cannot leak raw text, it cannot leak raw text by accident.
     POST /api/eval        {code, timeout}
     POST /api/screenshot  {selector, out, timeout}
     GET  /                              app/ (vanilla JS + canvas, no build)
+
+Every query parameter is either honoured or rejected with a 400 that lists the
+valid ones — a filter is never silently ignored (BUG-13). Malformed bodies are
+400 JSON, never a traceback (BUG-08). A store that an ingest run is writing is
+a retryable 503 with no path / PID / username in it (BUG-07).
 """
 
 from __future__ import annotations
@@ -28,7 +33,9 @@ import json
 import math
 import os
 import sys
+import tempfile
 import threading
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
@@ -39,6 +46,15 @@ from fastapi.staticfiles import StaticFiles
 REPO_ROOT = Path(__file__).resolve().parent.parent
 APP_DIR = Path(os.environ.get("MEGASPEED_APP_DIR", REPO_ROOT / "app")).resolve()
 DB_PATH = Path(os.environ.get("MEGASPEED_DB", REPO_ROOT / "data" / "megaspeed.duckdb")).resolve()
+
+# Screenshots may only ever be written *inside* this directory (BUG-08).
+SHOT_DIR = Path(
+    os.environ.get("MEGASPEED_SHOT_DIR", Path(tempfile.gettempdir()) / "megaspeed-shots")
+).expanduser().resolve()
+
+# How long a read waits for an ingest run to release the DuckDB write lock.
+STORE_RETRY_ATTEMPTS = max(1, int(os.environ.get("MEGASPEED_STORE_RETRIES", "5")))
+STORE_RETRY_DELAY = max(0.0, float(os.environ.get("MEGASPEED_STORE_RETRY_DELAY", "0.12")))
 
 sys.path.insert(0, str(REPO_ROOT))
 from analysis import ballcourt as analyse  # noqa: E402  (read-only projections)
@@ -58,16 +74,51 @@ _analysis_lock = threading.Lock()
 _analysis_cache: tuple[tuple, object] | None = None
 
 
+class StoreBusy(RuntimeError):
+    """The DuckDB file is locked by a writer (an ingest run). Retryable."""
+
+
+LOCK_HINTS = (
+    "could not set lock",
+    "conflicting lock",
+    "lock on file",
+    "being used by another process",
+)
+
+
+def _is_lock_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(hint in text for hint in LOCK_HINTS)
+
+
 @contextlib.contextmanager
 def store_conn():
-    """One short-lived read-only DuckDB connection per request."""
+    """One short-lived read-only DuckDB connection per request.
+
+    DuckDB allows many readers *or* one writer, so an ingest run makes every
+    read fail with "Could not set lock". A run is seconds long for fixtures and
+    minutes for a corpus, so the read path retries briefly and then hands the
+    caller a :class:`StoreBusy` (a clean, retryable 503) instead of DuckDB's raw
+    message — which names the store path, the PID and the OS user.
+    """
     if not DB_PATH.exists():
         raise FileNotFoundError(str(DB_PATH))
-    con = pstore.connect(DB_PATH, read_only=True)
+    con = None
+    for attempt in range(STORE_RETRY_ATTEMPTS):
+        try:
+            con = pstore.connect(DB_PATH, read_only=True)
+            break
+        except Exception as exc:  # noqa: BLE001
+            if not _is_lock_error(exc):
+                raise
+            if attempt + 1 >= STORE_RETRY_ATTEMPTS:
+                raise StoreBusy("store is locked by a writer") from None
+            time.sleep(STORE_RETRY_DELAY * (attempt + 1))
     try:
         yield con
     finally:
-        con.close()
+        if con is not None:
+            con.close()
 
 
 def _missing_store() -> JSONResponse:
@@ -82,7 +133,24 @@ def _missing_store() -> JSONResponse:
 
 
 def _store_error(exc: Exception) -> JSONResponse:
-    return JSONResponse(status_code=503, content={"ok": False, "error": str(exc)})
+    if isinstance(exc, StoreBusy):
+        return JSONResponse(
+            status_code=503,
+            content={
+                "ok": False,
+                "error": "the store is being written right now (ingest in progress)",
+                "retryable": True,
+                "retry_after_ms": 600,
+                "hint": "retry in a moment; reads resume when the ingest run finishes",
+            },
+            headers={"Retry-After": "1"},
+        )
+    if LOG:
+        print(f"megaspeed: store read failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+    return JSONResponse(
+        status_code=503,
+        content={"ok": False, "error": "store read failed", "reason": type(exc).__name__},
+    )
 
 
 def _bad_request(message: str, **extra) -> JSONResponse:
@@ -147,12 +215,27 @@ async def lifespan(_app: FastAPI):
 
 
 app = FastAPI(title="megaspeed", version="0.1.0", lifespan=lifespan)
+
+# The UI is served by this same server, and the eval/screenshot bridge is driven
+# with curl (no Origin header), so nothing legitimate needs a wildcard. Only a
+# browser tab on localhost/loopback may make a cross-origin call (BUG-08).
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$",
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["content-type"],
+    max_age=600,
 )
+
+
+@app.exception_handler(Exception)
+async def _unhandled(request: Request, exc: Exception):
+    """A bug is a JSON 500, never a bare 'Internal Server Error' (BUG-08)."""
+    if LOG:
+        print(f"megaspeed: unhandled {type(exc).__name__}: {exc}", file=sys.stderr)
+    return JSONResponse(
+        status_code=500, content={"ok": False, "error": "internal error", "reason": type(exc).__name__}
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -416,35 +499,131 @@ def delivery(request: Request):
 # --------------------------------------------------------------------------- #
 # harness: eval + screenshot (curl-drivable)
 # --------------------------------------------------------------------------- #
+MAX_TIMEOUT = 300.0
+
+
+def _body_timeout(body: dict, default: float) -> float:
+    """``timeout`` as a positive, finite number of seconds (BUG-08).
+
+    A numeric string ("10") is accepted because curl users type one; anything
+    else is a 400, never a ``ValueError`` traceback.
+    """
+    raw = body.get("timeout")
+    if raw is None or raw == "":
+        return default
+    if isinstance(raw, bool):
+        raise ValueError("timeout must be a number of seconds")
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise ValueError("timeout must be a number of seconds") from None
+    if not math.isfinite(value):
+        raise ValueError("timeout must be a finite number of seconds")
+    if value <= 0:
+        raise ValueError("timeout must be positive")
+    return min(value, MAX_TIMEOUT)
+
+
+def _body_text(body: dict, name: str, *, default: str | None = None,
+               allow_number: bool = False) -> str:
+    """A non-empty string field, or a clear 400 message."""
+    raw = body.get(name)
+    if raw is None or raw == "":
+        if default is None:
+            raise ValueError(f"{name} required")
+        return default
+    if isinstance(raw, str):
+        text = raw.strip()
+    elif allow_number and isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        text = str(raw)
+    else:
+        raise ValueError(f"{name} must be a string")
+    if not text:
+        raise ValueError(f"{name} must not be empty")
+    return text
+
+
 @app.post("/api/eval")
 async def eval_js(request: Request):
     body = await _json_body(request)
     if body is None:
-        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid json"})
-    code = body.get("code")
-    if not code:
-        return JSONResponse(status_code=400, content={"ok": False, "error": "code required"})
-    timeout = float(body.get("timeout") or 10)
-    return await bridge.eval(str(code), timeout)
+        return _bad_request("invalid json")
+    if not isinstance(body, dict):
+        return _bad_request("body must be a JSON object, e.g. {\"code\": \"1+1\"}")
+    try:
+        code = _body_text(body, "code", allow_number=True)
+        timeout = _body_timeout(body, 10.0)
+    except ValueError as exc:
+        return _bad_request(str(exc), valid=["code", "timeout"])
+    return await bridge.eval(code, timeout)
+
+
+def _shot_path(raw: str) -> Path:
+    """Resolve ``out`` inside :data:`SHOT_DIR` or refuse it (BUG-08).
+
+    A bare file name is relative to the screenshot directory; an absolute path
+    must land inside it. Symlinks are resolved first, so neither ``..`` nor a
+    symlink can escape, and the directory is created lazily by the caller.
+    """
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        candidate = SHOT_DIR / candidate
+    resolved = candidate.resolve()
+    try:
+        resolved.relative_to(SHOT_DIR)
+    except ValueError:
+        raise ValueError(
+            f"out must stay inside the screenshot directory ({SHOT_DIR}); "
+            "pass a file name only"
+        ) from None
+    if resolved == SHOT_DIR:
+        raise ValueError("out must be a file inside the screenshot directory")
+    if resolved.suffix.lower() != ".png":
+        resolved = resolved.with_suffix(resolved.suffix + ".png" if resolved.suffix else ".png")
+        try:
+            resolved.relative_to(SHOT_DIR)
+        except ValueError:  # pragma: no cover - only reachable via odd suffix tricks
+            raise ValueError("out must stay inside the screenshot directory") from None
+    return resolved
 
 
 @app.post("/api/screenshot")
 async def screenshot(request: Request):
     body = await _json_body(request)
     if body is None:
-        return JSONResponse(status_code=400, content={"ok": False, "error": "invalid json"})
-    selector = str(body.get("selector") or ".app")
-    out = body.get("out")
-    result = await bridge.screenshot(selector, float(body.get("timeout") or 30))
+        return _bad_request("invalid json")
+    if not isinstance(body, dict):
+        return _bad_request("body must be a JSON object, e.g. {\"selector\": \".app\"}")
+    try:
+        selector = _body_text(body, "selector", default=".app")
+        timeout = _body_timeout(body, 30.0)
+        out = body.get("out")
+        if out not in (None, ""):
+            if not isinstance(out, str):
+                raise ValueError("out must be a file name inside the screenshot directory")
+            path = _shot_path(out)
+        else:
+            path = None
+    except ValueError as exc:
+        return _bad_request(str(exc), valid=["selector", "out", "timeout"])
+
+    result = await bridge.screenshot(selector, timeout)
     if not result.get("ok"):
         return result
-    raw = base64.b64decode(result["data"])
-    if out:
-        path = Path(str(out)).expanduser()
+    data = result["data"]
+    raw = base64.b64decode(data)
+    response = {
+        "ok": True,
+        "selector": selector,
+        "mime": "image/png",
+        "bytes": len(raw),
+        "data": data,
+    }
+    if path is not None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(raw)
-        return {"ok": True, "selector": selector, "out": str(path), "bytes": len(raw), "mime": "image/png"}
-    return {"ok": True, "selector": selector, "data": result["data"], "bytes": len(raw), "mime": "image/png"}
+        response["out"] = str(path)
+    return response
 
 
 async def _json_body(request: Request):
