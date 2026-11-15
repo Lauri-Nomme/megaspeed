@@ -1071,4 +1071,3 @@ function visibleWord(timeline) {
   return `${n} of ${timeline.events.length}`;
 }
 
-export { fmtDay, fmtStamp, fmtClock } from './format.js';

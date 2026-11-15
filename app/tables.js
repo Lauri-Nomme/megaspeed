@@ -6,7 +6,7 @@
  * are mono/tabular, state is a tinted pill, and zero is never red.
  */
 
-import { DAY, HOUR, fmtAbsolute, fmtHours, fmtAge, esc, whoLabel } from './format.js';
+import { fmtAbsolute, fmtHours, esc, whoLabel } from './format.js';
 
 export const TABS = [
   { id: 'blocked', label: 'Blocked' },
@@ -245,4 +245,3 @@ export function entityMarkdown(entity) {
   ].join('\n');
 }
 
-export { fmtAge, DAY, HOUR };

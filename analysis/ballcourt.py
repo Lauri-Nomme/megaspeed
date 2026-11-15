@@ -54,9 +54,6 @@ REVIEWER_ACTIONS = {"pr_approved", "pr_unapproved", "pr_needs_work", "reviewer_c
 AUTHOR_ACTIONS = {"pr_pushed", "rebased"}
 TERMINAL = {"pr_merged", "pr_declined"}
 
-QUEUE_LABEL = {"author": "author", "review": "review", "sentinel": "sentinel", CI: "CI", CALENDAR: "calendar"}
-
-
 def _hours(seconds: float) -> float:
     return round(max(0.0, seconds) / 3600.0, 2)
 
