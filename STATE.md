@@ -1,48 +1,45 @@
 # STATE — megaspeed · LIVE
 
-The product is **live and working end-to-end**: `https://megaspeed.example.com/` (nginx → `127.0.0.1:8766`),
-serving real Bitbucket DC `DEL` data — 131 PRs / 1316 events / 467 commits, `source=bitbucket-dc`.
+**Live**: `https://megaspeed.example.com` (nginx → `127.0.0.1:8766`).
+**GitHub**: `https://github.com/Lauri-Nomme/megaspeed` (private).
+Install config (nginx site + IP + cert layout) is **removed from the repo** — lives on the host only.
 
 ## Working
 
-- **BB ingest** — live DC 9.4, ticket-key filtered (`MEGASPEED_TICKET_PROJECTS`), pseudonymised store.
-  Verified 131/131 kept, `reviewer_changed`=266, bots classified, `--verify` → `contract OK`, idempotent,
-  no raw content (byte-level audit). 63/63 tests.
-- **Views** — Timeline (1316 markers, 131 PR bars, 7 actor lanes), Delivery list, Blocking map (weighted
-  graph, lens + drill-down), Queue view (WIP + slow/overloaded diagnosis), Overview, Sources, Policy-lab stub.
-- **Shell** — sidebar, scope/timeframe, scope banner, detail panel, pivot menu + Copy as Markdown, histogram brush.
-- **Harness** — Playwright headless browser + `/api/eval` + `/api/screenshot` (screenshot sandboxed).
+- **BB ingest** (airgap-ready split: `scrape` → tgz → `import`) — 131 PRs / 1316 events /
+  `reviewer_changed`=266 / bots classified / `--verify` OK / idempotent / zero raw content.
+- **Views**: Timeline, Delivery list, Blocking map, Queue, Overview, Sources, Policy stub.
+  Shell: sidebar, scope/timeframe + scope banner, detail panel, pivot menu + Copy as Markdown, brush.
+- **Tenants**: one DuckDB store per dataset (`data/<name>.duckdb`); `/api/tenants`; `?tenant=` on all
+  read endpoints; top-bar switcher (switchable live, per-dataset scope memory). Default tenant = `del`.
+- **Tests** 63/63. Harness (eval + screenshot) wired; Playwright headless browser.
 
-## Built this session (coherent, committed)
+## Airgap (prd/11, prd/13)
 
-PRD + UX spec → deploy (nginx+DNS) → bb-lab-a/b resurrection → walking skeleton → `DEL` corpus
-(131 PRs, 100 tickets, 5 users, ~3 months) → 3 QA reports → 3 fix passes (ingest, UI+views, server) →
-live integration → polish. All committed; `STATE.md` updated throughout.
+- **Scrape** (airgapped): source → classify → pseudonymise → **tgz** (`manifest.json` + `events.jsonl` +
+  `objects.jsonl` + `sha256sums` + watermark). Watermark + identity map stay scrape-side; identity map
+  never crosses.
+- **Import**: tgz → DuckDB (idempotent by natural key).
+- **Build**: `scrape/build.sh` → PyInstaller `--onefile` `megaspeed-scrape` (works locally).
+- **CI**: `.github/workflows/build-scraper.yml` — builds on push/PR to `main`, path-filtered to the
+  scraper component.
 
-## Next / follow-ups (prioritised)
+## Next
 
-1. **Business-hours calendar** — re-baselines every wait figure (currently wall-clock).
-2. **`push_class` via git patch-id** — needs a local clone; unblocks rebase-waste analysis.
-3. **question/phase local-LLM classification** — the original special requirement (prd/02).
-4. Light theme · commits+tickets on timeline (G13) · semantic zoom (G2) · window-virtualised loading ·
-   queue WIP sweep-line for 10k scale.
-5. **Story/Epic/Sprint** objects (needs Jira Cloud + Tempo ingest) · SvelteKit shell.
+- [ ] Restart 8766 to activate tenants (del / live-probe / megaspeed) and the split.
+- [ ] Verify airgap e2e: scrape `bb-lab-b` `DEL` → tgz → import → store.
+- [ ] Push follow-up commits as they land.
 
-## Known corpus limits (not ingest bugs)
+## Follow-ups (later slices)
 
-- No `removedReviewers` / merge-commit block / thread resolution / sentinel slugs in `DEL`.
-- 6 human actors (incl. `bb:admin`); `push_class`=`other` live (see follow-up #2).
+business-hours calendar · `push_class` via git patch-id · question/phase local-LLM classification
+(prd/02) · light theme · commits+tickets on timeline · semantic zoom · Story/Epic/Sprint (Jira+Tempo).
 
-## Test lab (Bitbucket DC 9.4.18)
+## Lab (Bitbucket DC 9.4.18)
 
-- `bb-lab-a` :7990 — FIX/golden (no keys). `bb-lab-b` :7991 — LICENSED, `DEL`.
-- Users: `admin`/`admin-lab-pw`; alice/bob/carol/dave/erin (`lab-pw-<name>`).
-- `MEGASPEED_BB_BASE_URL=http://127.0.0.1:7991` etc. (see docs/DEV.md).
-
-## Open items (real production data)
-
-- [ ] Production Bitbucket DC URL + auth. [ ] Jira ticket-key format.
+`bb-lab-a` :7990 (FIX/golden, no keys) · `bb-lab-b` :7991 (DEL, licensed).
 
 ## Subagent model
 
-- Primary `opencode/deepseek-v4.1-flash-free` (exhausted) → fallback `opencode-go/deepseek-v4.1-flash`.
+Primary `opencode/deepseek-v4.1-flash-free` (daily quota, resets 00:00 UTC) → fallback
+`opencode-go/deepseek-v4.1-flash`.
