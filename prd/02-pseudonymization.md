@@ -88,9 +88,18 @@ human to *extend the taxonomy* — it never falls back to free text.
 | Activity type | `created`, `status_changed`, `assigned`, `pointed`, `sprint_added`, `sprint_removed`, `comment_added`, `worklogged`, `pr_opened`, `pr_pushed`, `pr_approved`, `pr_unapproved`, `pr_needs_work`, `pr_merged`, `pr_declined`, `reviewer_changed`, `build_status`, `question_raised`, `question_answered`, `rebased` |
 | Question phase | `breakdown`, `refinement`, `sprint`, `implementation`, `review` |
 | Comment severity | `mandatory`, `suggestion` |
+| Comment type (prd/16) | `blocker`, `suggestion`, `question`, `nit`, `out_of_scope`, `optimization` |
+| Thread outcome (prd/16) | `acted_on`, `rejected`, `walked_back`, `unresolved` |
+| Question answer source (prd/16) | `reply`, `resolution` |
 | Push class | `content`, `pure_rebase`, `rebase_conflict` |
 | Linkage target type | `ticket`, `pr`, `none` |
 | Bot vs human | `bot`, `human` |
+
+`comment_type` and `thread_outcome` are attributes of the `THREAD` object;
+`question_raised` / `question_answered` are activities carrying `phase` (and the
+answer's `answer_source`). The classifier that produced them is recorded
+(`classifier_version` on the thread, `text_classifier` in the bundle manifest) so
+a re-classification is replayable from the raw-text cache.
 
 Attributes are typed and enumerated. An event is
 `(ts, activity, actor_pseudonym, [object_ids], {closed attributes})` — nothing

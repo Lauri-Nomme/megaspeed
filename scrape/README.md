@@ -77,10 +77,21 @@ is not the production path (there is no airgap in one process).
 * **Back up `identity.json`.** It is the only irreplaceable scrape-side state:
   losing it breaks pseudonym continuity (`LaNo` would become someone else).
   It is never put in the tgz, and no raw content ever leaves the box.
-* Classification (deterministic today; the cheap local LLM later) runs here.
-  A classifier upgrade is a scrape-side re-run, not a main-side re-analysis.
-  The LLM is an external localhost service (Ollama/llama.cpp) — it is **not**
-  bundled into the artifact.
+* **Text classification (prd/16) reads raw prose and emits labels only.** Every
+  PR description and every human review comment is sent to the local classifier
+  (`ingest/classify.py`) **before it is discarded**; what crosses is
+  `comment_type` + `thread_outcome` on the THREAD object and
+  `question_raised` / `question_answered` events with a `phase`. Backends:
+  the local Ollama box (`MEGASPEED_LLM_URL` / `MEGASPEED_LLM_MODEL`, JSON-schema
+  constrained decoding, temperature 0) for `--live`, and a deterministic
+  keyword mock for `--fixture` (and as the per-call fallback, counted in the
+  report, so a dead model never fails a scrape). `--no-text-classify` /
+  `MEGASPEED_TEXT_CLASSIFY=0` turns it off; `--text-backend mock` forces the
+  mock on a live run. Bot-authored comments are never sent to the model.
+  `thread_outcome` is decided by the git cache first (did the diff move at the
+  comment anchor?) and by the model's read of the text only when the diff is
+  unknown. The classifier version is in the manifest (`text_classifier`) and on
+  every THREAD object.
 * **`push_class` (prd/16) is deterministic and local.** For every RESCOPED
   activity the scrape compares `git patch-id --stable` of `target...old` vs
   `target...new` in a **shallow, partial** bare repo under `<state-dir>/git/`
@@ -141,6 +152,8 @@ PYTHON=/usr/bin/python3.12 scrape/build.sh
 megaspeed-scrape [--live | --fixture | --fixture-file PATH]
                  [--out PATH.tgz] [--state-dir DIR] [--identity PATH]
                  [--overlap-hours N] [--full] [--no-prefilter]
+                 [--no-push-class] [--no-text-classify] [--text-backend ollama|mock]
+                 [--llm-url URL] [--llm-model MODEL]
                  [--progress-interval SECONDS] [--quiet] [--repo PROJECT/REPO ...]
                  [--config PATH] [--n N] [--seed N] [--probe [--probe-bypass-filter]]
                  [--json] [--version]
@@ -156,6 +169,10 @@ megaspeed-scrape [--live | --fixture | --fixture-file PATH]
 | `--overlap-hours` | re-emit this far before the watermark (default 72) |
 | `--full` | ignore the watermark and the settled-PR set |
 | `--no-prefilter` | fetch every PR's commits before filtering (old, slower path) |
+| `--no-push-class` | skip the deterministic `push_class` (no git cache) |
+| `--no-text-classify` | skip comment/description labels (no local LLM) |
+| `--text-backend` | `ollama` (default live) or `mock` (deterministic, no model) |
+| `--llm-url` / `--llm-model` | local Ollama endpoint/model (`MEGASPEED_LLM_URL`, `MEGASPEED_LLM_MODEL`) |
 | `--progress-interval` | seconds between stderr progress lines (default 30, `0` = off) |
 | `--quiet` | no progress lines (the final summary still prints) |
 | `--probe` | read-only diagnostics, writes no bundle |

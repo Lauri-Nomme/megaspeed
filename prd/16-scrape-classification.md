@@ -68,6 +68,17 @@ need to re-visit the airgapped env just because a feature wasn't captured). Incr
 - LLM: the **mock** backend drives all classifier tests; a contract test asserts mock and Ollama
   backends share the same label schema; `--verify` accepts the new vocabulary.
 
+## Status
+
+- `push_class`: done (`ingest/gitclass.py`, deterministic, real-git tests).
+- Text classification: done (`ingest/classify.py`) — mock + Ollama backends, one schema, labels on
+  THREAD objects and as `question_*` events, `thread_outcome` hybrid (git diff at the anchor first,
+  the classifier's thread intent only when the diff is unknown). A bot-authored comment is never sent
+  to the model (bot-vs-human is deterministic).
+- Benchmark of the real backend on DEL: `scrape/bench/llm-bench.md` (~1.9 s/comment, CPU).
+- Still open: Jira-side text (descriptions/changelog comments) for the `breakdown` / `refinement` /
+  `sprint` phases — Bitbucket-only data can only honestly yield `implementation` / `review`.
+
 ## Out of scope
 
 Business-hours calendar · sentiment/personality · anything that would put raw text downstream.
