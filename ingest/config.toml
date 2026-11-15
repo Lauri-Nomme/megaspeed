@@ -1,0 +1,41 @@
+# megaspeed ingest configuration.
+# Everything here is non-secret. Credentials come from the environment:
+#   MEGASPEED_BB_TOKEN   (preferred, HTTP bearer)   or
+#   MEGASPEED_BB_USER + MEGASPEED_BB_PASSWORD      (basic auth)
+# and the base URL from MEGASPEED_BB_BASE_URL (or [bitbucket].base_url below).
+
+[store]
+# pseudonymised DuckDB store (gitignored)
+db = "data/megaspeed.duckdb"
+# raw-zone identity resolution table: slug/email -> pseudonym. Never served,
+# never committed, never queried by the analysis layer.
+identity = "var/identity_map.json"
+
+[filter]
+# Only PRs matching at least one key are kept. Matched against source branch,
+# PR title, PR description and commit messages. Raw text is read here and then
+# discarded -- it never reaches the store.
+ticket_regex = '\b[A-Z]+-\d+\b'
+# Matches that do not look like a key are discarded rather than stored.
+key_shape = '^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$'
+
+[source]
+[[source.repos]]
+project = "ENG"
+repo = "platform"
+[[source.repos]]
+project = "ENG"
+repo = "mobile"
+
+[bitbucket]
+base_url = ""          # e.g. https://bitbucket.example.com
+page_limit = 25
+
+[fixture]
+seed = 20261115
+# path = "fixtures/bitbucket-dc-fixture.json"   # load a committed bundle instead of generating
+
+[review]
+# Known sentinel-team slugs. Membership is deterministic (known account set),
+# so `sentinel=true/false` is a label, not an inference.
+sentinel_slugs = ["toomas.bruno", "kristjan.saar"]

@@ -1,0 +1,19 @@
+# python
+.venv/
+__pycache__/
+*.py[cod]
+
+# local pseudonymised stores + raw-zone files (never committed)
+*.db
+*.duckdb
+*.duckdb.wal
+*.parquet
+data/
+var/
+
+# build artifacts / tooling
+node_modules/
+dist/
+build/
+.playwright/
+*.log

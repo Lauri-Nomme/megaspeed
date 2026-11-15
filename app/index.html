@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>megaspeed — timeline</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div class="app" id="app">
+  <header class="topbar">
+    <span class="brand">megaspeed</span>
+    <span class="ctx"><span class="ctx-k">scope</span> everything</span>
+    <span class="ctx"><span class="ctx-k">timeframe</span> <span id="range" class="mono">—</span></span>
+    <span class="grow"></span>
+    <label class="lanes">lanes
+      <select id="lanes" aria-label="swimlane dimension">
+        <option value="actor">actors</option>
+        <option value="object">PRs</option>
+        <option value="activity">activities</option>
+      </select>
+    </label>
+    <div class="density" id="density" role="group" aria-label="density">
+      <button type="button" data-d="S" title="dense">S</button>
+      <button type="button" data-d="M" class="on" title="default">M</button>
+      <button type="button" data-d="L" title="roomy">L</button>
+    </div>
+    <span class="status" id="status">connecting</span>
+  </header>
+
+  <div class="pagehead">
+    <h1>Timeline</h1>
+    <p class="question">Where does the time go?</p>
+  </div>
+
+  <div class="toolbar">
+    <div class="zoom">
+      <button type="button" id="zoom-out" title="zoom out">−</button>
+      <button type="button" id="zoom-in" title="zoom in">+</button>
+      <button type="button" id="fit" title="fit the whole window">Fit</button>
+    </div>
+    <div class="legend" id="legend"></div>
+  </div>
+
+  <div class="stage" id="stage">
+    <canvas id="timeline" aria-label="event timeline"></canvas>
+    <div class="tip" id="tip" hidden></div>
+    <div class="empty" id="empty" hidden>
+      <p>No events in this window.</p>
+      <p class="muted">Run <code>python3 -m ingest --fixture --n 50</code> and reload.</p>
+    </div>
+  </div>
+
+  <footer class="foot">
+    <span id="provenance">loading…</span>
+    <span class="dot">·</span>
+    <span id="honesty"></span>
+    <span class="dot">·</span>
+    <span class="hint">drag to pan · wheel to zoom · click a legend key to hide an activity · double-click to zoom in</span>
+  </footer>
+</div>
+<script type="module" src="/main.js"></script>
+</body>
+</html>

@@ -73,9 +73,11 @@ stored, never sent to any LLM. No free-text content columns in the schema.
 - **S2+**: Jira Cloud + Tempo, identity/calendar, classifier + pseudonymisation
   gate, then the remaining views (blocking map, queue, delivery list, policy lab).
 
-## Deploy
+## Deploy (live)
 
-- `megaspeed.example.com`: nginx `upstream megaspeed { … }` → local dev server;
-  `server_name megaspeed.example.com`; TLS via `example.com` wildcard; WebSocket
-  upgrade headers (required for `/ws` and SvelteKit HMR).
-- Fill in the dev-server host:port when the server actually runs (see `STATE.md`).
+- `megaspeed.example.com` deployed to `/etc/nginx/sites-enabled/`; `server_name
+  megaspeed.example.com`; TLS via the `example.com` wildcard cert; WebSocket upgrade
+  headers. Upstream → `127.0.0.1:8766` (this host).
+- DNS `megaspeed.example.com → 203.0.113.10` added to `/etc/bind/example.com.zone`, reloaded
+  via `dnsserver` SIGHUP.
+- The dev server must bind `127.0.0.1:8766` so nginx can reach it.
