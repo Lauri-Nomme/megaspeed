@@ -15,7 +15,7 @@ import { fmtHours, esc, rgba } from './format.js';
 
 function lensText(lens, value) {
   if (lens.unit === 'h') return fmtHours(value);
-  if (lens.unit === '/d') return `${(Number(value) || 0).toFixed(2)}/d`;
+  if (lens.unit === 'h/d') return `${(Number(value) || 0).toFixed(1)} h/d`;
   return String(Math.round(Number(value) || 0));
 }
 
@@ -30,7 +30,7 @@ export const LENSES = {
   hours: { label: 'wait hours', hint: 'measured wait time attributed to the node', value: (n) => n.hours, unit: 'h' },
   out: { label: 'waiting on others', hint: 'time this node spent waiting on someone else', value: (n) => n.out_hours, unit: 'h' },
   wip: { label: 'WIP now', hint: 'open items currently waiting on this node', value: (n) => n.wip_now, unit: '' },
-  throughput: { label: 'per day', hint: 'items leaving this queue per day, wall clock', value: (n) => n.per_day, unit: '/d' },
+  intensity: { label: 'wait / day', hint: 'measured wait hours landing on this node per day', value: (n) => n.per_day, unit: 'h/d' },
   mean: { label: 'mean wait', hint: 'mean hours per measured wait', value: (n) => (n.count ? n.hours / n.count : 0), unit: 'h' },
 };
 
@@ -276,7 +276,7 @@ export class BlockingMap {
       ctx.fillText(node.id, p.x, p.y - 1);
       ctx.font = '500 10px "JetBrains Mono", ui-monospace, monospace';
       ctx.fillStyle = dimmed ? '#4E5258' : MUTED;
-      ctx.fillText(`${lens.value(node).toFixed(lens.unit === '' ? 0 : 0)}${lens.unit}`, p.x, p.y + radius + 13);
+      ctx.fillText(`${lens.value(node).toFixed(lens.unit === 'h/d' ? 1 : 0)}${lens.unit}`, p.x, p.y + radius + 13);
 
       this.hits.push({ kind: 'node', node, x: p.x, y: p.y, r: radius + 6 });
     });
