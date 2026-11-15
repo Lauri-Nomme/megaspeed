@@ -1,7 +1,7 @@
 # Fixtures — synthetic Bitbucket Data Center data
 
 `bitbucket-dc-fixture.json` is a generated bundle of **50 pull requests** across
-two repos (`ENG/platform`, `ENG/mobile`), with 496 PR activities and 199 commits.
+two repos (`ENG/platform`, `ENG/mobile`), with 519 PR activities and 190 commits.
 It exists so the whole pipeline runs end-to-end with no credentials.
 
 Everything in it is fabricated: people (`lauri.nomme` … `mart.sepp`), tickets
@@ -49,6 +49,10 @@ The bundle is shaped like the DC REST API — paging envelopes, `user` objects,
   "Bitbucket") comments on and auto-declines stale PRs, so the
   `bot | human` dimension is exercised: bots are marked
   `attributes.actor_kind=bot` on events and on the `PERSON` object.
+- Comment threads resolve both ways: some are already resolved in the `ADDED`
+  payload, others get a later `COMMENTED`/`UPDATED` activity carrying
+  `threadResolved` / `resolvedDate` / `resolver` — so review latency is
+  exercised as a state change, not just a snapshot.
 - Outcomes: merged, declined, still open (right-censored in the UI).
 - Timestamps are business minutes only (Mon–Fri, 08:00–18:00 UTC), Sept–Nov 2026.
 

@@ -35,6 +35,13 @@ OBJECT_ID_PREFIX = {
     "COMMIT": "COMMIT:",
     "TICKET": "TICKET:",
     "PERSON": "PERSON:",
+    "PRREV": "PRREV:",
+    "THREAD": "THREAD:",
+}
+# Per-object-type state vocabulary (prd/03).
+OBJECT_STATE_BY_TYPE = {
+    "PR": taxonomy.OBJECT_STATE,
+    "THREAD": taxonomy.THREAD_STATE,
 }
 
 ALLOWED: dict[str, set[str]] = {
@@ -481,13 +488,6 @@ def verify(con, key_shape: str = DEFAULT_KEY_SHAPE,
     if bad:
         problems.append(f"events.classifier_version: {bad} value(s) outside {versions}")
 
-    bad = _scan(
-        con, "objects", "state", "VARCHAR",
-        f"v NOT IN ({','.join('?' * len(taxonomy.OBJECT_STATE))})", sorted(taxonomy.OBJECT_STATE),
-    )
-    if bad:
-        problems.append(f"objects.state: {bad} value(s) outside {sorted(taxonomy.OBJECT_STATE)}")
-
     message_classes = sorted(taxonomy.MESSAGE_CLASS)
     bad = _scan(
         con, "objects", "message_class", "VARCHAR",
@@ -518,7 +518,9 @@ def verify(con, key_shape: str = DEFAULT_KEY_SHAPE,
         problems.append(f"objects: {bad} PR(s) without a matched ticket key")
 
     # Object ids must carry their type and a well-formed suffix.
-    for otype, oid in con.execute("SELECT object_type, object_id FROM objects").fetchall():
+    for otype, oid, state in con.execute(
+        "SELECT object_type, object_id, state FROM objects"
+    ).fetchall():
         prefix = OBJECT_ID_PREFIX.get(otype)
         if prefix and not str(oid).startswith(prefix):
             problems.append(f"object {oid!r} does not match its type {otype!r}")
@@ -530,6 +532,15 @@ def verify(con, key_shape: str = DEFAULT_KEY_SHAPE,
             problems.append(f"TICKET object id is not a key: {oid!r}")
         elif otype == "PERSON" and not re.fullmatch(ACTOR_RE, str(oid).partition(":")[2]):
             problems.append(f"PERSON object id is not a pseudonym: {oid!r}")
+        elif otype in ("PRREV", "THREAD") and not re.fullmatch(
+            rf"{otype}:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+:\d+", str(oid)
+        ):
+            problems.append(f"{otype} object id has an unexpected shape: {oid!r}")
+        allowed_states = OBJECT_STATE_BY_TYPE.get(otype)
+        if allowed_states is not None and state is not None and state not in allowed_states:
+            problems.append(
+                f"{otype} {oid!r}: state {state!r} outside {sorted(allowed_states)}"
+            )
 
     # ---- referential integrity ------------------------------------------
     orphans = con.execute(

@@ -284,6 +284,13 @@ def _make_pr(rng: random.Random, project: str, repo: str, pr_id: int, index: int
                 if rng.random() < 0.6
                 else None
             )
+            # Half of the resolved threads are resolved *later* (DC emits a
+            # COMMENTED/UPDATED activity carrying threadResolved/resolvedDate),
+            # which exercises the cumulative thread state, not just a snapshot.
+            resolve_later = comment["threadResolved"] and rng.random() < 0.5
+            if resolve_later:
+                comment["threadResolved"] = False
+                comment["state"] = "OPEN"
             activity = add(
                 "COMMENTED",
                 rng.randint(10, 240),
@@ -300,6 +307,17 @@ def _make_pr(rng: random.Random, project: str, repo: str, pr_id: int, index: int
             if comment["threadResolved"]:
                 comment["resolver"] = rng.choice(people)
                 comment["resolvedDate"] = activity["createdDate"] + rng.randint(5, 300) * 60_000
+            elif resolve_later:
+                resolver = rng.choice(people)
+                resolved = add("COMMENTED", rng.randint(1, 300), user=resolver, commentAction="UPDATED")
+                resolved["comment"] = {
+                    **comment,
+                    "version": comment["version"] + 1,
+                    "state": "RESOLVED",
+                    "threadResolved": True,
+                    "resolvedDate": resolved["createdDate"],
+                    "resolver": resolver,
+                }
             if rng.random() < 0.18:
                 add("NEEDS_WORK", rng.randint(1, 15), user=reviewer)
 

@@ -12,6 +12,7 @@ back to raw text).
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 # Version of the raw -> label projection. Bumped when a mapping changes; stored
@@ -64,7 +65,10 @@ OBJECT_STATE = frozenset({"open", "merged", "declined"})
 # prd/02 "Bot vs human": deterministic, from a known account set (DC user type
 # SERVICE plus configured CI/build slugs).
 ACTOR_KIND = frozenset({"bot", "human"})
-OBJECT_TYPES = frozenset({"PR", "COMMIT", "TICKET", "PERSON"})
+OBJECT_TYPES = frozenset({"PR", "COMMIT", "TICKET", "PERSON", "PRREV", "THREAD"})
+
+# A commit hash: DC uses full 40-hex, abbreviated forms are still hashes.
+HASH = re.compile(r"^[0-9a-f]{7,40}$")
 
 # attribute name -> allowed string values, or a python type for scalars.
 ATTRIBUTE_SPEC: dict[str, Any] = {
@@ -85,12 +89,20 @@ ATTRIBUTE_SPEC: dict[str, Any] = {
     "commits_removed": int,
     "review_rounds": int,
     "replies": int,
+    "push_index": int,
 }
 
 # Object attributes live in ``objects.attributes`` (JSON). Same rule: closed
 # values only, no free text.
 OBJECT_ATTRIBUTE_SPEC: dict[str, Any] = {
     "actor_kind": ACTOR_KIND,
+    "push_index": int,
+    "push_class": PUSH_CLASS,
+    "commits_added": int,
+    "commits_removed": int,
+    "severity": SEVERITY,
+    "anchor_class": ANCHOR_CLASS,
+    "merge_commit": HASH,
 }
 
 # Bitbucket DC activity action -> activity vocabulary (PRD 02).
@@ -143,6 +155,9 @@ def _check_spec(attrs: dict[str, Any], spec_map: dict[str, Any], label: str) -> 
         if isinstance(spec, frozenset):
             if value not in spec:
                 raise TaxonomyError(f"{label} {key!r} value outside closed vocabulary: {value!r}")
+        elif isinstance(spec, re.Pattern):
+            if not isinstance(value, str) or not spec.fullmatch(value):
+                raise TaxonomyError(f"{label} {key!r} must match {spec.pattern!r}, got {value!r}")
         elif isinstance(spec, type):
             # bool is a subclass of int in python; keep them strictly apart.
             if spec is int and isinstance(value, bool):

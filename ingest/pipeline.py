@@ -225,21 +225,22 @@ class Reducer:
         closed_ts = _ts(pr.pr["closedDate"]) if pr.pr.get("closedDate") else None
         state = {"MERGED": "merged", "DECLINED": "declined"}.get(pr.pr.get("state"), "open")
 
-        stats.objects.append(
-            {
-                "object_type": "PR",
-                "object_id": pr_object_id,
-                "repo": repo_label,
-                "pr_id": pr.id,
-                "ticket_keys": keys,
-                "actor": author,
-                "state": state,
-                "created_at": created,
-                "closed_at": closed_ts,
-                "head_commit": head,
-                "message_class": None,
-            }
+        pr_record = _object(
+            "PR",
+            pr_object_id,
+            repo=repo_label,
+            pr_id=pr.id,
+            ticket_keys=keys,
+            actor=author,
+            state=state,
+            created_at=created,
+            closed_at=closed_ts,
+            head_commit=head,
         )
+        merge_properties = (pr.pr.get("properties") or {}).get("mergeCommit") or {}
+        if merge_properties.get("id"):
+            pr_record["attributes"]["merge_commit"] = str(merge_properties["id"])
+        stats.objects.append(pr_record)
         for key in keys:
             stats.objects.append(_object("TICKET", f"TICKET:{key}", ticket_keys=[key]))
 
@@ -265,6 +266,7 @@ class Reducer:
         approvals: dict[str, dict] = {}
         pushed_since = False
         rounds = 0
+        threads: dict[str, dict] = {}
         ordered = sorted(activities, key=lambda a: (a.get("createdDate") or 0, a.get("id") or 0))
         for index, activity in enumerate(ordered):
             action = str(activity.get("action") or "")
@@ -280,26 +282,48 @@ class Reducer:
 
             elif action == "RESCOPED":
                 self._push(stats, pr, natural, ts, activity, actor,
-                           pr_object_id, ticket_objects)
+                           pr_object_id, ticket_objects, rounds + 1)
                 approvals.clear()
                 pushed_since = True
                 rounds += 1
 
             elif action == "COMMENTED":
                 comment = activity.get("comment") or {}
-                if activity.get("commentAction") not in (None, "ADDED"):
-                    continue  # edits/deletes are not new dialogue
+                comment_action = activity.get("commentAction")
+                if comment_action not in (None, "ADDED", "UPDATED"):
+                    continue  # deleted comments are not dialogue
                 severity = "mandatory" if str(comment.get("severity") or "").upper() == "BLOCKER" else "suggestion"
                 # Real DC 9.x puts the anchor on the *activity* (``commentAnchor``),
                 # not inside the comment; accept both shapes.
                 anchor = activity.get("commentAnchor") or comment.get("anchor")
+                anchor_class = "file" if anchor else "general"
                 resolved = bool(comment.get("threadResolved")) or str(comment.get("state") or "OPEN").upper() != "OPEN"
+                thread_objects: list[str] = []
+                if comment.get("id") is not None:
+                    thread_id = f"THREAD:{repo_label}#{pr.id}:{comment['id']}"
+                    thread_objects.append(thread_id)
+                    # A thread's state is cumulative: ADDED opens it, a later
+                    # COMMENTED/UPDATED activity may resolve it. Keep the
+                    # earliest timestamp and the latest resolution.
+                    entry = threads.setdefault(thread_id, {"created": ts})
+                    entry["severity"] = severity
+                    entry["anchor_class"] = anchor_class
+                    entry["resolved"] = resolved
+                    entry["resolved_at"] = (
+                        _ts(comment["resolvedDate"]) if resolved and comment.get("resolvedDate")
+                        else (ts if resolved else None)
+                    )
+                    entry["resolver"] = (comment.get("resolver") or {}) if resolved else {}
+                if comment_action == "UPDATED":
+                    # Edits and thread-resolution updates change the ReviewThread
+                    # object, not the dialogue log.
+                    continue
                 self._event(
                     stats, pr, natural, ts, "comment_added", actor,
-                    [pr_object_id, *ticket_objects],
+                    [pr_object_id, *ticket_objects, *thread_objects],
                     {
                         "severity": severity,
-                        "anchor_class": "file" if anchor else "general",
+                        "anchor_class": anchor_class,
                         "thread_state": "resolved" if resolved else "open",
                         "replies": len(comment.get("comments") or []),
                     },
@@ -341,7 +365,7 @@ class Reducer:
                         )
                 if not changed and self._has_rescope(activity):
                     self._push(stats, pr, natural, ts, activity, actor,
-                               pr_object_id, ticket_objects)
+                               pr_object_id, ticket_objects, rounds + 1)
                     approvals.clear()
                     pushed_since = True
                     rounds += 1
@@ -359,6 +383,7 @@ class Reducer:
                 commit = activity.get("commit") or {}
                 merge_objects = [f"COMMIT:{commit['id']}"] if commit.get("id") else []
                 if commit.get("id"):
+                    pr_record["attributes"]["merge_commit"] = str(commit["id"])
                     stats.objects.append(
                         _object(
                             "COMMIT",
@@ -383,9 +408,29 @@ class Reducer:
             # Unknown actions are ignored on purpose: the vocabulary is closed,
             # so an unknown label is a taxonomy task, never a free-text fallback.
 
+        for thread_id, entry in sorted(threads.items()):
+            resolver = entry.get("resolver") or {}
+            stats.objects.append(
+                _object(
+                    "THREAD",
+                    thread_id,
+                    repo=repo_label,
+                    pr_id=pr.id,
+                    ticket_keys=keys,
+                    actor=self._actor(resolver, stats) if resolver else None,
+                    state="resolved" if entry.get("resolved") else "open",
+                    created_at=entry.get("created"),
+                    closed_at=entry.get("resolved_at"),
+                    attributes={
+                        "severity": entry["severity"],
+                        "anchor_class": entry["anchor_class"],
+                    },
+                )
+            )
+
     def _push(self, stats: Stats, pr: PullRequest, natural: str, ts: datetime, activity: dict,
-              actor: str, pr_object_id: str, ticket_objects: list[str]) -> None:
-        """RESCOPED (or a rescope-shaped UPDATED) -> pr_pushed.
+              actor: str, pr_object_id: str, ticket_objects: list[str], push_index: int) -> None:
+        """RESCOPED (or a rescope-shaped UPDATED) -> pr_pushed + PRRevision.
 
         ``approvals_lost`` is deliberately *not* computed here: whether the push
         cost an approval depends on events that may only arrive in a later
@@ -395,11 +440,38 @@ class Reducer:
         added = (activity.get("added") or {}).get("commits") or []
         removed = (activity.get("removed") or {}).get("commits") or []
         patch = activity.get("megaspeedPatchId") or {}
+        push_class = patch.get("push_class") or "other"
+        repo_label = f"{pr.project}/{pr.repo}"
+        revision_id = f"PRREV:{repo_label}#{pr.id}:{push_index}"
+        stats.objects.append(
+            _object(
+                "PRREV",
+                revision_id,
+                repo=repo_label,
+                pr_id=pr.id,
+                ticket_keys=[oid.partition(":")[2] for oid in ticket_objects],
+                actor=actor,
+                created_at=ts,
+                head_commit=str(activity.get("fromHash") or ""),
+                attributes={
+                    "push_index": push_index,
+                    "push_class": push_class,
+                    "commits_added": len(added),
+                    "commits_removed": len(removed),
+                },
+            )
+        )
         self._event(
             stats, pr, natural, ts, "pr_pushed", actor,
-            [pr_object_id, *ticket_objects, *[f"COMMIT:{c['id']}" for c in added if c.get("id")]],
+            [
+                pr_object_id,
+                revision_id,
+                *ticket_objects,
+                *[f"COMMIT:{c['id']}" for c in added if c.get("id")],
+            ],
             {
-                "push_class": patch.get("push_class") or "other",
+                "push_class": push_class,
+                "push_index": push_index,
                 "commits_added": len(added),
                 "commits_removed": len(removed),
             },

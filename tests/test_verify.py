@@ -92,7 +92,7 @@ class VerifyTamperTests(unittest.TestCase):
         problems = self.assert_violation(
             "UPDATE objects SET state = 'MERGEDish' WHERE object_type = 'PR'"
         )
-        self.assertTrue(any("objects.state" in p for p in problems), problems)
+        self.assertTrue(any("outside" in p and "state" in p for p in problems), problems)
         self.con.execute("ROLLBACK")
         self.con.execute("BEGIN")
         problems = self.assert_violation(
