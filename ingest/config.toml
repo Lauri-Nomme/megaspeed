@@ -5,10 +5,14 @@
 # and the base URL from MEGASPEED_BB_BASE_URL (or [bitbucket].base_url below).
 
 [store]
-# pseudonymised DuckDB store (gitignored)
+# pseudonymised DuckDB store (gitignored). Fixture mode writes here; live runs
+# should use their own store, e.g. the DEL corpus:
+#   MEGASPEED_DB=data/del.duckdb
 db = "data/megaspeed.duckdb"
 # raw-zone identity resolution table: slug/email -> pseudonym. Never served,
-# never committed, never queried by the analysis layer.
+# never committed, never queried by the analysis layer. Keep the live map
+# persistent and git-ignored:
+#   MEGASPEED_IDENTITY=data/identity.json
 identity = "var/identity_map.json"
 
 [filter]
@@ -20,11 +24,14 @@ ticket_regex = '\b[A-Z]+-\d+\b'
 key_shape = '^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$'
 # Accepted project prefixes. A key counts only when its prefix is listed here,
 # so technical tokens that look key-shaped (UTF-8, SHA-256, ISO-8601) never
-# become tickets. Set the real project keys for production:
-#   MEGASPEED_TICKET_PROJECTS=DEL,FIX     (env wins over this file)
-# The default below is the fixture/test project set; a live run should override
-# it with the real Jira project keys.
+# become tickets. The default below is the fixture/test project set:
+#   [[source.repos]] in this file generates PROJ/OPS/ARCH keys.
 ticket_projects = ["PROJ", "OPS", "ARCH"]
+# Live corpora must override it with the real Jira project keys (env wins over
+# this file). The DEL corpus is project DEL; FIX/golden has no keys by design:
+#   MEGASPEED_TICKET_PROJECTS=DEL
+# `ingest --verify` reads the same setting: it checks every stored ticket key
+# against these prefixes, so point it at the project set that built the store.
 
 [source]
 [[source.repos]]
@@ -40,16 +47,27 @@ repo = "mobile"
 base_url = ""          # e.g. https://bitbucket.example.com
 page_limit = 25
 
-# Local Bitbucket DC 9.4.18 lab (FIX/golden). Its corpus has no Jira ticket keys,
-# so it exercises transport/paging/reducer mechanics only -- expect 0 kept PRs.
+# Local Bitbucket DC 9.4.18 labs:
 #
+#   :7990  bb-lab-a  FIX/golden      no Jira keys (transport/paging/reducer only)
+#   :7991  bb-lab-b  DEL             licensed; delivery-api + delivery-web
+#
+# FIX/golden diagnostic (read-only; expect 0 kept PRs):
 #   export MEGASPEED_BB_BASE_URL=http://127.0.0.1:7990
 #   export MEGASPEED_BB_USER=admin
 #   export MEGASPEED_BB_PASSWORD=admin-lab-pw
 #   .venv/bin/python -m ingest --live --repo FIX/golden --probe
 #
-# Real ingest stays off the default path and should use its own store:
-#   MEGASPEED_DB=data/live.duckdb .venv/bin/python -m ingest --live --repo FIX/golden
+# Real DEL ingest (131 PRs -> 1316 events). The project override is required;
+# without it every DEL PR is dropped by the filter:
+#   export MEGASPEED_BB_BASE_URL=http://127.0.0.1:7991
+#   export MEGASPEED_BB_USER=admin
+#   export MEGASPEED_BB_PASSWORD=admin-lab-pw
+#   export MEGASPEED_TICKET_PROJECTS=DEL
+#   export MEGASPEED_DB=data/del.duckdb
+#   export MEGASPEED_IDENTITY=data/identity.json
+#   .venv/bin/python -m ingest --live --repo DEL/delivery-api --repo DEL/delivery-web
+#   .venv/bin/python -m ingest --verify
 
 [fixture]
 seed = 20261115
