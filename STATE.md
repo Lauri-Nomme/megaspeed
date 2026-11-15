@@ -10,7 +10,7 @@ Tests: **215** (`tests/`) + **46** (`scrape/tests`) green.
   exact keys, set-over-prefix) → DEL `DEL-100,DEL-101` = 3 PRs / 8 requests.
 - **`push_class`** (shallow git cache, patch-id + range-diff). **LLM classification** (`comment_type`,
   `thread_outcome`, `question`+`phase`) via `qwen3-30b-a3b` on precision (~1.9 s/comment).
-- **PR diff size** capture — in progress.
+- **PR diff size** — `lines_added`/`lines_removed` per PR (shallow git cache).
 
 ## Analysis → suggested rules (the "what to change first" output)
 
@@ -25,12 +25,11 @@ Ollama `qwen3-30b-a3b:2507` (30B MoE / ~3B active, CPU) — `http://10.43.36.10:
 
 ## In progress (fallback `opencode-go/deepseek-v4.1-flash`)
 
-- [ ] **PR diff-size capture** (scrape-side `git diff --numstat` → `PR.attributes.lines_added/removed`).
+- [ ] **Re-scrape DEL `--full`** (push_class + LLM + diff size) → `data/del2.duckdb`, so the
+      already-implemented `rebase-waste` / `comment-tax` / `pr_size` fire on real data.
 
 ## Next / follow-ups
 
-- [ ] **Re-scrape DEL `--full`** (with push_class + LLM + diff size) so `rebase-waste`, `comment-tax`,
-      and `pr_size` fire on real data — the store was built before those landed.
 - [ ] Business-hours calendar (re-baselines waits). [ ] Story/Epic/Sprint (Jira+Tempo).
 
 ## Open (production)
