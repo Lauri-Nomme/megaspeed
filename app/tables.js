@@ -7,6 +7,7 @@
  */
 
 import { fmtAbsolute, fmtHours, esc, whoLabel } from './format.js';
+import { rowTicket } from './tickets.js';
 
 export const TABS = [
   { id: 'blocked', label: 'Blocked' },
@@ -76,7 +77,7 @@ export function deliveryTable(data, tab, { scope = null } = {}) {
   const body = rows.map((row) => `
     <tr tabindex="0" data-id="${esc(row.object_id)}" class="row">
       <td class="c-state">${rowState(row)}</td>
-      <td class="c-id"><span class="keys">${esc(row.tickets.join(' ')) || '—'}</span>
+      <td class="c-id"><span class="keys">${esc(rowTicket(row)) || '—'}</span>
         <span class="mono id">#${esc(row.number)}</span>
         <span class="repo">${esc(row.repo_short)}</span></td>
       <td class="c-who">${esc(whoLabel(row.ball_label || row.ball))}</td>
@@ -111,7 +112,7 @@ export function deliveryMarkdown(rows, meta) {
     '| status | ticket / PR | waiting on | since | waiting | impact |',
     '| --- | --- | --- | --- | --- | --- |',
   ];
-  const body = rows.map((row) => `| ${row.blocked ? 'blocked' : row.phase} | ${row.tickets.join(' ') || '—'} #${row.number} ${row.repo_short} | ${whoLabel(row.ball_label || row.ball)} | ${fmtAbsolute(Date.parse(row.waiting_since))} | ${fmtHours(row.waiting_hours)} | ${row.dependents ? `≈${fmtHours(row.impact_hours)}` : '—'} |`);
+  const body = rows.map((row) => `| ${row.blocked ? 'blocked' : row.phase} | ${rowTicket(row) || '—'} #${row.number} ${row.repo_short} | ${whoLabel(row.ball_label || row.ball)} | ${fmtAbsolute(Date.parse(row.waiting_since))} | ${fmtHours(row.waiting_hours)} | ${row.dependents ? `≈${fmtHours(row.impact_hours)}` : '—'} |`);
   return [...header, ...body].join('\n');
 }
 
@@ -183,8 +184,8 @@ export function detailMarkup(entity) {
   const row = entity.row || null;
   const overline = entity.overline || 'PULL REQUEST';
   const name = pr
-    ? `${pr.keys && pr.keys[0] ? `${pr.keys[0]} ` : ''}#${pr.number} ${pr.repo}`
-    : `${row ? `${row.tickets.join(' ')} ` : ''}#${row.number} ${row.repo_short}`;
+    ? `${pr.ticket ? `${pr.ticket} ` : ''}#${pr.number} ${pr.repo}`
+    : `${row ? `${rowTicket(row)} ` : ''}#${row.number} ${row.repo_short}`;
   const context = pr
     ? `author ${pr.actor} · ${pr.state}${pr.closed ? '' : ' · right-censored'}`
     : `author ${row.author} · ${row.state}`;
@@ -213,9 +214,16 @@ export function detailMarkup(entity) {
 /** Impact sentence: stated before the numbers (prd/10 §5.4). */
 export function impactSentence(row) {
   if (!row) return '';
+  const ticket = rowTicket(row);
   const dependents = row.dependents || 0;
-  if (!dependents) return `Waiting ${fmtHours(row.waiting_hours)} on ${whoLabel(row.ball_label || row.ball)}; no other open PR shares its ticket.`;
-  return `When this PR waits: ${dependents} other open PR${dependents === 1 ? '' : 's'} share its ticket, ` +
+  if (!dependents) {
+    return `Waiting ${fmtHours(row.waiting_hours)} on ${whoLabel(row.ball_label || row.ball)}; ` +
+      `no other open PR shares ${ticket ? `ticket ${ticket}` : 'its ticket'}.`;
+  }
+  const plural = dependents === 1 ? '' : 's';
+  const verb = dependents === 1 ? 'shares' : 'share';
+  return `When this PR waits: ${dependents} other open PR${plural} ${verb} ` +
+    `${ticket ? `ticket ${ticket}` : 'its ticket'}, ` +
     `so ≈${fmtHours(row.impact_hours)} of downstream wait accumulate behind it.`;
 }
 
@@ -223,12 +231,13 @@ export function entityMarkdown(entity, hoursMode = 'wall-clock') {
   if (entity.row) {
     const row = entity.row;
     return [
-      `## ${row.tickets.join(' ') || '—'} #${row.number} ${row.repo_short}`,
+      `## ${rowTicket(row) || '—'} #${row.number} ${row.repo_short}`,
       '',
       `- status: ${row.blocked ? 'blocked' : row.phase}`,
       `- waiting on: ${whoLabel(row.ball_label || row.ball)}`,
       `- waiting since: ${fmtAbsolute(Date.parse(row.waiting_since))} (${fmtHours(row.waiting_hours)})`,
       `- age: ${fmtHours(row.age_hours)}`,
+      row.epic ? `- epic: ${row.epic}` : '',
       row.dependents ? `- impact: ≈${fmtHours(row.impact_hours)} over ${row.dependents} dependent PR(s)` : '',
       '',
       '_' + (hoursMode === 'business'
@@ -239,11 +248,12 @@ export function entityMarkdown(entity, hoursMode = 'wall-clock') {
   const pr = entity.pr;
   if (!pr) return '';
   return [
-    `## ${pr.keys.join(' ') || '—'} #${pr.number} ${pr.repo}`,
+    `## ${pr.ticket || pr.keys.join(' ') || '—'} #${pr.number} ${pr.repo}`,
     '',
     `- author: ${pr.actor}`,
     `- state: ${pr.state}`,
+    pr.epic ? `- epic: ${pr.epic}` : '',
     `- created: ${fmtAbsolute(pr.created)}`,
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 

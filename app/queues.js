@@ -10,6 +10,7 @@
  */
 
 import { fmtStamp, fmtDuration, fmtHours, esc, rgba } from './format.js';
+import { streamRoleLabel } from './scope.js';
 
 const ROW_H = 62;
 const GUTTER = 232;
@@ -83,7 +84,8 @@ export class QueueChart {
     if (!this.streams.length) {
       ctx.fillStyle = '#8A8D93';
       ctx.font = '500 12px Inter, system-ui, sans-serif';
-      ctx.fillText('No measured waits in this window.', GUTTER, AXIS_H + 24);
+      const message = (this.data && this.data.emptyText) || 'No measured waits in this window.';
+      ctx.fillText(message, GUTTER, AXIS_H + 24);
       return;
     }
 
@@ -140,8 +142,8 @@ export class QueueChart {
       ctx.font = '500 10px "JetBrains Mono", ui-monospace, monospace';
       ctx.fillStyle = '#8A8D93';
       const role = stream.people && stream.people.length
-        ? `${stream.role} · ${stream.people.length} ppl`
-        : stream.role;
+        ? `${streamRoleLabel(stream)} · ${stream.people.length} ppl`
+        : streamRoleLabel(stream);
       ctx.fillText(role, 92, top + 16);
       // diagnosis pill
       const pillX = 194;
@@ -239,7 +241,7 @@ export class QueueChart {
     this.hover = { stream: stream.id, index };
     this.tip.innerHTML = `
       <div class="row"><span class="act">${esc(stream.id)}</span>
-        <span class="muted">${esc(stream.role)}</span></div>
+        <span class="muted">${esc(streamRoleLabel(stream))}</span></div>
       <div class="row"><span class="k">at</span><span class="v">${esc(fmtStamp(at))}</span></div>
       <div class="row"><span class="k">wip</span><span class="v">${stream.wip[index] ?? 0} waiting</span></div>
       <div class="row"><span class="k">arrived</span><span class="v">${stream.arrivals[index] ?? 0}</span></div>

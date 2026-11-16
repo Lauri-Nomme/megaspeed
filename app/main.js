@@ -18,13 +18,17 @@ import { Timeline, ACTIVITY_ORDER, ACTIVITY_COLOR, PHASE, PHASE_ORDER } from '/t
 import { BlockingMap, LENSES } from '/graph.js';
 import { QueueChart } from '/queues.js';
 import {
-  DAY, fmtAge, fmtBucket, fmtDay, fmtHours, fmtRange, fmtStamp, esc, whoLabel,
+  DAY, fmtAge, fmtBucket, fmtCompact, fmtDay, fmtHours, fmtRange, fmtStamp, esc, whoLabel,
 } from '/format.js';
 import {
   TABS, tabCounts, tabRows, deliveryTable, overviewMarkup, detailMarkup,
   impactSentence, entityMarkdown, deliveryMarkdown,
 } from '/tables.js';
 import { rulesMarkup, rulesStats, rulesMarkdown } from '/rules.js';
+import { annotateRow, epicKeySet, keyListsOf, rowTicket } from '/tickets.js';
+import {
+  ROLE_QUEUES, filteredPages, queueLevelForNode, scopeBanner, scopeForNode, scopeForStream,
+} from '/scope.js';
 
 const $ = (id) => document.getElementById(id);
 const LS_KEY = 'megaspeed.ui.v1';
@@ -57,7 +61,10 @@ const state = {
   objects: [],
   counts: null,
   eventCapped: false,
+  eventLimit: 40000,
+  eventTotal: 0,
   objectCapped: false,
+  epicKeys: new Set(),
   page: 'timeline',
   scope: { kind: 'all', value: null, label: 'everything' },
   timeframe: '1q',
@@ -81,14 +88,19 @@ const timeline = new Timeline({
   tip: $('tip'),
   onStats: (stats) => {
     $('range').textContent = fmtRange(stats.start, stats.end);
+    // B7: the timeline's disclosure describes the timeline only. Every other
+    // view writes its own line in render*Page(); an async repaint of a hidden
+    // canvas must not overwrite it.
+    if (state.page !== 'timeline') return;
     const bits = [];
     if (stats.aggregated) bits.push(`aggregated into ${fmtBucket(stats.bucketMs)} buckets — zoom in for individual events`);
     if (stats.openPrs) bits.push(`${stats.openPrs} PRs still open are right-censored at the snapshot time`);
     bits.push(`${stats.visible} of ${stats.total} events in view`);
-    if (state.eventCapped && state.counts && state.counts.total > state.events.length) {
-      bits.push(`only the first ${state.events.length} of ${state.counts.total} events are loaded`);
+    if (state.eventCapped) {
+      bits.push(`only the newest ${fmtCompact(state.events.length)} of ${fmtCompact(state.eventTotal)} events are loaded`);
     }
-    $('honesty').textContent = bits.join(' · ');
+    setHonesty(bits.join(' · '));
+    renderLoadAll();
     $('empty').hidden = !(stats.allHidden || !!state.emptyReason);
     if (stats.allHidden) {
       $('empty').querySelector('p').textContent = 'Every activity is hidden — click a legend key to show it again.';
@@ -185,22 +197,17 @@ function setStatus(text, cls = '') {
 }
 
 // -------------------------------------------------------------------- views
+/** The one honesty line (B7): each view states its own cohort, or clears it. */
+function setHonesty(text) {
+  $('honesty').textContent = text || '';
+}
+
+/** B3: the banner is derived from the filters the views really apply. */
 function renderScopeBanner() {
   const banner = $('scopebanner');
-  const scope = state.scope;
-  if (scope.kind === 'all') {
-    banner.hidden = true;
-    banner.textContent = '';
-    return;
-  }
-  banner.hidden = false;
-  if (scope.kind === 'person') {
-    banner.textContent = `Scope ${scope.value}: timeline events and triage rows are filtered to this person; ` +
-      'the blocking map, queue series and policy lab still show everything. Waits are measured over the whole log.';
-  } else {
-    banner.textContent = `Scope the ${scope.value} queue: the delivery list and queue view are filtered to it; ` +
-      'the timeline and blocking map still show everything, so the wait that lands in this queue stays visible.';
-  }
+  const text = scopeBanner(state.scope, state.page);
+  banner.hidden = !text;
+  banner.textContent = text;
 }
 
 function renderPage() {
@@ -216,8 +223,9 @@ function renderPage() {
   }
   $('page-title').textContent = PAGES[page].title;
   $('page-question').textContent = PAGES[page].question;
+  syncLevelSelects();
   renderScopeBanner();
-
+  setHonesty('');
   if (page === 'timeline') renderTimelinePage();
   if (page === 'delivery') renderDeliveryPage();
   if (page === 'blocking') renderBlockingPage();
@@ -265,6 +273,35 @@ async function ensureData(page) {
     if (!cached(key)) state.cache.set(key, await getJSON(withTenant(`/api/insights?level=${state.rulesLevel}&${q}`)));
     state.rules = cached(key);
   }
+}
+
+// ------------------------------------------------------------------- levels
+/* B8: the level state and the <select> that labels it are one thing. Every
+ * path that changes a level goes through these setters, and restoreUI()
+ * reconciles the selects with the restored state, so the toolbar can never
+ * contradict the chart it labels. */
+const BLOCKING_LEVELS = ['queue', 'person'];
+const QUEUE_LEVELS = ['person', 'queue'];
+
+function syncLevelSelects() {
+  const blocking = $('blocking-level');
+  if (blocking && BLOCKING_LEVELS.includes(state.blockingLevel)) blocking.value = state.blockingLevel;
+  const queue = $('queue-level');
+  if (queue && QUEUE_LEVELS.includes(state.queueLevel)) queue.value = state.queueLevel;
+}
+
+function setBlockingLevel(level) {
+  if (!BLOCKING_LEVELS.includes(level)) return false;
+  state.blockingLevel = level;
+  syncLevelSelects();
+  return true;
+}
+
+function setQueueLevel(level) {
+  if (!QUEUE_LEVELS.includes(level)) return false;
+  state.queueLevel = level;
+  syncLevelSelects();
+  return true;
 }
 
 // ------------------------------------------------------------------ tenants
@@ -358,7 +395,13 @@ function resetTenantData() {
   state.selection = null;
   state.drawerEntity = null;
   state.emptyReason = '';
+  state.eventCapped = false;
+  state.eventTotal = 0;
+  state.eventLimit = EVENT_MAX;
+  state.epicKeys = new Set();
   state.cache.clear();
+  $('load-all').hidden = true;
+  timeline.setTicketIndex({ epicKeys: state.epicKeys });
   timeline.setData([], [], {});
   blockingMap.setData({ nodes: [], edges: [] });
   queueChart.setData({ streams: [], buckets: 1, window: { start: '', end: '' } });
@@ -449,6 +492,16 @@ function renderPhaseLegend() {
 // ----------------------------------------------------------------- delivery
 function renderDeliveryPage() {
   const data = state.delivery;
+  // B2: label each row with its own ticket key, not the shared epic link. The
+  // API names the parent keys it excluded from impact; union with the store
+  // census so the table and the impact sentence agree.
+  if (data && data.rows) {
+    const epics = new Set([
+      ...(state.epicKeys || []),
+      ...(Array.isArray(data.parent_keys) ? data.parent_keys : []),
+    ]);
+    for (const row of data.rows) annotateRow(row, epics);
+  }
   const counts = scopedTabCounts(data);
   if (data && state.tab !== 'all') {
     // the actionable subset is the default, but never an empty screen
@@ -467,6 +520,15 @@ function renderDeliveryPage() {
       `${data.counts.open} open items, ${data.counts.waiting_over_week} of them waiting over a week. ` +
       `${data.impact_note}.`
     : '';
+  if (data) {
+    const filtered = filteredPages(state.scope).has('delivery');
+    setHonesty(
+      `${counts.all} open item${counts.all === 1 ? '' : 's'} in view · ` +
+      `${counts.blocked} blocked · ${counts.oldest} waiting over 3 days · ` +
+      `impact = dependents × current wait (≈) · ` +
+      (filtered ? `filtered to ${state.scope.label}` : 'whole team'),
+    );
+  }
   renderDeliveryDetail();
 }
 
@@ -511,16 +573,19 @@ function renderDeliveryDetail() {
     row,
     impact: impactSentence(row),
     facts: [
-      ['ticket', row.tickets.join(' ')],
+      ['ticket', rowTicket(row)],
+      ...(row.epic ? [['epic', row.epic]] : []),
       ['waiting on', whoLabel(row.ball_label || row.ball)],
       ['waiting since', `${fmtStamp(Date.parse(row.waiting_since))} (${fmtHours(row.waiting_hours)})`],
       ['phase', row.phase],
       ['age', fmtHours(row.age_hours)],
       ['commits in log', row.commits],
-      ['dependents', row.dependents ? `${row.dependents} PR(s) on the same ticket` : 'none'],
+      ['dependents', row.dependents
+        ? `${row.dependents} other open PR${row.dependents === 1 ? '' : 's'} on ${rowTicket(row)}`
+        : 'none'],
       ['impact', row.dependents ? `≈${fmtHours(row.impact_hours)}` : '—'],
     ],
-    children: [...row.tickets, row.id],
+    children: [rowTicket(row), row.epic, row.id].filter(Boolean),
   });
 }
 
@@ -539,6 +604,15 @@ function renderBlockingPage() {
   $('blocking-assumption').textContent = data
     ? `${data.assumption} · ${data.window.days} days in view · edge = “X waited on Y” · ${data.attribution}. Direction colour is relative to the selected node.`
     : '';
+  if (data) {
+    const totals = data.totals || {};
+    const scoped = state.scope.kind !== 'all';
+    setHonesty(
+      `${totals.nodes || 0} nodes · ${totals.edges || 0} edges · ` +
+      `${fmtHours(totals.hours || 0)} measured wait in the ${data.window.days} d window · ` +
+      (scoped ? 'not filtered by scope — every handover stays visible' : 'whole team'),
+    );
+  }
   renderBlockingStats();
 }
 
@@ -564,13 +638,12 @@ function renderBlockingStats() {
 }
 
 async function openNodeQueue(node) {
-  if (node.kind === 'role' || node.kind === 'person') {
-    if (node.id === 'review' || node.id === 'sentinel' || node.id === 'author') {
-      setScope('role', node.id, { silent: true });
-    } else {
-      setScope('person', node.id, { silent: true });
-    }
-  }
+  // B5: the drill-down must land on the level that can show the clicked node.
+  // A person node opens the person-level chart; a role/queue node the queue
+  // level — otherwise the queue view is scoped to someone no stream matches.
+  setQueueLevel(queueLevelForNode(node));
+  const scope = scopeForNode(node);
+  if (scope) setScope(scope.kind, scope.value, { silent: true });
   await showPage('queue');
 }
 
@@ -578,21 +651,36 @@ async function openNodeQueue(node) {
 function renderQueuePage() {
   const data = state.queues;
   const streams = data ? data.streams.filter((stream) => queueMatchesScope(stream)) : [];
-  queueChart.setData(data ? { ...data, streams } : { streams: [], buckets: 1, window: { start: '', end: '' } });
+  // An empty chart under a scope is a doorway, not a dead end: say which level
+  // would show it (B5's failure mode, reached from the scope select).
+  let emptyText = '';
+  if (data && data.streams.length && !streams.length && filteredPages(state.scope).has('queue')) {
+    const other = state.queueLevel === 'queue' ? 'people' : 'queues';
+    emptyText = `No stream matches scope ${state.scope.label} at this level — switch level to ${other}.`;
+  }
+  queueChart.setData(data ? { ...data, streams, emptyText } : { streams: [], buckets: 1, window: { start: '', end: '' } });
   $('queue-assumption').textContent = data
     ? `${data.assumption} · ${data.bucket_hours} h buckets over ${data.window.days} days. ` +
       `Little's law: WIP ≈ throughput × wait. Overloaded = long wait and a standing queue; slow = long wait with little WIP. ` +
       `${data.diagnosis_note}.`
     : '';
+  if (data) {
+    const filtered = filteredPages(state.scope).has('queue');
+    setHonesty(
+      `${streams.length} stream${streams.length === 1 ? '' : 's'} · ` +
+      `WIP sampled every ${data.bucket_hours} h over ${data.window.days} days · ` +
+      (filtered ? `filtered to ${state.scope.label}` : 'whole team'),
+    );
+  }
 }
 
 function queueMatchesScope(stream) {
   if (state.scope.kind === 'all') return true;
   if (state.scope.kind === 'person') return stream.id === state.scope.value;
   if (state.scope.kind === 'role') {
-    if (state.scope.value === 'sentinel') return stream.id === 'sentinel';
-    if (state.scope.value === 'review') return stream.id === 'review';
-    if (state.scope.value === 'author') return stream.id === 'author';
+    // Role/queue scopes match the stream id, including the synthetic `author`
+    // and `review` streams (B4).
+    return String(stream.id).toLowerCase() === String(state.scope.value).toLowerCase();
   }
   return true;
 }
@@ -615,12 +703,12 @@ function renderRulesPage() {
     ? rulesMarkup(data)
     : '<div class="empty-row">Loading the rule engine…</div>';
   $('rules-stats').innerHTML = data ? rulesStats(data) : '';
-  // The shared honesty line is the timeline's by default; on this page say what
-  // the cohort is, so "aggregated into 2 h buckets" never describes a rule.
-  $('honesty').textContent = data
+  // Each view owns its disclosure (B7): on this page say what the cohort is,
+  // so "aggregated into 2 h buckets" never describes a rule.
+  setHonesty(data
     ? `${data.sample.prs} PRs opened in the window are the cohort · ` +
       `${data.sample.threads} classified threads · impact is an estimate (≈)`
-    : '';
+    : '');
   $('rules-assumption').textContent = data
     ? `${data.assumption} · snapshot ${fmtStamp(Date.parse(data.as_of))} · ` +
       `targets: first review < ${fmtHours(data.targets.first_review_hours)}, ` +
@@ -651,6 +739,13 @@ function renderOverviewPage() {
     queues: state.queues,
     blocking: state.blocking,
   });
+  // B7: the overview is a whole-team summary; say so instead of inheriting a
+  // disclosure about a different view.
+  const counts = state.delivery ? state.delivery.counts : null;
+  setHonesty(counts
+    ? `${counts.open} open items · ${counts.blocked} blocked · ` +
+      `whole team in the window${state.scope.kind === 'all' ? '' : ' — the overview is not scope-filtered'}`
+    : '');
 }
 
 // ------------------------------------------------------------------ sources
@@ -694,6 +789,11 @@ function renderSourcesPage() {
     (state.tenants.length > 1
       ? `<p class="panel-note">${state.tenants.length} datasets on this server${tenant.ok === false ? ' (this one is unreadable)' : ''}. Switch with the tenant pill in the top bar.</p>`
       : '');
+  // B7: provenance is this view's disclosure, not the timeline's.
+  setHonesty(state.meta
+    ? `tenant ${state.meta.tenant || state.tenant || '—'} · ` +
+      `snapshot ${fmtStamp(Date.parse(state.meta.as_of))} · read-only, pseudonymised store`
+    : '');
 }
 
 // --------------------------------------------------------------- selection
@@ -717,7 +817,8 @@ function openPrDrawer(pr) {
   const totals = timeline.phases(pr);
   const cycle = segments.length ? segments[segments.length - 1].to - segments[0].from : 0;
   const facts = [
-    ['tickets', pr.keys.join(' ') || '—'],
+    ['ticket', pr.ticket || '—'],
+    ...(pr.epic ? [['epic', pr.epic]] : []),
     ['author', pr.actor],
     ['state', pr.state + (pr.closed ? '' : ' · right-censored')],
     ['cycled', `${fmtHours(cycle / 3_600_000)} (measured)`],
@@ -731,7 +832,7 @@ function openPrDrawer(pr) {
     overline: 'PULL REQUEST',
     pr,
     facts,
-    children: [...pr.keys, `${pr.repo}#${pr.number}`],
+    children: [pr.ticket, pr.epic, `${pr.repo}#${pr.number}`].filter(Boolean),
     impact: pr.closed ? 'Closed: its wait is history, not a live bottleneck.' : undefined,
   });
 }
@@ -785,7 +886,7 @@ function entityForTarget(target, point) {
     if (record) {
       return {
         entity: { row: record, author: record.author },
-        label: `${record.tickets.join(' ') || '—'} #${record.number} ${record.repo_short}`,
+        label: `${rowTicket(record) || '—'} #${record.number} ${record.repo_short}`,
       };
     }
   }
@@ -795,7 +896,7 @@ function entityForTarget(target, point) {
     if (hit && (hit.kind === 'bar' || hit.kind === 'interval') && hit.pr) {
       return {
         entity: { pr: hit.pr, author: hit.pr.actor, row: findDeliveryRow(hit.pr.id) },
-        label: `${hit.pr.keys[0] ? `${hit.pr.keys[0]} ` : ''}#${hit.pr.number} ${hit.pr.repo}`,
+        label: `${hit.pr.ticket ? `${hit.pr.ticket} ` : ''}#${hit.pr.number} ${hit.pr.repo}`,
       };
     }
   }
@@ -809,7 +910,9 @@ function buildScopeOptions() {
   const options = [['all:all', 'everything']];
   [...counts.entries()].sort((a, b) => b[1] - a[1])
     .forEach(([actor]) => options.push([`person:${actor}`, `person ${actor}`]));
-  options.push(['role:review', 'queue review'], ['role:sentinel', 'queue sentinel'], ['role:author', 'queue author']);
+  // Every closed role queue is a scope option, so a role scope set from the
+  // queue chart or a graph node always has a matching <option> (B4).
+  options.push(...ROLE_QUEUES.map((role) => [`role:${role}`, `queue ${role}`]));
   $('scope').innerHTML = options.map(([value, label]) =>
     `<option value="${esc(value)}">${esc(label)}</option>`).join('');
   $('scope').value = `${state.scope.kind}:${state.scope.value || 'all'}`;
@@ -828,9 +931,12 @@ function setScope(kind, value, { silent = false } = {}) {
 }
 
 function setScopeFromQueue(stream) {
-  if (stream.role === 'synthetic') return;
-  if (stream.role === 'sentinel') setScope('role', 'sentinel');
-  else setScope('person', stream.id);
+  // B4: a stream named after a role (`author`, `review`, `CI`) is a queue, not a
+  // person. Scoping to `person:author` blanked the timeline and the top-bar
+  // select; scope to the role instead.
+  const scope = scopeForStream(stream);
+  if (!scope) return;
+  setScope(scope.kind, scope.value);
 }
 
 function scopedEvents() {
@@ -860,6 +966,9 @@ function scopedObjects(events) {
 
 function applyScopeToTimeline() {
   const events = scopedEvents();
+  // The epic census is store-wide: a scope may hide most PRs, but the label
+  // must still prefer each PR's own ticket over the shared epic link (B2).
+  timeline.setTicketIndex({ epicKeys: state.epicKeys });
   timeline.setData(events, scopedObjects(events), state.meta || {});
 }
 
@@ -957,7 +1066,9 @@ async function pageAll(url, pageSize, max, onPage) {
   let offset = 0;
   let total = Infinity;
   while (offset < total && offset < max) {
-    const { response, body } = await fetchJSON(`${url}${url.includes('?') ? '&' : '?'}limit=${pageSize}&offset=${offset}`);
+    // Ask for no more than the cap allows: a full page would overshoot it.
+    const want = Math.min(pageSize, Math.max(1, max - offset));
+    const { response, body } = await fetchJSON(`${url}${url.includes('?') ? '&' : '?'}limit=${want}&offset=${offset}`);
     if (!response.ok) throw new HttpError(response.status, body, url);
     if (!Array.isArray(body)) throw new Error(`${url} → unexpected payload`);
     total = totalOf(response, total === Infinity ? body.length : total);
@@ -965,7 +1076,7 @@ async function pageAll(url, pageSize, max, onPage) {
     offset += body.length;
     const enough = await onPage(body, offset, total);
     if (enough) break;
-    if (body.length < pageSize) break;
+    if (body.length < want) break;
   }
   return { loaded: offset, total: Number.isFinite(total) ? total : offset };
 }
@@ -982,6 +1093,114 @@ function retryWhenFree() {
   retryCount += 1;
   clearTimeout(retryTimer);
   retryTimer = setTimeout(() => load({ force: true }), Math.min(8000, 400 * retryCount));
+}
+
+/* NFR-2: the default view is the recent window, not the oldest slice.
+ *
+ * `/api/events` is paged newest-first (`order=desc`), so the cap keeps the most
+ * recent rows: with a 40k cap on a much larger store the timeline still opens
+ * on "now" instead of the oldest 40k events. `state.eventLimit` is the only
+ * knob; the "Load the full range" action raises it and says what it costs.
+ */
+async function loadEvents(seq) {
+  state.events = [];
+  state.eventCapped = false;
+  const events = await pageAll(
+    withTenant('/api/events?order=desc'),
+    EVENT_PAGE,
+    state.eventLimit,
+    async (page, loaded, total) => {
+      if (seq !== loadSeq) return true;
+      state.events.push(...page);
+      state.eventTotal = total;
+      state.eventCapped = loaded < total;
+      // paint the first page straight away, then keep the canvas still
+      if (loaded <= EVENT_PAGE) {
+        applyScopeToTimeline();
+        renderLegend();
+        renderPhaseLegend();
+        setStatus(`loading events ${loaded} of ${total}`, 'live');
+      }
+      return false;
+    },
+  );
+  if (seq !== loadSeq) return null;
+  state.eventCapped = events.loaded < events.total;
+  state.eventTotal = events.total;
+  // Paged newest-first, kept chronological: scope counts, exports and the
+  // timeline domain all read oldest → newest.
+  state.events.sort((a, b) => Date.parse(a.ts) - Date.parse(b.ts));
+  return events;
+}
+
+/* PR objects first, then everything else. `/api/objects` orders by
+ * `object_type`, so a capped page of a commit-heavy store can stop before the
+ * PR rows and leave the timeline without lanes. PRs are few, so fetch them
+ * unconditionally and merge the rest by object id. */
+async function loadObjects(seq) {
+  const byId = new Map();
+  const add = (rows) => {
+    for (const row of rows) if (!byId.has(row.object_id)) byId.set(row.object_id, row);
+  };
+  await pageAll(withTenant('/api/objects?type=PR'), OBJECT_PAGE, OBJECT_MAX, async (page) => {
+    if (seq !== loadSeq) return true;
+    add(page);
+    return false;
+  });
+  if (seq !== loadSeq) return null;
+  const objects = await pageAll(withTenant('/api/objects'), OBJECT_PAGE, OBJECT_MAX, async (page) => {
+    if (seq !== loadSeq) return true;
+    add(page);
+    return false;
+  });
+  if (seq !== loadSeq) return null;
+  state.objects = [...byId.values()];
+  state.objectCapped = objects.loaded < objects.total;
+  // B2: the epic-key census is store-wide, so a scope that hides most PRs
+  // cannot turn the shared epic key back into a label.
+  state.epicKeys = epicKeySet(keyListsOf(state.objects));
+  return objects;
+}
+
+/** Show the cap and offer to lift it, with the cost stated (QA round 2, G5). */
+function renderLoadAll() {
+  const button = $('load-all');
+  if (!button) return;
+  const total = Math.max(state.eventTotal, state.counts ? state.counts.total || 0 : 0);
+  const capped = state.eventCapped && total > state.events.length;
+  button.hidden = !capped;
+  if (!capped) return;
+  button.textContent = `Load the full range · ${fmtCompact(state.events.length)} of ${fmtCompact(total)} events`;
+  button.title = `The timeline holds the newest ${state.events.length} of ${total} events. ` +
+    `Load all ${total} (${fmtCompact(total - state.events.length)} more rows) instead.`;
+}
+
+async function loadFullRange() {
+  if (!state.eventCapped) return;
+  const total = Math.max(state.eventTotal, state.counts ? state.counts.total || 0 : 0);
+  if (!total) return;
+  const seq = ++loadSeq;
+  const view = timeline.captureView();
+  state.eventLimit = Math.max(total, state.events.length);
+  $('load-all').hidden = true;
+  setStatus(`loading all ${fmtCompact(total)} events…`, 'live');
+  try {
+    await loadEvents(seq);
+  } catch (err) {
+    if (seq !== loadSeq) return;
+    state.eventLimit = EVENT_MAX;
+    renderLoadAll();
+    setStatus(`could not load the full range: ${err.message}`, 'stale');
+    return;
+  }
+  if (seq !== loadSeq) return;
+  applyScopeToTimeline();
+  if (view) timeline.restoreView(view);
+  buildScopeOptions();
+  renderLegend();
+  renderPhaseLegend();
+  renderPage();
+  setStatus(`live · ${state.events.length} events`, 'live');
 }
 
 async function load({ force = false } = {}) {
@@ -1069,32 +1288,10 @@ async function load({ force = false } = {}) {
     }
     if (seq !== loadSeq) return;
 
-    state.events = [];
-    state.eventCapped = false;
-    const events = await pageAll(withTenant('/api/events'), EVENT_PAGE, EVENT_MAX, async (page, loaded, total) => {
-      if (seq !== loadSeq) return true;
-      state.events.push(...page);
-      state.eventCapped = loaded < total;
-      // paint the first page straight away, then keep the canvas still
-      if (loaded <= EVENT_PAGE) {
-        applyScopeToTimeline();
-        renderLegend();
-        renderPhaseLegend();
-        setStatus(`loading events ${loaded} of ${total}`, 'live');
-      }
-      return false;
-    });
+    await loadEvents(seq);
     if (seq !== loadSeq) return;
-    state.eventCapped = events.loaded < events.total;
-
-    state.objects = [];
-    const objects = await pageAll(withTenant('/api/objects'), OBJECT_PAGE, OBJECT_MAX, async (page) => {
-      if (seq !== loadSeq) return true;
-      state.objects.push(...page);
-      return false;
-    });
+    await loadObjects(seq);
     if (seq !== loadSeq) return;
-    state.objectCapped = objects.loaded < objects.total;
   } catch (err) {
     if (seq !== loadSeq) return;
     if (storeBusy(err)) {
@@ -1127,6 +1324,7 @@ async function load({ force = false } = {}) {
   renderProvenance();
   renderLegend();
   renderPhaseLegend();
+  renderLoadAll();
   if (state.page !== 'timeline') await ensureData(state.page);
   renderPage();
   syncChromeHeight();
@@ -1336,6 +1534,13 @@ window.__megaspeed = {
   setScope,
   setTimeframe,
   setTenant,
+  loadFullRange,
+  // Test hook: lower the event cap so the capped path (and its "load the full
+  // range" affordance) can be exercised on a small fixture.
+  setEventLimit: (limit) => {
+    state.eventLimit = Math.max(1, Number(limit) || EVENT_MAX);
+    return state.eventLimit;
+  },
   setLanes: (dim) => { $('lanes').value = dim; timeline.setLanes(dim); renderPhaseLegend(); },
   setDensity,
   setRulesLevel,
@@ -1373,17 +1578,20 @@ $('timeframe').addEventListener('click', (event) => {
 });
 
 $('blocking-level').addEventListener('change', async (event) => {
-  state.blockingLevel = event.target.value;
+  if (!setBlockingLevel(event.target.value)) return;
   state.cache.clear();
   await ensureData('blocking');
   renderBlockingPage();
+  saveUI();
 });
 $('queue-level').addEventListener('change', async (event) => {
-  state.queueLevel = event.target.value;
+  if (!setQueueLevel(event.target.value)) return;
   state.cache.clear();
   await ensureData('queue');
   renderQueuePage();
+  saveUI();
 });
+$('load-all').addEventListener('click', () => { loadFullRange(); });
 
 document.addEventListener('click', async (event) => {
   const menuItem = event.target.closest('#menu [data-menu]');
@@ -1555,6 +1763,7 @@ function restoreUI() {
   try { stored = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch { stored = null; }
   if (!stored) {
     setDensity('M');
+    syncLevelSelects();
     return;
   }
   // The tenant must be restored before anything reads state.scope: the scope
@@ -1569,8 +1778,12 @@ function restoreUI() {
   if (TIMEFRAMES[stored.timeframe]) state.timeframe = stored.timeframe;
   if (stored.tab) state.tab = stored.tab;
   if (LENSES[stored.lens]) state.lens = stored.lens;
-  if (stored.blockingLevel) state.blockingLevel = stored.blockingLevel;
-  if (stored.queueLevel) state.queueLevel = stored.queueLevel;
+  if (stored.blockingLevel && BLOCKING_LEVELS.includes(stored.blockingLevel)) {
+    state.blockingLevel = stored.blockingLevel;
+  }
+  if (stored.queueLevel && QUEUE_LEVELS.includes(stored.queueLevel)) {
+    state.queueLevel = stored.queueLevel;
+  }
   if (stored.rulesLevel === 'team' || stored.rulesLevel === 'person') {
     state.rulesLevel = stored.rulesLevel;
   }
@@ -1589,6 +1802,9 @@ function restoreUI() {
     button.setAttribute('aria-pressed', String(button.dataset.tf === state.timeframe));
     button.classList.toggle('on', button.dataset.tf === state.timeframe);
   }
+  // B8: the restored level state is the source of truth — make the <select>
+  // that labels it agree, or the toolbar contradicts the chart.
+  syncLevelSelects();
 }
 
 // -------------------------------------------------------------------- boot

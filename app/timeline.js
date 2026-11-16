@@ -18,6 +18,7 @@
 import {
   MINUTE, HOUR, DAY, fmtDay, fmtClock, fmtStamp, fmtDuration, fmtTick, fmtCompact, esc, rgba,
 } from './format.js';
+import { epicKeySet, epicTicket, ownTicket } from './tickets.js';
 
 export const ACTIVITY_ORDER = [
   'pr_opened', 'pr_pushed', 'comment_added', 'pr_approved', 'pr_unapproved',
@@ -136,6 +137,9 @@ export class Timeline {
     this.events = [];
     this.prs = [];
     this.commitsByPr = new Map();
+    // The epic/tracking keys across the whole store, set by the page (B2). When
+    // null the census is taken over the PRs handed to setData().
+    this.epicKeys = null;
     this.now = Date.now();
     this.domain = { start: 0, end: 1 };
     this.view = { start: 0, end: 1 };
@@ -150,6 +154,14 @@ export class Timeline {
   }
 
   // ---------------------------------------------------------------- data
+  /** The store-wide epic-key census, so a scope-filtered timeline still labels
+   *  a PR with its own ticket rather than the shared epic key (B2). */
+  setTicketIndex(index = {}) {
+    const keys = index.epicKeys;
+    this.epicKeys = keys instanceof Set ? keys : new Set(keys || []);
+    this.schedule();
+  }
+
   setData(events, objects, meta = {}) {
     const previous = this._initialised ? { ...this.view } : null;
     this.events = events
@@ -184,6 +196,13 @@ export class Timeline {
     }
     for (const pr of prs.values()) pr.commits = this.commitsByPr.get(`${pr.repoFull}#${pr.number}`) || [];
     this.prs = [...prs.values()].sort((a, b) => (a.repoFull || '').localeCompare(b.repoFull || '') || a.number - b.number);
+    // One label key per PR: its own story ticket, not the shared epic link (B2).
+    const epics = this.epicKeys || epicKeySet(this.prs.map((pr) => pr.keys));
+    for (const pr of this.prs) {
+      pr.ticket = ownTicket(pr.keys, epics);
+      pr.epic = epicTicket(pr.keys, epics);
+    }
+    this.epics = epics;
     this.now = meta.as_of ? Date.parse(meta.as_of) : (meta.last_ts ? Date.parse(meta.last_ts) : Date.now());
 
     const times = this.events.map((e) => e.t).concat(this.prs.map((p) => p.created));
@@ -421,7 +440,7 @@ export class Timeline {
         key: `${pr.repo}#${pr.number}`,
         pr,
         count: pr.events.length,
-        label: `${pr.keys[0] ? `${pr.keys[0]} ` : ''}#${pr.number} ${pr.repo}`,
+        label: `${pr.ticket ? `${pr.ticket} ` : ''}#${pr.number} ${pr.repo}`,
       }));
     }
     if (this.dim === 'queue') {
@@ -939,7 +958,7 @@ export class Timeline {
       ctx.font = `500 ${g.label}px "JetBrains Mono", ui-monospace, monospace`;
       ctx.textAlign = 'right';
       ctx.fillStyle = isHover ? '#E8E9EB' : '#B9BBC0';
-      const key = pr.keys[0] ? `${pr.keys[0]} ` : '';
+      const key = pr.ticket ? `${pr.ticket} ` : '';
       const label = `${key}#${pr.number} ${pr.repo}`;
       ctx.fillText(fit(ctx, label, g.gutter - 22), g.gutter - 10, y + g.barH / 2);
 
@@ -1015,7 +1034,7 @@ export class Timeline {
         <div class="row"><span class="act" style="color:${PHASE[seg.phase].color}">${esc(PHASE[seg.phase].label)}</span>
           <span class="muted">${esc(fmtDuration(seg.to - seg.from))}</span></div>
         <div class="row"><span class="k">queue</span><span class="v">${esc(hit.queue)}</span></div>
-        <div class="row"><span class="k">pr</span><span class="v">#${esc(pr.number)} ${esc(pr.repo)}</span></div>
+        <div class="row"><span class="k">pr</span><span class="v">${pr.ticket ? `${esc(pr.ticket)} ` : ''}#${esc(pr.number)} ${esc(pr.repo)}</span></div>
         <div class="row"><span class="k">window</span><span class="v">${esc(fmtStamp(seg.from))}<br>${esc(fmtStamp(seg.to))}</span></div>
         <div class="row"><span class="k">basis</span><span class="v">${esc(PHASE[seg.phase].hint)}</span></div>`;
     } else {
@@ -1028,7 +1047,8 @@ export class Timeline {
       this.tip.innerHTML = `
         <div class="row"><span class="act">#${pr.number} ${esc(pr.repo)}</span>
           <span class="muted">${esc(pr.state)}${pr.closed ? '' : ' · right-censored'}</span></div>
-        <div class="row"><span class="k">tickets</span><span class="v">${esc(pr.keys.join(' ')) || '—'}</span></div>
+        <div class="row"><span class="k">ticket</span><span class="v">${esc(pr.ticket) || '—'}</span></div>
+        ${pr.epic ? `<div class="row"><span class="k">epic</span><span class="v">${esc(pr.epic)}</span></div>` : ''}
         <div class="row"><span class="k">author</span><span class="v">${esc(pr.actor)}</span></div>
         <div class="row"><span class="k">cycle</span><span class="v">${esc(fmtDuration(total))}</span></div>
         ${measured.map(([phase, ms]) => `<div class="row"><span class="k">${esc(PHASE[phase].label)}</span>

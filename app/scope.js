@@ -1,0 +1,118 @@
+/* What a scope actually filters, per view.
+ *
+ * prd/10 §4.2 calls the scope banner "the single most important honesty
+ * device", so the sentence is derived from the filters the code really applies
+ * instead of a hardcoded string (QA round 2, B3). Two rules keep it true:
+ *
+ *   - `FILTERED_PAGES` is the single place that says which views narrow to a
+ *     scope. `renderScopeBanner()` reads it, and the banner never claims a
+ *     view shows everything when it does not.
+ *   - a queue stream whose id is a closed role (`author`, `review`, `CI`, …)
+ *     is a role queue even when the API labels it `person`: clicking it must
+ *     scope to the queue, not to a person literally named "author" (B4).
+ *
+ * Pure functions only, so they are unit-testable without a browser.
+ */
+
+export const ROLE_QUEUES = ['author', 'review', 'sentinel', 'CI', 'calendar'];
+
+/** Pages that narrow their rows/series when a scope is active. */
+const PERSON_PAGES = ['timeline', 'delivery', 'queue'];
+const ROLE_PAGES = {
+  author: ['delivery', 'queue'],
+  review: ['delivery', 'queue'],
+  sentinel: ['queue'],
+  ci: ['queue'],
+  calendar: ['queue'],
+};
+
+export const VIEW_NAMES = {
+  overview: 'overview',
+  delivery: 'delivery list',
+  timeline: 'timeline',
+  blocking: 'blocking map',
+  queue: 'queue view',
+  rules: 'rules',
+  sources: 'sources',
+};
+
+export function isRoleQueue(id) {
+  const value = String(id ?? '').toLowerCase();
+  return ROLE_QUEUES.some((role) => role.toLowerCase() === value);
+}
+
+/** True when a queue-chart row is a queue/role, not an individual person. */
+export function streamIsQueue(stream) {
+  if (!stream) return false;
+  return stream.role === 'synthetic' || isRoleQueue(stream.id);
+}
+
+/** The role label to show next to a stream: a role queue is never "a person". */
+export function streamRoleLabel(stream) {
+  if (!stream) return '';
+  if (isRoleQueue(stream.id)) return 'role';
+  return stream.role || 'person';
+}
+
+/** The scope a queue row should set: role for a queue, person otherwise. */
+export function scopeForStream(stream) {
+  if (!stream || !stream.id) return null;
+  if (streamIsQueue(stream)) return { kind: 'role', value: stream.id, label: stream.id };
+  return { kind: 'person', value: stream.id, label: stream.id };
+}
+
+/** The scope a blocking-map node should set. */
+export function scopeForNode(node) {
+  if (!node || !node.id) return null;
+  if (node.kind === 'person' && !isRoleQueue(node.id)) {
+    return { kind: 'person', value: node.id, label: node.id };
+  }
+  if (node.kind === 'person' || node.kind === 'role' || node.kind === 'synthetic' || node.kind === 'queue') {
+    return { kind: 'role', value: node.id, label: node.id };
+  }
+  return null;
+}
+
+/** The queue-chart level a blocking node's drill-down lands on (B5). */
+export function queueLevelForNode(node) {
+  return node && node.kind === 'person' && !isRoleQueue(node.id) ? 'person' : 'queue';
+}
+
+/** The pages whose content narrows under this scope. */
+export function filteredPages(scope) {
+  if (!scope || scope.kind === 'all') return new Set();
+  if (scope.kind === 'person') return new Set(PERSON_PAGES);
+  if (scope.kind === 'role') {
+    return new Set(ROLE_PAGES[String(scope.value || '').toLowerCase()] || []);
+  }
+  return new Set();
+}
+
+function list(ids) {
+  const names = ids.map((id) => VIEW_NAMES[id] || id);
+  if (!names.length) return 'none';
+  if (names.length === 1) return names[0];
+  return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
+}
+
+/**
+ * The banner sentence for one view: names this view's state first, then what
+ * is and is not filtered, so it can never contradict the chart on screen.
+ */
+export function scopeBanner(scope, pageId) {
+  if (!scope || scope.kind === 'all') return '';
+  const filtered = filteredPages(scope);
+  const here = filtered.has(pageId);
+  const name = VIEW_NAMES[pageId] || pageId;
+  const subject = scope.kind === 'person' ? `person ${scope.value}` : `the ${scope.value} queue`;
+  const inside = [...filtered];
+  const outside = Object.keys(VIEW_NAMES).filter((id) => !filtered.has(id));
+  const bits = [
+    `Scope ${subject}`,
+    `this view (${name}) is ${here ? 'filtered to it' : 'not filtered — it still shows the whole team'}`,
+    `filtered: ${list(inside)}`,
+    `not filtered: ${list(outside)}`,
+  ];
+  if (scope.kind === 'person') bits.push('waits are measured over the whole log');
+  return bits.join(' · ');
+}
