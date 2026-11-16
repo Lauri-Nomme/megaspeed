@@ -24,17 +24,22 @@ name) is pinned in ``tests/test_ref_digest.py``.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import json
 import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
+from urllib.parse import urlencode
 
 from analysis import ballcourt, rules, stack
 from ingest.pipeline import ref_digest
 from ingest.store import (
     connect, ensure_schema, write_events, write_objects, write_run,
 )
+from server import app as app_module
 
 REPO = "ENG/platform"
 T0 = datetime(2026, 1, 5, 9, 0)          # a Monday
@@ -199,7 +204,7 @@ def by_id(payload: dict, suggestion_id: str) -> dict | None:
 
 
 # --------------------------------------------------------------------------- #
-# 2. the stack DAG
+# 1. the stack DAG
 # --------------------------------------------------------------------------- #
 class StackDagTests(StoreCase):
     def test_edges_follow_target_equals_source(self):
@@ -256,7 +261,7 @@ class StackDagTests(StoreCase):
 
 
 # --------------------------------------------------------------------------- #
-# 3. the cascade cost
+# 2. the cascade cost
 # --------------------------------------------------------------------------- #
 class CascadeCostTests(StoreCase):
     def metric(self, fixture: Fixture) -> dict:
@@ -349,7 +354,7 @@ class CascadeCostTests(StoreCase):
 
 
 # --------------------------------------------------------------------------- #
-# 4. the suggestion
+# 3. the suggestion
 # --------------------------------------------------------------------------- #
 class StackedCascadeRuleTests(StoreCase):
     def test_the_rule_names_the_rebases_the_hours_and_the_depth(self):
@@ -407,6 +412,98 @@ class StackedCascadeRuleTests(StoreCase):
         self.assertEqual(metric["edges"], 0)
         self.assertIn("no stacked PRs", metric["note"])
         self.assertIsNone(by_id(payload, "stacked-cascade"))
+
+
+# --------------------------------------------------------------------------- #
+# 4. the API: /api/insights carries the metric and the rule
+# --------------------------------------------------------------------------- #
+class Reply:
+    def __init__(self, status: int, headers: dict[str, str], body: bytes):
+        self.status = status
+        self.headers = headers
+        self.body = body
+
+    def json(self):
+        return json.loads(self.body.decode())
+
+
+async def _call_asgi(app, path: str, query: str) -> Reply:
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": query.encode(),
+        "root_path": "",
+        "headers": [(b"host", b"testserver")],
+        "client": ("127.0.0.1", 12345),
+        "server": ("testserver", 80),
+    }
+    sent: list[dict] = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    await app(scope, receive, send)
+    start = next(m for m in sent if m["type"] == "http.response.start")
+    body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    return Reply(start["status"], dict(start.get("headers") or []), body)
+
+
+def get(path: str, **query: object) -> Reply:
+    return asyncio.run(_call_asgi(app_module.app, path, urlencode(query)))
+
+
+class InsightsApiTests(unittest.TestCase):
+    """The real ASGI app against a temp tenant directory, like test_rules."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.dir = Path(cls.tmp.name).resolve()
+        stack_fixture().write(cls.dir / "del.duckdb")
+        cls.env = [
+            mock.patch.object(app_module, "TENANTS_DIR", cls.dir),
+            mock.patch.object(app_module, "DEFAULT_TENANT", ""),
+            mock.patch.object(app_module, "LOG", False),
+        ]
+        for patch in cls.env:
+            patch.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        for patch in reversed(cls.env):
+            patch.stop()
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        app_module._analysis_cache = None
+
+    def test_the_payload_carries_the_stack_metric_and_rule(self):
+        reply = get("/api/insights", tenant="del", level="team", days=3650)
+        self.assertEqual(reply.status, 200)
+        body = reply.json()
+        self.assertTrue(body["ok"])
+        metric = body["metrics"]["stacked_cascade"]
+        self.assertTrue(metric["available"])
+        self.assertEqual(metric["stacked_prs"], 2)
+        self.assertEqual(metric["depth"]["max"], 2)
+        self.assertEqual(metric["cascaded_rebases"], 2)
+        self.assertGreater(metric["re_review_hours"], 0)
+        self.assertEqual(body["sample"]["stacked_prs"], 2)
+        self.assertEqual(body["targets"]["max_stack_depth"], 2)
+        suggestion = by_id(body, "stacked-cascade")
+        self.assertIsNotNone(suggestion)
+        self.assertEqual(suggestion["metric"], "stacked_cascade")
+        # ranking metadata is filled in like every other rule
+        self.assertGreaterEqual(suggestion["rank"], 1)
+        self.assertIn("stacked", suggestion["title"])
 
 
 if __name__ == "__main__":
