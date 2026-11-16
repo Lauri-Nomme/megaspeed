@@ -1,38 +1,44 @@
 # STATE — megaspeed · LIVE
 
-Live behind nginx (→ `127.0.0.1:8766`), 3 tenants. GitHub: `Lauri-Nomme/megaspeed` (private, install-details scrubbed).
-Tests: **215** (`tests/`) + **46** (`scrape/tests`) green.
+Live behind nginx (→ `127.0.0.1:8766`), tenants. GitHub: `Lauri-Nomme/megaspeed` (private, install-details scrubbed).
+Tests: **321** (`tests/`) + **46** (`scrape/tests`) green. CI builds a tagged release of the scraper.
 
 ## Scrape (airgapped) — full value in one pass
 
-- **Ingest**: scrape → tgz → import; ticket **pre-filter** + `updatedDate` watermark + settled-PR finality +
-  early termination (strict `<`), progress reporting. **Ticket-set scoping** (`MEGASPEED_TICKET_KEYS`/`_FILE`,
-  exact keys, set-over-prefix) → DEL `DEL-100,DEL-101` = 3 PRs / 8 requests.
-- **`push_class`** (shallow git cache, patch-id + range-diff). **LLM classification** (`comment_type`,
-  `thread_outcome`, `question`+`phase`) via `qwen3-30b-a3b` on precision (~1.9 s/comment).
-- **PR diff size** — `lines_added`/`lines_removed` per PR (shallow git cache).
+Ticket-set scoping (`MEGASPEED_TICKET_KEYS`/`_FILE`) · pre-filter + watermark + settled-PR finality +
+early termination · `push_class` (shallow git cache, patch-id/range-diff) · diff size (`lines_added/removed`)
+· LLM classification (`comment_type`, `thread_outcome`, `question`+`phase`) via `qwen3-30b-a3b` on precision.
+Import is a **pre-write gate** (validates the whole bundle, rolls back on failure) and batched (~90× faster).
 
-## Analysis → suggested rules (the "what to change first" output)
+## Analysis → suggested rules
 
-`analysis/rules.py` → `GET /api/insights` → **Rules** view. 9 metrics → ranked suggestions (impact ×
-confidence). DEL top-3: cycle-time (4.3 d median), rework-loops (p90 3 rounds), review-tail.
-`rebase-waste` / `comment-tax` / `pr-size` are implemented but silent on the CURRENT DEL store (stale —
-scraped before push_class + LLM existed; see below).
+`analysis/` → `GET /api/insights` → **Rules** view. 9 metrics → ranked suggestions. **Business-hours
+calendar** (prd/19): per-person overrides, vacations, EE holidays incl half-days, `business_hours()`
+applied everywhere, vacation-blocking insight. `hours_mode` = business when a calendar applies.
+
+## Reviews + fixes (this cycle)
+
+- **Product review** (`docs/review-product.md`) · **adversarial review** (`docs/review-adversarial.md`) ·
+  **QA round-2 UI/UX** (`docs/QA-round2.md`).
+- **Fixed (High)**: SEC-1 import gate · SEC-2 eval/ws bridge auth · FR-1 watermark vs never-seen PR ·
+  NFR-1 import speed · NFR-2 timeline loads newest · UI: DEL-1 label, scope banner, queue `author`,
+  drill-down · responder-vs-blocker attribution · dependents · DES-3 honest thread_outcome · censoring.
+- **Corpus** now exercises everything: rebases (pure + conflict), thread resolution, sentinel (`frank`),
+  reviewer removal, merge commits, varied PR sizes.
+
+## Next
+
+- [ ] **Fresh scrape of the NEW corpus** (bb-lab-b DEL re-seeded with all features) → `data/del3.duckdb`,
+      so `rebase-waste`/`comment-tax`/`pr_size`/`sentinel-queue` fire on real data. (The `del2` re-scrape
+      was killed — it was scraping the pre-reseed corpus.)
+- [ ] Roadmap: Jira+Tempo (Story/Epic/Sprint) · stacked-PR cascade · flow-efficiency/survival ·
+      simulation · deferred UI items (B6/B9–B21, G2–G12 in `docs/QA-round2.md`).
 
 ## LLM (precision box)
 
 Ollama `qwen3-30b-a3b:2507` (30B MoE / ~3B active, CPU) — `http://10.43.36.10:11434`; logproxy `:11435`.
 
-## In progress (fallback `opencode-go/deepseek-v4.1-flash`)
-
-- [ ] **Re-scrape DEL `--full`** (push_class + LLM + diff size) → `data/del2.duckdb`, so the
-      already-implemented `rebase-waste` / `comment-tax` / `pr_size` fire on real data.
-
-## Next / follow-ups
-
-- [ ] Business-hours calendar (re-baselines waits). [ ] Story/Epic/Sprint (Jira+Tempo).
-
 ## Open (production)
 
-- [ ] Production Bitbucket DC URL + auth (configurable via `MEGASPEED_BB_*`). [ ] Jira keys
-      (`MEGASPEED_TICKET_KEYS`/`_FILE`, e.g. `FOOBAR-1234`).
+- [ ] Production Bitbucket DC URL + auth (`MEGASPEED_BB_*`). [ ] Jira keys (`MEGASPEED_TICKET_KEYS`).
+- [ ] Lab license expired — read-only works, pushes need the clock-shift shim (see `corpus/README.md`).
