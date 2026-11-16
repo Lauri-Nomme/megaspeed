@@ -1385,7 +1385,7 @@ def _summary(calibration: dict, scenario: Scenario, pooled: dict,
             f"{row['person']} is saturated (utilisation {row['utilisation']:.0%}): its "
             "queue grows without bound, so the predicted distribution depends on the "
             "horizon rather than settling"
-            for row in resources if row["utilisation"] >= 0.98
+            for row in resources if row["utilisation"] >= 0.9
         ],
         "scenario": scenario.as_dict(),
         "horizon_business_days": round(horizon_days, 1),
