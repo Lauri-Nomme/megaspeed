@@ -91,7 +91,9 @@ DEFAULT_OVERLAP_HOURS = 72
 
 # Fields the reducer needs from a PR record. DC's list rows carry them all, so a
 # detail request is only made when a source returns a trimmed summary row.
-_DETAIL_FIELDS = ("createdDate", "state", "author", "fromRef", "toRef", "properties")
+# ``description`` is here on purpose (FR-2): it is a *filter* input, and a list
+# projection that omits it cannot decide whether a description-only key matches.
+_DETAIL_FIELDS = ("createdDate", "state", "author", "fromRef", "toRef", "properties", "description")
 
 
 # --------------------------------------------------------------------------- #
@@ -405,12 +407,30 @@ def collect(
 
                 # -- layer 1: the cheap ticket-key pre-filter ------------------
                 cheap_keys = _list_keys(key_filter, pr.pr) if prefilter else []
+                detail_fetched = False
                 if prefilter and not cheap_keys:
-                    stats.prs_dropped += 1
-                    continue
+                    if "description" in pr.pr:
+                        stats.prs_dropped += 1
+                        continue
+                    # The list projection omitted ``description``. If it is
+                    # otherwise a complete PR record, the only key may be in the
+                    # body, so one detail request decides it (FR-2). A wholly
+                    # trimmed projection is different: fetching detail for every
+                    # PR would defeat the pre-filter, so its cheap fields are
+                    # treated as authoritative (the detail is still fetched for
+                    # every PR that *does* match).
+                    if not all(field in pr.pr for field in _DETAIL_FIELDS if field != "description"):
+                        stats.prs_dropped += 1
+                        continue
+                    pr.pr = _with_detail(pr.pr, client.pull_request(project, repo, pr.id))
+                    detail_fetched = True
+                    cheap_keys = _list_keys(key_filter, pr.pr)
+                    if not cheap_keys:
+                        stats.prs_dropped += 1
+                        continue
 
                 # -- expensive: detail (only if the list row is trimmed) ----
-                if _needs_detail(pr.pr):
+                if not detail_fetched and _needs_detail(pr.pr):
                     pr.pr = _with_detail(pr.pr, client.pull_request(project, repo, pr.id))
                 pr.commits = list(client.iter_commits(project, repo, pr.id))
                 keys = key_filter.keys(
@@ -725,6 +745,11 @@ def scrape(
     )
 
     previous = None if full else state.watermark(source)
+    # FR-1: the overlap cutoff is for PRs whose history is already in the store.
+    # A PR this scraper has never kept (no ``prs.json`` entry, or one recorded
+    # without ticket keys) must be emitted in full regardless of age, otherwise
+    # its entire history is dropped and it is marked settled forever.
+    prior_prs = {} if full else pr_state.entries(source)
     collected = collect(
         cfg,
         transport,
@@ -740,7 +765,18 @@ def scrape(
     )
 
     cutoff = previous - timedelta(hours=overlap_hours) if previous else None
-    events = collected.events if cutoff is None else [e for e in collected.events if e["ts"] >= cutoff]
+    if cutoff is None:
+        events = collected.events
+    else:
+        def _already_kept(event: dict) -> bool:
+            entry = prior_prs.get(f"{event.get('repo')}#{event.get('pr_id')}")
+            return bool(entry and entry.get("ticket_keys"))
+
+        events = [
+            e
+            for e in collected.events
+            if e["ts"] >= cutoff or not _already_kept(e)
+        ]
     emitted = max((e["ts"] for e in events), default=None)
     watermark = max((w for w in (previous, emitted) if w is not None), default=None)
 
@@ -789,6 +825,8 @@ def scrape(
         },
         "overlap_hours": overlap_hours,
         "full": bool(full),
+        "events_collected": len(collected.events),
+        "events_dropped_watermark": len(collected.events) - len(events),
         "requests": collected.requests,
         "requests_by_kind": dict(collected.requests_by_kind),
         "prs_seen": collected.stats.prs_seen,

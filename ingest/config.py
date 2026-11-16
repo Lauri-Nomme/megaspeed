@@ -321,4 +321,8 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
             "MEGASPEED_BB_BASE_URL is set but no credentials: set MEGASPEED_BB_TOKEN"
             " or MEGASPEED_BB_USER + MEGASPEED_BB_PASSWORD"
         )
+    try:
+        config.llm_url = classify.validate_llm_url(config.llm_url)
+    except classify.ClassifyError as exc:
+        raise SystemExit(f"bad MEGASPEED_LLM_URL: {exc}") from exc
     return config

@@ -73,6 +73,8 @@ def run(
         "prs_skipped_watermark": scrape_report["prs_skipped_watermark"],
         "early_stopped": scrape_report["early_stopped"],
         "events_emitted": scrape_report["events"],
+        "events_collected": scrape_report.get("events_collected"),
+        "events_dropped_watermark": scrape_report.get("events_dropped_watermark"),
         "events_new": import_report["events_new"],
         "events_rewritten": import_report["events_rewritten"],
         "events_derived": import_report["events_derived"],

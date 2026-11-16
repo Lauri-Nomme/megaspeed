@@ -118,6 +118,33 @@ class VerifyTamperTests(unittest.TestCase):
         )
         self.assertTrue(any("ingest_runs.source" in p for p in problems), problems)
 
+    def test_raw_actor_on_an_object_is_rejected(self):
+        problems = self.assert_violation(
+            "UPDATE objects SET actor = 'LauriNomme' WHERE object_type = 'PR'"
+        )
+        self.assertTrue(any("objects.actor" in p for p in problems), problems)
+
+    def test_branch_name_in_head_commit_is_rejected(self):
+        problems = self.assert_violation(
+            "UPDATE objects SET head_commit = 'feature/secret-acquisition-q4'"
+            " WHERE object_type = 'COMMIT'"
+        )
+        self.assertTrue(any("objects.head_commit" in p for p in problems), problems)
+
+    def test_prose_event_key_is_rejected(self):
+        key = self.con.execute("SELECT min(event_key) FROM events").fetchone()[0]
+        problems = self.assert_violation(
+            "UPDATE events SET event_key = 'feature/secret-acquisition-q4' WHERE event_key = ?",
+            [key],
+        )
+        self.assertTrue(any("events.event_key" in p for p in problems), problems)
+
+    def test_prose_run_id_is_rejected(self):
+        problems = self.assert_violation(
+            "UPDATE ingest_runs SET run_id = 'Lauri Nomme run'"
+        )
+        self.assertTrue(any("ingest_runs.run_id" in p for p in problems), problems)
+
     def test_orphan_event_objects_are_rejected(self):
         key = self.con.execute("SELECT min(event_key) FROM events").fetchone()[0]
         problems = self.assert_violation("DELETE FROM events WHERE event_key = ?", [key])

@@ -25,8 +25,8 @@ from .timeutil import iso, to_naive_utc, utcnow  # re-exported for existing impo
 
 __all__ = [
     "ALLOWED", "CANARY", "connect", "ensure_schema", "iso", "list_events",
-    "list_objects", "summary", "to_naive_utc", "utcnow", "verify", "write_events",
-    "write_objects", "write_run",
+    "list_objects", "object_shape_problems", "summary", "to_naive_utc", "utcnow",
+    "verify", "write_events", "write_objects", "write_run",
 ]
 
 SCHEMA_SQL = Path(__file__).with_name("schema.sql")
@@ -37,6 +37,13 @@ ACTOR_RE = r"^(?:[A-Z][a-z]?[A-Z][a-z]?\d*|system|CI|calendar|bot:[A-Za-z0-9_.-]
 # content_hash is a blake2b digest (digest_size=8) in hex, nothing else.
 CONTENT_HASH_RE = r"^[0-9a-f]{16}$"
 REPO_RE = r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+# A commit hash (full or abbreviated) -- ``objects.head_commit``.
+HEAD_COMMIT_RE = r"^[0-9a-f]{7,40}$"
+# ``event_key`` is ``project/repo#pr_id:natural`` and ``natural`` may itself
+# contain colons (``act:12:q``). An identifier, never prose.
+EVENT_KEY_RE = r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+:[A-Za-z0-9_.:+-]+$"
+# ``ingest_runs.run_id``: one token, no whitespace (``fixture-2026...-abcdef``).
+RUN_ID_RE = r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$"
 OBJECT_ID_PREFIX = {
     "PR": "PR:",
     "COMMIT": "COMMIT:",
@@ -85,27 +92,54 @@ def ensure_schema(con) -> None:
 # --------------------------------------------------------------------------- #
 # writes (used by ingest only)
 # --------------------------------------------------------------------------- #
+# Rows are staged as a DuckDB relation (``con.values(*rows)``) and merged with
+# one ``INSERT ... SELECT`` / ``UPDATE ... FROM`` per batch. The Python client's
+# ``executemany`` runs one statement per row (and ``INSERT OR IGNORE`` against a
+# primary key scans for every row), which made import ~9 ms/event (NFR-1).
+# ``colN`` is the relation's positional column name; the explicit casts keep the
+# inferred type stable when the first row of a batch has a NULL optional field.
 INSERT_EVENT = """
-INSERT OR IGNORE INTO events
+INSERT INTO events
     (event_key, ts, activity, actor, repo, pr_id, attributes, classifier_version, content_hash, as_of)
-VALUES (?, ?, ?, ?, ?, ?, CAST(? AS JSON), ?, ?, ?)
+SELECT col0, col1, col2, col3, CAST(col4 AS VARCHAR), CAST(col5 AS BIGINT),
+       CAST(col6 AS JSON), col7, CAST(col8 AS VARCHAR), col9
+FROM incoming
 """
 
 UPDATE_EVENT = """
 UPDATE events SET
-    ts = ?, activity = ?, actor = ?, repo = ?, pr_id = ?,
-    attributes = CAST(? AS JSON), classifier_version = ?, content_hash = ?, as_of = ?
-WHERE event_key = ?
+    ts = s.col1, activity = s.col2, actor = s.col3,
+    repo = CAST(s.col4 AS VARCHAR), pr_id = CAST(s.col5 AS BIGINT),
+    attributes = CAST(s.col6 AS JSON), classifier_version = s.col7,
+    content_hash = CAST(s.col8 AS VARCHAR), as_of = s.col9
+FROM incoming s
+WHERE events.event_key = s.col0
 """
 
-INSERT_REL = "INSERT OR IGNORE INTO event_objects (event_key, object_type, object_id) VALUES (?, ?, ?)"
+INSERT_REL = """
+INSERT OR IGNORE INTO event_objects (event_key, object_type, object_id)
+SELECT col0, col1, col2 FROM relations_rel
+"""
 
 INSERT_OBJECT = """
 INSERT OR REPLACE INTO objects
     (object_type, object_id, repo, pr_id, ticket_keys, actor, state, created_at, closed_at, head_commit,
      message_class, attributes)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CAST(? AS JSON))
+SELECT col0, col1, CAST(col2 AS VARCHAR), CAST(col3 AS BIGINT), CAST(col4 AS VARCHAR[]),
+       CAST(col5 AS VARCHAR), CAST(col6 AS VARCHAR), CAST(col7 AS TIMESTAMP),
+       CAST(col8 AS TIMESTAMP), CAST(col9 AS VARCHAR), CAST(col10 AS VARCHAR),
+       CAST(col11 AS JSON)
+FROM objects_in
 """
+
+#: Rows per staged relation. Big enough that the per-statement cost disappears,
+#: small enough that a 1M-event bundle does not build one enormous VALUES list.
+BATCH_ROWS = 5_000
+
+
+def _batches(rows: list, size: int = BATCH_ROWS):
+    for start in range(0, len(rows), size):
+        yield rows[start : start + size]
 
 INSERT_RUN = """
 INSERT OR REPLACE INTO ingest_runs
@@ -133,14 +167,15 @@ def write_events(con, events: list[dict], relations: list[tuple[str, str, str]])
       re-derives every existing row (`prd/02`: reproducible/tunable).
     """
     if not events:
-        if relations:
-            con.executemany(INSERT_REL, relations)
+        for batch in _batches(relations):
+            relations_rel = con.values(*batch)
+            con.execute(INSERT_REL)
         return 0, 0
 
     existing: dict[str, tuple] = {}
     keys = [e["event_key"] for e in events]
-    for start in range(0, len(keys), 500):
-        chunk = keys[start : start + 500]
+    for start in range(0, len(keys), BATCH_ROWS):
+        chunk = keys[start : start + BATCH_ROWS]
         placeholders = ",".join("?" * len(chunk))
         for row in con.execute(
             "SELECT event_key, ts, activity, actor, repo, pr_id, CAST(attributes AS VARCHAR),"
@@ -170,56 +205,60 @@ def write_events(con, events: list[dict], relations: list[tuple[str, str, str]])
             updates.append(event)
 
     if inserts:
-        con.executemany(
-            INSERT_EVENT,
-            [
-                (
-                    e["event_key"], e["ts"], e["activity"], e["actor"], e["repo"], e["pr_id"],
-                    json.dumps(e["attributes"], separators=(",", ":"), sort_keys=True),
-                    e["classifier_version"], e["content_hash"], e["as_of"],
-                )
-                for e in inserts
-            ],
-        )
+        for batch in _batches(inserts):
+            incoming = con.values(
+                *[
+                    (
+                        e["event_key"], e["ts"], e["activity"], e["actor"], e["repo"], e["pr_id"],
+                        json.dumps(e["attributes"], separators=(",", ":"), sort_keys=True),
+                        e["classifier_version"], e["content_hash"], e["as_of"],
+                    )
+                    for e in batch
+                ]
+            )
+            con.execute(INSERT_EVENT)
     if updates:
-        con.executemany(
-            UPDATE_EVENT,
-            [
-                (
-                    e["ts"], e["activity"], e["actor"], e["repo"], e["pr_id"],
-                    json.dumps(e["attributes"], separators=(",", ":"), sort_keys=True),
-                    e["classifier_version"], e["content_hash"], e["as_of"], e["event_key"],
-                )
-                for e in updates
-            ],
-        )
+        for batch in _batches(updates):
+            incoming = con.values(
+                *[
+                    (
+                        e["event_key"], e["ts"], e["activity"], e["actor"], e["repo"], e["pr_id"],
+                        json.dumps(e["attributes"], separators=(",", ":"), sort_keys=True),
+                        e["classifier_version"], e["content_hash"], e["as_of"],
+                    )
+                    for e in batch
+                ]
+            )
+            con.execute(UPDATE_EVENT)
         # Objects attached to a rewritten event may have changed too (e.g. a
         # merge commit that only a later ingest knows about).
         stale = [e["event_key"] for e in updates]
-        for start in range(0, len(stale), 500):
-            chunk = stale[start : start + 500]
+        for start in range(0, len(stale), BATCH_ROWS):
+            chunk = stale[start : start + BATCH_ROWS]
             placeholders = ",".join("?" * len(chunk))
             chunk_set = set(chunk)
             con.execute(
                 f"DELETE FROM event_objects WHERE event_key IN ({placeholders})", chunk
             )
-            con.executemany(
-                INSERT_REL,
-                [rel for rel in relations if rel[0] in chunk_set],
-            )
+            for batch in _batches([rel for rel in relations if rel[0] in chunk_set]):
+                relations_rel = con.values(*batch)
+                con.execute(INSERT_REL)
 
     rewritten = {e["event_key"] for e in updates}
     fresh_relations = [rel for rel in relations if rel[0] not in rewritten]
     if fresh_relations:
-        con.executemany(INSERT_REL, fresh_relations)
+        for batch in _batches(fresh_relations):
+            relations_rel = con.values(*batch)
+            con.execute(INSERT_REL)
     return len(inserts), len(updates)
 
 
 def write_objects(con, objects: list[dict]) -> None:
-    if objects:
-        con.executemany(
-            INSERT_OBJECT,
-            [
+    if not objects:
+        return
+    for batch in _batches(objects):
+        objects_in = con.values(
+            *[
                 (
                     o["object_type"], o["object_id"], o.get("repo"), o.get("pr_id"),
                     o.get("ticket_keys") or [], o.get("actor"), o.get("state"),
@@ -227,9 +266,10 @@ def write_objects(con, objects: list[dict]) -> None:
                     o.get("message_class"),
                     json.dumps(o.get("attributes") or {}, separators=(",", ":"), sort_keys=True),
                 )
-                for o in objects
-            ],
+                for o in batch
+            ]
         )
+        con.execute(INSERT_OBJECT)
 
 
 def write_run(con, run: dict) -> None:
@@ -375,6 +415,44 @@ def _scan(con, table: str, column: str, dtype: str, predicate: str, params: list
     return int(con.execute(sql, params).fetchone()[0])
 
 
+def object_shape_problems(
+    otype: str,
+    oid: str,
+    state: str | None,
+    key_shape: str = DEFAULT_KEY_SHAPE,
+    key_set: tuple[str, ...] = (),
+) -> list[str]:
+    """Shape problems for one ``objects`` row (shared by verify and the gate)."""
+    problems: list[str] = []
+    prefix = OBJECT_ID_PREFIX.get(otype)
+    if prefix and not str(oid).startswith(prefix):
+        problems.append(f"object {oid!r} does not match its type {otype!r}")
+    elif otype == "PR" and not re.search(r"#\d+$", str(oid)):
+        problems.append(f"PR object id without a numeric id: {oid!r}")
+    elif otype == "COMMIT" and not re.fullmatch(r"COMMIT:[0-9a-f]{7,40}", str(oid)):
+        problems.append(f"COMMIT object id is not a hash: {oid!r}")
+    elif otype == "TICKET":
+        key = str(oid).partition(":")[2]
+        if not re.fullmatch(key_shape, key):
+            problems.append(f"TICKET object id is not a key: {oid!r}")
+        elif key_set and key.upper() not in key_set:
+            problems.append(
+                f"TICKET object id is outside the configured ticket keys: {oid!r}"
+            )
+    elif otype == "PERSON" and not re.fullmatch(ACTOR_RE, str(oid).partition(":")[2]):
+        problems.append(f"PERSON object id is not a pseudonym: {oid!r}")
+    elif otype in ("PRREV", "THREAD") and not re.fullmatch(
+        rf"{otype}:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+:\d+", str(oid)
+    ):
+        problems.append(f"{otype} object id has an unexpected shape: {oid!r}")
+    allowed_states = OBJECT_STATE_BY_TYPE.get(otype)
+    if allowed_states is not None and state is not None and state not in allowed_states:
+        problems.append(
+            f"{otype} {oid!r}: state {state!r} outside {sorted(allowed_states)}"
+        )
+    return problems
+
+
 def verify(con, key_shape: str = DEFAULT_KEY_SHAPE,
            ticket_projects: tuple[str, ...] = DEFAULT_TICKET_PROJECTS,
            ticket_keys: tuple[str, ...] = ()) -> dict:
@@ -466,10 +544,14 @@ def verify(con, key_shape: str = DEFAULT_KEY_SHAPE,
 
     # ---- content class of every identifier-ish column --------------------
     shape_checks = [
+        ("events", "event_key", "VARCHAR", "NOT regexp_matches(v, ?)", [EVENT_KEY_RE]),
         ("events", "actor", "VARCHAR", "NOT regexp_matches(v, ?)", [ACTOR_RE]),
         ("events", "content_hash", "VARCHAR", "NOT regexp_matches(v, ?)", [CONTENT_HASH_RE]),
         ("events", "repo", "VARCHAR", "NOT regexp_matches(v, ?)", [REPO_RE]),
         ("objects", "repo", "VARCHAR", "NOT regexp_matches(v, ?)", [REPO_RE]),
+        ("objects", "actor", "VARCHAR", "v <> '' AND NOT regexp_matches(v, ?)", [ACTOR_RE]),
+        ("objects", "head_commit", "VARCHAR", "v <> '' AND NOT regexp_matches(v, ?)", [HEAD_COMMIT_RE]),
+        ("ingest_runs", "run_id", "VARCHAR", "NOT regexp_matches(v, ?)", [RUN_ID_RE]),
         ("ingest_runs", "source", "VARCHAR", "v NOT IN ('fixture', 'bitbucket-dc')", []),
     ]
     for table, column, dtype, predicate, params in shape_checks:
@@ -530,32 +612,7 @@ def verify(con, key_shape: str = DEFAULT_KEY_SHAPE,
     for otype, oid, state in con.execute(
         "SELECT object_type, object_id, state FROM objects"
     ).fetchall():
-        prefix = OBJECT_ID_PREFIX.get(otype)
-        if prefix and not str(oid).startswith(prefix):
-            problems.append(f"object {oid!r} does not match its type {otype!r}")
-        elif otype == "PR" and not re.search(r"#\d+$", str(oid)):
-            problems.append(f"PR object id without a numeric id: {oid!r}")
-        elif otype == "COMMIT" and not re.fullmatch(r"COMMIT:[0-9a-f]{7,40}", str(oid)):
-            problems.append(f"COMMIT object id is not a hash: {oid!r}")
-        elif otype == "TICKET":
-            key = str(oid).partition(":")[2]
-            if not re.fullmatch(key_shape, key):
-                problems.append(f"TICKET object id is not a key: {oid!r}")
-            elif key_set and key.upper() not in key_set:
-                problems.append(
-                    f"TICKET object id is outside the configured ticket keys: {oid!r}"
-                )
-        elif otype == "PERSON" and not re.fullmatch(ACTOR_RE, str(oid).partition(":")[2]):
-            problems.append(f"PERSON object id is not a pseudonym: {oid!r}")
-        elif otype in ("PRREV", "THREAD") and not re.fullmatch(
-            rf"{otype}:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+:\d+", str(oid)
-        ):
-            problems.append(f"{otype} object id has an unexpected shape: {oid!r}")
-        allowed_states = OBJECT_STATE_BY_TYPE.get(otype)
-        if allowed_states is not None and state is not None and state not in allowed_states:
-            problems.append(
-                f"{otype} {oid!r}: state {state!r} outside {sorted(allowed_states)}"
-            )
+        problems.extend(object_shape_problems(otype, oid, state, key_shape, key_set))
 
     # ---- referential integrity ------------------------------------------
     orphans = con.execute(

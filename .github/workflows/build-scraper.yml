@@ -33,8 +33,10 @@ on:
       - "setup.cfg"
       - "Makefile"
 
+# Least privilege by default (SEC-5). The build/test job only reads the repo;
+# the release job below is the only place that needs `contents: write`.
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: build-scraper-${{ github.ref }}
@@ -46,10 +48,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: "3.12"
 
@@ -81,18 +85,32 @@ jobs:
           print(f"smoke: {report['events']} events, {report['counts']['objects']} objects")
           PY
 
-      - name: Upload scraper artifact (PR preview)
-        if: github.event_name == 'pull_request'
-        uses: actions/upload-artifact@v4
+      - name: Upload scraper artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: megaspeed-scrape-${{ github.sha }}
           path: scrape/dist/megaspeed-scrape
           if-no-files-found: error
           retention-days: 30
 
+  release:
+    name: publish scraper release
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # The only job that can write; the build/test job above cannot (SEC-5).
+    permissions:
+      contents: write
+    steps:
+      - name: Download the built artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: megaspeed-scrape-${{ github.sha }}
+          path: scrape/dist
+
       - name: Create release + tag (main push)
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: scraper-${{ github.sha }}
           name: megaspeed-scrape ${{ github.sha }}

@@ -15,17 +15,146 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
+from . import taxonomy
 from .bundle import Bundle, BundleError, read_bundle
 from .config import Config, load_config
 from .pipeline import fill_derived, recompute_derived
-from .store import connect, ensure_schema, summary, utcnow, verify, write_events, write_objects, write_run
+from .store import (
+    ACTOR_RE,
+    CONTENT_HASH_RE,
+    EVENT_KEY_RE,
+    HEAD_COMMIT_RE,
+    REPO_RE,
+    RUN_ID_RE,
+    connect,
+    ensure_schema,
+    object_shape_problems,
+    summary,
+    utcnow,
+    verify,
+    write_events,
+    write_objects,
+    write_run,
+)
+
+#: Sources this build knows how to name in ``ingest_runs`` (store.verify enforces
+#: the same set, but the gate must reject before a single row is written).
+ALLOWED_SOURCES = ("fixture", "bitbucket-dc")
 
 
 class ImportRejected(RuntimeError):
     """The bundle is structurally fine but may not be merged into this store."""
+
+
+def _matches(pattern: str, value) -> bool:
+    return isinstance(value, str) and re.fullmatch(pattern, value) is not None
+
+
+def validate_bundle(
+    bundle: Bundle,
+    *,
+    key_shape: str,
+    ticket_projects: tuple[str, ...],
+    ticket_keys: tuple[str, ...],
+) -> None:
+    """The pre-write half of the pseudonymisation gate (SEC-1).
+
+    ``read_bundle`` checks the container (checksums, schema, closed
+    vocabularies); this checks the **content class** of every row the scraper
+    sent: actors must be pseudonyms, hashes must be hashes, event keys / run ids
+    / object ids must be identifiers, ticket keys must match the configured
+    scope, and attribute bags must be closed. A violation raises
+    :class:`ImportRejected` *before* the store is opened for writing, so a
+    tampered tgz cannot leave even one row behind.
+
+    It deliberately re-implements nothing from ``verify`` that can be shared:
+    object-id/state shapes come from :func:`store.object_shape_problems`, so the
+    gate and the audit agree by construction.
+    """
+    problems: list[str] = []
+    key_set = tuple(sorted({str(k).strip().upper() for k in ticket_keys or () if str(k).strip()}))
+    projects = tuple(str(p).upper() for p in ticket_projects or ())
+
+    def key_ok(value) -> bool:
+        key = str(value)
+        if not re.fullmatch(key_shape, key):
+            return False
+        if key_set:
+            return key.upper() in key_set
+        return key.partition("-")[0] in projects
+
+    if bundle.source not in ALLOWED_SOURCES:
+        problems.append(f"source {bundle.source!r} is not one of {ALLOWED_SOURCES}")
+    run_info = bundle.manifest.get("run") or {}
+    run_id = run_info.get("run_id")
+    if run_id is not None and not _matches(RUN_ID_RE, str(run_id)):
+        problems.append(f"run_id {run_id!r} is not an identifier")
+
+    object_ids: set[tuple[str, str]] = set()
+    for obj in bundle.objects:
+        otype = obj["object_type"]
+        oid = obj["object_id"]
+        object_ids.add((otype, oid))
+        problems.extend(object_shape_problems(otype, oid, obj.get("state"), key_shape, key_set))
+        actor = obj.get("actor")
+        if actor not in (None, "") and not _matches(ACTOR_RE, str(actor)):
+            problems.append(f"objects.actor {actor!r} is not a pseudonym shape ({oid})")
+        head = obj.get("head_commit")
+        if head not in (None, "") and not _matches(HEAD_COMMIT_RE, str(head)):
+            problems.append(f"objects.head_commit {head!r} is not a commit hash ({oid})")
+        repo = obj.get("repo")
+        if repo not in (None, "") and not _matches(REPO_RE, str(repo)):
+            problems.append(f"objects.repo {repo!r} is not a repo slug ({oid})")
+        message_class = obj.get("message_class")
+        if message_class not in (None, "") and message_class not in taxonomy.MESSAGE_CLASS:
+            problems.append(f"objects.message_class {message_class!r} is outside the vocabulary ({oid})")
+        for key in obj.get("ticket_keys") or []:
+            if not key_ok(key):
+                problems.append(f"objects.ticket_keys {key!r} is outside the configured scope ({oid})")
+        if otype == "PR" and not obj.get("ticket_keys"):
+            problems.append(f"PR object {oid} carries no matched ticket key")
+        try:
+            taxonomy.check_object_attributes(obj.get("attributes") or {})
+        except taxonomy.TaxonomyError as exc:
+            problems.append(f"objects.attributes for {oid}: {exc}")
+
+    for event in bundle.events:
+        key = event["event_key"]
+        if not _matches(EVENT_KEY_RE, key):
+            problems.append(f"events.event_key {key!r} is not an identifier")
+        if not _matches(ACTOR_RE, str(event["actor"])):
+            problems.append(f"events.actor {event['actor']!r} is not a pseudonym shape ({key})")
+        content_hash = event.get("content_hash")
+        if content_hash not in (None, "") and not _matches(CONTENT_HASH_RE, str(content_hash)):
+            problems.append(f"events.content_hash {content_hash!r} is not a digest ({key})")
+        repo = event.get("repo")
+        if repo not in (None, "") and not _matches(REPO_RE, str(repo)):
+            problems.append(f"events.repo {repo!r} is not a repo slug ({key})")
+        if event.get("classifier_version") not in taxonomy.CLASSIFIER_VERSIONS:
+            problems.append(
+                f"events.classifier_version {event.get('classifier_version')!r}"
+                f" is not known ({key})"
+            )
+        try:
+            taxonomy.check_attributes(event.get("attributes") or {})
+        except taxonomy.TaxonomyError as exc:
+            problems.append(f"events.attributes for {key}: {exc}")
+        for object_id in event.get("objects") or []:
+            otype = str(object_id).partition(":")[0]
+            if (otype, object_id) not in object_ids:
+                problems.append(f"event {key} references an object not in the bundle: {object_id}")
+
+    if problems:
+        shown = "\n  - ".join(problems[:50])
+        more = f"\n  … and {len(problems) - 50} more" if len(problems) > 50 else ""
+        raise ImportRejected(
+            f"bundle {bundle.path} violates the pseudonymisation contract;"
+            f" nothing was written:\n  - {shown}{more}"
+        )
 
 
 def _previous_watermark(con, source: str):
@@ -47,7 +176,13 @@ def check_watermark(con, bundle: Bundle) -> None:
 
 
 def import_bundle(cfg: Config, path: str | Path, *, verify_contract: bool = True) -> dict:
-    """Validate ``path`` and load it into ``cfg.db_path``."""
+    """Validate ``path`` and load it into ``cfg.db_path``.
+
+    The order is the gate (SEC-1, prd/11 §6): the full bundle is shape-checked
+    **before** the store is opened, then the merge runs in one transaction and
+    ``verify`` is the final check before ``COMMIT``. A bundle that fails either
+    check leaves the store exactly as it was.
+    """
     bundle = read_bundle(path)
     imported_at = utcnow()
     run_info = dict(bundle.manifest.get("run") or {})
@@ -57,37 +192,59 @@ def import_bundle(cfg: Config, path: str | Path, *, verify_contract: bool = True
     projects = bundle.ticket_projects or cfg.ticket_projects
     keys = bundle.ticket_keys or cfg.ticket_keys
 
+    # SEC-1: nothing below this line may write a row unless every actor, hash,
+    # key and identifier in the bundle is of the expected shape.
+    validate_bundle(
+        bundle, key_shape=cfg.key_shape, ticket_projects=projects, ticket_keys=keys
+    )
+
     cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
     con = connect(cfg.db_path)
     try:
         ensure_schema(con)
         check_watermark(con, bundle)
         before = con.execute("SELECT count(*) FROM events").fetchone()[0]
-        # Derived attributes are a function of the *whole* stored log, so union
-        # the bundle with what the store already knows before writing.
-        fill_derived(con, bundle.events)
-        written, rewritten = write_events(con, bundle.events, bundle.relations)
-        write_objects(con, bundle.objects)
-        derived = recompute_derived(
-            con, {(e["repo"], e["pr_id"]) for e in bundle.events if e.get("repo")}
-        )
-        write_run(
-            con,
-            {
-                "run_id": run_id,
-                "source": source,
-                "as_of": as_of,
-                "source_watermark": bundle.watermark,
-                "classifier_version": bundle.classifier_version,
-                "prs_seen": int(run_info.get("prs_seen") or 0),
-                "prs_kept": int(run_info.get("prs_kept") or 0),
-                "prs_dropped": int(run_info.get("prs_dropped") or 0),
-                "events_written": written,
-                "events_skipped": len(bundle.events) - written,
-            },
-        )
+        report = None
+        con.execute("BEGIN")
+        try:
+            # Derived attributes are a function of the *whole* stored log, so
+            # union the bundle with what the store already knows before writing.
+            fill_derived(con, bundle.events)
+            written, rewritten = write_events(con, bundle.events, bundle.relations)
+            write_objects(con, bundle.objects)
+            derived = recompute_derived(
+                con, {(e["repo"], e["pr_id"]) for e in bundle.events if e.get("repo")}
+            )
+            write_run(
+                con,
+                {
+                    "run_id": run_id,
+                    "source": source,
+                    "as_of": as_of,
+                    "source_watermark": bundle.watermark,
+                    "classifier_version": bundle.classifier_version,
+                    "prs_seen": int(run_info.get("prs_seen") or 0),
+                    "prs_kept": int(run_info.get("prs_kept") or 0),
+                    "prs_dropped": int(run_info.get("prs_dropped") or 0),
+                    "events_written": written,
+                    "events_skipped": len(bundle.events) - written,
+                },
+            )
+            report = verify(con, cfg.key_shape, projects, keys) if verify_contract else None
+            if report is not None and not report["ok"]:
+                raise ImportRejected(
+                    "bundle merged but the store failed the pseudonymisation"
+                    " contract; rolled back:\n  - "
+                    + "\n  - ".join(report["problems"])
+                )
+            con.execute("COMMIT")
+        except Exception:
+            try:
+                con.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
         after = con.execute("SELECT count(*) FROM events").fetchone()[0]
-        report = verify(con, cfg.key_shape, projects, keys) if verify_contract else None
         totals = summary(con)
     finally:
         con.close()

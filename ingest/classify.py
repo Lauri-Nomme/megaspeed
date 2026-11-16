@@ -58,6 +58,7 @@ import json
 import re
 import urllib.request
 from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from . import taxonomy
 
@@ -97,6 +98,36 @@ DEFAULT_TIMEOUT = 180.0
 
 class ClassifyError(RuntimeError):
     """The backend answered something outside the closed vocabulary."""
+
+
+def validate_llm_url(url: str) -> str:
+    """Reject a malformed ``MEGASPEED_LLM_URL`` at startup (SEC-3).
+
+    The local-LLM invariant is only as strong as the URL: the classifier posts
+    **raw comment text** to ``{url}/api/chat``. A typo, a stray ``@`` or a
+    ``file:``/``ftp:`` scheme would otherwise silently ship prose somewhere it
+    must never go. Only ``http``/``https`` with a real host and no userinfo is
+    accepted; the caller decides whether a remote host is allowed.
+    """
+    text = str(url or "").strip()
+    if not text:
+        raise ClassifyError("LLM URL is empty")
+    parts = urlsplit(text)
+    if parts.scheme not in ("http", "https"):
+        raise ClassifyError(
+            f"LLM URL {text!r} must use http or https (got {parts.scheme or 'no scheme'!r})"
+        )
+    if not parts.hostname:
+        raise ClassifyError(f"LLM URL {text!r} has no host")
+    if parts.username is not None or parts.password is not None or "@" in parts.netloc:
+        raise ClassifyError(f"LLM URL {text!r} must not carry userinfo")
+    try:
+        parts.port
+    except ValueError as exc:
+        raise ClassifyError(f"LLM URL {text!r} has a bad port ({exc})") from exc
+    if parts.query or parts.fragment:
+        raise ClassifyError(f"LLM URL {text!r} must not carry a query or fragment")
+    return text
 
 
 # --------------------------------------------------------------------------- #
@@ -282,6 +313,10 @@ class Classifier:
         self.calls = 0
         self.fallbacks = 0
         self.labels: dict[str, int] = {}
+        #: The version of the backend that produced the **most recent** answer.
+        #: A wrapper that degrades to its fallback must stamp the fallback's
+        #: version, not its own (FR-3: a mock label is never ``ollama-v1``).
+        self.last_version = self.version
 
     # -- to implement ----------------------------------------------------
     def classify(self, text: str, kind: str) -> dict:
@@ -390,6 +425,7 @@ class MockClassifier(Classifier):
 
     def classify(self, text: str, kind: str) -> dict:
         _check_kind(kind)
+        self.last_version = self.version
         body = str(text or "").strip()
         if kind == KIND_DESCRIPTION:
             question = bool(re.search(r"\?", body))
@@ -449,7 +485,7 @@ class OllamaClassifier(Classifier):
         max_failures: int = 5,
     ):
         super().__init__()
-        self.url = str(url or DEFAULT_URL).rstrip("/")
+        self.url = validate_llm_url(url or DEFAULT_URL).rstrip("/")
         self.model = str(model or DEFAULT_MODEL)
         self.timeout = float(timeout)
         self.fallback = fallback or MockClassifier()
@@ -484,6 +520,7 @@ class OllamaClassifier(Classifier):
         _check_kind(kind)
         if self.down:
             self.fallbacks += 1
+            self.last_version = self.fallback.version
             return self._count(self.fallback.classify(text, kind))
         try:
             payload = self._chat(self.request_body(text, kind))
@@ -495,8 +532,10 @@ class OllamaClassifier(Classifier):
                 # labels instead of paying a timeout per comment.
                 self.down = True
             self.fallbacks += 1
+            self.last_version = self.fallback.version
             return self._count(self.fallback.classify(text, kind))
         self.failures = 0
+        self.last_version = self.version
         return self._count(labels)
 
     def _chat(self, body: dict) -> Any:
@@ -614,4 +653,5 @@ __all__ = [
     "schema_for",
     "system_prompt",
     "thread_outcome",
+    "validate_llm_url",
 ]

@@ -367,6 +367,7 @@ class Reducer:
                 resolved = bool(comment.get("threadResolved")) or str(comment.get("state") or "OPEN").upper() != "OPEN"
                 thread_objects: list[str] = []
                 labels: dict | None = None
+                classifier_version: str | None = None
                 if comment.get("id") is not None:
                     thread_id = f"THREAD:{repo_label}#{pr.id}:{comment['id']}"
                     thread_objects.append(thread_id)
@@ -388,10 +389,11 @@ class Reducer:
                     # prd/16: one label set per thread, taken from the comment
                     # that opened it. The raw body never leaves this branch.
                     if comment_action != "UPDATED" and self.classifier is not None:
-                        labels = self._comment_labels(
+                        labels, classifier_version = self._comment_labels(
                             actor, comment.get("text"), severity, stats
                         )
                     if labels is not None:
+                        entry.setdefault("classifier_version", classifier_version)
                         entry.setdefault("comment_type", labels["comment_type"])
                         entry.setdefault("thread_intent", labels["thread_intent"])
                         entry.setdefault("question", labels["question"])
@@ -534,7 +536,9 @@ class Reducer:
                 )
                 attributes["comment_type"] = entry["comment_type"]
                 attributes["thread_outcome"] = outcome
-                attributes["classifier_version"] = self.classifier.version
+                attributes["classifier_version"] = (
+                    entry.get("classifier_version") or self.classifier.version
+                )
                 stats.comment_types[entry["comment_type"]] = (
                     stats.comment_types.get(entry["comment_type"], 0) + 1
                 )
@@ -559,19 +563,25 @@ class Reducer:
             )
 
     # -- prd/16 text classification --------------------------------------
-    def _comment_labels(self, actor: str, text: Any, severity: str, stats: Stats) -> dict | None:
-        """Raw comment body -> closed labels (the body is not retained).
+    def _comment_labels(
+        self, actor: str, text: Any, severity: str, stats: Stats
+    ) -> tuple[dict | None, str | None]:
+        """Raw comment body -> (closed labels, backend version).
 
         ``None`` means "this comment is not dialogue worth labelling": a bot
         notice (a stale-PR auto-decline, a build account) is not a review
         remark, and classifying it would put noise in the comment-tax metric.
         Bot-vs-human is deterministic (prd/02), so it is decided before the
         model is ever asked.
+
+        The version is the backend that actually produced *these* labels: a
+        per-call fallback to the deterministic mock is stamped ``mock-v1``, not
+        the wrapper's ``ollama-v1`` (FR-3).
         """
         assert self.classifier is not None
         if self.actor_kind(actor) == "bot":
             stats.bot_comments_skipped += 1
-            return None
+            return None, None
         body = str(text or "").strip()
         if not body:
             # An attachment-only or empty comment: the residual label, decided
@@ -584,14 +594,15 @@ class Reducer:
                 "question": False,
                 "answered": False,
                 "phase": classify.PHASES_BY_KIND[classify.KIND_COMMENT][0],
-            }
+            }, self.classifier.version
         labels = self.classifier.classify(body, classify.KIND_COMMENT)
+        version = getattr(self.classifier, "last_version", "") or self.classifier.version
         if severity == "mandatory" and labels["comment_type"] != "blocker":
             # DC's own BLOCKER marker is deterministic evidence (prd/02:
             # "comment severity -- or Bitbucket task-type where available") and
             # outranks a model that read the prose as a mere suggestion.
             labels = {**labels, "comment_type": "blocker"}
-        return labels
+        return labels, version
 
     def _reply_answer(
         self, comment: dict, ts: datetime, stats: Stats
@@ -812,6 +823,35 @@ def derive_approvals_lost(events: list[dict]) -> dict[str, bool]:
     return out
 
 
+def _stored_events_for_scope(con, scope) -> dict[tuple[str, int], list[dict]]:
+    """One scan for every PR in ``scope`` (instead of a query per PR, NFR-1/7)."""
+    pairs = sorted(
+        {(repo, int(pr_id)) for repo, pr_id in scope if repo is not None and pr_id is not None}
+    )
+    grouped: dict[tuple[str, int], list[dict]] = {pair: [] for pair in pairs}
+    if not pairs:
+        return grouped
+    for start in range(0, len(pairs), 5_000):
+        scope_rel = con.values(*pairs[start : start + 5_000])
+        rows = con.execute(
+            "SELECT e.repo, e.pr_id, e.event_key, e.ts, e.activity,"
+            " CAST(e.attributes AS VARCHAR)"
+            " FROM events e JOIN scope_rel s"
+            " ON e.repo = s.col0 AND e.pr_id = CAST(s.col1 AS BIGINT)"
+            " ORDER BY e.ts ASC, e.event_key ASC"
+        ).fetchall()
+        for repo, pr_id, key, ts, activity, attrs in rows:
+            grouped[(repo, int(pr_id))].append(
+                {
+                    "event_key": key,
+                    "ts": ts,
+                    "activity": activity,
+                    "attributes": json.loads(attrs or "{}"),
+                }
+            )
+    return grouped
+
+
 def fill_derived(con, events: list[dict]) -> None:
     """Set derived attributes on *this run's* events before they are written.
 
@@ -824,16 +864,10 @@ def fill_derived(con, events: list[dict]) -> None:
     run_events: dict[tuple[str, int], dict[str, dict]] = {}
     for event in events:
         run_events.setdefault((event["repo"], event["pr_id"]), {})[event["event_key"]] = event
+    stored = _stored_events_for_scope(con, scope)
     for repo, pr_id in sorted(scope):
-        rows = con.execute(
-            "SELECT event_key, ts, activity, CAST(attributes AS VARCHAR) FROM events"
-            " WHERE repo = ? AND pr_id = ? ORDER BY ts ASC, event_key ASC",
-            [repo, pr_id],
-        ).fetchall()
         union: dict[str, dict] = {
-            key: {"event_key": key, "ts": ts, "activity": activity,
-                  "attributes": json.loads(attrs or "{}")}
-            for key, ts, activity, attrs in rows
+            row["event_key"]: row for row in stored.get((repo, int(pr_id)), [])
         }
         union.update(run_events.get((repo, pr_id), {}))
         for key, lost in derive_approvals_lost(list(union.values())).items():
@@ -852,32 +886,29 @@ def recompute_derived(con, scope: set[tuple[str, int]]) -> int:
     is the safety net for rows the reducer did not re-emit.
     """
     rewritten = 0
+    updates: list[tuple[str, str]] = []
+    stored = _stored_events_for_scope(con, scope)
     for repo, pr_id in sorted(scope):
-        rows = con.execute(
-            "SELECT event_key, ts, activity, CAST(attributes AS VARCHAR) FROM events"
-            " WHERE repo = ? AND pr_id = ? ORDER BY ts ASC, event_key ASC",
-            [repo, pr_id],
-        ).fetchall()
-        events = [
-            {
-                "event_key": key,
-                "ts": ts,
-                "activity": activity,
-                "attributes": json.loads(attrs or "{}"),
-            }
-            for key, ts, activity, attrs in rows
-        ]
+        events = stored.get((repo, int(pr_id)), [])
         by_key = {event["event_key"]: event for event in events}
         for key, lost in derive_approvals_lost(events).items():
             event = by_key[key]
             if event["attributes"].get("approvals_lost") is lost:
                 continue
             event["attributes"]["approvals_lost"] = lost
-            con.execute(
-                "UPDATE events SET attributes = CAST(? AS JSON) WHERE event_key = ?",
-                [json.dumps(event["attributes"], separators=(",", ":"), sort_keys=True), key],
+            updates.append(
+                (
+                    key,
+                    json.dumps(event["attributes"], separators=(",", ":"), sort_keys=True),
+                )
             )
-            rewritten += 1
+    for start in range(0, len(updates), 5_000):
+        update_rel = con.values(*updates[start : start + 5_000])
+        con.execute(
+            "UPDATE events SET attributes = CAST(s.col1 AS JSON)"
+            " FROM update_rel s WHERE events.event_key = s.col0"
+        )
+        rewritten += len(updates[start : start + 5_000])
     return rewritten
 
 

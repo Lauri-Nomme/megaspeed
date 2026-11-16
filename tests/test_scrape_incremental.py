@@ -69,7 +69,7 @@ def _pr(pr_id: int, state: str, activities: list[dict]) -> dict:
     }
 
 
-def _bundle(*, approval_on_open_pr: bool = False) -> dict:
+def _bundle(*, approval_on_open_pr: bool = False, include_old_pr: bool = False) -> dict:
     records = [
         _pr(1, "MERGED", [
             _activity(101, "OPENED", 0, ADA),
@@ -88,6 +88,14 @@ def _bundle(*, approval_on_open_pr: bool = False) -> dict:
         # A late approval: the PR's updatedDate moves, so it is re-fetched.
         open_activities.append(_activity(303, "APPROVED", 90, ADA))
     records.append(_pr(3, "OPEN", open_activities))
+    if include_old_pr:
+        # A PR first seen *after* the watermark, opened 100 days earlier. Its
+        # whole history is older than ``watermark - overlap_hours`` (FR-1).
+        old = -100 * 24 * 60
+        records.append(_pr(4, "DECLINED", [
+            _activity(401, "OPENED", old, ADA),
+            _activity(402, "DECLINED", old + 40, GRACE),
+        ]))
     return {
         "schema": "megaspeed.fixture/1",
         "projects": [{"key": "QA", "repos": [{"slug": "qa", "pull_requests": records}]}],
@@ -112,10 +120,15 @@ class IncrementalScrapeTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def ingest(self, *, approval_on_open_pr: bool = False) -> dict:
+    def ingest(self, *, approval_on_open_pr: bool = False, include_old_pr: bool = False) -> dict:
         return run(
             self.cfg,
-            FixtureTransport(_bundle(approval_on_open_pr=approval_on_open_pr)),
+            FixtureTransport(
+                _bundle(
+                    approval_on_open_pr=approval_on_open_pr,
+                    include_old_pr=include_old_pr,
+                )
+            ),
             "fixture",
             out=self.bundle_path,
             state_dir=self.state_dir,
@@ -165,6 +178,34 @@ class IncrementalScrapeTests(unittest.TestCase):
             rows = con.execute(
                 "SELECT count(*) FROM events WHERE pr_id = 3 AND activity = 'pr_approved'"
             ).fetchone()[0]
+        finally:
+            con.close()
+        self.assertEqual(rows, 2)
+
+    def test_a_pr_first_seen_below_the_watermark_keeps_its_full_history(self):
+        """FR-1: age is irrelevant for a PR this scraper has never ingested."""
+        first = self.ingest()
+        self.assertEqual(first["prs_kept"], 3)
+
+        second = self.ingest(include_old_pr=True)
+        self.assertTrue(second["verified"], second["problems"])
+        self.assertEqual(second["events_dropped_watermark"], 0)
+        self.assertEqual(second["prs_kept"], 2)  # the tie (PR 2) + the never-seen old PR
+        self.assertEqual(second["events_new"], 2)  # PR 4 opened + declined
+        con = connect(self.cfg.db_path, read_only=True)
+        try:
+            rows = con.execute("SELECT count(*) FROM events WHERE pr_id = 4").fetchone()[0]
+        finally:
+            con.close()
+        self.assertEqual(rows, 2)
+
+        # And once its history is in the store, it is settled like any other
+        # closed PR -- no repeated full read, no duplicate events.
+        third = self.ingest(include_old_pr=True)
+        self.assertEqual(third["events_new"], 0)
+        con = connect(self.cfg.db_path, read_only=True)
+        try:
+            rows = con.execute("SELECT count(*) FROM events WHERE pr_id = 4").fetchone()[0]
         finally:
             con.close()
         self.assertEqual(rows, 2)

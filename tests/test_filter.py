@@ -37,6 +37,7 @@ def _bundle(title: str, description: str, branch: str, message: str) -> dict:
         "title": title,
         "description": description,
         "reviewers": [],
+        "properties": {},
     }
     commit = {
         "id": "a" * 40,
@@ -152,6 +153,79 @@ class TicketProjectFilterTests(unittest.TestCase):
                 self.assertEqual(keys, ["TICKET:DEL-12"])
             finally:
                 con.close()
+
+
+class _ListWithoutDescription(FixtureTransport):
+    """A source whose list projection omits ``description`` (FR-2)."""
+
+    def get(self, path: str, params: dict | None = None) -> dict:
+        payload = super().get(path, params)
+        if path.endswith("/pull-requests"):
+            return {
+                **payload,
+                "values": [
+                    {key: value for key, value in row.items() if key != "description"}
+                    for row in payload["values"]
+                ],
+            }
+        return payload
+
+
+class DescriptionOnlyMatchTests(unittest.TestCase):
+    def _cfg(self, root: Path) -> Config:
+        return Config(
+            db_path=root / "store.duckdb",
+            identity_path=root / "identity.json",
+            ticket_regex=REGEX,
+            key_shape=SHAPE,
+            repos=[("QA", "qa")],
+            ticket_projects=("DEL", "FIX"),
+        )
+
+    def test_a_key_only_in_the_description_survives_a_trimmed_list_row(self):
+        """The pre-filter must fetch the detail record, not drop the PR (FR-2)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = self._cfg(root)
+            bundle = _bundle(
+                title="no key in the title",
+                description="This implements DEL-11 in the parser",
+                branch="feature/no-key-here",
+                message="no key in the commit either",
+            )
+            report = run(cfg, _ListWithoutDescription(bundle), source="fixture")
+
+            self.assertEqual(report["prs_seen"], 1)
+            self.assertEqual(report["prs_kept"], 1)
+            self.assertEqual(report["prs_dropped"], 0)
+            self.assertEqual(report["requests_by_kind"].get("detail"), 1)
+            self.assertEqual(report["keys_by_placement"].get("description"), 1)
+            con = connect(cfg.db_path, read_only=True)
+            try:
+                keys = [
+                    row[0]
+                    for row in con.execute(
+                        "SELECT object_id FROM objects WHERE object_type = 'TICKET'"
+                    ).fetchall()
+                ]
+                self.assertEqual(keys, ["TICKET:DEL-11"])
+            finally:
+                con.close()
+
+    def test_a_trimmed_list_row_with_no_key_anywhere_is_still_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = self._cfg(root)
+            bundle = _bundle(
+                title="no key",
+                description="still no key, just prose",
+                branch="feature/no-key",
+                message="no key",
+            )
+            report = run(cfg, _ListWithoutDescription(bundle), source="fixture")
+            self.assertEqual(report["prs_kept"], 0)
+            self.assertEqual(report["prs_dropped"], 1)
+            self.assertEqual(report["requests_by_kind"].get("detail"), 1)
 
 
 if __name__ == "__main__":

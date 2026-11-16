@@ -24,15 +24,17 @@ without a live LLM:
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 from ingest import classify, fixtures, taxonomy
 from ingest.bitbucket import PullRequest
-from ingest.config import Config
+from ingest.config import Config, load_config
 from ingest.gitclass import PushClassifier
 from ingest.importer import import_bundle
 from ingest.pipeline import KeyFilter, Reducer, Stats, run
@@ -442,6 +444,43 @@ class ConstructionTests(unittest.TestCase):
         self.assertIsInstance(classify.for_scrape(self.cfg, "bitbucket-dc"), classify.MockClassifier)
 
 
+class LLMUrlValidationTests(unittest.TestCase):
+    """SEC-3: a mistyped endpoint must fail at startup, not ship prose off-box."""
+
+    def test_valid_http_and_https_urls_pass(self):
+        for url in (
+            "http://127.0.0.1:11434",
+            "http://10.43.36.10:11434",
+            "https://llm.example.invalid:11434",
+        ):
+            with self.subTest(url=url):
+                self.assertEqual(classify.validate_llm_url(url), url)
+
+    def test_malformed_urls_are_rejected(self):
+        for url in (
+            "",
+            "not-a-url",
+            "ftp://llm.example.invalid",
+            "file:///etc/passwd",
+            "http://",
+            "http://user:secret@llm.example.invalid:11434",
+            "http://llm.example.invalid:notaport",
+            "http://llm.example.invalid:11434?exfiltrate=1",
+        ):
+            with self.subTest(url=url):
+                with self.assertRaises(classify.ClassifyError):
+                    classify.validate_llm_url(url)
+
+    def test_the_ollama_backend_refuses_a_malformed_url(self):
+        with self.assertRaises(classify.ClassifyError):
+            classify.OllamaClassifier("ftp://llm.example.invalid")
+
+    def test_load_config_rejects_a_malformed_env_url(self):
+        with mock.patch.dict(os.environ, {"MEGASPEED_LLM_URL": "http://user@evil.invalid:11434"}):
+            with self.assertRaises(SystemExit):
+                load_config()
+
+
 # --------------------------------------------------------------------------- #
 # vocabulary + --verify
 # --------------------------------------------------------------------------- #
@@ -611,6 +650,36 @@ class ReducerLabelTests(unittest.TestCase):
         self.assertEqual(thread["attributes"]["classifier_version"], "mock-v1")
         self.assertEqual(self.stats.comment_types, {"nit": 1})
         self.assertEqual(self.stats.thread_outcomes, {"unresolved": 1})
+
+    def test_a_mock_fallback_is_stamped_mock_v1_not_ollama_v1(self):
+        """FR-3: a per-call degrade must not claim the model produced the label."""
+        def opener(request, timeout):
+            raise OSError("connection refused")
+
+        classifier = classify.OllamaClassifier(
+            "http://llm.invalid:11434", opener=opener, max_failures=1
+        )
+        reducer = Reducer(
+            self.cfg,
+            IdentityTable(self.cfg.identity_path),
+            KeyFilter.build(self.cfg.ticket_regex, self.cfg.key_shape, self.cfg.ticket_projects),
+            AS_OF,
+            classifier=classifier,
+        )
+        pr = _pr(activities=[
+            _activity(1, "OPENED", 0, ADA),
+            _activity(2, "COMMENTED", 5, GRACE,
+                      comment=_comment(101, "nit: rename this variable"),
+                      commentAction="ADDED"),
+        ])
+        stats = Stats()
+        reducer.reduce(pr, ["PROJ-1"], pr.activities, stats)
+        thread = next(
+            obj for obj in stats.objects
+            if obj["object_type"] == "THREAD" and obj["object_id"].endswith(":101")
+        )
+        self.assertEqual(thread["attributes"]["classifier_version"], "mock-v1")
+        self.assertEqual(classifier.fallbacks, classifier.calls)
 
     def test_dc_blocker_severity_outranks_the_text_label(self):
         # The prose is a suggestion; DC's own BLOCKER marker wins (deterministic
