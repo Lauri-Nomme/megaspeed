@@ -1,44 +1,44 @@
 # STATE — megaspeed · LIVE
 
-Live behind nginx (→ `127.0.0.1:8766`), tenants. GitHub: `Lauri-Nomme/megaspeed` (private, install-details scrubbed).
-Tests: **321** (`tests/`) + **46** (`scrape/tests`) green. CI builds a tagged release of the scraper.
+Live behind nginx (→ `127.0.0.1:8766`), tenants. GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
+Tests: **321** (`tests/`) + **46** (`scrape/tests`) green. Worktrees: `ui-fixes`(merged), `jira-lab`(merged), `jira-ingest`(running).
 
 ## Scrape (airgapped) — full value in one pass
 
-Ticket-set scoping (`MEGASPEED_TICKET_KEYS`/`_FILE`) · pre-filter + watermark + settled-PR finality +
-early termination · `push_class` (shallow git cache, patch-id/range-diff) · diff size (`lines_added/removed`)
-· LLM classification (`comment_type`, `thread_outcome`, `question`+`phase`) via `qwen3-30b-a3b` on precision.
-Import is a **pre-write gate** (validates the whole bundle, rolls back on failure) and batched (~90× faster).
+Ticket-set scoping · pre-filter + watermark + settled-PR finality · `push_class` (patch-id) · diff size ·
+LLM classification via `qwen3-30b-a3b` (precision). Import = pre-write gate, batched (~90×). Business-hours
+calendar (overrides/vacations/EE holidays) + vacation-blocking insight.
 
-## Analysis → suggested rules
+## Analysis → suggested rules — FIRES on real data now
 
-`analysis/` → `GET /api/insights` → **Rules** view. 9 metrics → ranked suggestions. **Business-hours
-calendar** (prd/19): per-person overrides, vacations, EE holidays incl half-days, `business_hours()`
-applied everywhere, vacation-blocking insight. `hours_mode` = business when a calendar applies.
+`data/del2.duckdb` (the re-seeded corpus, full pipeline) → 1484 events, push_class
+content=186/pure_rebase=28/conflict=12, 375 classified threads, diff size 131/131.
+Analysis (business hours): **rework-loops** (p90 4 rounds), **comment-tax** (15% of threads rejected/walked
+back, top type `question`), **conformance-rounds** fire. `rebase-waste` populated but honestly silent (0
+approvals lost on pure rebase); `pr_size` populated but silent (large PRs aren't slower — honest negative).
 
-## Reviews + fixes (this cycle)
+## Jira
 
-- **Product review** (`docs/review-product.md`) · **adversarial review** (`docs/review-adversarial.md`) ·
-  **QA round-2 UI/UX** (`docs/QA-round2.md`).
-- **Fixed (High)**: SEC-1 import gate · SEC-2 eval/ws bridge auth · FR-1 watermark vs never-seen PR ·
-  NFR-1 import speed · NFR-2 timeline loads newest · UI: DEL-1 label, scope banner, queue `author`,
-  drill-down · responder-vs-blocker attribution · dependents · DES-3 honest thread_outcome · censoring.
-- **Corpus** now exercises everything: rebases (pure + conflict), thread resolution, sentinel (`frank`),
-  reviewer removal, merge commits, varied PR sizes.
+**Jira DC lab** up (`jira-lab` :8090, Jira 9.17.5, DEL project/epic/100 stories/sprints/native worklogs;
+Tempo fell back to native worklogs). **Jira ingest** being built (worktree `jira-ingest`).
 
-## Next
+## Scrape reliability bugs found (QUEUED — from the 2 h scrape that died 3×)
 
-- [ ] **Fresh scrape of the NEW corpus** (bb-lab-b DEL re-seeded with all features) → `data/del3.duckdb`,
-      so `rebase-waste`/`comment-tax`/`pr_size`/`sentinel-queue` fire on real data. (The `del2` re-scrape
-      was killed — it was scraping the pre-reseed corpus.)
-- [ ] Roadmap: Jira+Tempo (Story/Epic/Sprint) · stacked-PR cascade · flow-efficiency/survival ·
-      simulation · deferred UI items (B6/B9–B21, G2–G12 in `docs/QA-round2.md`).
+1. `transport.py` doesn't retry `ConnectionResetError` → kills the run.
+2. A crash loses everything (no incremental bundle/watermark save).
+3. A 404 on `/pull-requests/{id}/commits` aborts the scrape (should skip the PR).
+4. Silent partial-bundle success (5 PRs → "successful" bundle, exit 0).
+5. Scrape raced an in-flight corpus rebuild (concurrency).
 
-## LLM (precision box)
+→ Fix after `jira-ingest` lands (both touch `ingest/`).
 
-Ollama `qwen3-30b-a3b:2507` (30B MoE / ~3B active, CPU) — `http://10.43.36.10:11434`; logproxy `:11435`.
+## Next / roadmap
+
+- [ ] Merge `jira-ingest`; fix the 5 scrape-reliability bugs.
+- [ ] Jira layer analysis (waiting-time decomposition, carry-over, worklog cross-check) once Story/Epic/Sprint land.
+- [ ] Stacked-PR cascade · flow-efficiency/survival · simulation.
 
 ## Open (production)
 
 - [ ] Production Bitbucket DC URL + auth (`MEGASPEED_BB_*`). [ ] Jira keys (`MEGASPEED_TICKET_KEYS`).
-- [ ] Lab license expired — read-only works, pushes need the clock-shift shim (see `corpus/README.md`).
+- [ ] Lab license expired (read-only works; pushes need clock-shift shim).
