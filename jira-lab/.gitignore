@@ -1,0 +1,4 @@
+# Jira instance data (bind mount of $JIRA_HOME) - never commit
+home/
+__pycache__/
+*.pyc

@@ -1,0 +1,202 @@
+# jira-lab — Jira Data Center fixture for megaspeed ingest testing
+
+A local, scripted Jira **Data Center** instance that mirrors the Bitbucket DC
+corpus (`corpus/generate.py`, project `DEL`) so the ingest can pull
+Story/Epic/Sprint + worklogs from Jira and join them with the PR data from the
+Bitbucket labs (`~/dev/hans/lab/bb-lab-a|b`).
+
+Everything here is unattended and repeatable: container bring-up, the Jira
+setup wizard, the data seed and the verification are four scripts. No browser
+clicks, no manual license entry.
+
+| | |
+|---|---|
+| Container | `jira-lab` (nerdctl, `--restart unless-stopped`) |
+| Image | `atlassian/jira-software:9.17.5-jdk17` (Jira Software DC 9.17 LTS) |
+| URL | <http://localhost:8090> |
+| Sysadmin | `admin` / `admin-lab-pw` |
+| Data | `jira-lab/home/jira-lab` (bind mount of `$JIRA_HOME`) |
+| License | Atlassian's public **timebomb** Jira Software DC license (10 users, non-expiring on 9.17.5) |
+
+## Quick start
+
+```bash
+./jira-lab/lab-up.sh      # pull image, start container, wait for FIRST_RUN
+./jira-lab/setup.py       # walk the setup wizard (license, base URL, admin)
+./jira-lab/seed.py        # project DEL, epic DEL-1, DEL-100..199, sprints, worklogs
+./jira-lab/verify.py      # REST checks (exit 0 = fixture is intact)
+```
+
+Total wall clock on this host: ~2 min for `lab-up.sh` + `setup.py`, ~15 s for
+`seed.py` once the app is warm.
+
+Reset to a blank instance (needed to re-arm the license window):
+
+```bash
+PURGE=1 ./jira-lab/lab-down.sh && ./jira-lab/lab-up.sh
+./jira-lab/setup.py && ./jira-lab/seed.py
+```
+
+## Licensing (the one non-obvious part)
+
+Jira has **no** unattended-setup properties file (unlike Bitbucket's
+`bitbucket.properties` + `setup.*` keys), so the wizard is driven over HTTP by
+`setup.py`. The license itself is Atlassian's published **3-hour timebomb
+license** for "Jira Software Data Center, 10 users":
+
+<https://developer.atlassian.com/platform/marketplace/timebomb-licenses-for-testing-server-apps/>
+
+* no Atlassian account, no my.atlassian.com, no clock shifting, no patching of
+  the product (the Bitbucket lab's `hack-unlicensed.sh` is *not* needed here —
+  Jira has no unlicensed path, and it doesn't have to);
+* the key lives in `jira-lab/license.txt` (single line) and is applied by the
+  wizard's license step;
+* Atlassian publishes this key as "expires in 3 hours", but on 9.17.5 Jira
+  stores it as a *developer test license*: `Evaluation: false`, `SEN-500`, and
+  **no expiry/maintenance date at all** in the startup license dump (verified
+  across restarts), so the lab stays writable. If a future build does enforce
+  the 3-hour window, Jira drops into read-only mode (REST GETs still work,
+  writes are refused) and the fix is to recreate the home
+  (`PURGE=1 … lab-down.sh`) and re-run `setup.py` + `seed.py`, or to drop a
+  30-day evaluation license into `license.txt`;
+* 10 seats, 7 used (admin + alice/bob/carol/dave/erin/frank).
+
+`jira-lab/app-license.txt` holds the matching *Data Center app* timebomb
+license; it is unused because Tempo could not be installed (see below).
+
+## What is seeded
+
+| Thing | Value |
+|---|---|
+| Project | `DEL` "Delivery Platform", company-managed Scrum (board type `scrum`) |
+| Epic | `DEL-1` "Delivery platform epic" |
+| Stories | `DEL-100` … `DEL-199` (100), same 20 themes/titles as the Bitbucket corpus |
+| Assignees | `AUTHORS[(i * 7 + 2) % 5]` — exactly the Bitbucket PR author rotation |
+| Epic link | every story linked to `DEL-1` (field id is discovered at runtime) |
+| Sprints | `DEL Sprint 1` (closed, DEL-100..129), `DEL Sprint 2` (closed, DEL-130..159), `DEL Sprint 3` (active, DEL-160..189) |
+| Backlog | DEL-190..199 |
+| Statuses | all stories in closed sprints `Done`; active sprint ≈30 % Done / 40 % In Progress / 30 % To Do |
+| Worklogs | 199 **native Jira worklogs**, 1–3 per story, authored by the assignee (sometimes a second engineer), backdated into 2026-08-17 … 2026-11-12 |
+| Users | alice, bob, carol, dave, erin, frank (+ admin), password `lab-pw-<name>`, Jira Software access |
+
+Descriptions carry `Epic: DEL-1`, `Ticket: DEL-xxx`, `Area:` and `Repo:` — the
+same shape as the Bitbucket PR descriptions, so both sources join on the ticket
+key. The seed is deterministic (fixed RNG seed `20261115`) and idempotent:
+re-running skips anything that already exists.
+
+## REST verification
+
+`verify.py` runs 24 checks; the interesting endpoints are:
+
+```bash
+# epic + stories (JQL)
+curl -s -u admin:admin-lab-pw \
+  'http://localhost:8090/rest/api/2/search?jql=project=DEL%20AND%20issuetype=Story&maxResults=3&fields=summary,assignee,status'
+
+# epic
+curl -s -u admin:admin-lab-pw http://localhost:8090/rest/api/2/issue/DEL-1
+
+# board + sprints (Agile REST)
+curl -s -u admin:admin-lab-pw 'http://localhost:8090/rest/agile/1.0/board?projectKeyOrId=DEL'
+curl -s -u admin:admin-lab-pw 'http://localhost:8090/rest/agile/1.0/board/1/sprint'
+
+# sprint membership
+curl -s -u admin:admin-lab-pw 'http://localhost:8090/rest/agile/1.0/sprint/3/issue?maxResults=2'
+
+# worklogs (native, per issue)
+curl -s -u admin:admin-lab-pw http://localhost:8090/rest/api/2/issue/DEL-100/worklog
+
+# worklogs in bulk (issue search with the worklog field)
+curl -s -u admin:admin-lab-pw \
+  'http://localhost:8090/rest/api/2/search?jql=key%20in%20(DEL-100,DEL-101)&fields=worklog'
+```
+
+Observed result on the seeded lab:
+
+```
+  [ok] Jira version 9.17.5
+  [ok] Jira Software DC license: 10 seats, 7 used
+  [ok] project DEL exists / project type 'software'
+  [ok] epic DEL-1 = 'Delivery platform epic'
+  [ok] story count = 100 (expected 100)
+  [ok] keys are DEL-100..DEL-199
+  [ok] 100/100 stories linked to DEL-1 (field customfield_10100)
+  [ok] assignees match the Bitbucket author rotation
+  [ok] board 1 type 'scrum'
+  [ok] sprint 'DEL Sprint 1' state=closed / 'DEL Sprint 2' state=closed / 'DEL Sprint 3' state=active
+  [ok] sprint membership {'DEL Sprint 1': 30, 'DEL Sprint 2': 30, 'DEL Sprint 3': 30}
+  [ok] 199 native worklogs across 100 stories
+  [ok] worklog authors = {'alice': 45, 'bob': 40, 'carol': 38, 'dave': 38, 'erin': 38}
+24/24 checks passed
+```
+
+## Tempo: NOT installed (documented fallback)
+
+Tempo Timesheets could not be installed in this lab, and worklogs are therefore
+**native Jira worklogs** (which is also what the Jira REST API exposes without
+any add-on):
+
+* the Marketplace artifact is not fetchable unattended — every documented
+  download URL (`/download/apps/<id>/version/<build>`,
+  `/download/plugins/<key>/versions/<id>`, the `binary` link from the
+  Marketplace API) returns the Marketplace SPA shell or 404 without a browser
+  session / Atlassian ID login, and Jira's UPM install-from-URL uses the same
+  endpoint;
+* the DC builds the public API exposes (Tempo 19.6/20.x) target Jira 10/11, not
+  9.17; the Jira-9 line is not listed without paging deep into the version
+  history;
+* even with the jar, Tempo needs its own app license and its own setup wizard
+  (Tempo Platform/Accounts bootstrap), which is more manual work than the lab
+  warrants.
+
+`jira-lab/app-license.txt` (Atlassian's public 3-hour DC **app** timebomb
+license) is committed so a future attempt has the licensing piece ready:
+`PUT /rest/plugins/1.0/<pluginKey>-key/license` with that key. If Tempo is ever
+installed, its worklogs are the same records (`/rest/tempo-timesheets/4/worklogs`
+reads the native worklog store), so the ingest contract does not change.
+
+## Notes / known quirks
+
+* **Jira Software app install ordering.** The `jira-software` image installs
+  the Jira Software application from
+  `WEB-INF/application-installation/jira-software-application` on the very
+  first boot — which happens *before* the setup wizard, i.e. with no license in
+  the database. Jira then writes `$JIRA_HOME/plugins/install-app-info` without
+  enabling the app, and a plain restart does not re-run the installation: the
+  instance stays "Jira Core" (no `/rest/agile`, no `software` project type).
+  `setup.py` detects this (`/rest/api/2/project/type/software/accessible`),
+  clears the marker, restarts once and re-checks. `--no-fix-app` skips it.
+* **The wizard's admin step** creates the account but re-renders the step
+  instead of redirecting (reproduced on every fresh 9.17.5 install); `setup.py`
+  notices the side effect and continues at the mail step.
+* **Issue keys.** Jira numbers issues sequentially and exposes no API to set
+  the counter, so `seed.py` creates 98 filler issues after `DEL-1` and deletes
+  them again to make the stories land on `DEL-100..DEL-199`. The project only
+  ever contains the epic plus the 100 stories.
+* **Created/updated timestamps** are the seed time (Jira does not accept them
+  via REST); only the worklogs are backdated into the corpus window. If an
+  ingest rule needs ticket open dates spread over the window, that is a DB
+  update, not a REST one.
+* Restarting the container is safe (data and license live in the H2 DB under
+  `jira-lab/home/jira-lab`); the Jira Software app stays enabled.
+* `/rest/api/2/serverInfo` reports `"deploymentType": "Server"` — Jira reports
+  that for every self-managed instance. This *is* Data Center: DC license,
+  `cluster.properties` (`jira.node.id=jira-lab-node-1`, shared home under
+  `$JIRA_HOME/shared`) and `ClusteringLauncher` in the log.
+* No `-jdk21` tag exists for 9.17 (JDK 21 support starts with Jira 10); the
+  image runs JDK 17.
+* Ports: 8090 was chosen because 7990/7991/7999/7998 belong to the Bitbucket
+  labs, 8766 to another local service, and 8080 is taken on this host.
+
+## Files
+
+| File | Purpose |
+|---|---|
+| `config.env` | ports, image tag, heap, sysadmin creds, license paths |
+| `license.txt` | Jira Software DC 10-user 3-hour timebomb license |
+| `app-license.txt` | DC app 3-hour timebomb license (for a Tempo attempt) |
+| `lab-up.sh` | pull image, create/start `jira-lab`, wait for `/status` |
+| `lab-down.sh` | remove the container (`PURGE=1` deletes the home) |
+| `setup.py` | unattended setup wizard + Jira Software app repair |
+| `seed.py` | idempotent DEL corpus seed (users, project, epic, stories, sprints, worklogs) |
+| `verify.py` | read-only REST/Agile verification (24 checks) |
