@@ -849,6 +849,11 @@ def insights(request: Request):
     rules, which carry a pseudonym in ``scope`` and nothing else. Ranking is
     impact hours × confidence, and ``hours_mode`` is ``business`` when the
     tenant's calendar applies (prd/19), ``wall-clock`` otherwise.
+
+    The ticket layer (prd/21) rides along: ``jira`` says whether the store has
+    one, and the decomposition / carry-over / churn / worklog / conformance
+    metrics and their rules are added when it does. A store without the Jira
+    ingest reports ``available: false`` on each of them instead of zeroes.
     """
     unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["insights"]))
     if unknown is not None:
@@ -865,12 +870,16 @@ def insights(request: Request):
     try:
         with store_conn(path) as con:
             court = _ballcourt(con, tenant, path)
-            window = insights_rules.window_for(court, _days(days))
+            # prd/21: the ticket layer is loaded before the window, because a
+            # Jira-only store's earliest item is a story, not a PR.
+            jira = insights_rules.load_jira(con, court)
+            window = insights_rules.window_for(court, _days(days), jira)
             threads = insights_rules.load_threads(con)
             bots = insights_rules.load_bots(con)
             sizes = insights_rules.load_pr_sizes(con)
             payload = insights_rules.insights(
-                court, threads, window, level=level, bots=bots, sizes=sizes
+                court, threads, window, level=level, bots=bots, sizes=sizes,
+                jira=jira,
             )
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
