@@ -24,6 +24,15 @@ export function fmtImpact(hours) {
 /** "median_hours" -> "median", "merged_prs" -> "merged PRs". */
 export function evidenceLabel(key) {
   if (key === 'diff_size_pending') return 'diff size';
+  // prd/22: the stack evidence reads as prose, not as snake_case.
+  const stacked = {
+    re_review_hours: 're-review',
+    depth_median: 'median depth',
+    depth_max: 'max depth',
+    critical_path_hours: 'critical path',
+    stacked_prs: 'stacked PRs',
+  }[key];
+  if (stacked) return stacked;
   const label = String(key)
     .replace(/_hours$/, '')
     .replace(/_/g, ' ')
