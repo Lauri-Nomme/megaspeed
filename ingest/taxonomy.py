@@ -108,6 +108,13 @@ OBJECT_TYPES = frozenset(
 
 # A commit hash: DC uses full 40-hex, abbreviated forms are still hashes.
 HASH = re.compile(r"^[0-9a-f]{7,40}$")
+# A one-way digest of a branch ref (prd/22). The branch *name* never crosses the
+# boundary -- a DC branch is ``DEL-101-add-login-form-validation``, i.e. the
+# ticket summary in slug form, which prd/02 forbids (schema.sql has no branch
+# column, and a summary is not a classification). What the stack DAG needs is
+# only equality (``A.toRef == B.fromRef``), and a digest gives that without the
+# name. 16 hex chars, the same shape as ``content_hash``.
+REF_DIGEST = re.compile(r"^[0-9a-f]{16}$")
 # A ticket key used as an *attribute* value (the epic link on a Story object).
 # Ticket keys are explicitly allowed to cross (prd/02); this shape is the same
 # default ``key_shape`` the store validates, and it can never hold prose.
@@ -207,6 +214,14 @@ OBJECT_ATTRIBUTE_SPEC: dict[str, Any] = {
     "thread_outcome": THREAD_OUTCOME,
     "classifier_version": CLASSIFIER_TOKEN,
     "merge_commit": HASH,
+    # prd/22 "stacked-PR cascade": the PR's source and target refs as one-way
+    # digests. Equal digests mean "same branch", so ``A.target_ref ==
+    # B.source_ref`` is the stack edge -- the branch name itself is never stored
+    # (prd/02; it is the ticket summary in slug form). Absent when the source
+    # payload carried no ``fromRef``/``toRef`` display id, which the analysis
+    # reads as "stack depth unknown", never as depth 0.
+    "source_ref": REF_DIGEST,
+    "target_ref": REF_DIGEST,
     # prd/16 "PR diff size": ``git diff --numstat <target>...<head>`` totals on
     # the PR's final head. Integers only; both absent when the diff could not be
     # computed (the analysis layer reads that as "pending", never as zero).

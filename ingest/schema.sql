@@ -6,6 +6,12 @@
 -- column for a title, description, commit message, comment body, branch name or
 -- diff -- and ingest/store.py refuses to run if one appears.
 --
+-- A PR's source/target branch is the one identifier the stack analysis needs
+-- (prd/22) and the one the contract forbids by name: a DC branch is the ticket
+-- summary in slug form. It travels as a one-way digest in
+-- ``objects.attributes`` (``source_ref``/``target_ref``, 16 hex chars), which
+-- answers "same branch?" without ever holding the name.
+--
 -- Natural keys make ingest idempotent: re-running the pipeline inserts nothing
 -- twice (see `event_key`).
 

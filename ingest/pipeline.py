@@ -87,6 +87,26 @@ def _digest(payload: Any) -> str:
     ).hexdigest()
 
 
+def ref_digest(repo: str, ref: Any) -> str | None:
+    """One-way digest of a branch ref (prd/22), or ``None`` when absent.
+
+    The stack DAG only ever asks "is this the same branch?", so equality is all
+    we need -- and a digest is the only form prd/02 allows: a DC branch name is
+    the ticket summary in slug form (``DEL-101-add-login-form-validation``), so
+    storing it would smuggle ticket content into the store (``schema.sql`` has no
+    branch column, and the object-attribute spec accepts only this digest shape).
+
+    The repo is part of the digest because a branch ref is repo-scoped: two
+    repos' ``main`` must not look like the same branch, or a cross-repo
+    "stack" would be invented. 16 hex chars, the same shape as
+    ``events.content_hash``.
+    """
+    branch = str((ref or {}).get("displayId") or "").strip()
+    if not branch:
+        return None
+    return hashlib.blake2b(f"{repo}|{branch}".encode(), digest_size=8).hexdigest()
+
+
 def _line_count(value: Any) -> bool:
     """True for a non-negative int. ``bool`` is an ``int`` in python: exclude it."""
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
@@ -296,6 +316,14 @@ class Reducer:
         merge_properties = (pr.pr.get("properties") or {}).get("mergeCommit") or {}
         if merge_properties.get("id"):
             pr_record["attributes"]["merge_commit"] = str(merge_properties["id"])
+        # prd/22: the source/target refs as one-way digests. Equal digests mean
+        # "same branch", which is the whole of the stack edge; the branch name
+        # never enters the store (see :func:`ref_digest`).
+        for attribute, ref in (("source_ref", pr.pr.get("fromRef")),
+                               ("target_ref", pr.pr.get("toRef"))):
+            digest = ref_digest(repo_label, ref)
+            if digest:
+                pr_record["attributes"][attribute] = digest
         # prd/16 "PR diff size": the scrape's git cache measured the final head's
         # numstat totals. Both counts travel together; an absent block means the
         # size is unknown (analysis reads that as "pending", never as zero).
