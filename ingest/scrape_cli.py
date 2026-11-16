@@ -8,14 +8,21 @@ source -> classify -> pseudonymise -> tgz (prd/11 §7, prd/13).
 megaspeed-scrape --live --repo DEL/delivery-api --repo DEL/delivery-web \\
                  --out export/del.tgz --state-dir export/del.state
 
+# the Jira half: the ticket layer (Epic/Story/Sprint + worklogs)
+megaspeed-scrape --jira --live --project DEL \\
+                 --out export/del-jira.tgz --state-dir export/del.state
+
 # no source credentials needed: replay/produce a synthetic bundle
 megaspeed-scrape --fixture --n 50 --out /tmp/fixture.tgz
+megaspeed-scrape --jira --fixture --out /tmp/jira-fixture.tgz
 ```
 
 Credentials are **never baked into the artifact**: they come from the
 environment (``MEGASPEED_BB_BASE_URL`` + ``MEGASPEED_BB_TOKEN`` or
-``MEGASPEED_BB_USER``/``MEGASPEED_BB_PASSWORD``), and ticket keys/projects /
-bot slugs / repos from the environment or a runtime ``--config`` TOML file.
+``MEGASPEED_BB_USER``/``MEGASPEED_BB_PASSWORD`` for Bitbucket;
+``MEGASPEED_JIRA_BASE_URL`` + ``MEGASPEED_JIRA_USER``/``MEGASPEED_JIRA_PASSWORD``
+or ``MEGASPEED_JIRA_TOKEN`` for Jira), and ticket keys/projects / bot slugs /
+repos from the environment or a runtime ``--config`` TOML file.
 
 Also available as ``python3 -m ingest scrape ...``.
 """
@@ -25,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 from . import __version__, classify
@@ -35,6 +43,7 @@ from .scrape import DEFAULT_OVERLAP_HOURS, default_state_dir, scrape
 from .transport import BitbucketError, FixtureTransport, HttpTransport
 
 DEFAULT_OUT = "export/megaspeed-scrape.tgz"
+DEFAULT_JIRA_OUT = "export/megaspeed-jira.tgz"
 
 
 def _probe(cfg: Config, as_json: bool, bypass_filter: bool) -> int:
@@ -56,6 +65,141 @@ def _probe(cfg: Config, as_json: bool, bypass_filter: bool) -> int:
         print(f"repo           {repo['repo']}: {repo['prs']} PRs ({states}), {repo['commits']} commits")
         print(f"filter         {len(repo['matched_prs'])} matched · {len(repo['unmatched_prs'])} dropped")
     return 0
+
+
+def _jira_transport(cfg: Config, args) -> tuple[object, str, int | None]:
+    """Build the Jira transport + source name for the requested mode."""
+    from .jira_fixtures import generate
+    from .transport import FixtureJiraTransport
+
+    if args.live or args.probe:
+        if not cfg.jira_base_url:
+            raise SystemExit(
+                "jira live mode needs MEGASPEED_JIRA_BASE_URL (and"
+                " MEGASPEED_JIRA_USER/MEGASPEED_JIRA_PASSWORD or MEGASPEED_JIRA_TOKEN)"
+            )
+        from .jira import JiraClient
+
+        transport = HttpTransport(
+            cfg.jira_base_url,
+            token=cfg.jira_auth_token,
+            user=cfg.jira_auth_user,
+            password=cfg.jira_auth_password,
+        )
+        JiraClient(transport, page_limit=cfg.jira_page_limit).check()
+        return transport, "jira-dc", args.limit
+    path = Path(args.fixture_file).expanduser() if args.fixture_file else cfg.fixture_path
+    bundle = (
+        json.loads(path.read_text())
+        if path and path.exists() and args.fixture_file
+        else generate(n=args.n, seed=args.seed if args.seed is not None else cfg.seed)
+    )
+    return FixtureJiraTransport(bundle), "jira-fixture", None
+
+
+def _issue_type_name(row: dict) -> str:
+    """The issue-type *name* out of a search row (Jira returns an object)."""
+    value = (row.get("fields") or {}).get("issuetype")
+    if isinstance(value, dict):
+        return str(value.get("name") or "?")
+    return str(value or "?")
+
+
+def _jira_probe(cfg: Config, transport, as_json: bool) -> int:
+    """Read-only Jira diagnostics: version, board, sprints, issue counts."""
+    from .jira import FIELD_EPIC_LINK, FIELD_SPRINT, FIELD_STORY_POINTS, JiraClient
+    from .scrape_jira import ISSUE_TYPES, jql_for
+
+    client = JiraClient(transport, page_limit=cfg.jira_page_limit, min_interval=0.05)
+    version = (client.check() or {}).get("version")
+    fields = client.field_ids()
+    projects = tuple(cfg.jira_projects or cfg.ticket_projects)
+    report: dict = {
+        "version": version,
+        "projects": list(projects),
+        "requests": client.requests,
+        "fields": {
+            "epic_link": cfg.jira_epic_link_field or fields.get(FIELD_EPIC_LINK),
+            "sprint": cfg.jira_sprint_field or fields.get(FIELD_SPRINT),
+            "story_points": cfg.jira_story_points_field or fields.get(FIELD_STORY_POINTS),
+        },
+        "boards": {},
+        "sprints": {},
+        "issues": {},
+    }
+    for project in projects:
+        board = cfg.jira_board or client.scrum_board(project)
+        report["boards"][project] = board
+        if board:
+            sprints = client.sprints(board)
+            report["sprints"][project] = [
+                {"id": int(s["id"]), "state": s.get("state"), "name": s.get("name")}
+                for s in sprints
+            ]
+        rows = list(client.search(jql_for(project), fields="key,updated,issuetype"))
+        types = Counter(_issue_type_name(row) for row in rows)
+        report["issues"][project] = {"total": len(rows), "types": dict(sorted(types.items()))}
+    report["requests"] = client.requests
+    report["requests_by_kind"] = dict(sorted(client.requests_by_kind.items()))
+    if as_json:
+        print(json.dumps(report, indent=2, default=str))
+        return 0
+    print(f"probe          jira {report['version']} · {report['requests']} requests · read-only")
+    print(f"projects       {', '.join(report['projects'])}  (issue types: {', '.join(ISSUE_TYPES)})")
+    for name, field_id in report["fields"].items():
+        print(f"field          {name:14} {field_id or '— (not discovered)'}")
+    for project, board in report["boards"].items():
+        print(f"board          {project}: {board}")
+        for sprint in report["sprints"].get(project, []):
+            print(f"  sprint {sprint['id']:>4}  {sprint['state']:<7} {sprint['name']}")
+        issues = report["issues"].get(project, {})
+        types = ", ".join(f"{k}={v}" for k, v in (issues.get("types") or {}).items())
+        print(f"issues         {project}: {issues.get('total', 0)} ({types})")
+    return 0
+
+
+def _print_jira_scrape(r: dict) -> None:
+    print(f"source         {r['source']} (run {r['run_id']})")
+    print(f"bundle         {r['bundle']}  ({r['bundle_bytes']} bytes)")
+    print(f"sha256         {r['bundle_sha256']}")
+    print(f"state          {r['state_dir']}  (watermark + issues + identity, raw zone, never transferred)")
+    print(f"identity map   {r['identity_map']}")
+    print(f"projects       {', '.join(r['projects'])}")
+    scope = filter_scope(tuple(r['ticket_projects']), tuple(r.get('ticket_keys') or ()))
+    print(f"ticket filter  {r['ticket_regex']}   ({scope})")
+    fields = ", ".join(f"{k}={v}" for k, v in r["fields"].items())
+    print(f"fields         {fields or '—'}")
+    print(
+        f"issues         {r['issues_seen']} seen -> {r['issues_kept']} kept,"
+        f" {r['issues_skipped']} skipped"
+        + (f" ({r['issues_skipped_type']} outside the issue types)" if r['issues_skipped_type'] else "")
+    )
+    counts = r["counts"]
+    print(
+        f"objects        {r['objects']}  (epics={counts['epics']}, stories={counts['stories']},"
+        f" sprints={counts['sprints']}, people={counts['people']})"
+    )
+    print(f"events         {r['events']}")
+    acts = ", ".join(f"{k}={v}" for k, v in r["activities_by_activity"].items())
+    print(f"activities     {acts}")
+    print(
+        f"changelog      {r['changelog_items']} item(s) -> {r['transitions']} status,"
+        f" {r['points_changes']} points, {r['sprint_changes']} sprint,"
+        f" {r['assigned_changes']} assignee · {r['changelog_ignored']} dropped"
+    )
+    if r["points_rounded"]:
+        print(f"points         {r['points_rounded']} fractional value(s) rounded to whole points")
+    print(
+        f"worklogs       {r['worklogs']}  (delay: "
+        + ", ".join(f"{k}={v}" for k, v in r["log_delays"].items())
+        + ")"
+    )
+    if r["sprint_at_start"]:
+        print(f"sprint start   {r['sprint_at_start']} membership-at-start event(s) synthesised")
+    by_kind = ", ".join(f"{k}={v}" for k, v in r["requests_by_kind"].items())
+    print(f"requests       {r['requests']}" + (f"  ({by_kind})" if by_kind else ""))
+    print(f"watermark      {r['previous_watermark'] or '—'} -> {r['watermark'] or '—'}"
+          f"   (overlap {r['overlap_hours']}h{', full' if r['full'] else ''})")
 
 
 def _print_scrape(r: dict) -> None:
@@ -142,8 +286,14 @@ def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
     mode.add_argument("--live", action="store_true", help="call the real Bitbucket DC REST API")
     mode.add_argument("--fixture", action="store_true", help="scrape synthetic data (no credentials)")
     mode.add_argument("--fixture-file", metavar="PATH", help="scrape a committed fixture bundle")
-    ap.add_argument("--out", default=DEFAULT_OUT, metavar="PATH.tgz",
-                    help=f"bundle to write (default {DEFAULT_OUT})")
+    ap.add_argument("--jira", action="store_true",
+                    help="scrape Jira (Epic/Story/Sprint + worklogs) instead of Bitbucket")
+    ap.add_argument("--project", action="append", default=None, metavar="KEY",
+                    help="--jira: override the configured Jira projects (repeatable)")
+    ap.add_argument("--limit", type=int, default=None, metavar="N",
+                    help="--jira: read at most N issues (dev/demo)")
+    ap.add_argument("--out", default=None, metavar="PATH.tgz",
+                    help=f"bundle to write (default {DEFAULT_OUT}, or {DEFAULT_JIRA_OUT} for --jira)")
     ap.add_argument("--state-dir", default=None, metavar="DIR",
                     help="watermark cursor + identity map (default: next to --out, <out>.state/)")
     ap.add_argument("--identity", default=None, metavar="PATH",
@@ -197,6 +347,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.overlap_hours < 0:
         print("--overlap-hours must be >= 0", file=sys.stderr)
         return 2
+    if args.limit is not None and args.limit < 1:
+        print(f"--limit must be at least 1 (got {args.limit})", file=sys.stderr)
+        return 2
     if args.progress_interval is not None and args.progress_interval < 0:
         print("--progress-interval must be >= 0 (0 disables)", file=sys.stderr)
         return 2
@@ -230,7 +383,9 @@ def main(argv: list[str] | None = None) -> int:
 
     seed = args.seed if args.seed is not None else cfg.seed
     generate_n = args.n if args.n is not None else 50
-    out = Path(args.out).expanduser()
+    out = Path(args.out).expanduser() if args.out else Path(
+        DEFAULT_JIRA_OUT if args.jira else DEFAULT_OUT
+    )
     state_dir = Path(args.state_dir).expanduser() if args.state_dir else default_state_dir(out)
 
     # Progress goes to stderr only, so a piped --json report stays machine
@@ -241,6 +396,55 @@ def main(argv: list[str] | None = None) -> int:
         else cfg.progress_interval
     )
     progress = ProgressReporter(interval=interval)
+
+    if args.jira:
+        from .jira import JiraError
+        from .scrape_jira import scrape as scrape_jira
+
+        projects = None
+        if args.project:
+            projects = tuple(str(p).strip().upper() for p in args.project if str(p).strip())
+        try:
+            if args.probe:
+                if not cfg.jira_base_url:
+                    print("--jira --probe needs MEGASPEED_JIRA_BASE_URL", file=sys.stderr)
+                    return 2
+                transport, _source, _limit = _jira_transport(cfg, args)
+                return _jira_probe(cfg, transport, args.json)
+            transport, source, limit = _jira_transport(cfg, args)
+            report = scrape_jira(
+                cfg,
+                transport,
+                source,
+                out=out,
+                state_dir=state_dir,
+                limit=limit,
+                overlap_hours=args.overlap_hours,
+                full=args.full,
+                identity_path=args.identity,
+                progress=progress,
+                projects=projects,
+            )
+        except (JiraError, BitbucketError) as exc:
+            print(f"jira error: {exc}", file=sys.stderr)
+            return 2
+        except SystemExit as exc:
+            print(str(exc.code) if exc.code not in (0, None) else "bad configuration", file=sys.stderr)
+            return 2
+        if args.json:
+            print(json.dumps(report, indent=2, default=str))
+        else:
+            _print_jira_scrape(report)
+            print(f"\nnext           python3 -m ingest import {report['bundle']}")
+        return 0
+
+    if not cfg.repos:
+        print(
+            "no repos configured: set MEGASPEED_REPOS=PROJECT/REPO,PROJECT/REPO"
+            " (or --repo) for the Bitbucket scrape",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         if args.live or args.probe:
@@ -300,4 +504,4 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["DEFAULT_OUT", "build_parser", "main", "REPO_ROOT"]
+__all__ = ["DEFAULT_JIRA_OUT", "DEFAULT_OUT", "build_parser", "main", "REPO_ROOT"]

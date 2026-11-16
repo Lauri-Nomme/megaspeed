@@ -364,12 +364,6 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
             os.environ.get("MEGASPEED_JIRA_STORY_POINTS_FIELD", jira.get("story_points_field", "")) or ""
         ),
     )
-    if not config.repos and not config.jira_projects:
-        raise SystemExit(
-            "no repos configured: set MEGASPEED_REPOS=PROJECT/REPO,PROJECT/REPO,"
-            " MEGASPEED_JIRA_PROJECTS=DEL, or add [[source.repos]] / [jira].projects"
-            f" to a config file (--config PATH; looked at {cfg_path})"
-        )
     if config.base_url and not config.has_credentials:
         raise SystemExit(
             "MEGASPEED_BB_BASE_URL is set but no credentials: set MEGASPEED_BB_TOKEN"

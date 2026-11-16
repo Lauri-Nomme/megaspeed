@@ -292,6 +292,11 @@ def _print_import(r: dict) -> None:
     print(f"objects        {r['objects']}")
     s = r["summary"]
     print(f"store now      {s['events']} events, {s['prs']} PRs, {s['commits']} commits, as_of {s['as_of']}")
+    if s.get("stories") or s.get("epics"):
+        print(
+            f"ticket layer   {s.get('epics', 0)} epics, {s.get('stories', 0)} stories,"
+            f" {s.get('sprints', 0)} sprints"
+        )
     if r["verified"] is None:
         print("contract       skipped (--no-verify)")
     else:
