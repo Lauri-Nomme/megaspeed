@@ -314,6 +314,16 @@ class DependentsTests(Case):
         self.assertLessEqual(max(row["dependents"] for row in delivery["rows"]), 2)
         self.assertEqual(delivery["counts"]["open"], 5)
 
+    def test_a_small_store_keeps_a_real_shared_ticket(self):
+        # 3 PRs on one ticket: too small to call it an epic, so the dependency
+        # is reported instead of being guessed away
+        store = Store()
+        for number in (1, 2, 3):
+            store.pr(number, "AaAa", tickets=("EP-1",))
+        delivery = ballcourt.delivery_list(self.load(store))
+        self.assertEqual(delivery["parent_keys"], [])
+        self.assertEqual([row["dependents"] for row in delivery["rows"]], [2, 2, 2])
+
 
 # --------------------------------------------------------------------------- #
 # product review #5: cycle-time censoring

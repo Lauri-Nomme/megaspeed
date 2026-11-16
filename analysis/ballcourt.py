@@ -834,16 +834,19 @@ def _parent_keys(prs: dict[str, dict]) -> set[str]:
     counting dependents per key made every open PR "block 130 others" (QA round
     2, B1/B2). There is no epic flag in the store, so this is a stated v1
     heuristic: a key attached to at least a quarter of the corpus (and to at
-    least :data:`PARENT_KEY_MIN_PRS` PRs) is a parent/epic link, not a story
-    dependency. It is reported as ``parent_keys`` in the payload so a reader can
-    check the classification instead of trusting it.
+    least :data:`PARENT_KEY_MIN_PRS` PRs, in a corpus larger than that) is a
+    parent/epic link, not a story dependency. It is reported as ``parent_keys``
+    in the payload so a reader can check the classification instead of trusting
+    it.
     """
     counts: dict[str, int] = defaultdict(int)
     for pr in prs.values():
         for key in pr.get("ticket_keys") or []:
             counts[key] += 1
     total = len(prs)
-    if total < 2:
+    # Too small a corpus to tell an epic from a real shared ticket: report the
+    # dependency rather than guess it away.
+    if total <= PARENT_KEY_MIN_PRS:
         return set()
     threshold = max(PARENT_KEY_MIN_PRS, int(total * PARENT_KEY_SHARE + 0.999))
     return {key for key, count in counts.items() if count >= threshold}
