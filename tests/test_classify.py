@@ -208,7 +208,12 @@ class ThreadOutcomeTests(unittest.TestCase):
         self.assertEqual(classify.thread_outcome(resolved=True, thread_intent="rejected"), "rejected")
         self.assertEqual(classify.thread_outcome(resolved=True, thread_intent="withdrawn"), "walked_back")
         self.assertEqual(classify.thread_outcome(resolved=True, thread_intent="acted"), "acted_on")
-        self.assertEqual(classify.thread_outcome(resolved=True), "acted_on")
+        # DES-3: an unknown outcome is unknown. Booking it as acted_on would
+        # under-count the comment tax (the flattering direction).
+        self.assertEqual(classify.thread_outcome(resolved=True), "unresolved")
+        self.assertEqual(
+            classify.thread_outcome(resolved=True, thread_intent="unclear"), "unresolved"
+        )
         # a value the parser never agreed to cannot leak into a label
         self.assertIn(
             classify.thread_outcome(resolved=True, thread_intent="looks fixed to me"),

@@ -594,8 +594,10 @@ def thread_outcome(
          withdrew it, nothing to change);
        * anyone else resolved it -> ``rejected`` (closed without a change);
     4. the diff is **unknown** (no git cache, no anchor path -- a REST-only
-       scrape): the classifier's read of the text decides, defaulting to
-       ``acted_on`` because a resolved thread normally means it was addressed.
+       scrape): the classifier's read of the text decides, but only a definite
+       read earns a label. An ``unclear`` intent is ``unresolved``, never
+       ``acted_on``: booking "we could not tell" as "it was addressed" is the
+       one direction of bias that flatters the comment-tax metric (DES-3).
     """
     if not resolved:
         return "unresolved"
@@ -607,7 +609,7 @@ def thread_outcome(
     if intent not in THREAD_INTENT:
         intent = DEFAULT_INTENT
     return {"acted": "acted_on", "rejected": "rejected", "withdrawn": "walked_back"}.get(
-        intent, "acted_on"
+        intent, "unresolved"
     )
 
 
