@@ -860,7 +860,11 @@ def fill_derived(con, events: list[dict]) -> None:
     before the write keeps re-runs true no-ops: the row a run writes is already
     the converged row, so an unchanged PR is not rewritten on every ingest.
     """
-    scope = {(e["repo"], e["pr_id"]) for e in events}
+    scope = {
+        (e["repo"], e["pr_id"])
+        for e in events
+        if e.get("repo") is not None and e.get("pr_id") is not None
+    }
     run_events: dict[tuple[str, int], dict[str, dict]] = {}
     for event in events:
         run_events.setdefault((event["repo"], event["pr_id"]), {})[event["event_key"]] = event

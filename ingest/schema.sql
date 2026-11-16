@@ -24,19 +24,19 @@ CREATE TABLE IF NOT EXISTS events (
 
 CREATE TABLE IF NOT EXISTS event_objects (
     event_key  VARCHAR NOT NULL,
-    object_type VARCHAR NOT NULL,             -- PR | COMMIT | TICKET
+    object_type VARCHAR NOT NULL,             -- PR | COMMIT | TICKET | EPIC | STORY | SPRINT | PERSON
     object_id  VARCHAR NOT NULL,
     PRIMARY KEY (event_key, object_type, object_id)
 );
 
 CREATE TABLE IF NOT EXISTS objects (
-    object_type    VARCHAR NOT NULL,          -- PR | COMMIT | TICKET
-    object_id      VARCHAR NOT NULL,          -- e.g. PR:platform#482 / COMMIT:<sha> / TICKET:PROJ-101
+    object_type    VARCHAR NOT NULL,          -- PR | COMMIT | TICKET | EPIC | STORY | SPRINT
+    object_id      VARCHAR NOT NULL,          -- e.g. PR:platform#482 / STORY:DEL-100 / SPRINT:DEL#3
     repo           VARCHAR,
     pr_id          BIGINT,
     ticket_keys    VARCHAR[],                 -- matched keys only (never raw refs)
-    actor          VARCHAR,                   -- author pseudonym
-    state          VARCHAR,                   -- open | merged | declined (PR only)
+    actor          VARCHAR,                   -- author/assignee pseudonym
+    state          VARCHAR,                   -- per-type closed state (see store.py)
     created_at     TIMESTAMP,
     closed_at      TIMESTAMP,
     head_commit    VARCHAR,
@@ -47,13 +47,16 @@ CREATE TABLE IF NOT EXISTS objects (
 
 CREATE TABLE IF NOT EXISTS ingest_runs (
     run_id             VARCHAR PRIMARY KEY,
-    source             VARCHAR NOT NULL,      -- fixture | bitbucket-dc
+    source             VARCHAR NOT NULL,      -- fixture | bitbucket-dc | jira-fixture | jira-dc
     as_of              TIMESTAMP NOT NULL,    -- watermark: what we knew when
-    source_watermark   TIMESTAMP,             -- newest updatedDate observed
+    source_watermark   TIMESTAMP,             -- newest updatedDate / issue updated observed
     classifier_version VARCHAR NOT NULL,
-    prs_seen           INTEGER,
+    prs_seen           INTEGER,               -- bitbucket-dc sources
     prs_kept           INTEGER,
     prs_dropped        INTEGER,
     events_written     INTEGER,
-    events_skipped     INTEGER
+    events_skipped     INTEGER,
+    issues_seen        INTEGER,               -- jira sources (epic + story count)
+    issues_kept        INTEGER,
+    issues_skipped     INTEGER
 );
