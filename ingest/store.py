@@ -39,16 +39,12 @@ CONTENT_HASH_RE = r"^[0-9a-f]{16}$"
 REPO_RE = r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
 # A commit hash (full or abbreviated) -- ``objects.head_commit``.
 HEAD_COMMIT_RE = r"^[0-9a-f]{7,40}$"
-# ``event_key`` is ``project/repo#pr_id:natural`` and ``natural`` may itself
-# contain colons (``act:12:q``). An identifier, never prose.
-#
-# A Jira event has no repo/PR: its key is ``KEY:natural``
-# (``DEL-100:changelog:10190:status:0``), where ``KEY`` is a ticket key and the
-# natural part is built from closed tokens only.
-EVENT_KEY_RE = (
-    r"^(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+:[A-Za-z0-9_.:+-]+"
-    r"|[A-Z][A-Z0-9_]{0,9}-\d{1,6}:[A-Za-z0-9_.:+-]+)$"
-)
+# ``event_key`` is ``project/repo#pr_id:natural`` for Bitbucket and
+# ``KEY:natural`` for Jira (``DEL-100:changelog:10190:status:0``). The shape is
+# owned by :mod:`ingest.taxonomy` (both sides of the airgap need it, and the
+# scrape side may not import this module); re-exported here so the import gate
+# and the verifier share one definition.
+EVENT_KEY_RE = taxonomy.EVENT_KEY_RE
 # ``ingest_runs.run_id``: one token, no whitespace (``fixture-2026...-abcdef``).
 RUN_ID_RE = r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$"
 # The sources this store may hold. A source name is a closed label, not free
@@ -393,15 +389,23 @@ def list_objects(con, object_type: str | None = None) -> list[dict]:
 
 def summary(con) -> dict:
     events, first, last = con.execute("SELECT count(*), min(ts), max(ts) FROM events").fetchone()
-    prs = con.execute("SELECT count(*) FROM objects WHERE object_type = 'PR'").fetchone()[0]
-    commits = con.execute("SELECT count(*) FROM objects WHERE object_type = 'COMMIT'").fetchone()[0]
+    counts = {
+        row[0]: int(row[1])
+        for row in con.execute(
+            "SELECT object_type, count(*) FROM objects GROUP BY object_type"
+        ).fetchall()
+    }
     run = con.execute(
         "SELECT as_of, source, prs_seen, prs_kept, prs_dropped FROM ingest_runs ORDER BY as_of DESC LIMIT 1"
     ).fetchone()
     return {
         "events": int(events or 0),
-        "prs": int(prs or 0),
-        "commits": int(commits or 0),
+        "prs": counts.get("PR", 0),
+        "commits": counts.get("COMMIT", 0),
+        # Jira side (prd/03): the ticket layer the PRs join to.
+        "epics": counts.get("EPIC", 0),
+        "stories": counts.get("STORY", 0),
+        "sprints": counts.get("SPRINT", 0),
         "first_ts": iso(first) if first else None,
         "last_ts": iso(last) if last else None,
         "as_of": iso(run[0]) if run else None,

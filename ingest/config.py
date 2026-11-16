@@ -104,6 +104,26 @@ class Config:
     llm_url: str = classify.DEFAULT_URL
     llm_model: str = classify.DEFAULT_MODEL
     llm_timeout: float = classify.DEFAULT_TIMEOUT
+    # -- Jira source (prd/04) ---------------------------------------------
+    #: Jira DC base URL, e.g. http://127.0.0.1:8090. Credentials never live in
+    #: the config file: MEGASPEED_JIRA_TOKEN or _USER/_PASSWORD.
+    jira_base_url: str = ""
+    #: Jira projects to read. Empty => the ticket projects (the ingest is
+    #: ticket-scoped, so it reads exactly the projects it accepts keys from).
+    jira_projects: tuple[str, ...] = ()
+    jira_auth_user: str = ""
+    jira_auth_password: str = ""
+    jira_auth_token: str = ""
+    jira_page_limit: int = 50
+    #: Politeness delay between Jira requests (seconds). 0 for a lab run.
+    jira_min_interval: float = 0.2
+    #: Scrum board to read sprints from; 0 = discover the project's scrum board.
+    jira_board: int = 0
+    #: Custom-field ids, pinned when the installation's discovery is ambiguous.
+    #: Empty => discover by name ("Epic Link" / "Sprint" / "Story Points").
+    jira_epic_link_field: str = ""
+    jira_sprint_field: str = ""
+    jira_story_points_field: str = ""
 
     @property
     def live(self) -> bool:
@@ -112,6 +132,16 @@ class Config:
     @property
     def has_credentials(self) -> bool:
         return bool(self.auth_token or (self.auth_user and self.auth_password))
+
+    @property
+    def jira_live(self) -> bool:
+        return bool(self.jira_base_url)
+
+    @property
+    def has_jira_credentials(self) -> bool:
+        return bool(
+            self.jira_auth_token or (self.jira_auth_user and self.jira_auth_password)
+        )
 
 
 def _resolve(value: str | os.PathLike[str], base: Path) -> Path:
@@ -233,6 +263,7 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     filt = raw.get("filter", {})
     source = raw.get("source", {})
     bb = raw.get("bitbucket", {})
+    jira = raw.get("jira", {})
     fixture = raw.get("fixture", {})
     review = raw.get("review", {})
     actors = raw.get("actors", {})
@@ -310,16 +341,44 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         llm_url=str(os.environ.get("MEGASPEED_LLM_URL", classify_cfg.get("llm_url", classify.DEFAULT_URL))),
         llm_model=str(os.environ.get("MEGASPEED_LLM_MODEL", classify_cfg.get("llm_model", classify.DEFAULT_MODEL))),
         llm_timeout=float(os.environ.get("MEGASPEED_LLM_TIMEOUT", classify_cfg.get("llm_timeout", classify.DEFAULT_TIMEOUT))),
+        jira_base_url=os.environ.get("MEGASPEED_JIRA_BASE_URL", jira.get("base_url", "")).rstrip("/"),
+        jira_projects=parse_projects(
+            os.environ.get("MEGASPEED_JIRA_PROJECTS", jira.get("projects", [])),
+            required=False,
+        ),
+        jira_auth_user=os.environ.get("MEGASPEED_JIRA_USER", ""),
+        jira_auth_password=os.environ.get("MEGASPEED_JIRA_PASSWORD", ""),
+        jira_auth_token=os.environ.get("MEGASPEED_JIRA_TOKEN", ""),
+        jira_page_limit=int(os.environ.get("MEGASPEED_JIRA_PAGE_LIMIT", jira.get("page_limit", 50))),
+        jira_min_interval=float(
+            os.environ.get("MEGASPEED_JIRA_MIN_INTERVAL", jira.get("min_interval", 0.2))
+        ),
+        jira_board=int(os.environ.get("MEGASPEED_JIRA_BOARD", jira.get("board", 0))),
+        jira_epic_link_field=str(
+            os.environ.get("MEGASPEED_JIRA_EPIC_LINK_FIELD", jira.get("epic_link_field", "")) or ""
+        ),
+        jira_sprint_field=str(
+            os.environ.get("MEGASPEED_JIRA_SPRINT_FIELD", jira.get("sprint_field", "")) or ""
+        ),
+        jira_story_points_field=str(
+            os.environ.get("MEGASPEED_JIRA_STORY_POINTS_FIELD", jira.get("story_points_field", "")) or ""
+        ),
     )
-    if not config.repos:
+    if not config.repos and not config.jira_projects:
         raise SystemExit(
-            "no repos configured: set MEGASPEED_REPOS=PROJECT/REPO,PROJECT/REPO or add"
-            f" [[source.repos]] to a config file (--config PATH; looked at {cfg_path})"
+            "no repos configured: set MEGASPEED_REPOS=PROJECT/REPO,PROJECT/REPO,"
+            " MEGASPEED_JIRA_PROJECTS=DEL, or add [[source.repos]] / [jira].projects"
+            f" to a config file (--config PATH; looked at {cfg_path})"
         )
     if config.base_url and not config.has_credentials:
         raise SystemExit(
             "MEGASPEED_BB_BASE_URL is set but no credentials: set MEGASPEED_BB_TOKEN"
             " or MEGASPEED_BB_USER + MEGASPEED_BB_PASSWORD"
+        )
+    if config.jira_base_url and not config.has_jira_credentials:
+        raise SystemExit(
+            "MEGASPEED_JIRA_BASE_URL is set but no credentials: set MEGASPEED_JIRA_TOKEN"
+            " or MEGASPEED_JIRA_USER + MEGASPEED_JIRA_PASSWORD"
         )
     try:
         config.llm_url = classify.validate_llm_url(config.llm_url)

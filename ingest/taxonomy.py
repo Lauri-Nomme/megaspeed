@@ -120,6 +120,18 @@ DATE_TOKEN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # ``ollama-v1``, ``qwen3-30b-a3b:2507``). Shape-validated like a hash, so a
 # well-meaning "notes" field can never be smuggled in next to a label.
 CLASSIFIER_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,63}$")
+# An event's natural key. Two sources, one shape: Bitbucket's
+# ``project/repo#pr_id:natural`` (the natural part may contain colons:
+# ``act:12:q``) and Jira's ``KEY:natural`` (``DEL-100:changelog:10190:status:0``).
+# An identifier, never prose -- and never whitespace.
+#
+# It lives here, next to the other shapes, because both sides of the airgap need
+# it: the scrape-side tests must be able to check it without importing the store
+# (which would pull in DuckDB). ``ingest.store`` re-exports it.
+EVENT_KEY_RE = (
+    r"^(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+:[A-Za-z0-9_.:+-]+"
+    r"|[A-Z][A-Z0-9_]{0,9}-\d{1,6}:[A-Za-z0-9_.:+-]+)$"
+)
 
 
 class _NonNegativeInt:
