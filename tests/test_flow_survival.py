@@ -436,8 +436,8 @@ class SurvivalTests(StoreCase):
         self.assertEqual(suggestion["severity"], "warning")
         self.assertEqual(suggestion["evidence"]["survival_median_hours"], 100.0)
         self.assertEqual(suggestion["evidence"]["merged_only_median_hours"], 80.0)
-        self.assertEqual(suggestion["evidence"]["censored_open"], 1)
-        self.assertEqual(suggestion["evidence"]["censored_declined"], 1)
+        self.assertEqual(suggestion["evidence"]["open_censored_prs"], 1)
+        self.assertEqual(suggestion["evidence"]["declined_censored_prs"], 1)
         self.assertEqual(suggestion["evidence"]["estimator"], "Kaplan–Meier")
         self.assertEqual(suggestion["impact_hours"], 168.0)     # (100 − 72) × 6
 

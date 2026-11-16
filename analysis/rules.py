@@ -1365,8 +1365,8 @@ def templates(
             {
                 "survival_median_hours": sv["median_hours"],
                 "merged_only_median_hours": sv["merged_only_median_hours"],
-                "censored_open": sv["censored"]["open"],
-                "censored_declined": sv["censored"]["declined"],
+                "open_censored_prs": sv["censored"]["open"],
+                "declined_censored_prs": sv["censored"]["declined"],
                 "cohort_prs": sv["cohort"],
                 "merged_prs": sv["events"],
                 "p25_hours": sv["quantiles"]["p25"],
@@ -1404,7 +1404,7 @@ def templates(
             {
                 "merged_only_median_hours": sv["merged_only_median_hours"],
                 "survival_median_hours": sv["median_hours"],
-                "censored_open": sv["censored"]["open"],
+                "open_censored_prs": sv["censored"]["open"],
                 "open_over_target": over,
                 "oldest_open_age_hours": oldest,
                 "cohort_prs": sv["cohort"],
