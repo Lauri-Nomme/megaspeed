@@ -25,8 +25,8 @@ one failure this whole feature exists to prevent.
     GET  /api/insights?level=&days=&tenant=   ranked "change this" rules (prd/17)
     GET  /api/calendar?tenant=          effective business-hours calendar (prd/19)
     GET  /ws                            harness websocket (hello/changed/eval)
-    POST /api/eval        {code, timeout}
-    POST /api/screenshot  {selector, out, timeout}
+    POST /api/eval        {code, timeout}          local-only + harness token
+    POST /api/screenshot  {selector, out, timeout} local-only + harness token
     GET  /                              app/ (vanilla JS + canvas, no build)
 
 Every query parameter is either honoured or rejected with a 400 that lists the
@@ -46,6 +46,7 @@ import contextlib
 import json
 import math
 import os
+import secrets
 import sys
 import tempfile
 import threading
@@ -84,6 +85,41 @@ CALENDAR_CONFIG = Path(
 SHOT_DIR = Path(
     os.environ.get("MEGASPEED_SHOT_DIR", Path(tempfile.gettempdir()) / "megaspeed-shots")
 ).expanduser().resolve()
+
+# --------------------------------------------------------------------------- #
+# harness bridge security (SEC-2)
+# --------------------------------------------------------------------------- #
+# ``/api/eval`` runs arbitrary JS in whatever browser is attached and
+# ``/api/screenshot`` writes a file, so the bridge is *not* part of the read-only
+# product surface. Three independent gates:
+#
+#   1. transport: only a *direct loopback* request may drive it — loopback peer,
+#      loopback ``Host``, no proxy/forwarding header. A request that arrived
+#      through nginx is refused even when it carries a valid token.
+#   2. a shared secret: ``MEGASPEED_HARNESS_TOKEN``, or a per-process token
+#      generated on first use and written to ``MEGASPEED_HARNESS_TOKEN_FILE``
+#      (default ``<tenants-dir>/.harness-token``, mode 0600) so a local ``curl``
+#      can read it. Without it, a cross-site page in the operator's browser
+#      could still POST to ``127.0.0.1`` (CORS blocks reading the answer, not
+#      running the request).
+#   3. the websocket only delivers eval frames to, and only accepts answers
+#      from, *trusted* clients: the token, or the same-origin UI page on
+#      loopback. Everyone else is a notification-only client (hello/changed),
+#      so a cross-site or remote websocket can neither receive an eval nor spoof
+#      its result.
+#
+# The UI keeps working unchanged: it opens ``/ws`` from the same origin, which
+# is trusted when the page itself was served over loopback (the harness
+# browser's case) and notification-only otherwise.
+HARNESS_TOKEN_ENV = "MEGASPEED_HARNESS_TOKEN"
+HARNESS_TOKEN_FILE_ENV = "MEGASPEED_HARNESS_TOKEN_FILE"
+HARNESS_ORIGINS_ENV = "MEGASPEED_WS_ORIGINS"
+TOKEN_HEADER = "x-megaspeed-token"
+LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+PROXY_HEADERS = ("x-forwarded-for", "x-real-ip", "forwarded", "x-forwarded-host")
+
+_auto_token: str | None = None
+_auto_token_lock = threading.Lock()
 
 # How long a read waits for an ingest run to release the DuckDB write lock.
 STORE_RETRY_ATTEMPTS = max(1, int(os.environ.get("MEGASPEED_STORE_RETRIES", "5")))
@@ -434,6 +470,8 @@ def health(request: Request):
         "app": "megaspeed",
         "version": app.version,
         "browsers": bridge.clients,
+        # of which this many may receive/answer eval frames (SEC-2)
+        "harness_browsers": bridge.trusted,
         "calendar": _calendar_brief(tenant),
         **summary,
     }
@@ -841,9 +879,161 @@ def insights(request: Request):
 
 
 # --------------------------------------------------------------------------- #
-# harness: eval + screenshot (curl-drivable)
+# harness: eval + screenshot (curl-drivable, local-only, token-gated — SEC-2)
 # --------------------------------------------------------------------------- #
 MAX_TIMEOUT = 300.0
+
+
+def _hostname(value: str | None) -> str:
+    """The bare host from a Host header or an Origin URL (no port, no scheme)."""
+    text = (value or "").strip().lower()
+    if "://" in text:
+        text = text.split("://", 1)[1]
+    text = text.split("/", 1)[0]
+    if text.startswith("["):                      # [::1]:8766
+        return text[1:].split("]", 1)[0]
+    if text.count(":") == 1:                      # host:port
+        return text.split(":", 1)[0]
+    return text
+
+
+def _is_loopback(host: str | None) -> bool:
+    return _hostname(host) in LOOPBACK_HOSTS
+
+
+def harness_token() -> str:
+    """The shared secret for the eval/screenshot bridge.
+
+    ``MEGASPEED_HARNESS_TOKEN`` wins; otherwise one random token per process,
+    written to a 0600 file so a local tool can read it without the server
+    printing the secret into a log.
+    """
+    token = (os.environ.get(HARNESS_TOKEN_ENV) or "").strip()
+    if token:
+        return token
+    global _auto_token
+    with _auto_token_lock:
+        if _auto_token is None:
+            _auto_token = secrets.token_urlsafe(32)
+            _write_token_file(_auto_token)
+        return _auto_token
+
+
+def harness_token_file() -> Path:
+    override = (os.environ.get(HARNESS_TOKEN_FILE_ENV) or "").strip()
+    if override:
+        return Path(override).expanduser()
+    return TENANTS_DIR / ".harness-token"
+
+
+def _write_token_file(token: str) -> None:
+    """Persist the per-process token for local tooling; never fail the request."""
+    path = harness_token_file()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_symlink():
+            return  # do not follow a symlink planted in the tenant directory
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(token)
+        os.chmod(path, 0o600)
+    except OSError:
+        return
+    if LOG:
+        print(f"megaspeed: harness token written to {path.name} in the tenant directory",
+              file=sys.stderr)
+
+
+def _presented_token(headers, query=None) -> str:
+    """The token a client presented: header, bearer auth, or ``?token=``."""
+    value = (headers.get(TOKEN_HEADER) or "").strip()
+    if value:
+        return value
+    authorization = (headers.get("authorization") or "").strip()
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    if query is not None:
+        return str(query.get("token") or "").strip()
+    return ""
+
+
+def _token_ok(presented: str) -> bool:
+    expected = harness_token()
+    return bool(presented) and presented.isascii() and secrets.compare_digest(presented, expected)
+
+
+def _direct_loopback(client_host: str | None, host_header: str | None, headers) -> bool:
+    """A direct request to a loopback address, not one proxied in from outside."""
+    if not _is_loopback(client_host) or not _is_loopback(host_header):
+        return False
+    return not any((headers.get(name) or "").strip() for name in PROXY_HEADERS)
+
+
+def _harness_denied(request: Request) -> JSONResponse | None:
+    """403 for a non-local caller, 401 for a local caller without the token."""
+    client = request.client.host if request.client else ""
+    if not _direct_loopback(client, request.headers.get("host"), request.headers):
+        return JSONResponse(
+            status_code=403,
+            content={
+                "ok": False,
+                "error": "the eval/screenshot bridge is local-only "
+                         "(loopback client and Host, no proxy in front)",
+                "hint": "run the browser harness against 127.0.0.1, not the public name",
+            },
+        )
+    if not _token_ok(_presented_token(request.headers, request.query_params)):
+        return JSONResponse(
+            status_code=401,
+            content={
+                "ok": False,
+                "error": "harness token required",
+                "hint": f"send {TOKEN_HEADER}: <token> — set {HARNESS_TOKEN_ENV} or read "
+                        "the per-process token file in the tenant directory",
+            },
+        )
+    return None
+
+
+def _origin_allowed(origin: str | None, host: str | None) -> bool:
+    """Cross-site websocket protection.
+
+    A browser always sends ``Origin`` on a websocket handshake and a page cannot
+    forge it, so ``Origin`` must name the host the socket addressed (same
+    origin) or be an explicitly allowed origin. ``MEGASPEED_WS_ORIGINS``
+    overrides the default with a comma-separated allowlist (``*`` allows any).
+    A non-browser client may omit ``Origin``; it is then a notification-only
+    client, never a trusted one.
+    """
+    if not origin:
+        return True
+    allowed = [
+        entry.strip().rstrip("/")
+        for entry in (os.environ.get(HARNESS_ORIGINS_ENV) or "").split(",")
+        if entry.strip()
+    ]
+    if allowed:
+        return "*" in allowed or origin.strip().rstrip("/") in allowed
+    origin_host = _hostname(origin)
+    return bool(origin_host) and (
+        origin_host == _hostname(host) or origin_host in LOOPBACK_HOSTS
+    )
+
+
+def _ws_trusted(ws: WebSocket) -> bool:
+    """May this websocket receive and answer eval frames?"""
+    if _token_ok(_presented_token(ws.headers, ws.query_params)):
+        return True
+    # The UI page cannot carry a token. A same-origin page served over loopback
+    # *is* the browser the harness exists to drive; a page served from a public
+    # name is not trusted, so a remote deployment has no bridge at all.
+    origin = ws.headers.get("origin")
+    client = ws.client.host if ws.client else ""
+    host = ws.headers.get("host")
+    return bool(origin) and _direct_loopback(client, host, ws.headers) and (
+        _hostname(origin) == _hostname(host)
+    )
+
 
 
 def _body_timeout(body: dict, default: float) -> float:
@@ -889,6 +1079,9 @@ def _body_text(body: dict, name: str, *, default: str | None = None,
 
 @app.post("/api/eval")
 async def eval_js(request: Request):
+    denied = _harness_denied(request)
+    if denied is not None:
+        return denied
     body = await _json_body(request)
     if body is None:
         return _bad_request("invalid json")
@@ -933,6 +1126,9 @@ def _shot_path(raw: str) -> Path:
 
 @app.post("/api/screenshot")
 async def screenshot(request: Request):
+    denied = _harness_denied(request)
+    if denied is not None:
+        return denied
     body = await _json_body(request)
     if body is None:
         return _bad_request("invalid json")
@@ -983,10 +1179,18 @@ async def _json_body(request: Request):
 # --------------------------------------------------------------------------- #
 @app.websocket("/ws")
 async def websocket(ws: WebSocket):
+    if not _origin_allowed(ws.headers.get("origin"), ws.headers.get("host")):
+        # Cross-site websocket hijacking: refuse before accepting (SEC-2).
+        await ws.close(code=1008)
+        return
     await ws.accept()
-    await bridge.add(ws)
+    trusted = _ws_trusted(ws)
+    await bridge.add(ws, authenticated=trusted)
     try:
-        await ws.send_json({"event": "hello", "app": "megaspeed", "clients": bridge.clients})
+        await ws.send_json({
+            "event": "hello", "app": "megaspeed",
+            "clients": bridge.clients, "harness": trusted,
+        })
         while True:
             message = await ws.receive_text()
             await bridge.handle(ws, message)
