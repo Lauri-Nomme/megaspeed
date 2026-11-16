@@ -41,7 +41,10 @@ export function evidenceValue(key, value) {
     // A policy target is fixed, not estimated, so it takes no `≈` (B19).
     if (key === 'target_hours') return fmtHours(value);
     if (key.endsWith('_hours') || key === 'hours_per_round') return fmtImpact(value);
-    if (key.startsWith('share')) return `${Math.round(value * 100)}%`;
+    // A share (flow efficiency, waiting share) is a fraction of one, not hours.
+    if (key.startsWith('share') || key.endsWith('_share') || key.endsWith('_efficiency')) {
+      return `${Math.round(value * 100)}%`;
+    }
     return Number.isInteger(value) ? String(value) : String(value);
   }
   return String(value);

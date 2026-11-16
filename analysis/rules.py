@@ -13,6 +13,8 @@ Every metric prd/17 lists is computed from the store, in one pass:
 ======================  ==========================================================
 ``time_to_first_review`` first reviewer action (comment/approval) − ``pr_opened``
 ``cycle_time``           ``pr_merged`` − ``pr_opened`` (median + p90)
+``flow_efficiency``      active ÷ elapsed per PR, and the waiting-time split
+``survival``             Kaplan–Meier time-to-merge with open/declined censored
 ``reviewer_responsiveness``  per person: review-ball vs author-ball hours
 ``rework_loops``         review rounds per PR, split by ``push_class``
 ``rebase_waste``         approvals lost where the causing push was ``pure_rebase``
@@ -32,11 +34,19 @@ store cannot hold one.
 
 Thresholds are v1 defaults, stated in the response and in the UI rather than
 hidden: 24 h to first review, 72 h to merge, 3 review rounds, 10 commits or 400
-changed lines for the size cap, and one re-review round ≈ the median per-round
-share of a PR's cycle in the same window. Diff size is optional: the scrape-side
-capture (prd/16) is a separate task, so until ``PR.attributes`` carries
-``lines_added``/``lines_removed`` (or ``diff_size``) the size metric uses commit
-count alone and reports ``diff_size_pending: true``.
+changed lines for the size cap, 25% flow efficiency (below 10% is critical), and
+one re-review round ≈ the median per-round share of a PR's cycle in the same
+window. Flow efficiency credits each activity touch with 0.5 h of attention
+rather than the whole wait it ended (see :func:`flow_efficiency`); the constant
+is in the payload so the number can be recomputed. Diff size is optional: the
+scrape-side capture (prd/16) is a separate task, so until ``PR.attributes``
+carries ``lines_added``/``lines_removed`` (or ``diff_size``) the size metric uses
+commit count alone and reports ``diff_size_pending: true``.
+
+Censoring is treated properly, not noted away (product review #5): ``cycle_time``
+keeps its merged-only median but carries the Kaplan–Meier estimate next to it,
+and ``survival`` is the full-population metric (open PRs right-censored at the
+snapshot, declined at their close).
 
 Duration assumption: **business hours** when a calendar is attached (prd/19,
 ``analysis.calendar``), **wall-clock hours** otherwise. Every metric that turns
@@ -57,12 +67,34 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 
 from analysis import ballcourt
+from analysis.survival import Observation, kaplan_meier
 from ingest.store import iso, to_naive_utc, utcnow
 
 # v1 targets. Stated in every response that uses them (never a hidden constant).
 TARGET_FIRST_REVIEW_HOURS = 24.0
 TARGET_CYCLE_HOURS = 72.0
 MAX_REVIEW_ROUNDS = 3
+# Flow efficiency (prd/05): the share of a PR's business-hour lifetime spent in
+# active work. 25% is the common "good" threshold for software delivery; below
+# 10% the process is almost all queue.
+TARGET_FLOW_EFFICIENCY = 0.25
+CRITICAL_FLOW_EFFICIENCY = 0.10
+# An activity touch (a review comment, an approval, a push) is point-in-time:
+# it ends a wait, it does not fill it. Crediting the whole wait it ended would
+# make every reviewed PR 100% active, so a touch is worth this fixed attention
+# cost instead — stated, reported, and recomputable from the payload.
+TOUCH_HOURS = 0.5
+# "Active" phases of the interval model: the author is demonstrably working
+# (commits in the interval, a push, a rebase, an author reply). Everything else
+# — review, CI, an idle author, the unobserved tail — is waiting.
+ACTIVE_PHASES = ("active", "rebasing")
+# Events that mean somebody worked on the PR at that instant. Handover and
+# roster events (``pr_opened``, ``reviewer_changed``) and the terminal events
+# are not work; a build status is CI, not a person.
+TOUCH_ACTIVITIES = (
+    "comment_added", "pr_approved", "pr_needs_work", "pr_unapproved",
+    "pr_pushed", "rebased", "question_raised", "question_answered",
+)
 
 
 def _count(n: int, noun: str) -> str:
@@ -100,23 +132,28 @@ def _span_hours(court: ballcourt.BallCourt, person: str | None,
     return _hours(court.business_hours(person, t1, t2) * 3600.0)
 
 
-def _median(values: list[float]) -> float | None:
+def _median(values: list[float], digits: int = 2) -> float | None:
     if not values:
         return None
     ordered = sorted(values)
     middle = len(ordered) // 2
     if len(ordered) % 2:
-        return round(ordered[middle], 2)
-    return round((ordered[middle - 1] + ordered[middle]) / 2.0, 2)
+        return round(ordered[middle], digits)
+    return round((ordered[middle - 1] + ordered[middle]) / 2.0, digits)
+
+
+def _percentile(values: list[float], q: float, digits: int = 2) -> float | None:
+    """Nearest-rank percentile: the value at or above ``q`` of the sample."""
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, min(len(ordered) - 1, math.ceil(q * len(ordered)) - 1))
+    return round(ordered[index], digits)
 
 
 def _p90(values: list[float]) -> float | None:
     """Nearest-rank p90: the value at or above 90% of the sample."""
-    if not values:
-        return None
-    ordered = sorted(values)
-    index = max(0, min(len(ordered) - 1, math.ceil(0.9 * len(ordered)) - 1))
-    return round(ordered[index], 2)
+    return _percentile(values, 0.9)
 
 
 def _confidence(n: int) -> float:
@@ -401,9 +438,297 @@ def cycle_time(court: ballcourt.BallCourt, window) -> dict:
             "note": (
                 "median/p90 are over merged PRs only; open PRs are right-censored "
                 "(still running) and declined PRs never merge, so neither is in "
-                "the sample"
+                "the sample — metrics.survival is the censoring-aware estimate"
             ),
         },
+        # product review #5: the proper estimate travels next to the merged-only
+        # one, so a reader cannot quote the flattering number alone.
+        "survival_median_hours": time_to_merge(court, window)["median_hours"],
+        "survival_estimator": "Kaplan–Meier",
+    }
+
+
+def _within(stamp: datetime, spans: list[tuple[datetime, datetime]]) -> bool:
+    """Is ``stamp`` inside one of ``spans`` (inclusive, so a boundary counts)?"""
+    return any(start <= stamp <= end for start, end in spans)
+
+
+def flow_efficiency(court: ballcourt.BallCourt, window) -> dict:
+    """Flow efficiency (prd/05): active ÷ elapsed, per PR and for the process.
+
+    The waiting-time decomposition asks one blunt question — of a PR's lifetime,
+    how much was *work* and how much was *queue*? The interval model already
+    answers it per phase, so this metric only has to classify:
+
+    * **active** — the author is demonstrably working: an ``active`` interval
+      (commits inside it, a content push, an author reply) or a ``rebasing``
+      one (a rebase is work, even when it is rework — reported separately as
+      ``rework_hours``);
+    * **waiting** — everything else: ``review``, ``ci``, an author holding the
+      ball with no commits, and the unobserved tail of an open PR (no events
+      since; the honest label for "nothing happened").
+
+    Reviewer comments and approvals are **point-in-time touches**, not
+    durations: they end a wait, they do not fill it. Crediting the wait a touch
+    ended would make every reviewed PR ~100% active, so a touch that is not
+    already inside measured work is credited with :data:`TOUCH_HOURS` of
+    attention instead. Both numbers travel in the payload
+    (``active_hours`` + ``touch_hours`` = ``working_hours``), so a reader who
+    disagrees with the constant can recompute the headline from the same facts.
+
+    ``efficiency`` is per PR; ``aggregate_efficiency`` is the process number
+    (Σ working ÷ Σ elapsed) and is what a long PR pulls down. ``elapsed`` is the
+    sum of the PR's measured intervals — business hours when a calendar is
+    attached, so numerator and denominator share one clock and active can never
+    exceed elapsed by construction.
+    """
+    states = cohort(court, window)
+    by_pr: dict[str, list] = defaultdict(list)
+    for interval in court.intervals:
+        by_pr[interval.object_id].append(interval)
+
+    rows: list[dict] = []
+    efficiencies: list[float] = []
+    measured: list[float] = []
+    elapsed_all: list[float] = []
+    active_all: list[float] = []
+    waiting_all: list[float] = []
+    total = {"elapsed": 0.0, "active": 0.0, "touch": 0.0, "working": 0.0,
+             "waiting": 0.0, "rework": 0.0}
+    waiting_by_phase: dict[str, float] = defaultdict(float)
+    touches_total = 0
+    credited_total = 0
+    clamped = 0
+    active_intervals = 0
+
+    for state in states:
+        pr = state.pr
+        intervals = by_pr.get(pr["object_id"], [])
+        elapsed = sum(i.hours for i in intervals)
+        if not intervals:                      # no events at all: the age is all we know
+            elapsed = _span_hours(
+                court, None, pr["created_ts"], pr["closed_ts"] or court.snapshot
+            )
+        active = 0.0
+        rework = 0.0
+        spans: list[tuple[datetime, datetime]] = []
+        for interval in intervals:
+            if interval.phase in ACTIVE_PHASES:
+                active += interval.hours
+                active_intervals += 1
+                spans.append((interval.start, interval.end))
+                if interval.phase == "rebasing":
+                    rework += interval.hours
+            else:
+                waiting_by_phase[interval.phase] += interval.hours
+        touches = [
+            event for event in state.events
+            if event["activity"] in TOUCH_ACTIVITIES and event["_ts"] >= pr["created_ts"]
+        ]
+        credited = [event for event in touches if not _within(event["_ts"], spans)]
+        touch_hours = len(credited) * TOUCH_HOURS
+        working = active + touch_hours
+        if working > elapsed:
+            working = elapsed
+            clamped += 1
+        waiting = max(0.0, elapsed - active)
+        efficiency = round(working / elapsed, 4) if elapsed > 0 else None
+
+        total["elapsed"] += elapsed
+        total["active"] += active
+        total["touch"] += touch_hours
+        total["working"] += working
+        total["waiting"] += waiting
+        total["rework"] += rework
+        touches_total += len(touches)
+        credited_total += len(credited)
+        if elapsed > 0 and efficiency is not None:
+            efficiencies.append(efficiency)
+            measured.append(round(active / elapsed, 4))
+            elapsed_all.append(elapsed)
+            active_all.append(active)
+            waiting_all.append(waiting)
+
+        rows.append({
+            "object_id": pr["object_id"],
+            "id": f"{pr['repo'].split('/')[-1]}#{pr['pr_id']}",
+            "repo": pr["repo"],
+            "number": pr["pr_id"],
+            "author": pr["actor"],
+            "state": pr["state"] if pr["closed_ts"] else "open",
+            "elapsed_hours": round(elapsed, 2),
+            "active_hours": round(active, 2),
+            "rework_hours": round(rework, 2),
+            "touch_hours": round(touch_hours, 2),
+            "working_hours": round(working, 2),
+            "waiting_hours": round(waiting, 2),
+            "efficiency": efficiency,
+            "measured_efficiency": (
+                round(active / elapsed, 4) if elapsed > 0 else None
+            ),
+            "touches": len(touches),
+            "credited_touches": len(credited),
+            "commits": sum(i.commits for i in intervals),
+        })
+
+    rows.sort(key=lambda row: (
+        row["efficiency"] if row["efficiency"] is not None else 2.0, row["object_id"]
+    ))
+    elapsed_total = total["elapsed"]
+    aggregate = round(total["working"] / elapsed_total, 4) if elapsed_total > 0 else None
+    by_state: dict[str, list[float]] = defaultdict(list)
+    for row in rows:
+        if row["efficiency"] is not None:
+            by_state[row["state"]].append(row["efficiency"])
+    waiting_total = sum(waiting_by_phase.values())
+    return {
+        "available": active_intervals > 0,
+        "n": len(efficiencies),
+        "median_efficiency": _median(efficiencies, 4),
+        "mean_efficiency": (
+            round(sum(efficiencies) / len(efficiencies), 4) if efficiencies else None
+        ),
+        "p10_efficiency": _percentile(efficiencies, 0.1, 4),
+        "p90_efficiency": _percentile(efficiencies, 0.9, 4),
+        "aggregate_efficiency": aggregate,
+        "measured_median_efficiency": _median(measured, 4),
+        "elapsed_hours": round(elapsed_total, 1),
+        "active_hours": round(total["active"], 1),
+        "rework_hours": round(total["rework"], 1),
+        "touch_hours": round(total["touch"], 1),
+        "working_hours": round(total["working"], 1),
+        "waiting_hours": round(total["waiting"], 1),
+        "median_elapsed_hours": _median(elapsed_all),
+        "median_active_hours": _median(active_all),
+        "median_waiting_hours": _median(waiting_all),
+        "touches": touches_total,
+        "credited_touches": credited_total,
+        "touch_hours_per_touch": TOUCH_HOURS,
+        "waiting_breakdown": {
+            phase: {
+                "hours": round(waiting_by_phase.get(phase, 0.0), 1),
+                "share": (
+                    round(waiting_by_phase.get(phase, 0.0) / waiting_total, 2)
+                    if waiting_total > 0 else 0.0
+                ),
+            }
+            for phase in ("review", "ci", "waiting", "unobserved", "closed")
+        },
+        "by_state": {
+            state_name: {
+                "n": len(values),
+                "median_efficiency": _median(values, 4),
+            }
+            for state_name, values in sorted(by_state.items())
+        },
+        "clamped": clamped,
+        "target_efficiency": TARGET_FLOW_EFFICIENCY,
+        "critical_efficiency": CRITICAL_FLOW_EFFICIENCY,
+        "heuristic": (
+            "active = intervals where the ball-holder left evidence of work "
+            "(commits, a push, a rebase, an author reply) plus "
+            f"{TOUCH_HOURS} h per activity touch (comment/approval/needs-work) "
+            "that ends a queue wait; everything else — review, CI, an idle "
+            "author, the unobserved tail — is waiting"
+        ),
+        "elapsed_basis": (
+            "sum of the PR's measured intervals, in business hours when a "
+            "calendar is attached"
+        ),
+        "accounting": (
+            "working = active + touch; waiting is the measured queue time, so "
+            "working + waiting = elapsed + touch_hours — a touch credit is "
+            "attention spent inside time that is otherwise waiting, so it is "
+            "added to active without being removed from the queue it interrupted"
+        ),
+        "prs": rows,
+    }
+
+
+def time_to_merge(court: ballcourt.BallCourt, window) -> dict:
+    """Kaplan–Meier time-to-merge (prd/05, goal 7) over the opened cohort.
+
+    ``cycle_time`` can only average the PRs that merged; this metric keeps the
+    ones that did not as **right-censored** observations (open PRs at the
+    snapshot, declined PRs at their close time) and fits the survival curve, so
+    the median is the full-population estimate instead of a merged-only one.
+
+    Reported next to it, never instead of it:
+
+    * ``merged_only_median_hours`` — the old number, for comparison;
+    * ``understatement_hours`` — how much longer the survival median is;
+    * ``censored`` — how many observations were censored, their ages, and the
+      excess wait of the open PRs already past the cycle-time target (the
+      population a merged-only median cannot see);
+    * ``quantiles`` and a small ``curve`` — enough to draw the estimate.
+
+    ``hours_mode`` is the court's: business hours with a calendar, wall-clock
+    without one, and the same ``_span_hours`` helper every other metric uses.
+    """
+    states = cohort(court, window)
+    observations: list[Observation] = []
+    merged: list[float] = []
+    open_ages: list[float] = []
+    open_excess = 0.0
+    declined = 0
+    for state in states:
+        pr = state.pr
+        if pr["closed_ts"] is None:
+            hours = _span_hours(court, None, pr["created_ts"], court.snapshot)
+            open_ages.append(hours)
+            open_excess += max(0.0, hours - TARGET_CYCLE_HOURS)
+            observations.append(Observation(hours, False, pr["object_id"]))
+            continue
+        hours = _span_hours(court, None, pr["created_ts"], pr["closed_ts"])
+        if pr["state"] == "merged":
+            merged.append(hours)
+            observations.append(Observation(hours, True, pr["object_id"]))
+        else:
+            declined += 1
+            observations.append(Observation(hours, False, pr["object_id"]))
+
+    fit = kaplan_meier(observations)
+    merged_median = _median(merged)
+    understatement = (
+        round(fit["median_hours"] - merged_median, 2)
+        if fit["median_hours"] is not None and merged_median is not None
+        else None
+    )
+    understatement_share = (
+        round(fit["median_hours"] / merged_median - 1.0, 3)
+        if fit["median_hours"] is not None and merged_median
+        else None
+    )
+    return {
+        "estimator": "Kaplan–Meier",
+        "n": fit["n"],
+        "events": fit["events"],
+        "cohort": len(states),
+        "median_hours": fit["median_hours"],
+        "median_reached": fit["median_reached"],
+        "quantiles": fit["quantiles"],
+        "curve": fit["curve"],
+        "merged_only_median_hours": merged_median,
+        "merged_only_p90_hours": _p90(merged),
+        "understatement_hours": understatement,
+        "understatement_share": understatement_share,
+        "target_hours": TARGET_CYCLE_HOURS,
+        "events_over_target": sum(1 for h in merged if h > TARGET_CYCLE_HOURS),
+        "censored": {
+            "open": len(open_ages),
+            "declined": declined,
+            "total": len(open_ages) + declined,
+            "open_median_age_hours": _median(open_ages),
+            "open_over_target": sum(1 for h in open_ages if h > TARGET_CYCLE_HOURS),
+            "oldest_open_age_hours": round(max(open_ages), 2) if open_ages else None,
+            "open_excess_hours": round(open_excess, 2),
+            "note": (
+                "open PRs are right-censored at the snapshot (their age is a "
+                "lower bound on the merge time they will have); declined PRs "
+                "are censored at their close time"
+            ),
+        },
+        "note": fit["note"],
     }
 
 
@@ -842,6 +1167,8 @@ def metrics(court: ballcourt.BallCourt, threads: list[dict], window,
     return {
         "time_to_first_review": time_to_first_review(court, window),
         "cycle_time": cycle_time(court, window),
+        "flow_efficiency": flow_efficiency(court, window),
+        "survival": time_to_merge(court, window),
         "reviewer_responsiveness": reviewer_responsiveness(court, window),
         "rework_loops": rework_loops(court, window),
         "rebase_waste": rebase_waste(court, window),
@@ -951,11 +1278,144 @@ def templates(
                 "cohort_prs": cyc["cohort"],
                 "open_censored_prs": cyc["censored"]["open"],
                 "open_censored_over_target": cyc["censored"]["open_over_target"],
-                "censoring": "merged-only; open PRs are right-censored",
+                "censoring": (
+                    "merged-only; open PRs are right-censored — metrics.survival "
+                    "is the Kaplan–Meier estimate over the full cohort"
+                ),
+                "survival_median_hours": cyc["survival_median_hours"],
             },
             "Cap work in progress and split large PRs: a PR that opens and merges inside "
             "72 h stops review and rebase waits from compounding.",
             severity, (cyc["median_hours"] - TARGET_CYCLE_HOURS) * cyc["n"], cyc["n"],
+        ))
+
+    # 2b. flow_efficiency — the waiting-time decomposition's headline (prd/05).
+    fe = m["flow_efficiency"]
+    process_efficiency = fe["aggregate_efficiency"]
+    if (
+        fe["available"]
+        and process_efficiency is not None
+        and process_efficiency < TARGET_FLOW_EFFICIENCY
+    ):
+        percent = round(process_efficiency * 100)
+        waiting_percent = 100 - percent
+        severity = (
+            "critical" if process_efficiency < CRITICAL_FLOW_EFFICIENCY else "warning"
+        )
+        bucket, entry = max(
+            fe["waiting_breakdown"].items(), key=lambda item: (item[1]["hours"], item[0])
+        )
+        bucket_label = {
+            "review": "the review queue",
+            "ci": "CI",
+            "waiting": "an idle author",
+            "unobserved": "the unobserved tail",
+            "closed": "the close tail",
+        }.get(bucket, bucket)
+        excess = sum(
+            max(
+                0.0,
+                row["waiting_hours"]
+                - row["elapsed_hours"] * (1 - TARGET_FLOW_EFFICIENCY),
+            )
+            for row in fe["prs"]
+            if row["elapsed_hours"] > 0
+        )
+        median_percent = round((fe["median_efficiency"] or 0.0) * 100)
+        # When the median PR is efficient but the process is not, the gap is the
+        # long PRs — worth saying, because it changes which fix to pick.
+        gap = (
+            f" The median PR is at {median_percent}%, so the gap to the process "
+            "number is the long PRs: split or close those first."
+            if fe["median_efficiency"] is not None
+            and fe["median_efficiency"] >= TARGET_FLOW_EFFICIENCY
+            else ""
+        )
+        out.append(_suggestion(
+            "flow-efficiency", "flow_efficiency",
+            f"Flow efficiency is {percent}% — the process spends {waiting_percent}% "
+            "of cycle time waiting",
+            {
+                "aggregate_efficiency": process_efficiency,
+                "median_efficiency": fe["median_efficiency"],
+                "waiting_share": round(1 - process_efficiency, 2),
+                "median_elapsed_hours": fe["median_elapsed_hours"],
+                "median_waiting_hours": fe["median_waiting_hours"],
+                "largest_waiting_bucket": bucket_label,
+                "largest_waiting_share": entry["share"],
+                "prs": fe["n"],
+                "target_efficiency": TARGET_FLOW_EFFICIENCY,
+                "touch_hours_per_touch": TOUCH_HOURS,
+            },
+            f"Only {percent}% of a PR's life is hands-on time and {waiting_percent}% "
+            f"is queue, mostly {bucket_label}. Shrink the queue rather than speeding "
+            "up the work: a first-response SLA, smaller PRs, and a daily review block "
+            f"move flow efficiency more than asking people to type faster.{gap}",
+            severity, excess, fe["n"],
+        ))
+
+    # 2c. survival / time-to-merge — the censoring-aware estimate (prd/05, goal 7).
+    sv = m["survival"]
+    if sv["median_hours"] is not None and sv["median_hours"] > TARGET_CYCLE_HOURS:
+        severity = "critical" if sv["median_hours"] >= 7 * 24 else "warning"
+        out.append(_suggestion(
+            "time-to-merge", "survival",
+            f"Time to merge is {_human_hours(sv['median_hours'])} median with open "
+            "and declined PRs censored in (target < 3 d)",
+            {
+                "survival_median_hours": sv["median_hours"],
+                "merged_only_median_hours": sv["merged_only_median_hours"],
+                "open_censored_prs": sv["censored"]["open"],
+                "declined_censored_prs": sv["censored"]["declined"],
+                "cohort_prs": sv["cohort"],
+                "merged_prs": sv["events"],
+                "p25_hours": sv["quantiles"]["p25"],
+                "p75_hours": sv["quantiles"]["p75"],
+                "target_hours": TARGET_CYCLE_HOURS,
+                "estimator": sv["estimator"],
+            },
+            "Plan against the survival estimate, not the merged-only median: the PRs "
+            "that linger are exactly the ones a merged-only number cannot see. Close, "
+            "split, or decline the ones that sit open, and treat 'still open after "
+            "3 days' as a queue rather than as work in progress.",
+            severity, (sv["median_hours"] - TARGET_CYCLE_HOURS) * sv["n"], sv["n"],
+        ))
+
+    # 2d. cycle-time-censoring — a merged-only median that hides the open tail
+    # (product review #5). Fires only when the headline number *looks* healthy
+    # while the censored population is already past the target.
+    if (
+        sv["censored"]["open_over_target"] > 0
+        and sv["merged_only_median_hours"] is not None
+        and sv["merged_only_median_hours"] <= TARGET_CYCLE_HOURS
+    ):
+        over = sv["censored"]["open_over_target"]
+        oldest = sv["censored"]["oldest_open_age_hours"]
+        severity = (
+            "critical"
+            if oldest is not None and oldest >= 3 * TARGET_CYCLE_HOURS
+            else "warning"
+        )
+        out.append(_suggestion(
+            "cycle-time-censoring", "survival",
+            f"The merged-only median "
+            f"({_human_hours(sv['merged_only_median_hours'])}) meets 3 d, but "
+            f"{_count(over, 'open PR')} already waited past it",
+            {
+                "merged_only_median_hours": sv["merged_only_median_hours"],
+                "survival_median_hours": sv["median_hours"],
+                "open_censored_prs": sv["censored"]["open"],
+                "open_over_target": over,
+                "oldest_open_age_hours": oldest,
+                "cohort_prs": sv["cohort"],
+                "target_hours": TARGET_CYCLE_HOURS,
+                "estimator": sv["estimator"],
+            },
+            "Do not read the merged-only median as the team's cycle time: a PR that "
+            "has not merged cannot enter it, so the items that linger are invisible. "
+            "Close, split, or decline the open PRs past the target — an open PR is a "
+            "wait with no end yet — and track time-to-merge with the survival estimate.",
+            severity, sv["censored"]["open_excess_hours"], max(1, sv["censored"]["open"]),
         ))
 
     # 3. reviewer_responsiveness — pseudonyms only, team or person granularity.
@@ -1320,8 +1780,11 @@ def insights(
             # count travels with every cycle-time number so it is never read as
             # a full-population median.
             "open_censored": computed["cycle_time"]["censored"]["open"],
+            "declined_censored": computed["cycle_time"]["censored"]["declined"],
             "reviewed": computed["time_to_first_review"]["n"],
             "threads": computed["comment_tax"]["classified"],
+            "flow_efficiency": computed["flow_efficiency"]["n"],
+            "survival": computed["survival"]["n"],
         },
         "targets": {
             "first_review_hours": TARGET_FIRST_REVIEW_HOURS,
@@ -1329,6 +1792,8 @@ def insights(
             "max_review_rounds": MAX_REVIEW_ROUNDS,
             "size_commit_cap": SIZE_COMMIT_CAP,
             "size_line_cap": SIZE_LINE_CAP,
+            "flow_efficiency": TARGET_FLOW_EFFICIENCY,
+            "flow_efficiency_touch_hours": TOUCH_HOURS,
             "hours_per_round": round_hours,
             "hours_per_round_basis": ROUND_COST_BASIS,
         },

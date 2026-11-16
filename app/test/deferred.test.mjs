@@ -94,6 +94,14 @@ test('B19: a fixed target takes no ≈, an estimate still does', () => {
   assert.match(evidenceValue('hours_per_round', 59), /≈/);
 });
 
+test('flow efficiency and waiting shares are percentages, not fractions', () => {
+  assert.equal(evidenceValue('aggregate_efficiency', 0.1879), '19%');
+  assert.equal(evidenceValue('median_efficiency', 0.33), '33%');
+  assert.equal(evidenceValue('waiting_share', 0.81), '81%');
+  // a duration that happens to contain the word is still hours
+  assert.match(evidenceValue('median_waiting_hours', 17.02), /≈/);
+});
+
 test('B16: the people level admits when it has no person signal', () => {
   const team = { level: 'person', suggestions: [{ scope: { kind: 'team' } }] };
   const note = personSignalNote(team);

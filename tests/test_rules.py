@@ -900,6 +900,35 @@ class InsightsApiTests(unittest.TestCase):
         self.assertTrue(pr_size["diff_size"]["available"])
         self.assertEqual(pr_size["diff_size"]["median"], 15.0)
 
+    def test_the_new_flow_and_survival_metrics_are_exposed(self):
+        body = get("/api/insights", tenant="del", level="team", days=3650).json()
+        flow = body["metrics"]["flow_efficiency"]
+        # PR 1 is 10 h active in 300 h; PR 3 is 5 h active; PR 2 has no work
+        self.assertTrue(flow["available"])
+        self.assertEqual(flow["n"], 3)
+        self.assertIn("aggregate_efficiency", flow)
+        # the touch credit can only raise efficiency, never lower it
+        self.assertGreaterEqual(flow["median_efficiency"], flow["measured_median_efficiency"])
+        self.assertGreater(flow["aggregate_efficiency"], 0.0)
+        self.assertEqual(flow["touch_hours_per_touch"], 0.5)
+        self.assertIn("review", flow["waiting_breakdown"])
+        self.assertEqual(body["targets"]["flow_efficiency"], 0.25)
+        # survival: one merged PR, two open ones censored at the snapshot
+        fit = body["metrics"]["survival"]
+        self.assertEqual(fit["estimator"], "Kaplan–Meier")
+        self.assertEqual(fit["n"], 3)
+        self.assertEqual(fit["events"], 1)
+        self.assertEqual(fit["censored"]["open"], 2)
+        # business hours (prd/19): the one merged PR spans 78 working hours
+        self.assertEqual(fit["merged_only_median_hours"], 78.0)
+        self.assertEqual(body["metrics"]["cycle_time"]["median_hours"], 78.0)
+        # one event in three leaves S at 2/3: the median is not reached
+        self.assertIsNone(fit["median_hours"])
+        self.assertEqual(body["metrics"]["cycle_time"]["survival_median_hours"],
+                         fit["median_hours"])
+        ids = {s["id"] for s in body["suggestions"]}
+        self.assertIn("flow-efficiency", ids)
+
     def test_person_level_adds_pseudonym_scoped_rules(self):
         body = get("/api/insights", tenant="del", level="person", days=3650).json()
         suggestion = by_id(body, "reviewer-XxXx")
