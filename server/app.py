@@ -23,6 +23,8 @@ one failure this whole feature exists to prevent.
     GET  /api/queues?level=&days=&tenant=     per-person WIP / throughput series
     GET  /api/delivery?days=&tenant=          triage list: blocked / oldest waiting
     GET  /api/insights?level=&days=&tenant=   ranked "change this" rules (prd/17)
+    GET  /api/simulate?days=&scenario=&tenant= policy lab: calibrated model,
+                                              validation gate + one scenario (prd/23)
     GET  /api/calendar?tenant=          effective business-hours calendar (prd/19)
     GET  /ws                            harness websocket (hello/changed/eval)
     POST /api/eval        {code, timeout}          local-only + harness token
@@ -129,6 +131,7 @@ sys.path.insert(0, str(REPO_ROOT))
 from analysis import ballcourt as analyse  # noqa: E402  (read-only projections)
 from analysis import calendar as workcal  # noqa: E402  (prd/19 business hours)
 from analysis import rules as insights_rules  # noqa: E402  (prd/17 suggestions)
+from analysis import simulation as policy_lab  # noqa: E402  (prd/23 policy lab)
 from ingest import store as pstore  # noqa: E402  (read helpers + schema guard only)
 from ingest import taxonomy  # noqa: E402  (closed vocabularies, read-only)
 from server import query as query  # noqa: E402  (filters, paging, aggregation)
@@ -766,6 +769,7 @@ ANALYSIS_PARAMS = {
     "queues": ("level", "days", "bucket_hours"),
     "delivery": ("days",),
     "insights": ("level", "days"),
+    "simulate": ("days", "scenario", "seed", "tolerance", "replications"),
 }
 
 
@@ -885,6 +889,90 @@ def insights(request: Request):
         return _store_error(exc)
     payload["tenant"] = tenant
     return payload
+
+
+# --------------------------------------------------------------------------- #
+# policy lab (prd/23): calibrate the model from the store, run one scenario
+# --------------------------------------------------------------------------- #
+_sim_lock = threading.Lock()
+_sim_cache: dict = {}
+SIM_CACHE_SIZE = 64
+
+
+@app.get("/api/simulate")
+def simulate(request: Request):
+    """Calibrated discrete-event model + validation gate + one scenario A/B.
+
+    ``scenario`` is a JSON object of policy knobs (``wip_limit``, ``sentinels``,
+    ``review_sla_hours``, ``size_cap_commits``, ``stack_depth_cap``,
+    ``review_first``). Omitted means "baseline only". The response always
+    carries ``validation``; when the baseline does not reproduce the historical
+    cycle-time median within ``tolerance`` (±20 % by default) the scenario is
+    **not run** and ``blocked`` says why — a confident-looking wrong number is
+    worse than no number (prd/23 §"Validation gate").
+    """
+    unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["simulate"]))
+    if unknown is not None:
+        return unknown
+    try:
+        days = _num_param(request, "days", minimum=0, maximum=3650)
+        seed = _int_param(request, "seed", default=policy_lab.DEFAULT_SEED, minimum=0)
+        replications = _int_param(
+            request, "replications", default=policy_lab.DEFAULT_REPLICATIONS,
+            minimum=1, maximum=policy_lab.MAX_REPLICATIONS,
+        )
+        tolerance = _num_param(
+            request, "tolerance", default=policy_lab.DEFAULT_TOLERANCE,
+            minimum=0.01, maximum=1.0,
+        )
+        raw = request.query_params.get("scenario")
+        if raw:
+            try:
+                body = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"scenario is not valid JSON ({exc.msg})") from None
+            scenario = policy_lab.Scenario.from_dict(body)
+        else:
+            scenario = None
+    except policy_lab.SimulationError as exc:
+        return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["simulate"])))
+    except ValueError as exc:
+        return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["simulate"])))
+    try:
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    key = (
+        tenant, _file_stamp(path), _calendar_key(tenant), days,
+        raw or "", seed, replications, tolerance,
+    )
+    with _sim_lock:
+        hit = _sim_cache.get(key)
+    if hit is not None:
+        return JSONResponse(hit)
+    try:
+        with store_conn(path) as con:
+            court = _ballcourt(con, tenant, path)
+            window = analyse.window_from_events(court, _days(days))
+            calibration = policy_lab.calibrate(
+                court, window, conn=con, bots=insights_rules.load_bots(con)
+            )
+            payload = policy_lab.simulate(
+                calibration, scenario, seed=seed, tolerance=tolerance,
+            )
+    except Exception as exc:  # noqa: BLE001
+        return _store_error(exc)
+    payload["tenant"] = tenant
+    payload["params"] = {
+        "days": days, "seed": seed, "replications": replications,
+        "tolerance": tolerance,
+        "scenario": scenario.as_dict() if scenario else None,
+    }
+    with _sim_lock:
+        if len(_sim_cache) >= SIM_CACHE_SIZE:
+            _sim_cache.clear()
+        _sim_cache[key] = payload
+    return JSONResponse(payload)
 
 
 # --------------------------------------------------------------------------- #
