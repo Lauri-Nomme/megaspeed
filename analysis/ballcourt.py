@@ -30,6 +30,33 @@ Measured vs. inferred (the honesty line for this module):
   as such in the tooltip;
 * after the last event of an open PR nothing is measured at all: that tail is
   `unobserved`, never a phase, and it is excluded from the blocking graph.
+
+**Attribution semantics** (product review #7). A PR in review waits on *every*
+reviewer who was asked and has not answered yet, not on whichever reviewer
+happened to act first. The scrape records the roster as ``reviewer_changed``
+events (``added`` / ``removed`` / ``reviewed``, each carrying the person as an
+object link); this module replays that roster and keeps a *pending* set per
+review cycle:
+
+* a review cycle starts when the ball moves back to review (opened, pushed,
+  rebased, author reply) — at that point everyone on the roster owes a response;
+* a reviewer who acts (approve, needs-work, unapprove, reviewed) leaves the
+  pending set for the rest of that cycle;
+* an added reviewer joins the pending set, a removed one leaves it.
+
+``Interval.ball_people`` is therefore the set of **concurrent ball-holders**,
+and the person-level projections (blocking graph, queue series, responsiveness)
+attribute the wait to each of them — a slow non-responder on a three-reviewer PR
+is visible instead of being hidden behind the first responder. Consequences:
+
+* person-level hours are *person-hours*: a 10 h wait on two reviewers is 10 h of
+  blocking for each, so the person-level total is larger than the wall-clock
+  wait it came from (role/queue level still counts it once, under ``review``);
+* when the store has no roster (an old scrape, a REST-only source) the interval
+  falls back to the responder — the previous behaviour — and the wait stays on
+  the synthetic ``review`` queue rather than being invented onto a person;
+* an interval has one duration: business hours are priced with the responder's
+  calendar (or the default window for a queue wait), not per holder.
 """
 
 from __future__ import annotations
@@ -58,6 +85,11 @@ REVIEWER_ACTIONS = {"pr_approved", "pr_unapproved", "pr_needs_work", "reviewer_c
 AUTHOR_ACTIONS = {"pr_pushed", "rebased"}
 TERMINAL = {"pr_merged", "pr_declined"}
 
+# A ticket key on this share of the corpus (and at least this many PRs) is a
+# parent/epic link, not a story dependency. Stated in the delivery payload.
+PARENT_KEY_SHARE = 0.25
+PARENT_KEY_MIN_PRS = 3
+
 def _hours(seconds: float) -> float:
     return round(max(0.0, seconds) / 3600.0, 2)
 
@@ -81,6 +113,9 @@ class Interval:
     evidence: str | None    # commits | push | approval | none
     commits: int
     open: bool
+    # concurrent ball-holders at person resolution (product review #7): every
+    # reviewer who was asked and had not answered yet, not just the responder.
+    ball_people: tuple[str, ...] = ()
     # business hours (prd/19): seconds inside the person's working time, set by
     # ``load`` when a calendar is attached. ``None`` means wall-clock.
     business_seconds: float | None = None
@@ -109,6 +144,19 @@ class Interval:
         if self.ball in ("review", "sentinel"):
             return REVIEW
         return self.ball
+
+    @property
+    def holders(self) -> tuple[str, ...]:
+        """Every party the ball was concurrently with (person resolution).
+
+        Falls back to :attr:`waited_on` so a store without a reviewer roster
+        keeps the old, single-holder answer instead of inventing people.
+        """
+        if self.ball_people:
+            return self.ball_people
+        waited = self.waited_on
+        return (waited,) if waited else ()
+
 
 
 @dataclass(slots=True)
@@ -171,39 +219,76 @@ class BallCourt:
 # reconstruction
 # --------------------------------------------------------------------------- #
 def _state_after(pr: dict, state: dict, event: dict) -> dict | None:
-    """Advance the ball-in-court state machine by one event."""
+    """Advance the ball-in-court state machine by one event.
+
+    Also maintains the two sets the attribution needs: ``reviewers`` (the roster
+    this PR has accumulated) and ``pending`` (who still owes a response in the
+    current review cycle).
+    """
     activity = event["activity"]
     actor = event["actor"]
     attrs = event.get("attributes") or {}
     author = pr["actor"]
     since = event["_ts"]
 
+    reviewers = set(state.get("reviewers") or ())
+    pending = set(state.get("pending") or ())
+
+    # -- roster bookkeeping (product review #7) -------------------------------
+    if activity == "reviewer_changed":
+        people = {p for p in (event.get("people") or ()) if p and p != author}
+        change = attrs.get("change")
+        if change == "added":
+            reviewers |= people
+            pending |= people
+        elif change == "removed":
+            reviewers -= people
+            pending -= people
+        elif change == "reviewed" and actor != author:
+            # a completed review proves the person was asked
+            reviewers.add(actor)
+            pending.discard(actor)
+    elif activity in ("pr_approved", "pr_needs_work", "pr_unapproved") and actor != author:
+        reviewers.add(actor)
+        pending.discard(actor)
+
+    base = {"reviewers": frozenset(reviewers), "pending": frozenset(pending)}
+
+    # -- ball transitions -----------------------------------------------------
     if activity in TERMINAL:
         return None
+    if activity in ("pr_opened", "pr_pushed", "rebased"):
+        # the ball goes back to review: everyone on the roster owes a response
+        base["pending"] = frozenset(reviewers)
     if activity in ("pr_opened", "pr_pushed", "pr_approved", "reviewer_changed"):
         kind = activity
         if activity == "pr_pushed":
             kind = f"push:{attrs.get('push_class') or 'other'}"
-        return {"ball": REVIEW, "by": actor, "kind": kind, "since": since}
+        return {**base, "ball": REVIEW, "by": actor, "kind": kind, "since": since}
     if activity in ("pr_unapproved", "pr_needs_work"):
-        return {"ball": "author", "by": actor, "kind": activity, "since": since}
+        return {**base, "ball": "author", "by": actor, "kind": activity, "since": since}
     if activity == "comment_added":
         if actor == author:
-            return {"ball": REVIEW, "by": actor, "kind": "author_reply", "since": since}
+            # an author reply hands it back to the reviewers: a new response round
+            return {
+                **base, "pending": frozenset(reviewers),
+                "ball": REVIEW, "by": actor, "kind": "author_reply", "since": since,
+            }
         if attrs.get("severity") == "mandatory":
-            return {"ball": "author", "by": actor, "kind": "blocker_comment", "since": since}
+            return {**base, "ball": "author", "by": actor, "kind": "blocker_comment", "since": since}
         # a suggestion does not move the ball: keep whoever has it
         previous = state.get("ball") if state else REVIEW
-        return {"ball": previous or REVIEW, "by": actor, "kind": "comment", "since": since}
+        return {**base, "ball": previous or REVIEW, "by": actor, "kind": "comment", "since": since}
     if activity == "rebased":
-        return {"ball": REVIEW, "by": actor, "kind": "rebase", "since": since}
+        return {**base, "ball": REVIEW, "by": actor, "kind": "rebase", "since": since}
     if activity == "build_status":
-        return {"ball": CI, "by": actor, "kind": "ci", "since": since}
+        return {**base, "ball": CI, "by": actor, "kind": "ci", "since": since}
     if activity in ("question_raised", "question_answered"):
         previous = state.get("ball") if state else REVIEW
-        return {"ball": previous or REVIEW, "by": actor, "kind": activity, "since": since}
+        return {**base, "ball": previous or REVIEW, "by": actor, "kind": activity, "since": since}
     # anything else is outside this slice's vocabulary but must not crash
-    return state
+    return {**state, **base}
+
 
 
 def _phase_for(state: dict, pr_author: str, next_event: dict, commits_in: int) -> tuple[str, str]:
@@ -237,9 +322,10 @@ def _phase_for(state: dict, pr_author: str, next_event: dict, commits_in: int) -
 def _person_for(pr: dict, state: dict, next_event: dict) -> str | None:
     """Best available person for the waiting side of an interval.
 
-    ``review`` is a queue, so the specific reviewer is only known ex post: it is
-    the reviewer who eventually acted. That is a measured fact (this wait ended
-    with that person's action), not an assignment of blame.
+    ``review`` is a queue, so the responder is only known ex post: it is the
+    reviewer who eventually acted. That is a measured fact (this wait ended with
+    that person's action), not an assignment of blame — and it is *not* the only
+    party the item waited on: :func:`_holders` carries the concurrent holders.
     """
     if state["ball"] == "author":
         return pr["actor"]
@@ -253,6 +339,35 @@ def _person_for(pr: dict, state: dict, next_event: dict) -> str | None:
             return actor
         return None
     return state["ball"]
+
+
+def _holders(pr: dict, state: dict, next_event: dict | None) -> tuple[str, ...]:
+    """Every party the ball was concurrently with (product review #7).
+
+    For a review wait that is the *pending* roster — the reviewers who were
+    asked and had not answered when the interval started — plus whoever acted at
+    the end of it (a responder who was never on the roster was still a holder).
+    With no roster in the store this is empty and :attr:`Interval.holders`
+    falls back to the responder, i.e. the old behaviour.
+    """
+    ball = state.get("ball")
+    author = pr["actor"]
+    if ball == "author":
+        return (author,)
+    if ball in (CI, CALENDAR):
+        return ()
+    if ball in (REVIEW, "sentinel"):
+        people = {p for p in (state.get("pending") or ()) if p and p != author}
+        if next_event is not None:
+            actor = next_event["actor"]
+            activity = next_event["activity"]
+            if actor != author and (
+                activity in REVIEWER_ACTIONS or activity == "comment_added"
+            ):
+                people.add(actor)
+        return tuple(sorted(people))
+    return (ball,) if ball else ()
+
 
 
 def _timeline(state: PRState, snapshot: datetime, open_pr: bool) -> None:
@@ -276,6 +391,7 @@ def _timeline(state: PRState, snapshot: datetime, open_pr: bool) -> None:
                     tickets=tuple(pr.get("ticket_keys") or []), author=author,
                     start=start, end=end, phase=phase,
                     ball=current["ball"], ball_person=_person_for(pr, current, event),
+                    ball_people=_holders(pr, current, event),
                     by=current["by"], kind=current["kind"], evidence=evidence,
                     commits=commits_in, open=open_pr,
                 )
@@ -297,7 +413,9 @@ def _timeline(state: PRState, snapshot: datetime, open_pr: bool) -> None:
                 object_id=pr["object_id"], repo=pr["repo"], number=pr["pr_id"],
                 tickets=tuple(pr.get("ticket_keys") or []), author=author,
                 start=tail_start, end=end, phase=phase,
-                ball=current["ball"], ball_person=None, by=current["by"],
+                ball=current["ball"], ball_person=None,
+                ball_people=_holders(pr, current, None),
+                by=current["by"],
                 kind=current["kind"], evidence=evidence, commits=0, open=open_pr,
             )
         )
@@ -306,6 +424,12 @@ def _timeline(state: PRState, snapshot: datetime, open_pr: bool) -> None:
 EVENT_SQL = (
     "SELECT event_key, ts, activity, actor, repo, pr_id, CAST(attributes AS VARCHAR) AS attrs"
     " FROM events ORDER BY ts ASC, event_key ASC"
+)
+# Who an event is *about* (product review #7): ``reviewer_changed`` carries the
+# added/removed/reviewed person as a PERSON object link, not as the actor.
+LINK_SQL = (
+    "SELECT event_key, object_id FROM event_objects"
+    " WHERE object_type = 'PERSON' ORDER BY event_key, object_id"
 )
 OBJECT_SQL = (
     "SELECT object_type, object_id, repo, pr_id, ticket_keys, actor, state, created_at, closed_at"
@@ -335,6 +459,11 @@ def load(conn, calendar: Calendar | None = None, calendar_error: str | None = No
     wall-clock and ``hours_mode`` says so.
     """
     snapshot = _snapshot(conn)
+    people_by_event: dict[str, list[str]] = defaultdict(list)
+    for event_key, object_id in conn.execute(LINK_SQL).fetchall():
+        person = object_id.partition(":")[2]
+        if person:
+            people_by_event[event_key].append(person)
     events = []
     for key, ts, activity, actor, repo, pr_id, attrs in conn.execute(EVENT_SQL).fetchall():
         events.append({
@@ -346,6 +475,7 @@ def load(conn, calendar: Calendar | None = None, calendar_error: str | None = No
             "repo": repo,
             "pr_id": pr_id,
             "attributes": json.loads(attrs) if attrs else {},
+            "people": tuple(people_by_event.get(key, ())),
         })
     objects = []
     for otype, oid, repo, pr_id, keys, actor, state, created, closed in conn.execute(OBJECT_SQL).fetchall():
@@ -443,27 +573,35 @@ def blocking_graph(bc: BallCourt, level: str = "queue", window: tuple[datetime, 
     for interval in measured:
         pr = prs.get(interval.object_id)
         waited_on = interval.waited_on
-        if not waited_on:
+        # Person level: every concurrent holder is charged the wait (product
+        # review #7). Role/queue level keeps one edge per wait — the queue is
+        # the same whether one reviewer or three were asked.
+        if level == "person":
+            targets = interval.holders
+        else:
+            targets = (waited_on,) if waited_on else ()
+        if not targets:
             continue
         x, xkind = endpoint(interval.by, pr, "by")
-        y, ykind = endpoint(waited_on, pr, "ball")
-        if x == y:
-            continue
         hours = interval.hours
-        edge = edges.setdefault((x, y), {"from": x, "to": y, "hours": 0.0, "count": 0, "prs": set()})
-        edge["hours"] += hours
-        edge["count"] += 1
-        edge["prs"].add(interval.object_id)
-        for node_id, kind in ((x, xkind), (y, ykind)):
-            entry = nodes.setdefault(node_id, {
-                "id": node_id, "label": node_id, "kind": kind, "hours": 0.0,
-                "out_hours": 0.0, "count": 0, "wip_now": 0, "per_day": 0.0, "people": [],
-            })
-            if node_id == y:
-                entry["hours"] += hours       # waited on by others (inbound)
-                entry["count"] += 1
-            else:
-                entry["out_hours"] = entry.get("out_hours", 0.0) + hours
+        for person in targets:
+            y, ykind = endpoint(person, pr, "ball")
+            if x == y:
+                continue
+            edge = edges.setdefault((x, y), {"from": x, "to": y, "hours": 0.0, "count": 0, "prs": set()})
+            edge["hours"] += hours
+            edge["count"] += 1
+            edge["prs"].add(interval.object_id)
+            for node_id, kind in ((x, xkind), (y, ykind)):
+                entry = nodes.setdefault(node_id, {
+                    "id": node_id, "label": node_id, "kind": kind, "hours": 0.0,
+                    "out_hours": 0.0, "count": 0, "wip_now": 0, "per_day": 0.0, "people": [],
+                })
+                if node_id == y:
+                    entry["hours"] += hours       # waited on by others (inbound)
+                    entry["count"] += 1
+                else:
+                    entry["out_hours"] = entry.get("out_hours", 0.0) + hours
 
     # current WIP per node: open PRs whose latest measured interval waits on it
     latest: dict[str, Interval] = {}
@@ -477,11 +615,14 @@ def blocking_graph(bc: BallCourt, level: str = "queue", window: tuple[datetime, 
         if interval.phase == SNAPSHOT_PHASE:
             continue
         waited_on = interval.waited_on
-        if not waited_on:
-            continue
-        node_id, _kind = endpoint(waited_on, prs.get(interval.object_id), "ball")
-        if node_id in nodes:
-            nodes[node_id]["wip_now"] += 1
+        if level == "person":
+            targets = interval.holders
+        else:
+            targets = (waited_on,) if waited_on else ()
+        for person in targets:
+            node_id, _kind = endpoint(person, prs.get(interval.object_id), "ball")
+            if node_id in nodes:
+                nodes[node_id]["wip_now"] += 1
 
     days = max((end - start).total_seconds() / 86400.0, 1e-9)
     out_edges = []
@@ -511,9 +652,14 @@ def blocking_graph(bc: BallCourt, level: str = "queue", window: tuple[datetime, 
         "assumption": bc.assumption,
         **bc.calendar_warning(),
         "attribution": (
-            "a wait is attributed to the party the ball was with; at person level "
-            "to the person whose action ended the wait"
+            "a wait is attributed to every party the ball was concurrently with; "
+            "at person level that is every reviewer still pending on the PR (a "
+            "wait on N reviewers is N person-hours, not just the first responder)"
+            if level == "person" else
+            "a wait is attributed to the party the ball was with; the review "
+            "queue counts one wait per PR, however many reviewers were asked"
         ),
+        "hours_kind": "person-hours" if level == "person" else "wait-hours",
         "level": level,
         "window": {"start": iso(start), "end": iso(end), "days": round(days, 1)},
         "nodes": sorted(nodes.values(), key=lambda n: (-n["hours"], n["id"])),
@@ -540,6 +686,11 @@ def queue_series(
     *overloaded* server; the same wait with low WIP is a *slow* server. Waits are
     business hours when a calendar is attached (prd/19); the WIP sampling stays
     on the wall clock, so a weekend shows a flat queue — which is what it is.
+
+    At person level every concurrent holder is charged the wait (product review
+    #7): a PR waiting on three reviewers arrives in all three queues, so the
+    per-person ``hours`` are person-hours. The queue level still counts one wait
+    per PR under the role/queue name.
     """
     start, end = window or (bc.intervals[0].start if bc.intervals else bc.snapshot, bc.snapshot)
     span_hours = max(1.0, (end - start).total_seconds() / 3600.0)
@@ -579,29 +730,35 @@ def queue_series(
     measured = [i for i in bc.intervals if i.measured and i.start < end and i.end > start]
     for interval in measured:
         pr = prs.get(interval.object_id) or {}
-        person = interval.waited_on
-        if not person:
-            continue
-        name = key_for(person, pr)
-        entry = stream(name)
-        if level == "queue" and person not in (REVIEW, CI, CALENDAR):
-            entry["people"].append(person)
-        entry["hours"] += interval.hours
-        entry["count"] += 1
-        entry["prs"].add(interval.object_id)
-        if not interval.open:
-            entry.setdefault("served", set()).add(interval.object_id)
+        # Person level charges every concurrent holder (product review #7);
+        # the queue level keeps one wait per PR under the role/queue name.
+        if level == "person":
+            people = interval.holders
+        else:
+            people = (interval.waited_on,) if interval.waited_on else ()
+        for person in people:
+            if not person:
+                continue
+            name = key_for(person, pr)
+            entry = stream(name)
+            if level == "queue" and person not in (REVIEW, CI, CALENDAR):
+                entry["people"].append(person)
+            entry["hours"] += interval.hours
+            entry["count"] += 1
+            entry["prs"].add(interval.object_id)
+            if not interval.open:
+                entry.setdefault("served", set()).add(interval.object_id)
 
-        # arrivals / departures land in the bucket that contains the timestamp
-        for stamp, series in ((interval.start, entry["arrivals"]), (interval.end, entry["completions"])):
-            b = int((stamp - start).total_seconds() // (bucket_hours * 3600))
-            if 0 <= b < buckets:
-                series[b] += 1
-        # WIP is sampled at bucket midpoints: each item in the queue counts once
-        for b in range(buckets):
-            at = start + timedelta(hours=(b + 0.5) * bucket_hours)
-            if interval.start <= at < interval.end:
-                entry["wip"][b] += 1
+            # arrivals / departures land in the bucket that contains the timestamp
+            for stamp, series in ((interval.start, entry["arrivals"]), (interval.end, entry["completions"])):
+                b = int((stamp - start).total_seconds() // (bucket_hours * 3600))
+                if 0 <= b < buckets:
+                    series[b] += 1
+            # WIP is sampled at bucket midpoints: each item in the queue counts once
+            for b in range(buckets):
+                at = start + timedelta(hours=(b + 0.5) * bucket_hours)
+                if interval.start <= at < interval.end:
+                    entry["wip"][b] += 1
 
     days = span_hours / 24.0
     # global mean wait, for a relative diagnosis that works on any data size
@@ -670,6 +827,28 @@ def queue_series(
     }
 
 
+def _parent_keys(prs: dict[str, dict]) -> set[str]:
+    """Ticket keys shared by so much of the corpus that they are parent links.
+
+    Every DEL PR carries its epic key (``DEL-1``) next to its story key, so
+    counting dependents per key made every open PR "block 130 others" (QA round
+    2, B1/B2). There is no epic flag in the store, so this is a stated v1
+    heuristic: a key attached to at least a quarter of the corpus (and to at
+    least :data:`PARENT_KEY_MIN_PRS` PRs) is a parent/epic link, not a story
+    dependency. It is reported as ``parent_keys`` in the payload so a reader can
+    check the classification instead of trusting it.
+    """
+    counts: dict[str, int] = defaultdict(int)
+    for pr in prs.values():
+        for key in pr.get("ticket_keys") or []:
+            counts[key] += 1
+    total = len(prs)
+    if total < 2:
+        return set()
+    threshold = max(PARENT_KEY_MIN_PRS, int(total * PARENT_KEY_SHARE + 0.999))
+    return {key for key, count in counts.items() if count >= threshold}
+
+
 def delivery_list(bc: BallCourt, window: tuple[datetime, datetime] | None = None) -> dict:
     """The triage list: open PRs ranked by what waiting on them costs."""
     start, end = window or (bc.snapshot - timedelta(days=90), bc.snapshot)
@@ -688,10 +867,17 @@ def delivery_list(bc: BallCourt, window: tuple[datetime, datetime] | None = None
         if previous is None or interval.end >= previous.end:
             last_measured[interval.object_id] = interval
 
-    tickets: dict[str, list[str]] = defaultdict(list)
+    # Dependents are *other open* PRs on the same story ticket (QA round 2, B1):
+    # closed PRs cannot be blocked by a wait, and the shared epic key is not a
+    # dependency. A PR is counted once even when two of its keys match.
+    parent_keys = _parent_keys(prs)
+    open_tickets: dict[str, set[str]] = defaultdict(set)
     for object_id, pr in prs.items():
+        if pr["closed_ts"] is not None:
+            continue
         for key in pr.get("ticket_keys") or []:
-            tickets[key].append(object_id)
+            if key not in parent_keys:
+                open_tickets[key].add(object_id)
 
     rows = []
     for object_id, pr in prs.items():
@@ -702,13 +888,23 @@ def delivery_list(bc: BallCourt, window: tuple[datetime, datetime] | None = None
         # the current wait starts when the last event handed the ball over
         waiting_since = tail.start if tail else (current.start if current else pr["created_ts"])
         waiting_for = (tail.waited_on if tail else None) or (current.waited_on if current else None)
+        # everyone the item is waiting on right now (product review #7): an open
+        # PR in review lists its pending reviewers, not just the queue name.
+        waiting_on = [
+            person for person in (tail.holders if tail else (current.holders if current else ()))
+            if person not in (REVIEW, CI, CALENDAR)
+        ]
         waiting_hours = _hours(
             bc.business_hours(waiting_for, waiting_since, bc.snapshot) * 3600.0
         )
         age_hours = _hours(
             bc.business_hours(None, pr["created_ts"], bc.snapshot) * 3600.0
         )
-        dependents = sum(len(tickets[key]) - 1 for key in (pr.get("ticket_keys") or []))
+        story_keys = [k for k in (pr.get("ticket_keys") or []) if k not in parent_keys]
+        dependents = len(
+            set().union(*(open_tickets.get(key, set()) for key in story_keys))
+            - {object_id}
+        ) if story_keys else 0
         kind = (tail.kind if tail else None) or "no_events"
         rows.append({
             "object_id": object_id,
@@ -717,10 +913,12 @@ def delivery_list(bc: BallCourt, window: tuple[datetime, datetime] | None = None
             "repo_short": pr["repo"].split("/")[-1],
             "number": pr["pr_id"],
             "tickets": pr.get("ticket_keys") or [],
+            "story_tickets": story_keys,
             "author": pr["actor"],
             "state": pr["state"],
             "ball": tail.ball if tail else "unknown",
             "waiting_for": waiting_for,
+            "waiting_on": waiting_on,
             "ball_label": waiting_for or (tail.ball if tail else "unknown"),
             "phase": current.phase if current else "no events",
             "kind": kind,
@@ -743,7 +941,15 @@ def delivery_list(bc: BallCourt, window: tuple[datetime, datetime] | None = None
         "hours_mode": bc.hours_mode,
         "assumption": bc.assumption,
         **bc.calendar_warning(),
-        "impact_note": "impact = open PRs on the same ticket × current wait (≈)",
+        "impact_note": (
+            "impact = other OPEN PRs on the same story ticket × current wait (≈); "
+            "shared parent/epic keys are excluded and a PR counts once"
+        ),
+        "parent_keys": sorted(parent_keys),
+        "parent_key_note": (
+            f"v1 heuristic: a ticket key on >= {int(PARENT_KEY_SHARE * 100)}% of PRs "
+            f"(min {PARENT_KEY_MIN_PRS}) is treated as a parent/epic link"
+        ),
         "snapshot": iso(bc.snapshot),
         "window": {"start": iso(start), "end": iso(end)},
         "counts": {

@@ -353,11 +353,32 @@ def time_to_first_review(court: ballcourt.BallCourt, window) -> dict:
 
 
 def cycle_time(court: ballcourt.BallCourt, window) -> dict:
-    """``pr_merged.ts − pr_opened.ts`` for PRs merged in the cohort."""
+    """``pr_merged.ts − pr_opened.ts`` for PRs merged in the cohort.
+
+    The median/p90 are **conditional on merging**: an open PR has no end yet, so
+    it cannot enter the sample, and a declined PR never will. Dropping them
+    silently is exactly the censoring bias prd/05 warns about (product review
+    #5), so the metric reports the excluded population next to the number:
+
+    * ``censored.open`` — still running at the snapshot (right-censored): their
+      current age is a lower bound on the cycle time they will have;
+    * ``censored.declined`` — closed without merging: excluded by definition,
+      not censored.
+
+    ``n`` stays the merged sample the median is computed over; ``cohort`` is the
+    denominator. Nothing here pretends the median is a full-population number.
+    """
     samples: list[float] = []
-    for state in cohort(court, window):
+    open_ages: list[float] = []
+    declined = 0
+    states = cohort(court, window)
+    for state in states:
         pr = state.pr
-        if pr["state"] != "merged" or pr["closed_ts"] is None:
+        if pr["closed_ts"] is None:
+            open_ages.append(_span_hours(court, None, pr["created_ts"], court.snapshot))
+            continue
+        if pr["state"] != "merged":
+            declined += 1
             continue
         samples.append(_span_hours(court, None, pr["created_ts"], pr["closed_ts"]))
     return {
@@ -366,15 +387,30 @@ def cycle_time(court: ballcourt.BallCourt, window) -> dict:
         "p90_hours": _p90(samples),
         "target_hours": TARGET_CYCLE_HOURS,
         "over_target": sum(1 for h in samples if h > TARGET_CYCLE_HOURS),
+        "cohort": len(states),
+        "censored": {
+            "open": len(open_ages),
+            "declined": declined,
+            "open_median_age_hours": _median(open_ages),
+            "open_over_target": sum(1 for h in open_ages if h > TARGET_CYCLE_HOURS),
+            "note": (
+                "median/p90 are over merged PRs only; open PRs are right-censored "
+                "(still running) and declined PRs never merge, so neither is in "
+                "the sample"
+            ),
+        },
     }
 
 
 def reviewer_responsiveness(court: ballcourt.BallCourt, window) -> dict:
     """Per person: hours the ball sat in *their* review queue vs on their PRs.
 
-    Review-ball hours are attributed to the reviewer whose action ended the
-    wait (a measured fact: "this wait ended with that person"), never to a
-    roster assignment. Author-ball hours are the intervals where the person
+    Review-ball hours are attributed to **every reviewer the ball was
+    concurrently with** — the pending roster from ``ballcourt`` (product review
+    #7) — not only to whoever happened to answer first. A reviewer who never
+    responds therefore accumulates the waits they held instead of disappearing
+    behind the first responder; the responder is included even when the store
+    has no roster for them. Author-ball hours are the intervals where the person
     held the ball on their own PR. "Prefers own work" is the contrast: review
     latency high while their own cycle is low.
     """
@@ -384,8 +420,11 @@ def reviewer_responsiveness(court: ballcourt.BallCourt, window) -> dict:
     for interval in court.intervals:
         if not _overlap(interval, start, end):
             continue
-        if interval.ball == ballcourt.REVIEW and interval.ball_person:
-            review[interval.ball_person].append(interval.hours)
+        if interval.ball == ballcourt.REVIEW:
+            for person in interval.holders:
+                if person in (ballcourt.REVIEW, ballcourt.CI, ballcourt.CALENDAR):
+                    continue  # an unattributed queue wait is not a person's
+                review[person].append(interval.hours)
         elif interval.ball == "author":
             author[interval.author].append(interval.hours)
 
@@ -500,6 +539,13 @@ def comment_tax(court: ballcourt.BallCourt, threads: list[dict], window) -> dict
     zero value — the "wasted rounds" of prd/17. Threads without a
     ``comment_type`` (stores ingested before the text classifier) are counted
     but not classified, so the metric can say "not available yet" honestly.
+
+    ``acted_on`` is not a free pass (DES-3): the scrape only labels it when a
+    deterministic signal (the diff moved at the anchor) or a definite classifier
+    read says so. A thread whose outcome could not be determined is
+    ``unresolved`` — the bucket that keeps the wasted-round count from being
+    flattered — and the payload says what ``unresolved`` means so it is not read
+    as "nobody looked at it".
     """
     start, end = window
     cohort_ids = {state.pr["object_id"] for state in cohort(court, window)}
@@ -541,6 +587,12 @@ def comment_tax(court: ballcourt.BallCourt, threads: list[dict], window) -> dict
         "walked_back": outcomes.get("walked_back", 0),
         "unresolved": outcomes.get("unresolved", 0),
         "acted_on": outcomes.get("acted_on", 0),
+        "outcome_note": (
+            "acted_on means a deterministic signal (the diff moved at the anchor) "
+            "or a definite classifier read; unresolved includes threads whose "
+            "outcome could not be determined, so wasted_share is a floor, not a "
+            "flattering estimate"
+        ),
         "by_type": {
             comment_type: {"threads": entry["threads"], "wasted": entry["wasted"]}
             for comment_type, entry in sorted(by_type.items())
@@ -673,8 +725,10 @@ def sentinel_queue(court: ballcourt.BallCourt, window) -> dict:
     for interval in court.intervals:
         if not _overlap(interval, start, end):
             continue
-        if interval.ball == ballcourt.REVIEW and interval.ball_person in sentinels:
-            waits[interval.ball_person].append(interval.hours)
+        if interval.ball == ballcourt.REVIEW:
+            for person in interval.holders:
+                if person in sentinels:
+                    waits[person].append(interval.hours)
     all_waits = [hours for values in waits.values() for hours in values]
     return {
         "available": bool(all_waits),
@@ -728,7 +782,7 @@ def vacation_blocking(court: ballcourt.BallCourt, window) -> dict:
         blocked = [
             interval for interval in court.intervals
             if interval.measured
-            and interval.waited_on == person
+            and person in interval.holders
             and interval.start < v_end and interval.end > v_start
             and _overlap(interval, start, end)
         ]
@@ -742,8 +796,10 @@ def vacation_blocking(court: ballcourt.BallCourt, window) -> dict:
         delegated = {
             interval.object_id for interval in court.intervals
             if interval.measured
-            and interval.waited_on not in pseudo
-            and interval.waited_on != person
+            and any(
+                holder not in pseudo and holder != person
+                for holder in interval.holders
+            )
             and interval.object_id in per_item
             and interval.start < v_end and interval.end > v_start
         }
@@ -886,6 +942,11 @@ def templates(
                 "target_hours": TARGET_CYCLE_HOURS,
                 "merged_prs": cyc["n"],
                 "over_target": cyc["over_target"],
+                # product review #5: the median is over merged PRs only
+                "cohort_prs": cyc["cohort"],
+                "open_censored_prs": cyc["censored"]["open"],
+                "open_censored_over_target": cyc["censored"]["open_over_target"],
+                "censoring": "merged-only; open PRs are right-censored",
             },
             "Cap work in progress and split large PRs: a PR that opens and merges inside "
             "72 h stops review and rebase waits from compounding.",
@@ -1250,6 +1311,10 @@ def insights(
             "prs": len(cohort(court, window)),
             "days": days,
             "merged": computed["cycle_time"]["n"],
+            # product review #5: open PRs cannot contribute a cycle time; the
+            # count travels with every cycle-time number so it is never read as
+            # a full-population median.
+            "open_censored": computed["cycle_time"]["censored"]["open"],
             "reviewed": computed["time_to_first_review"]["n"],
             "threads": computed["comment_tax"]["classified"],
         },
