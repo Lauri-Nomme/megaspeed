@@ -40,7 +40,7 @@ export function evidenceValue(key, value) {
   if (typeof value === 'number') {
     // A policy target is fixed, not estimated, so it takes no `≈` (B19).
     if (key === 'target_hours') return fmtHours(value);
-    if (key.endsWith('_hours') || key === 'hours_per_round') return fmtImpact(value);
+    if (key.endsWith('_hours') || key === 'hours_per_round' || key === 'hours_per_refinement') return fmtImpact(value);
     // A share (flow efficiency, waiting share) is a fraction of one, not hours.
     if (key.startsWith('share') || key.endsWith('_share') || key.endsWith('_efficiency')) {
       return `${Math.round(value * 100)}%`;
@@ -89,10 +89,15 @@ export function rulesStats(data) {
   const sample = (data && data.sample) || {};
   const rules = suggestions.length;
   const prs = sample.prs ?? 0;
+  // prd/21: the ticket cohort travels next to the PR cohort; a store without the
+  // Jira ingest shows no story count rather than a misleading zero.
+  const stories = (data && data.jira && data.jira.available) ? (sample.stories ?? 0) : null;
   return `<span class="stat-inline"><b>${rules}</b> rule${rules === 1 ? '' : 's'}</span>
     <span class="stat-inline"><b class="${critical ? 'attention' : ''}">${critical}</b> critical</span>
     <span class="stat-inline"><b>${fmtImpact(impact)}</b> at stake</span>
-    <span class="stat-inline"><b>${prs}</b> PR${prs === 1 ? '' : 's'} · <b>${sample.days ?? 0}</b> d</span>`;
+    <span class="stat-inline"><b>${prs}</b> PR${prs === 1 ? '' : 's'}${
+      stories === null ? '' : ` · <b>${stories}</b> stor${stories === 1 ? 'y' : 'ies'}`} ·
+      <b>${sample.days ?? 0}</b> d</span>`;
 }
 
 /* B16: the `people` level is not a no-op toggle. When the engine has no

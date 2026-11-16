@@ -23,6 +23,11 @@ Every metric prd/17 lists is computed from the store, in one pass:
 ``sentinel_queue``       median wait on the mandatory approval (when roles exist)
 ``pr_size``              commits per PR (+ diff size when captured) vs review latency
 ``vacation_blocking``    per vacation: items that waited on the person, no delegation
+``waiting_time_decomposition``  prd/21: the 8 ticket segments, hours + efficiency each
+``carry_over``           prd/21: stories added to more than one sprint
+``point_churn``          prd/21: ``pointed`` events after the story started
+``worklog_cross_check``  prd/21: ``log_delay_bucket`` + logged vs active hours
+``jira_conformance``     prd/21: started before refined, re-pointed after start
 ======================  ==========================================================
 
 Every suggestion is ``{id, metric, title, evidence, suggestion, severity,
@@ -67,6 +72,13 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 
 from analysis import ballcourt
+from analysis import jira as jira_analysis
+from analysis.effort import ACTIVE_PHASES, TOUCH_ACTIVITIES, TOUCH_HOURS
+from analysis.jira import (
+    CARRY_OVER_SHARE_TARGET, POINT_CHURN_SHARE_TARGET, SEGMENT_SHARE_CRITICAL,
+    SEGMENT_SHARE_TARGET, WORKLOG_DELAY_TARGET_DAYS, WORKLOG_LATE_SHARE_TARGET,
+    WORKLOG_RATIO_HIGH, WORKLOG_RATIO_LOW,
+)
 from analysis.survival import Observation, kaplan_meier
 from ingest.store import iso, to_naive_utc, utcnow
 
@@ -83,18 +95,9 @@ CRITICAL_FLOW_EFFICIENCY = 0.10
 # it ends a wait, it does not fill it. Crediting the whole wait it ended would
 # make every reviewed PR 100% active, so a touch is worth this fixed attention
 # cost instead — stated, reported, and recomputable from the payload.
-TOUCH_HOURS = 0.5
-# "Active" phases of the interval model: the author is demonstrably working
-# (commits in the interval, a push, a rebase, an author reply). Everything else
-# — review, CI, an idle author, the unobserved tail — is waiting.
-ACTIVE_PHASES = ("active", "rebasing")
-# Events that mean somebody worked on the PR at that instant. Handover and
-# roster events (``pr_opened``, ``reviewer_changed``) and the terminal events
-# are not work; a build status is CI, not a person.
-TOUCH_ACTIVITIES = (
-    "comment_added", "pr_approved", "pr_needs_work", "pr_unapproved",
-    "pr_pushed", "rebased", "question_raised", "question_answered",
-)
+# ``TOUCH_HOURS`` and the phase/touch vocabularies are shared with the
+# ticket-layer segments (prd/21) so the two efficiencies cannot drift; they live
+# in ``analysis.effort``.
 
 
 def _count(n: int, noun: str) -> str:
@@ -111,6 +114,52 @@ DEFAULT_ROUND_HOURS = 24.0
 SEVERITY_RANK = {"critical": 0, "warning": 1, "info": 2}
 
 REVIEW_ACTIONS = ("comment_added", "pr_approved")
+
+# prd/21: what to change when one segment of the ticket cycle dominates. The
+# advice is per segment, because "wait less" is not a rule.
+SEGMENT_ADVICE = {
+    "ready_refined": (
+        "Refine before the sprint, not during it: a story that waits for a "
+        "refinement slot is not ready to be committed, so the wait turns into "
+        "a carry-over. Refine a story only when the team is ready to size it "
+        "and write its acceptance criteria in one sitting."
+    ),
+    "refined_sprint": (
+        "Plan the sprint from the refined backlog: a pointed story that waits "
+        "weeks for a sprint is a scheduling problem, not a work problem. Keep "
+        "the refined queue short enough that a story enters the next sprint "
+        "after it is refined."
+    ),
+    "sprint_in_progress": (
+        "Start committed work on day one. A story that enters a sprint and "
+        "then waits is queue, not progress: cap the sprint's work in progress "
+        "and pull the next story only when one finishes."
+    ),
+    "in_progress_pr_open": (
+        "Open the PR early (as a draft) as soon as the approach is settled, so "
+        "review and CI can start while the work continues. A story in progress "
+        "with no PR is invisible to the reviewers who could unblock it."
+    ),
+    "pr_open_first_review": (
+        "Adopt a first-response target: every PR gets a first review inside a "
+        "day, and the review queue is triaged each morning. The wait for the "
+        "first look, not the review itself, is what this segment measures."
+    ),
+    "review_rounds": (
+        "Cap review rounds: if a PR needs a third pass, the author and reviewer "
+        "agree the remaining blockers in one conversation instead of another "
+        "comment round. Nits and out-of-scope notes belong on the ticket."
+    ),
+    "final_approval_merge": (
+        "Merge on approval: enable auto-merge, or make merging part of the "
+        "reviewer's action. An approved PR that waits is finished work the "
+        "team cannot deliver or count."
+    ),
+    "merge_done": (
+        "Close the ticket when the PR merges: the story is done at the merge, "
+        "and a stale open ticket distorts every cycle-time number after it."
+    ),
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -178,15 +227,30 @@ def _overlap(interval, start: datetime, end: datetime) -> bool:
     return interval.measured and interval.start < end and interval.end > start
 
 
-def window_for(court: ballcourt.BallCourt, days: float | None = None) -> tuple[datetime, datetime]:
-    """The analysis window: PRs *opened* inside it are the cohort.
+def window_for(
+    court: ballcourt.BallCourt,
+    days: float | None = None,
+    jira: jira_analysis.JiraData | None = None,
+) -> tuple[datetime, datetime]:
+    """The analysis window: items *created* inside it are the cohort.
 
     Unlike ``ballcourt.window_from_events`` this includes the earliest PR
     creation, so a PR with no events yet still belongs to an "all time" window.
+    ``jira`` extends the earliest edge to the first story: a Jira-only store has
+    no PRs and no intervals, so without it "all time" would collapse to the
+    snapshot and the ticket metrics would report an empty window on a full
+    store.
     """
     first_pr = min((s.pr["created_ts"] for s in court.prs), default=None)
     first_interval = min((i.start for i in court.intervals), default=None)
-    first = min((t for t in (first_pr, first_interval) if t is not None), default=court.snapshot)
+    first_story = min(
+        (story.start for story in (jira.stories if jira else ()) if story.start),
+        default=None,
+    )
+    first = min(
+        (t for t in (first_pr, first_interval, first_story) if t is not None),
+        default=court.snapshot,
+    )
     if not days:
         return first, court.snapshot
     return max(first, court.snapshot - timedelta(days=float(days))), court.snapshot
@@ -1162,8 +1226,15 @@ def vacation_blocking(court: ballcourt.BallCourt, window) -> dict:
 
 
 def metrics(court: ballcourt.BallCourt, threads: list[dict], window,
-            sizes: dict[str, dict] | None = None) -> dict:
-    """Every prd/17 metric, in one deterministic pass."""
+            sizes: dict[str, dict] | None = None,
+            jira: jira_analysis.JiraData | None = None) -> dict:
+    """Every prd/17 metric, in one deterministic pass.
+
+    The Jira half (prd/21) is merged in under its own keys; with no Jira data in
+    the store every one of those metrics is ``available: false`` with the same
+    note, so "the ticket layer is missing" is a stated result rather than a
+    silent zero.
+    """
     return {
         "time_to_first_review": time_to_first_review(court, window),
         "cycle_time": cycle_time(court, window),
@@ -1178,7 +1249,16 @@ def metrics(court: ballcourt.BallCourt, threads: list[dict], window,
         "pr_size": pr_size(court, window, sizes),
         "vacation_blocking": vacation_blocking(court, window),
         "review_cost": {"hours_per_round": round_cost_hours(court, window)},
+        # prd/21: the ticket layer. Keys are distinct from the PR-level ones so
+        # a reader can never confuse "merged with no approval" (conformance)
+        # with "started before refinement" (jira_conformance).
+        **jira_analysis.metrics(court, jira, window),
     }
+
+
+def load_jira(con, court: ballcourt.BallCourt) -> jira_analysis.JiraData:
+    """The Jira half of the store, joined to the PR timelines on the story key."""
+    return jira_analysis.load(con, court)
 
 
 # --------------------------------------------------------------------------- #
@@ -1731,6 +1811,221 @@ def templates(
                 severity, vb["blocked_hours"], vb["blocked_items"],
             ))
 
+    # ----------------------------------------------------------------------- #
+    # 11-15. the Jira layer (prd/21) — the ticket half of the flow
+    # ----------------------------------------------------------------------- #
+    # 11. waiting_time_decomposition — where the ticket's time goes.
+    wtd = m["waiting_time_decomposition"]
+    if wtd["available"] and wtd["largest_share"] >= SEGMENT_SHARE_TARGET:
+        segment = wtd["largest"]
+        hours = wtd["largest_hours"]
+        share = wtd["largest_share"]
+        percent = round(share * 100)
+        severity = "critical" if share >= SEGMENT_SHARE_CRITICAL else "warning"
+        advice = SEGMENT_ADVICE.get(segment, "Shrink the biggest queue.")
+        out.append(_suggestion(
+            "jira-waiting-time", "waiting_time_decomposition",
+            f"The team spends {percent}% of ticket cycle time in the "
+            f"{wtd['largest_label']} segment",
+            {
+                "segment": wtd["largest_label"],
+                "segment_hours": hours,
+                "share": share,
+                "cycle_hours": wtd["total_hours"],
+                "stories": wtd["stories_decomposed"],
+                "flow_efficiency": wtd["largest_efficiency"],
+                "impact_basis": "half the largest segment's hours",
+            },
+            f"{advice} The largest wait is {_human_hours(hours)} per story in "
+            f"the {wtd['largest_label']} segment, {percent}% of the measured "
+            "ticket cycle. Fix that phase first: it is the cheapest hour to "
+            "remove, because nothing is being worked on during it.",
+            severity, hours / 2.0, wtd["stories_decomposed"],
+        ))
+
+    # 12. carry_over — "the sprint plan isn't honest".
+    co = m["carry_over"]
+    if (
+        co["available"]
+        and co["carried_over"] > 0
+        and (co["share"] >= CARRY_OVER_SHARE_TARGET or co["carried_over"] >= 3)
+    ):
+        carried = co["carried_over"]
+        severity = (
+            "critical" if co["share"] >= 0.25 or carried >= 5 else "warning"
+        )
+        out.append(_suggestion(
+            "jira-carry-over", "carry_over",
+            f"{carried} stor{'y' if carried == 1 else 'ies'} carried over "
+            "between sprints",
+            {
+                "carried_over": carried,
+                "stories_in_a_sprint": co["stories_in_a_sprint"],
+                "share": co["share"],
+                "sprints": co["sprints_involved"],
+                "wait_hours": co["wait_hours"],
+                "median_wait_hours": co["median_wait_hours"],
+                "target_share": co["target_share"],
+            },
+            "Plan from a refined backlog and finish what you commit: a story "
+            "carried into a second sprint takes capacity from the next plan "
+            "twice. Split the story until it fits one sprint, and leave it in "
+            "the backlog until it does — a carry-over is a commitment the "
+            "team already knew it would break.",
+            severity, co["wait_hours"], co["stories_in_a_sprint"] or carried,
+        ))
+
+    # 13. point_churn — the estimate moved after the work started.
+    pc = m["point_churn"]
+    rc = m["refinement_cost"]
+    if (
+        pc["churned"] > 0
+        and (pc["share"] >= POINT_CHURN_SHARE_TARGET or pc["churned"] >= 3)
+    ):
+        churned = pc["churned"]
+        severity = "critical" if pc["share"] >= 0.25 else "warning"
+        out.append(_suggestion(
+            "jira-point-churn", "point_churn",
+            f"{churned} stor{'y' if churned == 1 else 'ies'} re-pointed after "
+            "work started",
+            {
+                "churned": churned,
+                "stories_pointed": pc["stories_pointed"],
+                "share": pc["share"],
+                "repoint_events": pc["churned_events"],
+                "hours_per_refinement": rc["hours"],
+                "refinement_basis": rc["basis"],
+            },
+            "Settle the estimate in refinement: a re-point after work starts "
+            "means the sprint was planned on a number that was not final, so "
+            "the burn-down and the capacity both lie. If the story is bigger "
+            "than the estimate, split it rather than re-pointing it mid-flight.",
+            severity, churned * rc["hours"], pc["stories_pointed"] or churned,
+        ))
+
+    # 14. worklog_cross_check — how much to trust the logged hours.
+    wc = m["worklog_cross_check"]
+    if wc["available"]:
+        delay = wc["mean_delay_days"]
+        if delay is not None and delay >= WORKLOG_DELAY_TARGET_DAYS:
+            severity = (
+                "critical"
+                if delay >= 7 or wc["late_share"] >= WORKLOG_LATE_SHARE_TARGET
+                else "warning"
+            )
+            out.append(_suggestion(
+                "jira-worklog-noise", "worklog_cross_check",
+                f"Logging is {round(delay, 1)} days late on average — don't "
+                "trust the logged hours",
+                {
+                    "mean_delay_days": delay,
+                    "median_delay_days": wc["median_delay_days"],
+                    "p90_delay_days": wc["p90_delay_days"],
+                    "late_share": wc["late_share"],
+                    "untrusted_hours": wc["untrusted_hours"],
+                    "worklogs": wc["worklogs"],
+                    "logged_hours": wc["logged_hours"],
+                    "target_days": wc["delay_target_days"],
+                },
+                "Log the hours on the day they are worked: a worklog written a "
+                "week later is reconstructed from memory, so it can support a "
+                "total but never a timeline. Until logging is same-day, read "
+                "logged hours as an estimate of effort, not as evidence of when "
+                "the work happened.",
+                severity, 0.0, wc["worklogs"],
+            ))
+        elif wc["late_share"] >= WORKLOG_LATE_SHARE_TARGET:
+            late_percent = round(wc["late_share"] * 100)
+            out.append(_suggestion(
+                "jira-worklog-noise", "worklog_cross_check",
+                f"{late_percent}% of worklogs are a week or more late — don't "
+                "trust the logged hours",
+                {
+                    "late_share": wc["late_share"],
+                    "late_worklogs": wc["buckets"]["within_week"] + wc["buckets"]["late"],
+                    "untrusted_hours": wc["untrusted_hours"],
+                    "worklogs": wc["worklogs"],
+                    "logged_hours": wc["logged_hours"],
+                    "target_days": wc["delay_target_days"],
+                },
+                "Log the hours on the day they are worked, or accept that the "
+                "worklog is a weekly estimate: a log written after the fact "
+                "cannot tell you when the work happened, which is what the "
+                "timeline needs.",
+                "warning", 0.0, wc["worklogs"],
+            ))
+        ratio = wc["logged_to_active_ratio"]
+        if ratio is not None and (
+            ratio >= WORKLOG_RATIO_HIGH or ratio <= WORKLOG_RATIO_LOW
+        ):
+            severity = (
+                "critical"
+                if ratio >= 5 or ratio <= 0.2 else "warning"
+            )
+            direction = "more" if ratio > 1 else "less"
+            out.append(_suggestion(
+                "jira-worklog-mismatch", "worklog_cross_check",
+                f"Logged hours differ from active PR time by {ratio:g}×",
+                {
+                    "logged_hours": wc["logged_hours"],
+                    "active_hours": wc["active_hours"],
+                    "ratio": ratio,
+                    "stories_with_worklogs": wc["stories_with_worklogs"],
+                    "stories_with_prs": wc["stories_with_prs"],
+                },
+                f"The team logs {ratio:g}× {direction} time than the PRs show "
+                "as active work. One of the two numbers is wrong: either the "
+                "worklog counts meetings, reviews and waiting, or the PR is the "
+                "last ten percent of a long story. Agree what a worklog means "
+                "before either is used for planning.",
+                severity, 0.0, wc["worklogs"],
+            ))
+
+    # 15. jira_conformance — did the process happen in the order it claims?
+    jc = m["jira_conformance"]
+    if jc["available"] and (
+        jc["started_before_refined"] > 0 or jc["points_changed_after_start"] > 0
+    ):
+        parts = []
+        if jc["started_before_refined"]:
+            parts.append(
+                f"{jc['started_before_refined']} stor"
+                f"{'y' if jc['started_before_refined'] == 1 else 'ies'} started "
+                "before refinement"
+            )
+        if jc["points_changed_after_start"]:
+            parts.append(
+                f"{jc['points_changed_after_start']} re-pointed after start"
+            )
+        violations = (
+            jc["started_before_refined"] + jc["points_changed_after_start"]
+        )
+        severity = (
+            "critical"
+            if jc["started_before_refined_share"] >= 0.25 or violations >= 5
+            else ("warning" if violations >= 2 else "info")
+        )
+        out.append(_suggestion(
+            "jira-conformance", "jira_conformance",
+            "; ".join(parts),
+            {
+                "stories": jc["stories"],
+                "stories_started": jc["stories_started"],
+                "started_before_refined": jc["started_before_refined"],
+                "started_unrefined": jc["started_unrefined"],
+                "points_changed_after_start": jc["points_changed_after_start"],
+                "carried_over": jc["carried_over"],
+                "pr_opened_before_start": jc["pr_opened_before_start"],
+                "hours_per_refinement": rc["hours"],
+            },
+            "Run the ticket in the order the process describes: refine and "
+            "estimate, then start. Work that begins on an unestimated story "
+            "cannot be forecast, and a re-point after the start invalidates "
+            "the sprint plan it was built on. If the story is not ready, leave "
+            "it in the backlog — starting it is what makes the plan wrong.",
+            severity, violations * rc["hours"], jc["stories_started"] or 1,
+        ))
+
     return out
 
 
@@ -1756,10 +2051,11 @@ def insights(
     generated_at: datetime | None = None,
     bots: set[str] | None = None,
     sizes: dict[str, dict] | None = None,
+    jira: jira_analysis.JiraData | None = None,
 ) -> dict:
     """The API payload: metrics + ranked, evidence-backed suggestions."""
     start, end = window
-    computed = metrics(court, threads, window, sizes)
+    computed = metrics(court, threads, window, sizes, jira)
     round_hours = computed["review_cost"]["hours_per_round"]
     suggestions = rank(templates(computed, level, round_hours, bots))
     days = round(max(0.0, (end - start).total_seconds()) / 86400.0, 1)
@@ -1771,6 +2067,9 @@ def insights(
         "assumption": court.assumption,
         **court.calendar_warning(),
         "level": level,
+        # prd/21: the ticket layer's availability travels next to the numbers, so
+        # a store without the Jira ingest says so instead of reporting zeroes.
+        "jira": computed["jira"],
         "window": {"start": iso(start), "end": iso(end), "days": days},
         "sample": {
             "prs": len(cohort(court, window)),
@@ -1785,6 +2084,11 @@ def insights(
             "threads": computed["comment_tax"]["classified"],
             "flow_efficiency": computed["flow_efficiency"]["n"],
             "survival": computed["survival"]["n"],
+            # the Jira cohort (stories created in the window) and the population
+            # the decomposition could actually measure
+            "stories": computed["waiting_time_decomposition"]["stories"],
+            "stories_decomposed": computed["waiting_time_decomposition"]["stories_decomposed"],
+            "jira_available": computed["jira"]["available"],
         },
         "targets": {
             "first_review_hours": TARGET_FIRST_REVIEW_HOURS,
@@ -1796,6 +2100,14 @@ def insights(
             "flow_efficiency_touch_hours": TOUCH_HOURS,
             "hours_per_round": round_hours,
             "hours_per_round_basis": ROUND_COST_BASIS,
+            # prd/21 targets, stated rather than hidden
+            "jira_carry_over_share": CARRY_OVER_SHARE_TARGET,
+            "jira_point_churn_share": POINT_CHURN_SHARE_TARGET,
+            "jira_segment_share": SEGMENT_SHARE_TARGET,
+            "jira_segment_share_critical": SEGMENT_SHARE_CRITICAL,
+            "jira_worklog_delay_days": WORKLOG_DELAY_TARGET_DAYS,
+            "jira_worklog_late_share": WORKLOG_LATE_SHARE_TARGET,
+            "jira_worklog_ratio": [WORKLOG_RATIO_LOW, WORKLOG_RATIO_HIGH],
         },
         "metrics": computed,
         "suggestions": suggestions,
@@ -1803,6 +2115,8 @@ def insights(
             "impact_hours estimates the wait the rule would remove, in "
             f"{court.hours_mode} hours, using the measured review-round cost in "
             "this window; ranking is impact × confidence (sample size). Person "
-            "rules carry pseudonyms only."
+            "rules carry pseudonyms only. The Jira-layer rules (prd/21) price "
+            "ticket waits with the same calendar and report "
+            "available: false when the store has no ticket layer."
         ),
     }
