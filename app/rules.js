@@ -38,6 +38,8 @@ export function evidenceValue(key, value) {
   if (key === 'diff_size_pending') return value ? 'pending' : 'captured';
   if (typeof value === 'boolean') return value ? 'yes' : 'no';
   if (typeof value === 'number') {
+    // A policy target is fixed, not estimated, so it takes no `≈` (B19).
+    if (key === 'target_hours') return fmtHours(value);
     if (key.endsWith('_hours') || key === 'hours_per_round') return fmtImpact(value);
     if (key.startsWith('share')) return `${Math.round(value * 100)}%`;
     return Number.isInteger(value) ? String(value) : String(value);
@@ -82,35 +84,61 @@ export function rulesStats(data) {
   const critical = suggestions.filter((s) => s.severity === 'critical').length;
   const impact = suggestions.reduce((sum, s) => sum + (Number(s.impact_hours) || 0), 0);
   const sample = (data && data.sample) || {};
-  return `<span class="stat-inline"><b>${suggestions.length}</b> rules</span>
+  const rules = suggestions.length;
+  const prs = sample.prs ?? 0;
+  return `<span class="stat-inline"><b>${rules}</b> rule${rules === 1 ? '' : 's'}</span>
     <span class="stat-inline"><b class="${critical ? 'attention' : ''}">${critical}</b> critical</span>
     <span class="stat-inline"><b>${fmtImpact(impact)}</b> at stake</span>
-    <span class="stat-inline"><b>${sample.prs ?? 0}</b> PRs · <b>${sample.days ?? 0}</b> d</span>`;
+    <span class="stat-inline"><b>${prs}</b> PR${prs === 1 ? '' : 's'} · <b>${sample.days ?? 0}</b> d</span>`;
+}
+
+/* B16: the `people` level is not a no-op toggle. When the engine has no
+ * person-scoped signal, say so instead of silently listing team rules under a
+ * person heading. */
+export function personSignalNote(data, { below = true } = {}) {
+  if (!data || data.level !== 'person') return '';
+  const personRules = (data.suggestions || [])
+    .filter((suggestion) => suggestion.scope && suggestion.scope.kind === 'person');
+  if (personRules.length) return '';
+  return 'No person-level rule crosses its threshold in this window' +
+    (below ? '; the team rules below still apply.' : '.');
 }
 
 export function rulesMarkup(data) {
   const suggestions = (data && data.suggestions) || [];
+  const note = personSignalNote(data, { below: suggestions.length > 0 });
   if (!suggestions.length) {
     return `<div class="rules-empty">
+      ${note ? `<p>${esc(note)}</p>` : ''}
       <p>No rule crosses its threshold in this window.</p>
       <p class="muted">That is a result, not a missing screen: first review under 24 h, cycle
         time under 3 d, two review rounds or fewer, no lost approvals. Widen the timeframe or
         switch to people to check the per-person rules.</p>
     </div>`;
   }
-  return `<div class="rules-list">${suggestions.map(ruleRow).join('')}</div>`;
+  return `${note ? `<p class="rules-note">${esc(note)}</p>` : ''}
+    <div class="rules-list">${suggestions.map(ruleRow).join('')}</div>`;
 }
 
 export function rulesMarkdown(data) {
   if (!data) return '';
+  const note = personSignalNote(data, { below: (data.suggestions || []).length > 0 });
+  const personRules = (data.suggestions || [])
+    .some((suggestion) => suggestion.scope && suggestion.scope.kind === 'person');
+  // B16: the heading must not claim "(person)" over team rules.
+  const level = data.level === 'person'
+    ? (personRules ? 'person' : 'team — no person-level signal in this window')
+    : (data.level || 'team');
   const lines = [
-    `# Rules — what should we change first? (${data.level || 'team'})`,
+    `# Rules — what should we change first? (${level})`,
     '',
-    `_${data.sample.prs} PRs opened over ${data.sample.days} days · ` +
+    `_${data.sample.prs} PR${data.sample.prs === 1 ? '' : 's'} opened over ` +
+      `${data.sample.days} day${data.sample.days === 1 ? '' : 's'} · ` +
       `${data.hours_mode === 'business' ? 'business hours' : 'wall-clock hours'} · ` +
       `snapshot ${data.as_of}_`,
     '',
   ];
+  if (note) lines.push(`_${note}_`, '');
   for (const suggestion of data.suggestions) {
     const facts = evidenceItems(suggestion.evidence)
       .map((fact) => `${fact.label} ${fact.value}`).join(' · ');

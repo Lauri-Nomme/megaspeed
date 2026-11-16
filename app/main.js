@@ -68,7 +68,15 @@ const state = {
   page: 'timeline',
   scope: { kind: 'all', value: null, label: 'everything' },
   timeframe: '1q',
+  // B6: the timeline's window is the timeframe only until the user brushes or
+  // zooms. `timeframeCustom` says the control and the chart have diverged, and
+  // `tfWindow` remembers the window the active preset actually produced (the
+  // domain clamp means "1q" is not exactly 90 days on a short store).
+  timeframeCustom: false,
+  tfWindow: null,
   tab: 'blocked',
+  // B11: an explicitly chosen tab (or a restored one) is never auto-switched.
+  tabPinned: false,
   delivery: null,
   queues: null,
   blocking: null,
@@ -87,7 +95,12 @@ const timeline = new Timeline({
   canvas: $('timeline'),
   tip: $('tip'),
   onStats: (stats) => {
-    $('range').textContent = fmtRange(stats.start, stats.end);
+    // B6: the top bar follows the timeline's real window, and says "custom"
+    // when a brush or a zoom has taken it away from the active timeframe.
+    noteTimelineView(stats);
+    if (state.page === 'timeline') {
+      $('range').textContent = stats.total ? fmtRange(stats.start, stats.end) : 'no events';
+    }
     // B7: the timeline's disclosure describes the timeline only. Every other
     // view writes its own line in render*Page(); an async repaint of a hidden
     // canvas must not overwrite it.
@@ -101,10 +114,7 @@ const timeline = new Timeline({
     }
     setHonesty(bits.join(' · '));
     renderLoadAll();
-    $('empty').hidden = !(stats.allHidden || !!state.emptyReason);
-    if (stats.allHidden) {
-      $('empty').querySelector('p').textContent = 'Every activity is hidden — click a legend key to show it again.';
-    }
+    updateTimelineEmpty(stats);
   },
   onSelect: (pr) => openPrDrawer(pr),
   onSelection: (range) => renderSelection(range),
@@ -166,9 +176,114 @@ function timeframeDays() {
   return TIMEFRAMES[state.timeframe].days;
 }
 
+/** G5: `All` means the whole store, not the API's 90-day default. */
+function allDays() {
+  const meta = state.meta;
+  if (!meta || !meta.first_ts || !meta.as_of) return null;
+  const span = Date.parse(meta.as_of) - Date.parse(meta.first_ts);
+  if (!(span > 0)) return null;
+  // +1 day so the oldest event is inside the window, never one tick outside it.
+  return Math.ceil(span / DAY) + 1;
+}
+
 function timeframeQuery() {
-  const days = timeframeDays();
+  const days = timeframeDays() ?? allDays();
   return days ? `days=${days}` : '';
+}
+
+/** The absolute window the active timeframe describes, from the snapshot. */
+function presetWindow() {
+  const meta = state.meta;
+  if (!meta || !meta.as_of) return null;
+  const end = Date.parse(meta.as_of);
+  const days = timeframeDays();
+  if (!days) {
+    return meta.first_ts ? { start: Date.parse(meta.first_ts), end } : null;
+  }
+  return { start: end - days * DAY, end };
+}
+
+/* B6: the timeframe control is the top-bar contract for "when". A preset shows
+ * pressed; a brush or a zoom shows a `custom` chip instead of leaving a preset
+ * pressed over a different window. `#range` is the timeline's window and is
+ * never painted onto another view: those views show the preset window they
+ * really query. */
+function renderTimeframe() {
+  const custom = state.timeframeCustom;
+  for (const button of $('timeframe').querySelectorAll('button[data-tf]')) {
+    const active = !custom && button.dataset.tf === state.timeframe;
+    button.setAttribute('aria-pressed', String(active));
+    button.classList.toggle('on', active);
+  }
+  const chip = $('tf-custom');
+  if (chip) {
+    // The custom window belongs to the timeline; other views use the preset
+    // they query, so the chip would contradict the range beside it (B6).
+    chip.hidden = !custom || state.page !== 'timeline';
+    chip.setAttribute('aria-pressed', String(custom));
+  }
+  if (state.page !== 'timeline') {
+    const window = presetWindow();
+    $('range').textContent = window ? fmtRange(window.start, window.end) : '—';
+  } else if (custom) {
+    const view = timeline.captureView();
+    if (view) $('range').textContent = fmtRange(view.start, view.end);
+  }
+}
+
+function noteTimelineView(stats) {
+  // Nothing on the canvas: the preset is what the page asked for, and the empty
+  // overlay (B10) explains the blank, so do not claim a custom window.
+  if (!stats.total) {
+    if (state.timeframeCustom) {
+      state.timeframeCustom = false;
+      renderTimeframe();
+    }
+    return;
+  }
+  const applied = state.tfWindow;
+  const custom = !applied || Math.abs(stats.start - applied.start) > 1000
+    || Math.abs(stats.end - applied.end) > 1000;
+  if (custom !== state.timeframeCustom) {
+    state.timeframeCustom = custom;
+    renderTimeframe();
+  }
+}
+
+/* B10: a zero-event timeline is a state, not a blank canvas. The fixture hint
+ * only belongs to an empty store (B19); a scope or a zoom that hides everything
+ * says what to do about it. */
+function updateTimelineEmpty(stats) {
+  const empty = $('empty');
+  if (state.emptyReason) {
+    empty.hidden = false;
+    empty.querySelector('p').textContent = state.emptyReason;
+    return;
+  }
+  if (stats.allHidden) {
+    empty.hidden = false;
+    empty.querySelector('p').textContent = 'Every activity is hidden — click a legend key to show it again.';
+    empty.querySelector('.muted').textContent = 'Filtering de-emphasises or hides marks; it never deletes data.';
+    return;
+  }
+  if (!stats.total) {
+    empty.hidden = false;
+    if (state.scope.kind !== 'all') {
+      empty.querySelector('p').textContent = `No events for scope ${state.scope.label} in this dataset.`;
+      empty.querySelector('.muted').textContent = 'Clear the scope in the top bar to see the whole team.';
+    } else {
+      empty.querySelector('p').textContent = 'No events in this window.';
+      empty.querySelector('.muted').textContent = 'The store has no events to show; import a dataset, then reload.';
+    }
+    return;
+  }
+  if (!stats.visible) {
+    empty.hidden = false;
+    empty.querySelector('p').textContent = 'No events in this window.';
+    empty.querySelector('.muted').textContent = 'Zoom out, press Home, or pick a wider timeframe.';
+    return;
+  }
+  empty.hidden = true;
 }
 
 /* Every read is tenant-scoped (prd/12): the selected tenant is a query
@@ -191,9 +306,28 @@ function syncChromeHeight() {
   document.documentElement.style.setProperty('--meta-bottom', `${bottom}px`);
 }
 
+let statusTimer = 0;
+
+function liveStatusText() {
+  if (!state.meta) return 'connecting';
+  return `live · ${state.events.length} events${state.tenant ? ` · ${state.tenant}` : ''}`;
+}
+
 function setStatus(text, cls = '') {
+  clearTimeout(statusTimer);
   $('status').textContent = text;
   $('status').className = `status ${cls}`.trim();
+}
+
+/* B13: feedback like "copied as Markdown" is transient. It returns to the live
+ * state on its own, so the top-right never keeps claiming an old action. */
+function flashStatus(text, cls = 'live', ms = 2500) {
+  setStatus(text, cls);
+  clearTimeout(statusTimer);
+  statusTimer = setTimeout(() => {
+    if (state.meta) setStatus(liveStatusText(), 'live');
+    else setStatus('connecting');
+  }, ms);
 }
 
 // -------------------------------------------------------------------- views
@@ -226,6 +360,7 @@ function renderPage() {
   syncLevelSelects();
   renderScopeBanner();
   setHonesty('');
+  renderTimeframe();
   if (page === 'timeline') renderTimelinePage();
   if (page === 'delivery') renderDeliveryPage();
   if (page === 'blocking') renderBlockingPage();
@@ -401,10 +536,18 @@ function resetTenantData() {
   state.epicKeys = new Set();
   state.cache.clear();
   $('load-all').hidden = true;
+  // B12: a brush chip (and every hover/selection) belongs to the dataset it was
+  // made in. Clear it with the data so "Set timeframe" cannot apply a window
+  // from another tenant.
+  timeline.clearSelection();
   timeline.setTicketIndex({ epicKeys: state.epicKeys });
   timeline.setData([], [], {});
   blockingMap.setData({ nodes: [], edges: [] });
   queueChart.setData({ streams: [], buckets: 1, window: { start: '', end: '' } });
+  $('selection').hidden = true;
+  $('queue-tip').hidden = true;
+  $('blocking-tip').hidden = true;
+  closeMenu();
   $('nav-count').textContent = '—';
 }
 
@@ -428,7 +571,7 @@ async function setTenant(name, { silent = false } = {}) {
   applyTimeframeToTimeline();
   renderPage();
   if (!silent && state.meta) {
-    setStatus(`live · ${state.events.length} events · ${name}`, 'live');
+    setStatus(liveStatusText(), 'live');
   }
 }
 
@@ -449,6 +592,9 @@ function renderSelection(range) {
 function renderTimelinePage() {
   renderLegend();
   renderPhaseLegend();
+  // Returning to the timeline with a preset active shows that preset again;
+  // a custom brush/zoom window is the user's window and is left alone (B6).
+  if (!state.timeframeCustom) applyTimeframeToTimeline();
   timeline.schedule();
 }
 
@@ -503,8 +649,10 @@ function renderDeliveryPage() {
     for (const row of data.rows) annotateRow(row, epics);
   }
   const counts = scopedTabCounts(data);
-  if (data && state.tab !== 'all') {
-    // the actionable subset is the default, but never an empty screen
+  if (data && state.tab !== 'all' && !state.tabPinned) {
+    // The actionable subset is the default, but never an empty screen. An
+    // explicit choice (or a restored tab) is never overridden: `Blocked 0`
+    // must be selectable and say "nothing blocked" (B11).
     const available = state.tab === 'blocked' ? counts.blocked : counts.oldest;
     if (!available && counts.all) state.tab = counts.oldest ? 'oldest' : 'all';
   }
@@ -520,6 +668,19 @@ function renderDeliveryPage() {
       `${data.counts.open} open items, ${data.counts.waiting_over_week} of them waiting over a week. ` +
       `${data.impact_note}.`
     : '';
+  // B9: the detail panel must not describe a row the table no longer contains.
+  // A scope change (or a refresh) re-renders the table, so re-resolve the
+  // selection against the new rows and drop it when it is out of scope.
+  if (state.selection && state.selection.row) {
+    const selected = state.selection.row;
+    const current = data && data.rows.find((row) => row.object_id === selected.object_id);
+    if (!current || !matchesScopeRow(current)) state.selection = null;
+    else state.selection.row = current;
+  }
+  const selectedId = state.selection && state.selection.row ? state.selection.row.object_id : null;
+  for (const tr of document.querySelectorAll('#delivery-table tr.row')) {
+    tr.classList.toggle('selected', tr.dataset.id === selectedId);
+  }
   if (data) {
     const filtered = filteredPages(state.scope).has('delivery');
     setHonesty(
@@ -738,6 +899,7 @@ function renderOverviewPage() {
     delivery: state.delivery,
     queues: state.queues,
     blocking: state.blocking,
+    queueLevel: state.queueLevel,
   });
   // B7: the overview is a whole-team summary; say so instead of inheriting a
   // disclosure about a different view.
@@ -924,10 +1086,16 @@ function setScope(kind, value, { silent = false } = {}) {
     value: kind === 'all' ? null : value,
     label: kind === 'all' ? 'everything' : String(value),
   };
+  // B10: a scope is valid only in this tenant's data. Reset an unknown person
+  // (or role) instead of leaving every view blank with no explanation.
+  const valid = validateScope();
   buildScopeOptions();
   applyScopeToTimeline();
   renderPage();
-  if (!silent) setStatus(kind === 'all' ? 'scope cleared' : `scoped to ${state.scope.label}`, 'live');
+  if (!silent) {
+    if (!valid) flashStatus('that scope has no events in this dataset — showing everything', 'stale');
+    else flashStatus(kind === 'all' ? 'scope cleared' : `scoped to ${state.scope.label}`, 'live');
+  }
 }
 
 function setScopeFromQueue(stream) {
@@ -946,10 +1114,15 @@ function scopedEvents() {
 
 /** A person scope is only meaningful inside one tenant's identity space. */
 function validateScope() {
-  if (state.scope.kind === 'person'
-      && !state.events.some((event) => event.actor === state.scope.value)) {
+  const person = state.scope.kind === 'person'
+    && !state.events.some((event) => event.actor === state.scope.value);
+  const role = state.scope.kind === 'role'
+    && !ROLE_QUEUES.some((queue) => queue.toLowerCase() === String(state.scope.value || '').toLowerCase());
+  if (person || role) {
     state.scope = { kind: 'all', value: null, label: 'everything' };
+    return false;
   }
+  return true;
 }
 
 function scopedObjects(events) {
@@ -976,23 +1149,32 @@ function applyScopeToTimeline() {
 function setTimeframe(id) {
   if (!TIMEFRAMES[id]) return;
   state.timeframe = id;
+  state.timeframeCustom = false;
+  state.tfWindow = null;
   state.cache.clear();
-  for (const button of $('timeframe').querySelectorAll('button')) {
-    button.setAttribute('aria-pressed', String(button.dataset.tf === id));
-    button.classList.toggle('on', button.dataset.tf === id);
-  }
+  renderTimeframe();
   if (state.page === 'timeline') applyTimeframeToTimeline();
   ensureData(state.page).then(renderPage).catch((err) => setStatus(`view failed: ${err.message}`, 'stale'));
 }
 
 function applyTimeframeToTimeline() {
+  // An empty event set has a placeholder 1-day domain; fitting or clamping a
+  // preset to it would leave a preset pressed over a window it did not choose
+  // (B6/B10). Leave the view alone and let the empty state explain it.
+  if (!timeline.events.length) {
+    state.tfWindow = null;
+    return;
+  }
   const days = timeframeDays();
   if (!days) {
     timeline.fit();
-    return;
+  } else {
+    const end = timeline.now;
+    timeline.setWindow(end - days * DAY, end);
   }
-  const end = timeline.now;
-  timeline.setWindow(end - days * DAY, end);
+  state.tfWindow = { ...timeline.view };
+  state.timeframeCustom = false;
+  renderTimeframe();
 }
 
 // ----------------------------------------------------------------- density
@@ -1200,7 +1382,7 @@ async function loadFullRange() {
   renderLegend();
   renderPhaseLegend();
   renderPage();
-  setStatus(`live · ${state.events.length} events`, 'live');
+  setStatus(liveStatusText(), 'live');
 }
 
 async function load({ force = false } = {}) {
@@ -1269,7 +1451,7 @@ async function load({ force = false } = {}) {
     // run): nothing to refetch, so nothing is refetched.
     state.meta = health;
     renderProvenance();
-    setStatus(`live · ${state.events.length} events`, 'live');
+    setStatus(liveStatusText(), 'live');
     window.__megaspeedReady = true;
     return;
   }
@@ -1328,7 +1510,7 @@ async function load({ force = false } = {}) {
   if (state.page !== 'timeline') await ensureData(state.page);
   renderPage();
   syncChromeHeight();
-  setStatus(`live · ${state.events.length} events`, 'live');
+  setStatus(liveStatusText(), 'live');
   window.__megaspeedReady = true;
 }
 
@@ -1340,7 +1522,7 @@ function connect() {
   socket = new WebSocket(`${proto}://${location.host}/ws`);
 
   socket.onopen = () => {
-    if (state.meta) setStatus(`live · ${state.events.length} events`, 'live');
+    if (state.meta) setStatus(liveStatusText(), 'live');
   };
 
   socket.onclose = () => {
@@ -1457,21 +1639,46 @@ async function domToImage(element, rect) {
     node.style.backdropFilter = 'none';
     node.style.webkitBackdropFilter = 'none';
   }
-  // B9: a cloned <select> only carries the `selected` attribute, not the live
-  // value. Copy the state that is actually on screen.
+  // B21: a cloned <select> only carries the `selected` *attribute*, not the
+  // live value; a property assignment does not survive XML serialisation. Copy
+  // the option state as attributes so the capture shows the value on screen.
   const liveFields = element.querySelectorAll('select, input, textarea');
   const cloneFields = clone.querySelectorAll('select, input, textarea');
   cloneFields.forEach((field, index) => {
     const live = liveFields[index];
     if (!live) return;
     if (field.tagName === 'SELECT') {
-      for (const option of field.options) option.selected = option.value === live.value;
+      for (const option of field.options) {
+        const selected = option.value === live.value;
+        option.selected = selected;
+        if (selected) option.setAttribute('selected', 'selected');
+        else option.removeAttribute('selected');
+      }
     } else if (field.type === 'checkbox' || field.type === 'radio') {
       field.checked = live.checked;
+      if (live.checked) field.setAttribute('checked', 'checked');
+      else field.removeAttribute('checked');
     } else {
       field.setAttribute('value', live.value);
     }
   });
+  // B21: fixed-position overlays (drawer, menu) are part of the screen but not
+  // of the element's flow. Place their clones at the coordinates they occupy on
+  // screen instead of letting the `.shot` rules flatten them below the page.
+  for (const live of [document.getElementById('drawer'), document.getElementById('menu')]) {
+    if (!live || live.hidden || live === element) continue;
+    const target = clone.id === live.id ? clone : clone.querySelector(`#${live.id}`);
+    if (!target) continue;
+    const r = live.getBoundingClientRect();
+    target.style.setProperty('position', 'absolute', 'important');
+    target.style.setProperty('left', `${r.left - rect.left}px`, 'important');
+    target.style.setProperty('top', `${r.top - rect.top}px`, 'important');
+    target.style.setProperty('right', 'auto', 'important');
+    target.style.setProperty('bottom', 'auto', 'important');
+    target.style.width = `${r.width}px`;
+    target.style.height = `${r.height}px`;
+    target.style.zIndex = '30';
+  }
   // every canvas in the element, in document order (timeline, graph, queues)
   const liveCanvases = [...element.querySelectorAll('canvas')];
   const cloneCanvases = [...clone.querySelectorAll('canvas')];
@@ -1494,7 +1701,7 @@ async function domToImage(element, rect) {
   wrapper.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
   wrapper.setAttribute(
     'style',
-    `width:${rect.width}px;height:${rect.height}px;background:#191B1C;` +
+    `position:relative;width:${rect.width}px;height:${rect.height}px;background:#191B1C;` +
     'font-family:Inter,"Segoe UI",Roboto,sans-serif;font-size:13px;color:#E8E9EB;',
   );
   const style = document.createElement('style');
@@ -1650,6 +1857,7 @@ document.addEventListener('click', async (event) => {
   const tab = event.target.closest('#delivery-tabs [data-tab]');
   if (tab) {
     state.tab = tab.dataset.tab;
+    state.tabPinned = true;
     renderDeliveryPage();
     saveUI();
     return;
@@ -1724,14 +1932,14 @@ async function copyMarkdown(entity) {
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
-    setStatus('copied as Markdown', 'live');
+    flashStatus('copied as Markdown', 'live');
   } catch {
     const area = document.createElement('textarea');
     area.value = text;
     document.body.appendChild(area);
     area.select();
-    try { document.execCommand('copy'); setStatus('copied as Markdown', 'live'); }
-    catch { setStatus('copy failed — select the text manually', 'stale'); }
+    try { document.execCommand('copy'); flashStatus('copied as Markdown', 'live'); }
+    catch { flashStatus('copy failed — select the text manually', 'stale'); }
     area.remove();
   }
 }
@@ -1776,7 +1984,10 @@ function restoreUI() {
   }
   if (PAGES[stored.page]) state.page = stored.page;
   if (TIMEFRAMES[stored.timeframe]) state.timeframe = stored.timeframe;
-  if (stored.tab) state.tab = stored.tab;
+  if (stored.tab) {
+    state.tab = stored.tab;
+    state.tabPinned = true;
+  }
   if (LENSES[stored.lens]) state.lens = stored.lens;
   if (stored.blockingLevel && BLOCKING_LEVELS.includes(stored.blockingLevel)) {
     state.blockingLevel = stored.blockingLevel;
@@ -1798,10 +2009,7 @@ function restoreUI() {
     state.scope = stored.scope;
   }
   if (stored.density) setDensity(stored.density);
-  for (const button of $('timeframe').querySelectorAll('button')) {
-    button.setAttribute('aria-pressed', String(button.dataset.tf === state.timeframe));
-    button.classList.toggle('on', button.dataset.tf === state.timeframe);
-  }
+  renderTimeframe();
   // B8: the restored level state is the source of truth — make the <select>
   // that labels it agree, or the toolbar contradicts the chart.
   syncLevelSelects();

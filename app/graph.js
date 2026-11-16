@@ -91,6 +91,9 @@ export class BlockingMap {
     this.edges = graph.edges.map((edge) => ({ ...edge, a: byId.get(edge.from), b: byId.get(edge.to) }))
       .filter((edge) => edge.a && edge.b);
     if (this.selected && !byId.has(this.selected)) this.selected = null;
+    // B13: a tooltip from the previous graph must not survive a level switch.
+    this.hover = null;
+    if (this.tip) this.tip.hidden = true;
     // only re-run the simulation when the node set changed
     const key = nodes.map((n) => n.id).sort().join('|');
     if (key !== this._layoutKey) {

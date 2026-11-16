@@ -546,6 +546,9 @@ class ConformanceTests(StoreCase):
         self.assertIsNotNone(rounds)
         self.assertEqual(unapproved["severity"], "critical")
         self.assertEqual(rounds["severity"], "warning")
+        # titles are sentences, so a single item is singular (QA round 2 B19)
+        self.assertEqual(unapproved["title"], "1 PR merged with no approval")
+        self.assertEqual(rounds["title"], "1 PR ran past 3 review rounds")
         # the one closed PR with rounds: 200 h ÷ 4 = 50 h per round
         self.assertEqual(unapproved["impact_hours"], 50.0)
         self.assertEqual(rounds["impact_hours"], 50.0)

@@ -37,6 +37,14 @@ export function pill(kind, text, title = '') {
 }
 
 /** The status column: what the item is waiting on, in words. */
+export function rowStateText(row) {
+  if (row.blocked) return 'blocked';
+  if (row.waiting_hours >= 7 * 24) return 'waiting 1w+';
+  if (row.phase === 'review') return 'in review';
+  if (row.phase === 'active') return 'in progress';
+  return row.phase;
+}
+
 export function rowState(row) {
   if (row.blocked) return pill('blocked', 'blocked', blockedReason(row));
   if (row.waiting_hours >= 7 * 24) return pill('waiting', 'waiting 1w+', 'waiting more than a week');
@@ -61,9 +69,12 @@ export function impactCell(row) {
 export function deliveryTable(data, tab, { scope = null } = {}) {
   const rows = tabRows(data, tab).filter((row) => !scope || matchesScope(row, scope));
   if (!rows.length) {
-    return `<div class="empty-row">Nothing in this subset${
-      scope ? ` for scope ${esc(scope.label)}` : ''
-    }. Counts are honest: an empty tab means no item matches.</div>`;
+    // B11: an empty tab is a result, not a refusal. `Blocked 0` says so.
+    const suffix = scope ? ` for scope ${esc(scope.label)}` : '';
+    if (tab === 'blocked') {
+      return `<div class="empty-row">Nothing blocked${suffix} — good. No open item is waiting on a change.</div>`;
+    }
+    return `<div class="empty-row">Nothing in this subset${suffix}. Counts are honest: an empty tab means no item matches.</div>`;
   }
   const head = `<thead><tr>
       <th class="c-state">Status</th>
@@ -105,21 +116,27 @@ export function matchesScope(row, scope) {
 
 export function deliveryMarkdown(rows, meta) {
   const header = [
-    `# Delivery list — ${rows.length} open items`,
+    `# Delivery list — ${rows.length} open item${rows.length === 1 ? '' : 's'}`,
     '',
     meta ? `_${meta}_` : '',
     '',
     '| status | ticket / PR | waiting on | since | waiting | impact |',
     '| --- | --- | --- | --- | --- | --- |',
   ];
-  const body = rows.map((row) => `| ${row.blocked ? 'blocked' : row.phase} | ${rowTicket(row) || '—'} #${row.number} ${row.repo_short} | ${whoLabel(row.ball_label || row.ball)} | ${fmtAbsolute(Date.parse(row.waiting_since))} | ${fmtHours(row.waiting_hours)} | ${row.dependents ? `≈${fmtHours(row.impact_hours)}` : '—'} |`);
+  const body = rows.map((row) => `| ${rowStateText(row)} | ${rowTicket(row) || '—'} #${row.number} ${row.repo_short} | ${whoLabel(row.ball_label || row.ball)} | ${fmtAbsolute(Date.parse(row.waiting_since))} | ${fmtHours(row.waiting_hours)} | ${row.dependents ? `≈${fmtHours(row.impact_hours)}` : '—'} |`);
   return [...header, ...body].join('\n');
 }
 
 /** The overview: counts first, then the rows that need attention. */
-export function overviewMarkup({ delivery, queues, blocking }) {
+export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue' }) {
   const counts = delivery ? delivery.counts : { open: 0, blocked: 0, oldest_waiting: 0 };
   const streams = (queues && queues.streams) || [];
+  // B17: the API response says which level it answered at; never call people
+  // "queues" because another page happened to leave that level selected.
+  const level = (queues && queues.level) || queueLevel || 'queue';
+  const people = level === 'person';
+  const noun = people ? 'people' : 'queues';
+  const one = people ? 'person' : 'queue';
   const overloaded = streams.filter((s) => s.summary.diagnosis === 'overloaded');
   const slow = streams.filter((s) => s.summary.diagnosis === 'slow');
   const topBlocking = (blocking && blocking.edges ? blocking.edges.slice(0, 3) : []);
@@ -127,6 +144,7 @@ export function overviewMarkup({ delivery, queues, blocking }) {
   const rows = delivery ? tabRows(delivery, 'blocked').concat(
     tabRows(delivery, 'oldest').filter((row) => !row.blocked),
   ).slice(0, 6) : [];
+  const overloadedLabel = overloaded.length === 1 ? `overloaded ${one}` : `overloaded ${noun}`;
   return `
     <div class="stats">
       <div class="stat"><span class="stat-n ${counts.blocked ? 'attention' : ''}">${counts.blocked}</span>
@@ -134,12 +152,12 @@ export function overviewMarkup({ delivery, queues, blocking }) {
         <span class="stat-note">${counts.blocked ? 'waiting on a change, not on a person' : 'nothing blocked'}</span></div>
       <div class="stat"><span class="stat-n">${counts.oldest_waiting}</span>
         <span class="stat-k">waiting over 3 days</span>
-        <span class="stat-note">of ${counts.open} open items</span></div>
+        <span class="stat-note">of ${counts.open} open item${counts.open === 1 ? '' : 's'}</span></div>
       <div class="stat"><span class="stat-n">≈${fmtHours(waitHours).replace(' ', ' ')}</span>
         <span class="stat-k">measured wait</span>
         <span class="stat-note">wall clock, all handovers in the window</span></div>
       <div class="stat"><span class="stat-n">${overloaded.length}</span>
-        <span class="stat-k">overloaded queues</span>
+        <span class="stat-k">${esc(overloadedLabel)}</span>
         <span class="stat-note">${slow.length} slow · longest mean wait ${
           streams.length ? `≈${fmtHours(streams[0].summary.mean_wait_hours)}` : '–'}</span></div>
     </div>
@@ -167,7 +185,7 @@ export function overviewMarkup({ delivery, queues, blocking }) {
         <p class="panel-note">${esc((blocking && blocking.assumption) || '')}</p>
       </section>
       <section class="panel">
-        <div class="panel-head"><h2>Queue diagnosis</h2>
+        <div class="panel-head"><h2>${people ? 'People diagnosis' : 'Queue diagnosis'}</h2>
           <button type="button" class="link" data-go="queue">Queue view →</button></div>
         ${streams.length ? `<table class="table compact"><tbody>${streams.slice(0, 6).map((stream) => `
           <tr><td class="c-who"><span class="mono">${esc(stream.id)}</span></td>
@@ -238,7 +256,7 @@ export function entityMarkdown(entity, hoursMode = 'wall-clock') {
       `- waiting since: ${fmtAbsolute(Date.parse(row.waiting_since))} (${fmtHours(row.waiting_hours)})`,
       `- age: ${fmtHours(row.age_hours)}`,
       row.epic ? `- epic: ${row.epic}` : '',
-      row.dependents ? `- impact: ≈${fmtHours(row.impact_hours)} over ${row.dependents} dependent PR(s)` : '',
+      row.dependents ? `- impact: ≈${fmtHours(row.impact_hours)} over ${row.dependents} dependent PR${row.dependents === 1 ? '' : 's'}` : '',
       '',
       '_' + (hoursMode === 'business'
         ? 'business hours (tenant working-hours calendar)'

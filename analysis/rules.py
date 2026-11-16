@@ -63,6 +63,11 @@ from ingest.store import iso, to_naive_utc, utcnow
 TARGET_FIRST_REVIEW_HOURS = 24.0
 TARGET_CYCLE_HOURS = 72.0
 MAX_REVIEW_ROUNDS = 3
+
+
+def _count(n: int, noun: str) -> str:
+    """`1 PR` / `2 PRs` — titles are read as sentences, so they agree."""
+    return f"{n} {noun}" + ("" if n == 1 else "s")
 # A PR is "large" past either cap. 400 changed lines is the common review-size
 # guideline; commits are the coarse proxy until diff size is captured.
 SIZE_COMMIT_CAP = 10
@@ -1088,7 +1093,7 @@ def templates(
     if cf["merged_without_approval"] > 0:
         out.append(_suggestion(
             "conformance-unapproved", "conformance",
-            f"{cf['merged_without_approval']} PRs merged with no approval",
+            f"{_count(cf['merged_without_approval'], 'PR')} merged with no approval",
             {
                 "merged": cf["merged"],
                 "merged_without_approval": cf["merged_without_approval"],
@@ -1103,7 +1108,7 @@ def templates(
     if cf["prs_over_max_rounds"] > 0:
         out.append(_suggestion(
             "conformance-rounds", "conformance",
-            f"{cf['prs_over_max_rounds']} PRs ran past {cf['max_rounds']} review rounds",
+            f"{_count(cf['prs_over_max_rounds'], 'PR')} ran past {cf['max_rounds']} review rounds",
             {
                 "prs": cf["n"],
                 "prs_over_max_rounds": cf["prs_over_max_rounds"],

@@ -16,6 +16,9 @@ const ROW_H = 62;
 const GUTTER = 232;
 const AXIS_H = 26;
 const BOTTOM = 22;
+// B15: a small right-hand y scale, outside the plotted area so labels never
+// collide with the data or the gutter's name/diagnosis text.
+const Y_AXIS_W = 34;
 
 const WIP = '#63B1FF';
 const DONE = '#B9BBC0';   // neutral: green is reserved for the 'healthy' state
@@ -44,6 +47,10 @@ export class QueueChart {
     this.data = data;
     this.streams = (data && data.streams) || [];
     if (this.selected && !this.streams.some((s) => s.id === this.selected)) this.selected = null;
+    // B13: a tooltip describes the data that produced it. Level/tenant/page
+    // changes replace that data, so the old tooltip must not linger.
+    this.hover = null;
+    if (this.tip) this.tip.hidden = true;
     this.schedule();
   }
 
@@ -70,7 +77,7 @@ export class QueueChart {
     this.canvas.height = Math.round(height * dpr);
     this.canvas.style.height = `${height}px`;
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    return { width, height, plotW: Math.max(120, width - GUTTER - 18), plotH: rows * ROW_H };
+    return { width, height, plotW: Math.max(120, width - GUTTER - Y_AXIS_W - 10), plotH: rows * ROW_H };
   }
 
   render() {
@@ -162,6 +169,26 @@ export class QueueChart {
       ctx.fillStyle = '#6B6F76';
       ctx.fillText(`${summary.items} PRs · peak ${summary.peak_wip}`, 14, top + 47);
 
+      // B15: the y scale. Shared across rows (maxWip), labelled at 0, half and
+      // the top, with a faint gridline at each step so WIP can be read without
+      // hovering.
+      const yAxisX = GUTTER + g.plotW + 6;
+      for (const tick of wipTicks(maxWip)) {
+        const y = base - (tick / maxWip) * chartH;
+        if (tick > 0) {
+          ctx.strokeStyle = 'rgba(255,255,255,.05)';
+          ctx.beginPath();
+          ctx.moveTo(GUTTER, Math.round(y) + 0.5);
+          ctx.lineTo(GUTTER + g.plotW, Math.round(y) + 0.5);
+          ctx.stroke();
+        }
+        ctx.font = '500 9px "JetBrains Mono", ui-monospace, monospace';
+        ctx.fillStyle = '#6B6F76';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(fmtWipTick(tick), yAxisX, y);
+      }
+
       // WIP area
       const stepX = g.plotW / Math.max(1, buckets - 1);
       ctx.beginPath();
@@ -216,7 +243,7 @@ export class QueueChart {
     ctx.fillText(
       `WIP sampled every ${fmtDuration(bucketMs)} · ` +
         `${this.data && this.data.hours_mode === 'business' ? 'business hours' : 'wall-clock'} · ` +
-        'completions in grey',
+        `WIP scale 0–${fmtWipTick(maxWip)} items (shared) · completions in grey`,
       GUTTER, g.height - 8,
     );
   }
@@ -299,6 +326,16 @@ export class QueueChart {
     });
     new ResizeObserver(() => this.schedule()).observe(canvas.parentElement);
   }
+}
+
+/** B15: 0, half and the top of a shared WIP scale. */
+export function wipTicks(max) {
+  const top = Math.max(1, Number(max) || 1);
+  return [...new Set([0, top / 2, top])].sort((a, b) => a - b);
+}
+
+export function fmtWipTick(value) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
 }
 
 function roundRect(ctx, x, y, w, h, r) {
