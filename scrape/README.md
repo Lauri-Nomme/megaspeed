@@ -88,7 +88,8 @@ keys; an issue this scraper has never seen is always read in full.
 ```
 <state-dir>/
   watermark.json   # per-source event cursor + per-repo updatedDate cursor
-  prs.json         # per-PR cursor: {state, updated_date, done} (settled PRs)
+                   #   + complete/last_bundle_path (the resume marker)
+  prs.json         # per-PR cursor: {state, updated_date, done, run_id}
   identity.json    # RAW ZONE: slug/email -> pseudonym
   git/             # RAW ZONE: one shallow, partial bare repo per repo, for push_class
 ```
@@ -150,6 +151,73 @@ Import is idempotent by `event_key`, so overlapping overlaps and re-transfers
 are safe. A bundle is rejected (not merged) if the checksums, `schema_version`,
 `classifier_version` or watermark monotonicity do not check out.
 
+### Crash safety: checkpoints and resume
+
+A long scrape used to write its bundle and cursors only at the end, so a kill
+(reset connection, reboot, `Ctrl-C`) lost the whole run and the next one started
+from scratch. Now the run **checkpoints** every `--checkpoint-every N` kept PRs
+(default 50; `0` disables) and at every repo boundary:
+
+```
+identity.json  -> bundle tgz -> prs.json -> watermark.json   (write order)
+```
+
+`watermark.json` is the commit marker: `complete: false` while the run is in
+flight, `true` once the final bundle lands. A run that dies leaves a *readable*
+partial tgz plus that marker, and the next run with the same `--state-dir`
+resumes from it:
+
+* it loads the checkpointed tgz and **carries its events/objects** into the new
+  bundle (that tgz was never imported, so nothing may be dropped);
+* it **skips the PRs the interrupted run already read** (matched by `run_id` +
+  `updatedDate` in `prs.json`), so a 2 h scrape that died at 90 % does not pay
+  for the first 90 % again;
+* a repo whose walk was cut short keeps its *previous* cursor, so a resume never
+  skips a PR that was never read.
+
+The report says `resumed: true`, how many events were carried, and how many PRs
+were skipped as already-checkpointed. Use `--full` to ignore the checkpoint and
+re-read everything. A checkpoint is not a run: `runs` in `watermark.json` only
+counts completed runs.
+
+### Partial runs are not silent
+
+A bundle that is valid but *implausibly small* used to look like a success: a
+run that saw 5 PRs where the previous one saw 400 exited 0, wrote a tiny bundle,
+and became the new baseline — the gap was invisible. Now, per repo, the run
+compares what it listed with the previous run's counters in `watermark.json`:
+
+* listed < 50 % of the previous run's PRs (previous ≥ 20) → warn, **exit 3**;
+* kept 0 of the listed PRs although the previous run kept ≥ 20 (and nothing was
+  skipped) → warn, **exit 3**.
+
+Runs that legitimately see fewer rows are excluded: one that stopped early at
+the watermark, and one capped with `--n`. `--allow-partial` (alias `--force`)
+accepts the bundle and exits 0; `--full` re-reads everything. The tgz is written
+either way — the exit code is the signal, not a refusal to transfer.
+
+PRs that fail per-PR (a `404` on `/pull-requests/{id}/commits`, a reset that
+outlived the transport retries) are **skipped and counted**, never fatal: the run
+warns, lists them in `failures`/`--json`, and does not mark them done, so the
+next run retries exactly those. The transport itself retries `429`/`5xx`,
+`URLError`, timeouts, bad JSON, `ConnectionResetError` and `BrokenPipeError`
+with exponential backoff.
+
+### Quiescence: do not rebuild the corpus during a scrape
+
+A scrape walks a repo page by page; it is **not** a snapshot transaction. A
+concurrent corpus rebuild/restore (e.g. `corpus/generate.py` re-seeding the lab)
+can renumber or delete rows mid-walk, and the run may then see a PR twice, miss
+one, or record a cursor that never existed. **Keep them mutually exclusive**, and
+never point two scrapes at one `--state-dir`.
+
+As a cheap guard, a live run re-reads each repo's newest row before and after the
+walk (one `limit=1` request per repo; `--no-source-check` disables it). If the
+newest `updatedDate` moved, the repo is listed as `source_moved`, a warning is
+printed, and the tgz manifest records it — a torn snapshot is visible instead of
+silent. A normal push during a long walk can trigger it too: re-run the scrape
+incrementally to pick the change up.
+
 ### Progress on a long run
 
 A huge project takes minutes, so the scraper writes **one line to stderr** every
@@ -194,7 +262,8 @@ PYTHON=/usr/bin/python3.12 scrape/build.sh
 megaspeed-scrape [--live | --fixture | --fixture-file PATH]
                  [--jira [--project KEY ...] [--limit N]]
                  [--out PATH.tgz] [--state-dir DIR] [--identity PATH]
-                 [--overlap-hours N] [--full] [--no-prefilter]
+                 [--overlap-hours N] [--checkpoint-every N] [--full]
+                 [--allow-partial | --force] [--no-source-check] [--no-prefilter]
                  [--no-push-class] [--no-text-classify] [--text-backend ollama|mock]
                  [--llm-url URL] [--llm-model MODEL]
                  [--progress-interval SECONDS] [--quiet] [--repo PROJECT/REPO ...]
@@ -213,7 +282,10 @@ megaspeed-scrape [--live | --fixture | --fixture-file PATH]
 | `--state-dir` | watermark + prs/issues + identity map, default `<out>.state/` next to the bundle |
 | `--identity` | use an existing identity map instead of `<state-dir>/identity.json` |
 | `--overlap-hours` | re-emit this far before the watermark (default 72) |
-| `--full` | ignore the watermark and the settled-PR / settled-issue sets |
+| `--checkpoint-every` | checkpoint the bundle + cursors every N kept PRs (default 50, `0` = only at the end) |
+| `--full` | ignore the watermark and the settled-PR / settled-issue sets (and any checkpoint) |
+| `--allow-partial` / `--force` | accept an implausibly small run (otherwise it exits 3) |
+| `--no-source-check` | skip the quiescence guard (no per-repo newest-PR re-read) |
 | `--no-prefilter` | fetch every PR's commits before filtering (old, slower path) |
 | `--no-push-class` | skip the deterministic `push_class` (no git cache) |
 | `--no-text-classify` | skip comment/description labels (no local LLM) |
@@ -222,6 +294,9 @@ megaspeed-scrape [--live | --fixture | --fixture-file PATH]
 | `--progress-interval` | seconds between stderr progress lines (default 30, `0` = off) |
 | `--quiet` | no progress lines (the final summary still prints) |
 | `--probe` | read-only diagnostics, writes no bundle |
+
+Exit codes: `0` success, `2` bad usage / credentials / an unreadable source,
+`3` the run completed but looks **partial** (see "Partial runs are not silent").
 
 `python3 -m ingest import <bundle.tgz> [--db PATH] [--json] [--no-verify]` is
 the import CLI (`--no-verify` exists for debugging and is not for production).

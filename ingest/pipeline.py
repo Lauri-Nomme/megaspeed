@@ -174,6 +174,8 @@ class Stats:
     prs_settled: int = 0
     prs_skipped_settled: int = 0
     prs_skipped_watermark: int = 0
+    #: PRs already checkpointed by the interrupted run this run resumes.
+    prs_skipped_resumed: int = 0
     events: list[dict] = field(default_factory=list)
     relations: list[tuple[str, str, str]] = field(default_factory=list)
     objects: list[dict] = field(default_factory=list)

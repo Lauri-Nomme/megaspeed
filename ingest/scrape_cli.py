@@ -39,7 +39,12 @@ from . import __version__, classify
 from .config import REPO_ROOT, Config, filter_scope, load_config
 from .progress import DEFAULT_INTERVAL as DEFAULT_PROGRESS_INTERVAL
 from .progress import ProgressReporter
-from .scrape import DEFAULT_OVERLAP_HOURS, default_state_dir, scrape
+from .scrape import (
+    DEFAULT_CHECKPOINT_EVERY,
+    DEFAULT_OVERLAP_HOURS,
+    default_state_dir,
+    scrape,
+)
 from .transport import BitbucketError, FixtureTransport, HttpTransport
 
 DEFAULT_OUT = "export/megaspeed-scrape.tgz"
@@ -218,6 +223,19 @@ def _print_scrape(r: dict) -> None:
         f"PRs            {r['prs_seen']} seen -> {r['prs_kept']} kept, {r['prs_dropped']} dropped "
         f"(no ticket key)"
     )
+    if r.get("prs_failed"):
+        print(f"PRs failed     {r['prs_failed']} skipped after a fetch error (retried next run)")
+    if r.get("resumed"):
+        print(
+            f"resumed        from {r.get('resumed_from') or '—'}"
+            f" · {r.get('events_carried', 0)} event(s) carried"
+            f" · {r.get('prs_skipped_resumed', 0)} PR(s) already checkpointed"
+        )
+    if r.get("source_moved"):
+        print(f"source moved   {', '.join(r['source_moved'])} (not quiescent during the walk)")
+    partial = r.get("partial") or {}
+    for reason in partial.get("reasons") or []:
+        print(f"partial        {reason.get('repo')}: {reason.get('reason')} — {reason.get('detail')}")
     print(
         f"settled        {r['prs_skipped_settled']} skipped (closed, unchanged)"
         f" · {r['prs_settled']} marked done · {r['prs_settled_total']} in prs.json"
@@ -304,6 +322,15 @@ def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
                     help="raw-zone identity map to use instead of <state-dir>/identity.json")
     ap.add_argument("--overlap-hours", type=int, default=DEFAULT_OVERLAP_HOURS, metavar="N",
                     help=f"re-emit this far before the watermark (default {DEFAULT_OVERLAP_HOURS})")
+    ap.add_argument("--checkpoint-every", type=int, default=DEFAULT_CHECKPOINT_EVERY, metavar="N",
+                    help="checkpoint the bundle + cursors every N kept PRs, and at every repo"
+                         f" boundary (default {DEFAULT_CHECKPOINT_EVERY}; 0 disables)")
+    ap.add_argument("--allow-partial", "--force", dest="allow_partial", action="store_true",
+                    help="write the bundle even when the run looks implausibly partial"
+                         " (few PRs vs the previous run); without it a suspicious run exits 3")
+    ap.add_argument("--no-source-check", action="store_true",
+                    help="skip the quiescence guard (the per-repo newest-PR re-read that"
+                         " notices a source changing mid-scrape)")
     ap.add_argument("--full", action="store_true", help="ignore the watermark and re-scrape everything")
     ap.add_argument("--no-prefilter", action="store_true",
                     help="fetch every PR's commits before filtering (old, slower path; prd/14)")
@@ -356,6 +383,9 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.progress_interval is not None and args.progress_interval < 0:
         print("--progress-interval must be >= 0 (0 disables)", file=sys.stderr)
+        return 2
+    if args.checkpoint_every < 0:
+        print("--checkpoint-every must be >= 0 (0 disables)", file=sys.stderr)
         return 2
 
     try:
@@ -495,6 +525,8 @@ def main(argv: list[str] | None = None) -> int:
             full=args.full,
             identity_path=args.identity,
             progress=progress,
+            checkpoint_every=args.checkpoint_every,
+            verify_quiet=False if args.no_source_check else None,
         )
     except BitbucketError as exc:
         print(f"bitbucket error: {exc}", file=sys.stderr)
@@ -505,6 +537,52 @@ def main(argv: list[str] | None = None) -> int:
     else:
         _print_scrape(report)
         print(f"\nnext           python3 -m ingest import {report['bundle']}")
+    return _partial_exit(report, allow_partial=args.allow_partial)
+
+
+def _partial_exit(report: dict, *, allow_partial: bool) -> int:
+    """Warn about a partial-looking run; exit non-zero unless overridden.
+
+    A bundle that is *valid* but implausibly small used to exit 0, so a run that
+    saw 5 PRs where the previous one saw 400 looked like success and became the
+    new baseline. Failures (PRs skipped after a 404/reset) are always warned
+    about; the size heuristic decides the exit code.
+    """
+    partial = report.get("partial") or {}
+    for failure in partial.get("failures") or []:
+        print(
+            f"warning: skipped {failure.get('repo')}#{failure.get('pr_id')}:"
+            f" {failure.get('error')}",
+            file=sys.stderr,
+        )
+    if report.get("prs_failed"):
+        print(
+            f"warning: {report['prs_failed']} PR(s) could not be fetched and were skipped"
+            " (they are not marked done; the next run retries them)",
+            file=sys.stderr,
+        )
+    for reason in partial.get("reasons") or []:
+        print(
+            f"warning: {reason.get('repo')}: {reason.get('reason')}"
+            f" -- {reason.get('detail')}",
+            file=sys.stderr,
+        )
+    if report.get("source_moved"):
+        print(
+            "warning: the source changed during the scrape: "
+            + ", ".join(report["source_moved"])
+            + " (a corpus rebuild must not run concurrently with a scrape)",
+            file=sys.stderr,
+        )
+    if partial.get("suspicious") and not allow_partial:
+        print(
+            "error: this run looks partial (see the warnings above), so the bundle is"
+            " probably missing PRs; the state cursors were advanced anyway.\n"
+            "       re-run with --full to re-read everything, or pass"
+            " --allow-partial/--force to accept it",
+            file=sys.stderr,
+        )
+        return 3
     return 0
 
 

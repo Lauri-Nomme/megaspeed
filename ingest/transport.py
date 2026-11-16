@@ -36,6 +36,24 @@ class BitbucketError(RuntimeError):
     pass
 
 
+#: Failures that are worth another attempt, with the same exponential backoff.
+#:
+#: ``ConnectionResetError`` and ``BrokenPipeError`` are the important ones: DC
+#: under load resets the connection from inside ``http.client.getresponse()``
+#: (and a reset mid-body surfaces while ``response.read()`` runs), and both are
+#: plain ``OSError``s -- *not* ``urllib.error.URLError``. Without them a single
+#: reset escaped :meth:`HttpTransport.get` and killed a two-hour scrape.
+#: ``http.client.RemoteDisconnected`` is a ``ConnectionResetError`` subclass, so
+#: a server that drops the connection without a response is covered too.
+RETRYABLE = (
+    urllib.error.URLError,
+    TimeoutError,
+    json.JSONDecodeError,
+    ConnectionResetError,
+    BrokenPipeError,
+)
+
+
 class FixtureTransport:
     """An in-memory stand-in for the DC REST API."""
 
@@ -123,7 +141,9 @@ class HttpTransport:
                     time.sleep(1.5 ** attempt)
                     continue
                 raise BitbucketError(f"{exc.code} {exc.reason} for {path}") from exc
-            except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            except RETRYABLE as exc:
+                # A reset/abort from getresponse()/read() lands here (it is an
+                # OSError, not a URLError): retry it instead of killing the run.
                 last = exc
                 time.sleep(1.5 ** attempt)
         raise BitbucketError(f"GET {path} failed after {self.max_retries} attempts: {last}")

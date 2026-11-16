@@ -161,6 +161,20 @@ class BitbucketClient:
         path = f"{API}/projects/{project}/repos/{repo}/pull-requests/{pr_id}"
         return self._get(path, kind="detail")
 
+    def newest_pull_request(self, project: str, repo: str) -> dict | None:
+        """The single newest list row (``limit=1``) -- one cheap request.
+
+        The quiescence guard (prd/14, ``ingest/scrape.py``) reads this before and
+        after a repo so a corpus rebuild that lands mid-scrape is *noticed*
+        instead of silently producing a torn snapshot.
+        """
+        path = f"{API}/projects/{project}/repos/{repo}/pull-requests"
+        page = self._get(
+            path, {"state": "ALL", "order": "NEWEST", "start": 0, "limit": 1}, kind="list"
+        )
+        values = page.get("values") or []
+        return dict(values[0]) if values else None
+
     def iter_activities(self, project: str, repo: str, pr_id: int) -> Iterator[dict]:
         path = f"{API}/projects/{project}/repos/{repo}/pull-requests/{pr_id}/activities"
         yield from self._pages(path, kind="activities")

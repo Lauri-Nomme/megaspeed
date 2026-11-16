@@ -57,11 +57,42 @@ mock for a fixture), and dropped. Only ``comment_type`` / ``thread_outcome`` on
 the THREAD objects and the ``question_raised`` / ``question_answered`` events
 leave the raw zone. The git cache also answers "did the diff move at this
 comment's anchor?" -- the deterministic half of ``thread_outcome``.
+
+Preconditions and crash safety
+------------------------------
+
+**The source must be quiescent.** A scrape is not a snapshot transaction: it
+walks a repo page by page while people keep pushing. A corpus *rebuild* (e.g.
+``corpus/generate.py`` re-seeding the lab, or a restore that rewrites PR ids)
+running concurrently is worse than a normal push -- it can renumber or delete
+rows mid-walk, so the run may see a PR twice, miss one, or record a cursor that
+never existed. Keep rebuilds and scrapes mutually exclusive: do not start a
+scrape while a rebuild/restore is in flight, and do not start a rebuild while a
+scrape runs. Two guards help, neither is a substitute for that discipline:
+
+* a **quiescence check** (live runs; ``verify_quiet``) re-reads the repo's
+  newest row before and after the walk. A ``updatedDate`` that moved means the
+  source changed under us: the run is reported as ``source_moved`` (and the
+  operator is warned), so a torn snapshot is never mistaken for a clean one.
+* an **in-flight state dir lock** is *not* taken; two scrapes sharing one
+  ``--state-dir`` will still race on ``watermark.json``/``prs.json``. Use one
+  state dir per source and one scrape at a time.
+
+**A crash must not cost the whole run.** The bundle and the cursors are
+checkpointed as the walk progresses (``checkpoint_every`` PRs and at every repo
+boundary, :func:`scrape`), not only at the end. Order is deliberate: identity
+map, then bundle, then ``prs.json``, then ``watermark.json`` -- the last one is
+the commit marker (``complete: false``). A run that dies leaves a readable
+partial bundle plus ``complete: false``; the next run loads that bundle
+(``resumed: true``), skips the PRs the interrupted run already checkpointed, and
+finishes the walk instead of starting over.
 """
 
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -76,6 +107,7 @@ from .progress import DEFAULT_INTERVAL as DEFAULT_PROGRESS_INTERVAL
 from .progress import ProgressReporter
 from .pseudonym import IdentityTable
 from .timeutil import iso, iso_precise, to_naive_utc, utcnow
+from .transport import BitbucketError
 
 STATE_SCHEMA_VERSION = 2
 #: ``watermark.json`` written by earlier versions is still readable (the per-repo
@@ -88,6 +120,9 @@ IDENTITY_FILE = "identity.json"
 # How far back to re-emit before the watermark, so a backdated/late activity is
 # not lost between transfers (prd/11 §3/§8: default 1-7 days).
 DEFAULT_OVERLAP_HOURS = 72
+#: Persist the bundle + cursors this often (kept PRs), plus at every repo
+#: boundary. 0 disables checkpointing (the pre-crash-safety behaviour).
+DEFAULT_CHECKPOINT_EVERY = 50
 
 # Fields the reducer needs from a PR record. DC's list rows carry them all, so a
 # detail request is only made when a source returns a trimmed summary row.
@@ -108,6 +143,11 @@ class ScrapeState:
       the tgz manifest carries and what import checks for monotonicity.
     * ``repos[label].updated_ts`` (per repo) -- the max **PR updatedDate** seen;
       it is the scrape-time cursor from prd/14 §2 and never moves backwards.
+
+    Plus the crash marker: ``complete`` is ``False`` while a run is in flight
+    (each checkpoint rewrites the file) and ``True`` once the final bundle is
+    written. ``last_bundle_path`` points at that in-flight bundle so a later run
+    can resume from it (:func:`scrape`).
     """
 
     def __init__(self, path: str | Path):
@@ -129,6 +169,27 @@ class ScrapeState:
     def runs(self, source: str) -> int:
         return int((self.sources.get(source) or {}).get("runs") or 0)
 
+    def last_run_id(self, source: str) -> str | None:
+        value = (self.sources.get(source) or {}).get("last_run_id")
+        return str(value) if value else None
+
+    def incomplete(self, source: str) -> bool:
+        """Was the last run for this source interrupted (checkpointed, unfinished)?
+
+        A state file written by an older build has no ``complete`` key at all;
+        that is read as "complete" so a pre-checkpoint run is never resumed.
+        """
+        entry = self.sources.get(source) or {}
+        return bool(entry) and entry.get("complete") is False
+
+    def last_bundle_path(self, source: str) -> Path | None:
+        entry = self.sources.get(source) or {}
+        value = entry.get("last_bundle_path")
+        return Path(value) if value else None
+
+    def repo_entries(self, source: str) -> dict[str, dict]:
+        return dict((self.sources.get(source) or {}).get("repos") or {})
+
     def repo_watermarks(self, source: str) -> dict[str, datetime]:
         entry = self.sources.get(source) or {}
         out: dict[str, datetime] = {}
@@ -149,6 +210,9 @@ class ScrapeState:
         bundle: Path,
         *,
         repos: dict[str, dict] | None = None,
+        complete: bool = True,
+        resumed: bool = False,
+        count_run: bool = True,
     ) -> None:
         entry = dict(self.sources.get(source) or {})
         stored = dict(entry.get("repos") or {})
@@ -156,9 +220,15 @@ class ScrapeState:
             stored = repos
         self.sources[source] = {
             "watermark_ts": iso(watermark),
-            "runs": self.runs(source) + 1,
+            # A checkpoint is not a run: only the final write counts.
+            "runs": self.runs(source) + (1 if count_run else 0),
             "last_run_id": run_id,
             "last_bundle": bundle.name,
+            # Absolute on purpose: a resume may be asked for a different --out.
+            "last_bundle_path": str(Path(bundle).resolve()),
+            # False while a run is in flight; the resume contract (see scrape()).
+            "complete": bool(complete),
+            "resumed": bool(resumed),
             "updated_at": iso(utcnow()),
             "repos": stored,
         }
@@ -222,6 +292,7 @@ class PullRequestState:
         updated: datetime | None,
         done: bool,
         ticket_keys: list[str],
+        run_id: str = "",
     ) -> None:
         self.sources.setdefault(source, {})[pr_key] = {
             "state": str(state or "OPEN").upper(),
@@ -230,6 +301,9 @@ class PullRequestState:
             "updated_date": iso_precise(updated),
             "done": bool(done),
             "ticket_keys": sorted(ticket_keys),
+            # Which run wrote this entry. A resumed run skips exactly the entries
+            # of the interrupted run it is resuming (see ``_unchanged``).
+            "run_id": str(run_id or ""),
             "scraped_at": iso(utcnow()),
         }
 
@@ -281,6 +355,15 @@ class Collected:
     push_classifier: gitclass.PushClassifier | None = None
     #: the prd/16 text classifier (None when text classification is off)
     text_classifier: classify.Classifier | None = None
+    #: PRs whose per-PR fetch failed (404, reset, ...) and were skipped, so one
+    #: bad PR can never abort the run: ``{repo, pr_id, error}`` per row.
+    failures: list[dict] = field(default_factory=list)
+    #: Events/objects loaded from the bundle of an interrupted run (resume).
+    carried_events: list[dict] = field(default_factory=list)
+    #: True when this run resumed an interrupted one (see ``scrape``).
+    resumed: bool = False
+    #: Repos whose newest PR moved *while* the walk was running (quiescence).
+    source_moved: list[str] = field(default_factory=list)
 
     def counts(self) -> dict:
         stats = self.stats
@@ -297,9 +380,11 @@ class Collected:
             "prs_seen": stats.prs_seen,
             "prs_kept": stats.prs_kept,
             "prs_dropped": stats.prs_dropped,
+            "prs_failed": len(self.failures),
             "prs_settled": stats.prs_settled,
             "prs_skipped_settled": stats.prs_skipped_settled,
             "prs_skipped_watermark": stats.prs_skipped_watermark,
+            "prs_skipped_resumed": stats.prs_skipped_resumed,
         }
 
 
@@ -316,6 +401,12 @@ def collect(
     progress: ProgressReporter | None = None,
     push_classifier: gitclass.PushClassifier | None = None,
     text_classifier: classify.Classifier | None = None,
+    resume_run_id: str | None = None,
+    carry_events: list[dict] | None = None,
+    carry_objects: list[dict] | None = None,
+    checkpoint=None,
+    checkpoint_every: int = 0,
+    verify_quiet: bool = False,
 ) -> Collected:
     """Read the source and reduce it in memory. Nothing is written here.
 
@@ -328,6 +419,23 @@ def collect(
     ``text_classifier`` (prd/16) reads the raw comment bodies and PR
     descriptions **before they are discarded** and hands back only closed
     labels; ``None`` disables text classification entirely (no text is read).
+
+    Crash safety (see the module docstring):
+
+    * ``checkpoint(collected, completed, current)`` is called every
+      ``checkpoint_every`` kept PRs and at every repo boundary, so the caller can
+      persist a partial bundle + cursor without waiting for the end of the run.
+    * ``resume_run_id`` / ``carry_events`` / ``carry_objects`` resume an
+      interrupted run: the PRs it already checkpointed (same ``run_id``, same
+      ``updatedDate``) are skipped, and the rows it wrote are carried into this
+      run's bundle so nothing is lost.
+    * ``verify_quiet`` re-reads each repo's newest row after the walk and records
+      a repo that moved under us in ``source_moved`` (the quiescence guard).
+
+    A per-PR fetch failure (a 404 on one PR's commits, a reset that outlived the
+    transport retries) is **skipped and counted** in ``failures`` -- one bad PR
+    never aborts the run, and it is not recorded as done, so the next run retries
+    it.
     """
     as_of = utcnow()
     run_id = f"{source}-{as_of.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:6]}"
@@ -350,6 +458,7 @@ def collect(
         ticket_keys=cfg.ticket_keys,
         push_classifier=push_classifier,
         text_classifier=text_classifier,
+        resumed=bool(carry_events or carry_objects),
     )
     prefilter = getattr(cfg, "prefilter", True)
 
@@ -367,7 +476,23 @@ def collect(
             events=len(stats.events),
         )
 
+    def _refresh(collected_now: Collected) -> None:
+        """Refresh the row views from the in-flight accumulator.
+
+        ``stats`` is the accumulator during the walk (``collected.events`` is
+        only filled at the end), so a mid-run checkpoint must ask for a refresh
+        first -- otherwise it would write an empty bundle.
+        """
+        collected_now.events = list(stats.events)
+        collected_now.relations = list(stats.relations)
+        collected_now.objects = _merge_objects(
+            carry_objects or [], [*stats.objects, *_people_objects(stats, reducer)]
+        )
+        collected_now.carried_events = list(carry_events or [])
+
     stop = False
+    completed: list[str] = []
+    pending = 0  # kept PRs since the last checkpoint
     for project, repo in cfg.repos:
         label = f"{project}/{repo}"
         previous = None if full else (state.repo_watermark(source, label) if state else None)
@@ -375,7 +500,9 @@ def collect(
         newest: datetime | None = None
         truncated = False
         early_stopped = False
-        repo_seen = repo_kept = repo_settled = 0
+        repo_seen = repo_kept = repo_settled = repo_skipped = repo_failed = 0
+        # Quiescence guard, half 1: the newest row before the walk.
+        opened_at = _newest_stamp(client, project, repo) if verify_quiet else None
 
         # NEWEST-first (DC 9.4.18 sorts by updatedDate desc), so pagination can
         # stop at the first full page that is entirely at/below the watermark.
@@ -396,89 +523,114 @@ def collect(
                         stamp if stats.watermark is None else max(stats.watermark, stamp)
                     )
 
-                reason = _unchanged(pr, stamp, pr_state, source, previous, full)
+                reason = _unchanged(pr, stamp, pr_state, source, previous, full, resume_run_id)
                 if reason is not None:
+                    repo_skipped += 1
                     if reason == "settled":
                         stats.prs_skipped_settled += 1
                         repo_settled += 1
+                    elif reason == "resumed":
+                        stats.prs_skipped_resumed += 1
                     else:
                         stats.prs_skipped_watermark += 1
                     continue
 
-                # -- layer 1: the cheap ticket-key pre-filter ------------------
-                cheap_keys = _list_keys(key_filter, pr.pr) if prefilter else []
-                detail_fetched = False
-                if prefilter and not cheap_keys:
-                    if "description" in pr.pr:
+                # A per-PR fetch failure (a 404 on one PR's commits, a reset that
+                # outlived the transport retries) skips *this* PR: one bad row
+                # must never abort a two-hour walk. Nothing is recorded for it,
+                # so the next run retries it (and the partial guard counts it).
+                try:
+                    # -- layer 1: the cheap ticket-key pre-filter --------------
+                    cheap_keys = _list_keys(key_filter, pr.pr) if prefilter else []
+                    detail_fetched = False
+                    if prefilter and not cheap_keys:
+                        if "description" in pr.pr:
+                            stats.prs_dropped += 1
+                            continue
+                        # The list projection omitted ``description``. If it is
+                        # otherwise a complete PR record, the only key may be in
+                        # the body, so one detail request decides it (FR-2). A
+                        # wholly trimmed projection is different: fetching detail
+                        # for every PR would defeat the pre-filter, so its cheap
+                        # fields are treated as authoritative (the detail is
+                        # still fetched for every PR that *does* match).
+                        if not all(
+                            field in pr.pr for field in _DETAIL_FIELDS if field != "description"
+                        ):
+                            stats.prs_dropped += 1
+                            continue
+                        pr.pr = _with_detail(pr.pr, client.pull_request(project, repo, pr.id))
+                        detail_fetched = True
+                        cheap_keys = _list_keys(key_filter, pr.pr)
+                        if not cheap_keys:
+                            stats.prs_dropped += 1
+                            continue
+
+                    # -- expensive: detail (only if the list row is trimmed) ----
+                    if not detail_fetched and _needs_detail(pr.pr):
+                        pr.pr = _with_detail(pr.pr, client.pull_request(project, repo, pr.id))
+                    pr.commits = list(client.iter_commits(project, repo, pr.id))
+                    keys = key_filter.keys(
+                        (pr.pr.get("fromRef") or {}).get("displayId"),
+                        pr.pr.get("title"),
+                        pr.pr.get("description"),
+                        *[c.get("message") for c in pr.commits],
+                    )
+                    if not keys:
                         stats.prs_dropped += 1
-                        continue
-                    # The list projection omitted ``description``. If it is
-                    # otherwise a complete PR record, the only key may be in the
-                    # body, so one detail request decides it (FR-2). A wholly
-                    # trimmed projection is different: fetching detail for every
-                    # PR would defeat the pre-filter, so its cheap fields are
-                    # treated as authoritative (the detail is still fetched for
-                    # every PR that *does* match).
-                    if not all(field in pr.pr for field in _DETAIL_FIELDS if field != "description"):
-                        stats.prs_dropped += 1
-                        continue
-                    pr.pr = _with_detail(pr.pr, client.pull_request(project, repo, pr.id))
-                    detail_fetched = True
-                    cheap_keys = _list_keys(key_filter, pr.pr)
-                    if not cheap_keys:
-                        stats.prs_dropped += 1
+                        # Nothing to store now or ever: remember it so a
+                        # non-prefilter run does not pay for its commits again.
+                        if pr_state is not None:
+                            pr_state.record(
+                                source, pr.label, state=pr.state, updated=stamp,
+                                done=pr.closed, ticket_keys=[], run_id=run_id,
+                            )
                         continue
 
-                # -- expensive: detail (only if the list row is trimmed) ----
-                if not detail_fetched and _needs_detail(pr.pr):
-                    pr.pr = _with_detail(pr.pr, client.pull_request(project, repo, pr.id))
-                pr.commits = list(client.iter_commits(project, repo, pr.id))
-                keys = key_filter.keys(
-                    (pr.pr.get("fromRef") or {}).get("displayId"),
-                    pr.pr.get("title"),
-                    pr.pr.get("description"),
-                    *[c.get("message") for c in pr.commits],
-                )
-                if not keys:
-                    stats.prs_dropped += 1
-                    # Nothing to store now or ever: remember it so a non-prefilter
-                    # run does not pay for its commits again.
+                    stats.prs_kept += 1
+                    repo_kept += 1
+                    _note_placements(reducer.key_filter, pr, stats)
+                    # activities are fetched only for PRs that survived the filter
+                    pr.activities = list(client.iter_activities(project, repo, pr.id))
+                    if push_classifier is not None:
+                        # prd/16: classify the rescopes from the local git cache
+                        # before the reduction turns them into pr_pushed events.
+                        push_classifier.annotate(project, repo, pr.pr, pr.activities)
+                        for name, value in push_classifier.counts.items():
+                            stats.push_classes[name] = value
+                        # ... and measure the PR's final diff size (numstat totals)
+                        # from the same cache, for the analysis-side pr_size metric.
+                        push_classifier.annotate_diff_size(project, repo, pr.pr, pr.commits)
+                        if text_classifier is not None:
+                            # ... and whether the diff moved at each comment
+                            # anchor, the deterministic half of thread_outcome.
+                            push_classifier.annotate_threads(
+                                project, repo, pr.pr, pr.activities, pr.commits
+                            )
+                    tick()
+                    reducer.reduce(pr, keys, pr.activities, stats)
                     if pr_state is not None:
                         pr_state.record(
                             source, pr.label, state=pr.state, updated=stamp,
-                            done=pr.closed, ticket_keys=[],
+                            done=pr.closed, ticket_keys=keys, run_id=run_id,
                         )
+                        if pr.closed:
+                            stats.prs_settled += 1
+                except BitbucketError as exc:
+                    repo_failed += 1
+                    out.failures.append({"repo": label, "pr_id": pr.id, "error": str(exc)})
+                    if progress is not None:
+                        progress.emit(f"[scrape] skipped {pr.label}: {exc}")
                     continue
 
-                stats.prs_kept += 1
-                repo_kept += 1
-                _note_placements(reducer.key_filter, pr, stats)
-                # activities are fetched only for PRs that survived the filter
-                pr.activities = list(client.iter_activities(project, repo, pr.id))
-                if push_classifier is not None:
-                    # prd/16: classify the rescopes from the local git cache
-                    # before the reduction turns them into pr_pushed events.
-                    push_classifier.annotate(project, repo, pr.pr, pr.activities)
-                    for name, value in push_classifier.counts.items():
-                        stats.push_classes[name] = value
-                    # ... and measure the PR's final diff size (numstat totals)
-                    # from the same cache, for the analysis-side pr_size metric.
-                    push_classifier.annotate_diff_size(project, repo, pr.pr, pr.commits)
-                    if text_classifier is not None:
-                        # ... and whether the diff moved at each comment anchor,
-                        # which is the deterministic half of thread_outcome.
-                        push_classifier.annotate_threads(
-                            project, repo, pr.pr, pr.activities, pr.commits
-                        )
-                tick()
-                reducer.reduce(pr, keys, pr.activities, stats)
-                if pr_state is not None:
-                    pr_state.record(
-                        source, pr.label, state=pr.state, updated=stamp,
-                        done=pr.closed, ticket_keys=keys,
-                    )
-                    if pr.closed:
-                        stats.prs_settled += 1
+                # Checkpoint the bundle + cursors as we go (see scrape()): a crash
+                # costs the PRs since the last checkpoint, not the whole run.
+                if checkpoint is not None and checkpoint_every > 0:
+                    pending += 1
+                    if pending >= checkpoint_every:
+                        pending = 0
+                        _refresh(out)
+                        checkpoint(out, completed, label)
 
             if stop:
                 break
@@ -493,6 +645,18 @@ def collect(
                     early_stopped = True
                     break
 
+        # Quiescence guard, half 2: did the newest row move under the walk?
+        if verify_quiet:
+            closed_at = _newest_stamp(client, project, repo)
+            if opened_at is not None and closed_at is not None and closed_at > opened_at:
+                out.source_moved.append(label)
+                if progress is not None:
+                    progress.emit(
+                        f"[scrape] warning: {label} changed during the walk"
+                        f" (newest PR {iso(opened_at)} -> {iso(closed_at)});"
+                        " the source was not quiescent"
+                    )
+
         if not truncated and newest is not None:
             cursor = newest if cursor is None else max(cursor, newest)
         out.repo_watermarks[label] = cursor
@@ -501,30 +665,64 @@ def collect(
             "prs_seen": repo_seen,
             "prs_kept": repo_kept,
             "prs_settled": repo_settled,
+            "prs_skipped": repo_skipped,
+            "prs_failed": repo_failed,
             "truncated": truncated,
             "early_stopped": early_stopped,
         }
         if stop:
             break
+        completed.append(label)
+        if checkpoint is not None and checkpoint_every > 0:
+            pending = 0
+            _refresh(out)
+            checkpoint(out, completed, None)
 
-    for pseudonym in sorted(stats.people):
-        stats.objects.append(
-            _object(
-                "PERSON",
-                f"PERSON:{pseudonym}",
-                actor=pseudonym,
-                attributes={"actor_kind": reducer.actor_kind(pseudonym)},
-            )
-        )
-
-    out.events = stats.events
-    out.relations = stats.relations
-    out.objects = stats.objects
+    _refresh(out)
     out.requests = client.requests
     out.requests_by_kind = dict(sorted(client.requests_by_kind.items()))
     out.keys_by_placement = dict(sorted(stats.keys_by_placement.items()))
     out.identity = ident
     return out
+
+
+def _people_objects(stats: Stats, reducer: Reducer) -> list[dict]:
+    """PERSON rows for every actor seen so far (idempotent; derived, not stored)."""
+    return [
+        _object(
+            "PERSON",
+            f"PERSON:{pseudonym}",
+            actor=pseudonym,
+            attributes={"actor_kind": reducer.actor_kind(pseudonym)},
+        )
+        for pseudonym in sorted(stats.people)
+    ]
+
+
+def _newest_stamp(client, project: str, repo: str) -> datetime | None:
+    """The repo's newest PR ``updatedDate`` (one cheap ``limit=1`` request).
+
+    ``None`` when the probe itself fails: a guard must never be the reason a
+    scrape dies.
+    """
+    try:
+        row = client.newest_pull_request(project, repo)
+    except BitbucketError:
+        return None
+    return _updated_stamp(row) if row else None
+
+
+def _merge_objects(carried: list[dict], fresh: list[dict]) -> list[dict]:
+    """Resume merge: the rows of the interrupted bundle, then this run's rows.
+
+    This run's row wins for a shared ``object_id`` (it is the newer read of the
+    same object), so the merged set is exactly the union the final bundle needs.
+    """
+    if not carried:
+        return list(fresh)
+    merged = {str(row["object_id"]): row for row in carried}
+    merged.update({str(row["object_id"]): row for row in fresh})
+    return list(merged.values())
 
 
 def _updated_stamp(row: dict) -> datetime | None:
@@ -553,6 +751,7 @@ def _unchanged(
     source: str,
     repo_watermark: datetime | None,
     full: bool,
+    resume_run_id: str | None = None,
 ) -> str | None:
     """Why this PR needs no per-PR request, or ``None`` when it must be read.
 
@@ -561,6 +760,11 @@ def _unchanged(
 
     ``"watermark"`` -- any other PR already seen below the watermark: there is
     nothing new in it (prd/14 §2).
+
+    ``"resumed"`` -- this PR was already read and checkpointed by the run we are
+    resuming (its entry carries that run's ``run_id`` and the same
+    ``updatedDate``). The events live in the carried-over bundle, so paying for
+    the PR again would only re-do work a crash already paid for.
 
     The comparisons are **strict**: ``updatedDate >= watermark`` means "needs
     processing". ``updatedDate`` ties are common, so a row exactly *at* the
@@ -572,9 +776,13 @@ def _unchanged(
     """
     if full or pr_state is None or stamp is None:
         return None
+    entry = pr_state.get(source, pr.label)
+    if resume_run_id and entry and entry.get("run_id") == resume_run_id:
+        recorded = entry.get("updated_date")
+        if not recorded or stamp <= to_naive_utc(recorded):
+            return "resumed"
     if repo_watermark is None or stamp >= repo_watermark:
         return None
-    entry = pr_state.get(source, pr.label)
     if not entry:
         return None
     recorded = entry.get("updated_date")
@@ -632,11 +840,16 @@ def default_state_dir(out: Path) -> Path:
 
 
 def build_manifest(collected: Collected, *, previous: datetime | None, watermark: datetime | None,
-                   overlap_hours: int, full: bool, events_emitted: int) -> dict:
+                   overlap_hours: int, full: bool, events_emitted: int,
+                   checkpoint: bool = False) -> dict:
     """The bundle's manifest: provenance + counts, and nothing raw (prd/11 §2)."""
     counts = collected.counts()
     counts["events"] = events_emitted
-    repos = sorted({str(e["repo"]) for e in collected.events if e.get("repo")})
+    repos = sorted({
+        str(e["repo"])
+        for e in [*collected.carried_events, *collected.events]
+        if e.get("repo")
+    })
     return {
         "schema_version": bundle_mod.SCHEMA_VERSION,
         "generator": {"name": "megaspeed-scrape", "version": _version()},
@@ -668,12 +881,20 @@ def build_manifest(collected: Collected, *, previous: datetime | None, watermark
             "prs_seen": collected.stats.prs_seen,
             "prs_kept": collected.stats.prs_kept,
             "prs_dropped": collected.stats.prs_dropped,
+            "prs_failed": len(collected.failures),
             "prs_settled": collected.stats.prs_settled,
             "prs_skipped_settled": collected.stats.prs_skipped_settled,
             "prs_skipped_watermark": collected.stats.prs_skipped_watermark,
+            "prs_skipped_resumed": collected.stats.prs_skipped_resumed,
+            # Provenance for the crash-safety machinery: this tgz is an
+            # in-flight checkpoint, and/or continues an interrupted run.
+            "checkpoint": bool(checkpoint),
+            "resumed": bool(collected.resumed),
+            "source_moved": list(collected.source_moved),
             "early_stopped": sorted(
                 label for label, info in collected.repos.items() if info.get("early_stopped")
-            ),        },
+            ),
+        },
         "requests": collected.requests,
         "requests_by_kind": dict(collected.requests_by_kind),
         "keys_by_placement": collected.keys_by_placement,
@@ -685,6 +906,118 @@ def _version() -> str:
     from . import __version__
 
     return __version__
+
+
+#: A run that *lists* fewer than this share of the previous run's PRs is
+#: suspicious (the bundle would be silently partial), unless it legitimately
+#: stopped early at the watermark or was capped with ``--n``.
+PARTIAL_RATIO = 0.5
+#: ... and only once the previous run was big enough for a ratio to mean
+#: anything: a 3-PR repo shrinking to 2 is not news.
+PARTIAL_MIN_BASELINE = 20
+
+
+def partial_report(collected: Collected, prior_repos: dict[str, dict]) -> dict:
+    """Is this bundle implausibly small compared to the previous run?
+
+    The failure this guards against is the worst kind: a run that saw a handful
+    of PRs (a half-restored source, a repo whose listing silently ended, a
+    broken filter) still wrote a *valid* bundle, reported success and exited 0.
+    The next incremental run then treated that tiny snapshot as the new baseline
+    and the gap was invisible.
+
+    The baseline is the previous run's per-repo counters in ``watermark.json``.
+    A legitimately smaller run is excluded on purpose: one that stopped at the
+    watermark (``early_stopped``) or was capped by ``--n`` (``truncated``) *must*
+    see fewer rows. A run whose PRs were all skipped as settled is explained by
+    ``prs_skipped``, not by a shrinking source.
+
+    The caller decides what to do with it (:mod:`ingest.scrape_cli` warns and
+    exits non-zero unless ``--allow-partial``/``--force``).
+    """
+    reasons: list[dict] = []
+    for label, info in sorted(collected.repos.items()):
+        if info.get("early_stopped") or info.get("truncated"):
+            continue
+        prior = prior_repos.get(label) or {}
+        seen = int(info.get("prs_seen") or 0)
+        kept = int(info.get("prs_kept") or 0)
+        skipped = int(info.get("prs_skipped") or 0)
+        prior_seen = int(prior.get("prs_seen") or 0)
+        prior_kept = int(prior.get("prs_kept") or 0)
+        if prior_seen >= PARTIAL_MIN_BASELINE and seen < prior_seen * PARTIAL_RATIO:
+            reasons.append({
+                "repo": label,
+                "reason": "too few PRs listed",
+                "detail": f"saw {seen} PR(s); the previous run saw {prior_seen}",
+            })
+        elif (
+            prior_kept >= PARTIAL_MIN_BASELINE
+            and kept == 0
+            and seen > 0
+            and skipped == 0
+        ):
+            reasons.append({
+                "repo": label,
+                "reason": "no PR kept",
+                "detail": (
+                    f"kept 0 of {seen} PR(s); the previous run kept {prior_kept}"
+                    " (ticket filter or source?)"
+                ),
+            })
+    return {
+        "suspicious": bool(reasons),
+        "reasons": reasons,
+        "failures": list(collected.failures),
+        "baseline": {
+            label: {"prs_seen": int(entry.get("prs_seen") or 0),
+                    "prs_kept": int(entry.get("prs_kept") or 0)}
+            for label, entry in sorted(prior_repos.items())
+        },
+    }
+
+
+def _merge_events(carried: list[dict], fresh: list[dict]) -> list[dict]:
+    """Resume merge: the interrupted run's events, then this run's.
+
+    This run's row wins for a shared ``event_key`` (identical content in
+    practice); the union is what the final bundle must carry, because the
+    checkpointed bundle was never imported.
+    """
+    if not carried:
+        return list(fresh)
+    merged = {str(event["event_key"]): event for event in carried}
+    merged.update({str(event["event_key"]): event for event in fresh})
+    return list(merged.values())
+
+
+def _write_bundle_atomic(
+    path: Path,
+    *,
+    manifest: dict,
+    events: list[dict],
+    objects: list[dict],
+    relations: list[tuple[str, str, str]],
+) -> dict:
+    """Write the tgz through a temp file + rename.
+
+    A checkpoint runs after every N PRs, so a kill *during* a write must not
+    leave a truncated tgz where the resume expects a readable one: the old file
+    (or nothing) stays until the new one is complete.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".part")
+    os.close(handle)
+    temp = Path(temp_name)
+    try:
+        written = bundle_mod.write_bundle(
+            temp, manifest=manifest, events=events, objects=objects, relations=relations
+        )
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+    written["path"] = str(path)
+    return written
 
 
 def scrape(
@@ -701,6 +1034,8 @@ def scrape(
     progress: ProgressReporter | None = None,
     push_classifier: gitclass.PushClassifier | None = None,
     text_classifier: classify.Classifier | None = None,
+    checkpoint_every: int = DEFAULT_CHECKPOINT_EVERY,
+    verify_quiet: bool | None = None,
 ) -> dict:
     """Scrape one source into ``out`` (a tgz) and update local state.
 
@@ -724,6 +1059,23 @@ def scrape(
     what the config/source imply: the deterministic mock for ``--fixture``, the
     local Ollama box for a live run, ``None`` when ``cfg.text_classify`` is off.
     Raw text never crosses into the bundle -- only the labels do.
+
+    **Crash safety.** The bundle, the identity map and both cursors are
+    checkpointed every ``checkpoint_every`` kept PRs and at every repo boundary
+    (``0`` disables, giving the old end-of-run-only behaviour). The write order
+    is identity -> bundle -> ``prs.json`` -> ``watermark.json``, and
+    ``watermark.json`` is the commit marker (``complete: false`` until the final
+    bundle lands). If the run dies, the next call with the same ``--state-dir``
+    resumes: it reads the checkpointed bundle back, carries its rows into the
+    new bundle, and skips the PRs the interrupted run already read (matched by
+    ``run_id`` + ``updatedDate``). The report says so via ``resumed``.
+
+    **Quiescence.** ``verify_quiet`` (default: on for a live source, off for a
+    fixture) re-reads each repo's newest PR before and after the walk; a repo
+    that moved is listed in ``source_moved`` and warned about, so a corpus
+    rebuild that raced the scrape is visible instead of silent. It costs one
+    ``limit=1`` request per repo. It cannot make a scrape transactional -- see
+    the module docstring for the precondition.
     """
     out = Path(out).expanduser()
     state_dir = Path(state_dir).expanduser() if state_dir else default_state_dir(out)
@@ -743,6 +1095,37 @@ def scrape(
         if text_classifier is not None
         else classify.for_scrape(cfg, source)
     )
+    quiet_check = (source != "fixture") if verify_quiet is None else bool(verify_quiet)
+    prior_repo_entries = state.repo_entries(source)
+
+    # -- resume an interrupted run (module docstring "crash safety") --------
+    resume_run_id: str | None = None
+    resume_bundle: Path | None = None
+    carry_events: list[dict] = []
+    carry_objects: list[dict] = []
+    if not full and state.incomplete(source):
+        resume_run_id = state.last_run_id(source)
+        resume_bundle = state.last_bundle_path(source) or out
+        if resume_bundle.is_file():
+            try:
+                carried = bundle_mod.read_bundle(resume_bundle)
+            except bundle_mod.BundleError as exc:
+                reporter.emit(f"[scrape] cannot resume from {resume_bundle}: {exc}")
+                resume_run_id, resume_bundle = None, None
+            else:
+                if carried.source != source:
+                    reporter.emit(
+                        f"[scrape] not resuming {resume_bundle}: it holds source"
+                        f" {carried.source!r}, not {source!r}"
+                    )
+                    resume_run_id, resume_bundle = None, None
+                else:
+                    carry_events, carry_objects = carried.events, carried.objects
+                    reporter.emit(
+                        f"[scrape] resuming interrupted run {resume_run_id}"
+                        f" from {resume_bundle}: carrying {len(carry_events)} event(s),"
+                        f" {len(carry_objects)} object(s)"
+                    )
 
     previous = None if full else state.watermark(source)
     # FR-1: the overlap cutoff is for PRs whose history is already in the store.
@@ -750,6 +1133,75 @@ def scrape(
     # without ticket keys) must be emitted in full regardless of age, otherwise
     # its entire history is dropped and it is marked settled forever.
     prior_prs = {} if full else pr_state.entries(source)
+    cutoff = previous - timedelta(hours=overlap_hours) if previous else None
+
+    def _fresh_events(collected_now: Collected) -> list[dict]:
+        if cutoff is None:
+            return list(collected_now.events)
+
+        def _already_kept(event: dict) -> bool:
+            entry = prior_prs.get(f"{event.get('repo')}#{event.get('pr_id')}")
+            return bool(entry and entry.get("ticket_keys"))
+
+        return [e for e in collected_now.events if e["ts"] >= cutoff or not _already_kept(e)]
+
+    def _emitted_events(collected_now: Collected) -> list[dict]:
+        # The carried rows are unioned in *after* the cutoff on purpose: the
+        # checkpointed bundle was never imported, so the overlap window (which
+        # assumes the store already has the older history) must not drop them.
+        return _merge_events(collected_now.carried_events, _fresh_events(collected_now))
+
+    def _repo_entries(
+        collected_now: Collected, current: str | None, *, final: bool
+    ) -> dict[str, dict]:
+        entries = {label: dict(entry) for label, entry in state.repo_entries(source).items()}
+        for label, info in collected_now.repos.items():
+            entries[label] = {
+                # Milliseconds matter: the cursor is compared to DC's updatedDate.
+                "updated_ts": iso_precise(collected_now.repo_watermarks.get(label)),
+                **info,
+                "complete": True,
+            }
+        if not final and current and current not in collected_now.repos:
+            # Mid-repo: never advance that repo's cursor past PRs we have not
+            # read (the resume re-walks from the previous cursor and skips the
+            # per-PR entries this run checkpointed).
+            entry = dict(entries.get(current) or {})
+            entry.setdefault("updated_ts", None)
+            entry["in_progress"] = True
+            entries[current] = entry
+        return entries
+
+    def checkpoint(collected_now: Collected, completed: list[str], current: str | None) -> None:
+        """Persist identity + a valid partial bundle + both cursors, mid-run."""
+        events_now = _emitted_events(collected_now)
+        emitted = max((e["ts"] for e in events_now), default=None)
+        watermark_now = max((w for w in (previous, emitted) if w is not None), default=None)
+        manifest = build_manifest(
+            collected_now,
+            previous=previous,
+            watermark=watermark_now,
+            overlap_hours=overlap_hours,
+            full=full,
+            events_emitted=len(events_now),
+            checkpoint=True,
+        )
+        # Identity first: the bundle names these pseudonyms, so the map must
+        # never lag behind a bundle that mentions them.
+        if collected_now.identity is not None:
+            collected_now.identity.save()
+        _write_bundle_atomic(
+            out, manifest=manifest, events=events_now,
+            objects=collected_now.objects, relations=collected_now.relations,
+        )
+        pr_state.save()
+        state.record(
+            source, watermark_now, collected_now.run_id, out,
+            repos=_repo_entries(collected_now, current, final=False),
+            complete=False, resumed=collected_now.resumed, count_run=False,
+        )
+        state.save()
+
     collected = collect(
         cfg,
         transport,
@@ -762,21 +1214,15 @@ def scrape(
         progress=reporter,
         push_classifier=classifier,
         text_classifier=text,
+        resume_run_id=resume_run_id,
+        carry_events=carry_events,
+        carry_objects=carry_objects,
+        checkpoint=checkpoint,
+        checkpoint_every=max(0, int(checkpoint_every)),
+        verify_quiet=quiet_check,
     )
 
-    cutoff = previous - timedelta(hours=overlap_hours) if previous else None
-    if cutoff is None:
-        events = collected.events
-    else:
-        def _already_kept(event: dict) -> bool:
-            entry = prior_prs.get(f"{event.get('repo')}#{event.get('pr_id')}")
-            return bool(entry and entry.get("ticket_keys"))
-
-        events = [
-            e
-            for e in collected.events
-            if e["ts"] >= cutoff or not _already_kept(e)
-        ]
+    events = _emitted_events(collected)
     emitted = max((e["ts"] for e in events), default=None)
     watermark = max((w for w in (previous, emitted) if w is not None), default=None)
 
@@ -788,24 +1234,20 @@ def scrape(
         full=full,
         events_emitted=len(events),
     )
-    written = bundle_mod.write_bundle(
+    if collected.identity is not None:
+        collected.identity.save()
+    written = _write_bundle_atomic(
         out, manifest=manifest, events=events, objects=collected.objects,
         relations=collected.relations,
     )
-
-    repo_entries = {
-        label: {
-            # Milliseconds matter: the cursor is compared to DC's updatedDate.
-            "updated_ts": iso_precise(collected.repo_watermarks.get(label)),
-            **info,
-        }
-        for label, info in collected.repos.items()
-    }
-    state.record(source, watermark, collected.run_id, out, repos=repo_entries)
-    state.save()
     pr_state.save()
-    if collected.identity is not None:
-        collected.identity.save()
+    state.record(
+        source, watermark, collected.run_id, out,
+        repos=_repo_entries(collected, None, final=True),
+        complete=True, resumed=collected.resumed,
+    )
+    state.save()
+    partial = partial_report(collected, prior_repo_entries)
 
     return {
         "mode": "scrape",
@@ -825,22 +1267,30 @@ def scrape(
         },
         "overlap_hours": overlap_hours,
         "full": bool(full),
+        "resumed": bool(collected.resumed),
+        "resumed_from": str(resume_bundle) if resume_bundle else None,
+        "checkpoint_every": max(0, int(checkpoint_every)),
+        "source_moved": list(collected.source_moved),
+        "partial": partial,
         "events_collected": len(collected.events),
-        "events_dropped_watermark": len(collected.events) - len(events),
+        "events_carried": len(collected.carried_events),
+        "events_dropped_watermark": len(collected.events) - len(_fresh_events(collected)),
         "requests": collected.requests,
         "requests_by_kind": dict(collected.requests_by_kind),
         "prs_seen": collected.stats.prs_seen,
         "prs_kept": collected.stats.prs_kept,
         "prs_dropped": collected.stats.prs_dropped,
+        "prs_failed": len(collected.failures),
+        "failures": list(collected.failures),
         "prs_settled": collected.stats.prs_settled,
         "prs_skipped_settled": collected.stats.prs_skipped_settled,
         "prs_skipped_watermark": collected.stats.prs_skipped_watermark,
+        "prs_skipped_resumed": collected.stats.prs_skipped_resumed,
         "early_stopped": sorted(
             label for label, info in collected.repos.items() if info.get("early_stopped")
         ),
         "prs_settled_total": pr_state.done_count(source),
         "events": len(events),
-        "events_collected": len(collected.events),
         "objects": len(collected.objects),
         "counts": manifest["counts"],
         "classifier_version": taxonomy.CLASSIFIER_VERSION,
