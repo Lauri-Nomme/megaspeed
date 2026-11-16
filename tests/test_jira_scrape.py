@@ -337,6 +337,16 @@ class IncrementalScrapeTests(unittest.TestCase):
         self.assertGreater(done, 0)
         self.assertLess(done, len(self.fixture["issues"]))
 
+    def test_an_explicit_key_set_scopes_the_whole_run(self):
+        # prd/18: on a shared project a prefix matches everyone's tickets, so a
+        # key set replaces the project clause -- one query, one issue.
+        self.cfg.ticket_keys = ("PROJ-101",)
+        report = self.ingest()
+        self.assertEqual(report["issues_seen"], 1)
+        self.assertEqual(report["issues_kept"], 1)
+        self.assertEqual(report["counts"]["stories"], 1)
+        self.assertEqual(report["counts"]["epics"], 0)
+
 
 class JqlTests(unittest.TestCase):
     def test_project_scope(self):

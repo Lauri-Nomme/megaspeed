@@ -18,7 +18,6 @@ import unittest
 from pathlib import Path
 
 from ingest.pseudonym import (
-    BITBUCKET,
     JIRA,
     IdentityTable,
     actor_key,

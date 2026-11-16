@@ -54,7 +54,6 @@ from .jira import (
     FIELD_SPRINT,
     FIELD_STORY_POINTS,
     JiraClient,
-    sprint_id,
 )
 from .jira_pipeline import JiraReducer, JiraStats
 from .pipeline import KeyFilter, _object
@@ -269,16 +268,19 @@ def collect(
     previous = None if full else (state.watermark(source) if state else None)
     cutoff = previous - timedelta(hours=overlap_hours) if previous else None
     prior = {} if full else (issue_state.entries(source) if issue_state else {})
+    # An explicit key set (prd/18) is one query across projects: `key in (...)`
+    # replaces the project clause, so only the first project is walked.
+    key_scoped = bool(cfg.ticket_keys)
     fetched: list[dict] = []
     seen: set[str] = set()
     stop = False
-    for project in project_list:
-        if stop:
+    for index, project in enumerate(project_list):
+        if stop or (key_scoped and index > 0):
             break
         jql = jql_for(
             project,
             since=cutoff,
-            keys=cfg.ticket_keys if len(project_list) == 1 else (),
+            keys=cfg.ticket_keys if key_scoped else (),
         )
         for row in client.search(jql):
             key = str(row.get("key") or "")
@@ -508,8 +510,10 @@ def scrape(
         overlap_hours=overlap_hours,
     )
 
-    emitted = max((e["ts"] for e in collected.events), default=None)
-    watermark = max((w for w in (previous, collected.watermark, emitted) if w is not None), default=None)
+    # The Jira cursor is the max issue ``updated`` (the column the JQL filters
+    # on), not the newest event timestamp: a worklog's ``created`` can be older
+    # than the issue's ``updated`` and the two must not drift apart.
+    watermark = max((w for w in (previous, collected.watermark) if w is not None), default=None)
 
     manifest = build_manifest(
         collected,
