@@ -172,7 +172,11 @@ def _print_jira_scrape(r: dict) -> None:
     print(
         f"issues         {r['issues_seen']} seen -> {r['issues_kept']} kept,"
         f" {r['issues_skipped']} skipped"
-        + (f" ({r['issues_skipped_type']} outside the issue types)" if r['issues_skipped_type'] else "")
+        + (
+            f" ({r['issues_skipped_type']} of the kept ones are an unsupported issue type)"
+            if r['issues_skipped_type']
+            else ""
+        )
     )
     counts = r["counts"]
     print(
