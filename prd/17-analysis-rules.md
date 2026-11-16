@@ -21,6 +21,15 @@ product's headline output (prd/15).
 8. **`sentinel_queue`** — (when role/sentinel data exists) median wait on the mandatory approval.
 9. **`pr_size`** — commits per PR (count of COMMIT objects, already in the store) + diff size
    (lines added/removed, scrape-side capture per prd/16), vs review latency.
+10. **`flow_efficiency`** — per PR, active ÷ elapsed (business hours). *Active* = intervals where the
+    ball-holder left evidence of work (commits, a push, a rebase, an author reply) plus a stated
+    attention cost per activity touch that ends a queue wait; *waiting* = review, CI, an idle author,
+    the unobserved tail. Report per-PR and process (Σ working ÷ Σ elapsed) efficiency + the waiting
+    split (prd/05 "Waiting-time decomposition").
+11. **`survival`** — Kaplan–Meier time-to-merge over the opened cohort: open PRs are right-censored at
+    the snapshot, declined PRs at their close time. Report the median, quantiles, censored counts and a
+    small curve next to the merged-only median, so the censoring bias is visible instead of noted away
+    (prd/05 "Drivers of cycle time").
 
 ## Suggestion engine
 
@@ -35,6 +44,10 @@ Example templates:
 - "P PRs merged with no approval → enforce the +1 rule."
 - "The mandatory-approval (sentinel) queue is the longest wait → rotate / add sentinels."
 - "PRs over N commits / M lines get the slowest reviews → adopt a PR size cap."
+- "Flow efficiency is X% — the process spends N% of cycle time waiting → shrink the biggest queue
+  (usually review) rather than speeding up the work."
+- "Time to merge is X median with open and declined PRs censored in (target < 3 d) → plan against the
+  survival estimate, and close/split/decline the PRs that sit open."
 
 ## API
 
