@@ -718,6 +718,72 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .stub code { color: var(--link); }
 .facts-block { font-size: 12.5px; }
 
+/* --- policy lab (prd/23) ------------------------------------------------ */
+/* The gate sits above everything: green when the baseline reproduces the store,
+   red when it does not and the scenario numbers are withheld. */
+.policy-wrap { display: flex; flex-direction: column; min-width: 0; }
+.policy-gate {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  padding: 9px 14px; font-size: var(--body-font);
+  border-bottom: 1px solid var(--border-hairline);
+}
+.policy-gate.ok { background: rgba(115, 207, 85, .05); }
+.policy-gate.blocked { background: var(--critical-tint); color: var(--text-primary); }
+.policy-gate b { font-family: var(--font-mono); font-weight: 600; }
+.policy-grid { display: grid; grid-template-columns: 320px minmax(0, 1fr); align-items: start; }
+.policy-panel { padding: 12px 14px 18px; border-right: 1px solid var(--border-hairline); min-width: 0; }
+.policy-panel:last-child { border-right: 0; }
+.policy-h {
+  margin: 0 0 8px; font-size: 11px; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--text-secondary); font-weight: 600;
+}
+.policy-h:not(:first-child) { margin-top: 18px; }
+.policy-knobs { display: flex; flex-direction: column; gap: 10px; }
+.policy-knob { display: grid; grid-template-columns: 1fr auto; gap: 1px 8px; align-items: baseline; }
+.policy-knob-k { font-size: var(--body-font); color: var(--text-primary); }
+.policy-knob select, .policy-knob input[type="checkbox"] { justify-self: end; }
+.policy-knob select {
+  background: var(--bg-control); color: var(--text-primary);
+  border: 1px solid var(--border-control); border-radius: var(--radius-control);
+  height: 24px; font-size: 12px; font-family: var(--font-mono); padding: 0 6px;
+}
+.policy-knob-note { grid-column: 1 / -1; font-size: 11px; color: var(--text-tertiary); }
+.policy-actions { display: flex; gap: 8px; margin-top: 14px; align-items: center; }
+.policy-run {
+  background: var(--primary-tint-bg); color: var(--primary-tint-fg);
+  border: 1px solid var(--border-control); border-radius: var(--radius-control);
+  height: 26px; padding: 0 12px; font-size: 12px; font-weight: 600; cursor: pointer;
+}
+.policy-run:hover { background: var(--bg-control-active); }
+.policy-presets { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 14px; }
+.policy-table { width: 100%; border-collapse: collapse; font-size: var(--row-font); }
+.policy-table th, .policy-table td { padding: 5px 8px; border-bottom: 1px solid var(--border-hairline); text-align: left; }
+.policy-table th { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-tertiary); font-weight: 600; }
+.policy-table td.c-metric { color: var(--text-secondary); }
+.policy-table td.c-base, .policy-table td.c-scen, .policy-table td.c-dur { font-family: var(--font-mono); }
+.policy-table td.c-scen { color: var(--text-primary); }
+.policy-table .c-delta { text-align: right; font-family: var(--font-mono); white-space: nowrap; }
+.policy-table .c-delta.good { color: var(--healthy); }
+.policy-table .c-delta.bad { color: var(--critical); }
+.policy-table .c-delta.muted, .policy-table .muted { color: var(--text-tertiary); }
+.policy-row-note { display: block; font-size: 10.5px; color: var(--text-tertiary); font-family: var(--font-sans, inherit); }
+.policy-facts { max-width: 520px; }
+.policy-note { margin: 10px 14px 0; font-size: var(--body-font); color: var(--text-tertiary); max-width: 100ch; }
+.policy-warning {
+  margin: 10px 0 0; padding: 7px 10px; font-size: var(--body-font);
+  color: var(--warning); background: var(--warning-tint);
+  border-left: 3px solid var(--warning);
+}
+.policy-provenance {
+  margin: 0; padding: 8px 14px; font-size: 11.5px; color: var(--text-tertiary);
+  border-top: 1px solid var(--border-hairline);
+}
+
+@media (max-width: 1180px) {
+  .policy-grid { grid-template-columns: minmax(0, 1fr); }
+  .policy-panel { border-right: 0; border-bottom: 1px solid var(--border-hairline); }
+}
+
 @media (max-width: 1180px) {
   .split { grid-template-columns: minmax(0, 1fr); }
   .detail { border-left: 0; border-top: 1px solid var(--border-hairline); position: static; max-height: none; }

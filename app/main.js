@@ -11,7 +11,7 @@
  *   blocking   Who is blocking whom?     weighted handover graph (canvas)
  *   queue      Who is slow vs overloaded? WIP per person (canvas)
  *   rules      What should we change first? ranked, evidence-backed rules
- *   policy     What should we change first? (simulation stub, next slice)
+ *   policy     What should we change first? calibrated simulation + A/B
  */
 
 import { Timeline, ACTIVITY_ORDER, ACTIVITY_COLOR, PHASE, PHASE_ORDER } from '/timeline.js';
@@ -25,6 +25,10 @@ import {
   impactSentence, entityMarkdown, deliveryMarkdown,
 } from '/tables.js';
 import { rulesMarkup, rulesStats, rulesMarkdown } from '/rules.js';
+import {
+  defaultScenario, policyMarkdown, policyMarkup, predHours,
+  PRESETS, readScenario, scenarioQuery,
+} from '/policy.js';
 import { annotateRow, epicKeySet, keyListsOf, rowTicket } from '/tickets.js';
 import {
   ROLE_QUEUES, filteredPages, queueLevelForNode, scopeBanner, scopeForNode, scopeForStream,
@@ -82,6 +86,8 @@ const state = {
   blocking: null,
   rules: null,
   rulesLevel: 'team',
+  policy: null,
+  policyScenario: defaultScenario(),
   blockingLevel: 'queue',
   queueLevel: 'person',
   lens: 'hours',
@@ -366,6 +372,7 @@ function renderPage() {
   if (page === 'blocking') renderBlockingPage();
   if (page === 'queue') renderQueuePage();
   if (page === 'rules') renderRulesPage();
+  if (page === 'policy') renderPolicyPage();
   if (page === 'overview') renderOverviewPage();
   if (page === 'sources') renderSourcesPage();
   saveUI();
@@ -407,6 +414,17 @@ async function ensureData(page) {
     const key = `rules:${tenant}:${state.timeframe}:${state.rulesLevel}:${stamp}`;
     if (!cached(key)) state.cache.set(key, await getJSON(withTenant(`/api/insights?level=${state.rulesLevel}&${q}`)));
     state.rules = cached(key);
+  }
+  if (page === 'policy') {
+    // prd/23: the scenario is part of the cache key — two knob settings are two
+    // different predictions, and re-running the same one must not refetch.
+    const scenario = scenarioQuery(state.policyScenario);
+    const key = `policy:${tenant}:${state.timeframe}:${scenario}:${stamp}`;
+    if (!cached(key)) {
+      const url = `/api/simulate?${q}${scenario ? `&${scenario}` : ''}`;
+      state.cache.set(key, await getJSON(withTenant(url)));
+    }
+    state.policy = cached(key);
   }
 }
 
@@ -890,6 +908,40 @@ async function setRulesLevel(level) {
   state.cache.clear();
   await ensureData('rules');
   renderRulesPage();
+  saveUI();
+}
+
+// ------------------------------------------------------------------- policy
+/* The Policy lab (prd/23): a calibrated SimPy model, a validation gate, and one
+ * scenario A/B. The page never shows a predicted number without the `≈` marker
+ * and the provenance line; when the baseline fails the gate, the scenario is
+ * not run and the mismatch is the result. */
+function renderPolicyPage() {
+  const data = state.policy;
+  $('policy-body').innerHTML = policyMarkup(data, state.policyScenario);
+  const baseline = data && data.baseline && data.baseline.ok ? data.baseline : null;
+  $('policy-stats').innerHTML = data && data.validation
+    ? `<span class="stat-inline"><b class="${data.validation.ok ? '' : 'attention'}">${
+        data.validation.status === 'validated' ? 'validated' : 'not validated'}</b> baseline</span>
+      <span class="stat-inline"><b>${baseline ? predHours(baseline.predicted.cycle_hours.median) : '–'}</b> cycle median</span>
+      <span class="stat-inline"><b>${data.calibration && data.calibration.prs ? data.calibration.prs.n : 0}</b> PRs calibrated</span>`
+    : '';
+  setHonesty(data
+    ? `predictions, not measurements — every number is ≈ and the model is ` +
+      `validated against the store's own cycle-time median`
+    : '');
+}
+
+async function runPolicyScenario(scenario) {
+  state.policyScenario = scenario;
+  state.cache.clear();
+  try {
+    await ensureData('policy');
+  } catch (err) {
+    setStatus(`policy lab failed: ${err.message}`, 'stale');
+    return;
+  }
+  renderPolicyPage();
   saveUI();
 }
 
@@ -1837,6 +1889,25 @@ document.addEventListener('click', async (event) => {
     await copyText(rulesMarkdown(state.rules));
     return;
   }
+  if (event.target.closest('#policy-copy')) {
+    await copyText(policyMarkdown(state.policy));
+    return;
+  }
+  if (event.target.closest('#policy-run')) {
+    const body = $('policy-body');
+    await runPolicyScenario(readScenario(body));
+    return;
+  }
+  if (event.target.closest('#policy-reset')) {
+    await runPolicyScenario(defaultScenario());
+    return;
+  }
+  const preset = event.target.closest('[data-preset]');
+  if (preset) {
+    const chosen = PRESETS.find((entry) => entry.id === preset.dataset.preset);
+    if (chosen) await runPolicyScenario({ ...defaultScenario(), ...chosen.scenario });
+    return;
+  }
   const ruleLevel = event.target.closest('[data-rule-level]');
   if (ruleLevel) {
     await setRulesLevel(ruleLevel.dataset.ruleLevel);
@@ -1957,6 +2028,7 @@ function saveUI() {
       blockingLevel: state.blockingLevel,
       queueLevel: state.queueLevel,
       rulesLevel: state.rulesLevel,
+      policyScenario: state.policyScenario,
       activity: [...timeline.activityState.entries()],
       scope: state.scope,
       tenant: state.tenant,
@@ -1997,6 +2069,9 @@ function restoreUI() {
   }
   if (stored.rulesLevel === 'team' || stored.rulesLevel === 'person') {
     state.rulesLevel = stored.rulesLevel;
+  }
+  if (stored.policyScenario && typeof stored.policyScenario === 'object') {
+    state.policyScenario = { ...defaultScenario(), ...stored.policyScenario };
   }
   if (stored.lanes) { $('lanes').value = stored.lanes; timeline.setLanes(stored.lanes); }
   if (Array.isArray(stored.activity)) {

@@ -197,17 +197,14 @@
         <p class="assumption" id="rules-assumption"></p>
       </section>
 
-      <!-- Policy lab (stub) -->
+      <!-- Policy lab (prd/23): calibrated simulation + A/B -->
       <section class="page" id="page-policy" aria-labelledby="page-title" hidden>
-        <div class="stub">
-          <h2>Not built in this slice</h2>
-          <p>The diagnosis views ship first: timeline, delivery list, blocking map and queues.
-            The Policy lab is the next slice (prd/09 view 4) — it configures a calibrated
-            simulation and compares predicted vs. historical cycle time.</p>
-          <p class="muted">Planned inputs: WIP limits · sentinel rotation · PR size cap ·
-            review SLA · stack depth · async-refinement cadence. Every predicted number
-            will be marked <code>≈</code> and calibrated from a stated window.</p>
+        <div class="toolbar">
+          <span class="grow"></span>
+          <div class="stats-strip" id="policy-stats"></div>
+          <button type="button" class="chip" id="policy-copy">Copy as Markdown</button>
         </div>
+        <div id="policy-body"></div>
       </section>
 
       <!-- Sources (stub) -->
