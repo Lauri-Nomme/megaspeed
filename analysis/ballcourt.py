@@ -435,6 +435,35 @@ OBJECT_SQL = (
     "SELECT object_type, object_id, repo, pr_id, ticket_keys, actor, state, created_at, closed_at"
     " FROM objects ORDER BY object_type, object_id"
 )
+# prd/22: the PR's source/target refs as one-way digests (never branch names).
+REF_SQL = (
+    "SELECT object_id, CAST(attributes AS VARCHAR) FROM objects WHERE object_type = 'PR'"
+)
+
+
+def _pr_refs(con) -> dict[str, dict]:
+    """``object_id -> {source_ref, target_ref}`` for the PRs that carry them.
+
+    Absent on a store ingested before prd/22 persisted the refs; the stack
+    analysis reads that as "stack depth unknown" (``available: false``), never
+    as "no stacks". The values are digests: comparable, never displayed.
+    """
+    columns = {
+        row[0]
+        for row in con.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = 'main' AND table_name = 'objects'"
+        ).fetchall()
+    }
+    if "attributes" not in columns:
+        return {}
+    refs: dict[str, dict] = {}
+    for object_id, attrs in con.execute(REF_SQL).fetchall():
+        payload = json.loads(attrs) if attrs else {}
+        entry = {key: payload[key] for key in ("source_ref", "target_ref") if payload.get(key)}
+        if entry:
+            refs[object_id] = entry
+    return refs
 
 
 def _snapshot(conn) -> datetime:
@@ -508,6 +537,10 @@ def load(conn, calendar: Calendar | None = None, calendar_error: str | None = No
         elif obj["object_type"] == "COMMIT" and obj["repo"] and obj["pr_id"] is not None:
             if obj["created_at"]:
                 commits_by_pr[(obj["repo"], int(obj["pr_id"]))].append(to_naive_utc(obj["created_at"]))
+    # prd/22: the stack edges are ref-digest equality, so they ride on the PR.
+    for object_id, refs in _pr_refs(conn).items():
+        if object_id in pr_objects:
+            pr_objects[object_id].update(refs)
 
     by_pr: dict[str, list[dict]] = defaultdict(list)
     sentinels: set[str] = set()

@@ -23,6 +23,8 @@ Every metric prd/17 lists is computed from the store, in one pass:
 ``sentinel_queue``       median wait on the mandatory approval (when roles exist)
 ``pr_size``              commits per PR (+ diff size when captured) vs review latency
 ``vacation_blocking``    per vacation: items that waited on the person, no delegation
+``stacked_cascade``      prd/22: stack depth (median/max) + the rebases and re-review
+                         hours a lower-PR update forced up every stack above it
 ``waiting_time_decomposition``  prd/21: the 8 ticket segments, hours + efficiency each
 ``carry_over``           prd/21: stories added to more than one sprint
 ``point_churn``          prd/21: ``pointed`` events after the story started
@@ -73,6 +75,7 @@ from datetime import date, datetime, timedelta
 
 from analysis import ballcourt
 from analysis import jira as jira_analysis
+from analysis import stack as stack_analysis
 from analysis.effort import ACTIVE_PHASES, TOUCH_ACTIVITIES, TOUCH_HOURS
 from analysis.jira import (
     CARRY_OVER_SHARE_TARGET, POINT_CHURN_SHARE_TARGET, SEGMENT_SHARE_CRITICAL,
@@ -1248,6 +1251,7 @@ def metrics(court: ballcourt.BallCourt, threads: list[dict], window,
         "sentinel_queue": sentinel_queue(court, window),
         "pr_size": pr_size(court, window, sizes),
         "vacation_blocking": vacation_blocking(court, window),
+        "stacked_cascade": stack_analysis.metrics(court, window),
         "review_cost": {"hours_per_round": round_cost_hours(court, window)},
         # prd/21: the ticket layer. Keys are distinct from the PR-level ones so
         # a reader can never confuse "merged with no approval" (conformance)
@@ -1602,6 +1606,43 @@ def templates(
             "Don't rebase approved PRs unless the target moved in a conflicting file; tie "
             "auto-unapprove to a content change (patch-id), not to any push.",
             severity, lost * round_hours, rb["prs"],
+        ))
+
+    # 5b. stacked_cascade (prd/22) — the rebase cost a stack walks up. A rule
+    # needs priced hours: rebases whose review round never finished are reported
+    # by the metric (unfinished_rounds) but cannot carry an impact estimate.
+    sc = m["stacked_cascade"]
+    if sc["available"] and sc["re_review_hours"] > 0:
+        rebases = sc["cascaded_rebases"]
+        hours = sc["re_review_hours"]
+        severity = (
+            "critical" if hours >= 3 * round_hours
+            else ("warning" if hours >= round_hours else "info")
+        )
+        critical = sc["critical_path"]
+        deepest = sc["depth"]["max"]
+        out.append(_suggestion(
+            "stacked-cascade", "stacked_cascade",
+            f"{_count(sc['stacked_prs'], 'stacked PR')}; a lower-PR update triggered "
+            f"{_count(rebases, 'rebase')} and {_human_hours(hours)} of re-review up-stack",
+            {
+                "stacked_prs": sc["stacked_prs"],
+                "stacks": sc["stacks"],
+                "triggers": sc["triggers"],
+                "rebases": rebases,
+                "re_review_hours": hours,
+                "depth_median": sc["depth"]["median"],
+                "depth_max": deepest,
+                "critical_path_hours": critical["hours"],
+                "unfinished_rounds": sc["unfinished_rounds"],
+                "hours_per_round": round_hours,
+            },
+            "Merge stacks bottom-up: land the bottom PR first and retarget or rebase the "
+            "ones above it in the same pass, and cap stack depth at "
+            f"{stack_analysis.MAX_STACK_DEPTH}. Every update to a "
+            "lower PR reopens review on everything above it, so a tall stack turns one "
+            "merge into a chain of rebases and re-reviews.",
+            severity, hours, sc["stacked_prs"] or sc["triggers"],
         ))
 
     # 6. comment_tax.
@@ -2084,6 +2125,9 @@ def insights(
             "threads": computed["comment_tax"]["classified"],
             "flow_efficiency": computed["flow_efficiency"]["n"],
             "survival": computed["survival"]["n"],
+            # prd/22: how many PRs sit on another PR's branch (0 is a result, not
+            # a missing measurement -- see metrics.stacked_cascade.available)
+            "stacked_prs": computed["stacked_cascade"]["stacked_prs"],
             # the Jira cohort (stories created in the window) and the population
             # the decomposition could actually measure
             "stories": computed["waiting_time_decomposition"]["stories"],
@@ -2100,6 +2144,8 @@ def insights(
             "flow_efficiency_touch_hours": TOUCH_HOURS,
             "hours_per_round": round_hours,
             "hours_per_round_basis": ROUND_COST_BASIS,
+            # prd/22: the stack-depth cap the advice names
+            "max_stack_depth": stack_analysis.MAX_STACK_DEPTH,
             # prd/21 targets, stated rather than hidden
             "jira_carry_over_share": CARRY_OVER_SHARE_TARGET,
             "jira_point_churn_share": POINT_CHURN_SHARE_TARGET,
@@ -2117,6 +2163,8 @@ def insights(
             "this window; ranking is impact × confidence (sample size). Person "
             "rules carry pseudonyms only. The Jira-layer rules (prd/21) price "
             "ticket waits with the same calendar and report "
-            "available: false when the store has no ticket layer."
+            "available: false when the store has no ticket layer. The stacked-PR "
+            "rule (prd/22) derives the stack DAG from ref digests -- never branch "
+            "names -- and reports available: false when the store predates them."
         ),
     }
