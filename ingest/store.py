@@ -39,11 +39,17 @@ CONTENT_HASH_RE = r"^[0-9a-f]{16}$"
 REPO_RE = r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
 # A commit hash (full or abbreviated) -- ``objects.head_commit``.
 HEAD_COMMIT_RE = r"^[0-9a-f]{7,40}$"
-# ``event_key`` is ``project/repo#pr_id:natural`` and ``natural`` may itself
-# contain colons (``act:12:q``). An identifier, never prose.
-EVENT_KEY_RE = r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+:[A-Za-z0-9_.:+-]+$"
+# ``event_key`` is ``project/repo#pr_id:natural`` for Bitbucket and
+# ``KEY:natural`` for Jira (``DEL-100:changelog:10190:status:0``). The shape is
+# owned by :mod:`ingest.taxonomy` (both sides of the airgap need it, and the
+# scrape side may not import this module); re-exported here so the import gate
+# and the verifier share one definition.
+EVENT_KEY_RE = taxonomy.EVENT_KEY_RE
 # ``ingest_runs.run_id``: one token, no whitespace (``fixture-2026...-abcdef``).
 RUN_ID_RE = r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$"
+# The sources this store may hold. A source name is a closed label, not free
+# text: it is the provenance column of ``ingest_runs``.
+SOURCES = ("fixture", "bitbucket-dc", "jira-fixture", "jira-dc")
 OBJECT_ID_PREFIX = {
     "PR": "PR:",
     "COMMIT": "COMMIT:",
@@ -51,12 +57,20 @@ OBJECT_ID_PREFIX = {
     "PERSON": "PERSON:",
     "PRREV": "PRREV:",
     "THREAD": "THREAD:",
+    "EPIC": "EPIC:",
+    "STORY": "STORY:",
+    "SPRINT": "SPRINT:",
 }
 # Per-object-type state vocabulary (prd/03).
 OBJECT_STATE_BY_TYPE = {
     "PR": taxonomy.OBJECT_STATE,
     "THREAD": taxonomy.THREAD_STATE,
+    "EPIC": taxonomy.ISSUE_STATE,
+    "STORY": taxonomy.ISSUE_STATE,
+    "SPRINT": taxonomy.SPRINT_STATE,
 }
+# Object types whose id is a ticket key (the PRD allows keys to cross, prd/02).
+KEYED_OBJECT_TYPES = ("TICKET", "EPIC", "STORY")
 
 ALLOWED: dict[str, set[str]] = {
     "events": {
@@ -72,6 +86,7 @@ ALLOWED: dict[str, set[str]] = {
     "ingest_runs": {
         "run_id", "source", "as_of", "source_watermark", "classifier_version",
         "prs_seen", "prs_kept", "prs_dropped", "events_written", "events_skipped",
+        "issues_seen", "issues_kept", "issues_skipped",
     },
 }
 
@@ -87,6 +102,8 @@ def ensure_schema(con) -> None:
     # Additive migrations for stores created by earlier builds: the schema file
     # is the contract, so a new allowlisted column must exist everywhere.
     con.execute("ALTER TABLE objects ADD COLUMN IF NOT EXISTS attributes JSON")
+    for column in ("issues_seen", "issues_kept", "issues_skipped"):
+        con.execute(f"ALTER TABLE ingest_runs ADD COLUMN IF NOT EXISTS {column} INTEGER")
 
 
 # --------------------------------------------------------------------------- #
@@ -144,8 +161,9 @@ def _batches(rows: list, size: int = BATCH_ROWS):
 INSERT_RUN = """
 INSERT OR REPLACE INTO ingest_runs
     (run_id, source, as_of, source_watermark, classifier_version,
-     prs_seen, prs_kept, prs_dropped, events_written, events_skipped)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     prs_seen, prs_kept, prs_dropped, events_written, events_skipped,
+     issues_seen, issues_kept, issues_skipped)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -279,6 +297,12 @@ def write_run(con, run: dict) -> None:
             run["run_id"], run["source"], run["as_of"], run["source_watermark"],
             run["classifier_version"], run["prs_seen"], run["prs_kept"],
             run["prs_dropped"], run["events_written"], run["events_skipped"],
+            # Jira sources count issues where Bitbucket counts PRs; a run only
+            # fills the half that belongs to its source (prd/11 §8: per-source
+            # cursors and per-source counters).
+            int(run.get("issues_seen") or 0),
+            int(run.get("issues_kept") or 0),
+            int(run.get("issues_skipped") or 0),
         ),
     )
 
@@ -365,15 +389,23 @@ def list_objects(con, object_type: str | None = None) -> list[dict]:
 
 def summary(con) -> dict:
     events, first, last = con.execute("SELECT count(*), min(ts), max(ts) FROM events").fetchone()
-    prs = con.execute("SELECT count(*) FROM objects WHERE object_type = 'PR'").fetchone()[0]
-    commits = con.execute("SELECT count(*) FROM objects WHERE object_type = 'COMMIT'").fetchone()[0]
+    counts = {
+        row[0]: int(row[1])
+        for row in con.execute(
+            "SELECT object_type, count(*) FROM objects GROUP BY object_type"
+        ).fetchall()
+    }
     run = con.execute(
         "SELECT as_of, source, prs_seen, prs_kept, prs_dropped FROM ingest_runs ORDER BY as_of DESC LIMIT 1"
     ).fetchone()
     return {
         "events": int(events or 0),
-        "prs": int(prs or 0),
-        "commits": int(commits or 0),
+        "prs": counts.get("PR", 0),
+        "commits": counts.get("COMMIT", 0),
+        # Jira side (prd/03): the ticket layer the PRs join to.
+        "epics": counts.get("EPIC", 0),
+        "stories": counts.get("STORY", 0),
+        "sprints": counts.get("SPRINT", 0),
         "first_ts": iso(first) if first else None,
         "last_ts": iso(last) if last else None,
         "as_of": iso(run[0]) if run else None,
@@ -431,13 +463,13 @@ def object_shape_problems(
         problems.append(f"PR object id without a numeric id: {oid!r}")
     elif otype == "COMMIT" and not re.fullmatch(r"COMMIT:[0-9a-f]{7,40}", str(oid)):
         problems.append(f"COMMIT object id is not a hash: {oid!r}")
-    elif otype == "TICKET":
+    elif otype in KEYED_OBJECT_TYPES:
         key = str(oid).partition(":")[2]
         if not re.fullmatch(key_shape, key):
-            problems.append(f"TICKET object id is not a key: {oid!r}")
+            problems.append(f"{otype} object id is not a key: {oid!r}")
         elif key_set and key.upper() not in key_set:
             problems.append(
-                f"TICKET object id is outside the configured ticket keys: {oid!r}"
+                f"{otype} object id is outside the configured ticket keys: {oid!r}"
             )
     elif otype == "PERSON" and not re.fullmatch(ACTOR_RE, str(oid).partition(":")[2]):
         problems.append(f"PERSON object id is not a pseudonym: {oid!r}")
@@ -445,6 +477,10 @@ def object_shape_problems(
         rf"{otype}:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+:\d+", str(oid)
     ):
         problems.append(f"{otype} object id has an unexpected shape: {oid!r}")
+    elif otype == "SPRINT" and not re.fullmatch(
+        r"SPRINT:[A-Z][A-Z0-9_]{0,9}#\d+", str(oid)
+    ):
+        problems.append(f"SPRINT object id has an unexpected shape: {oid!r}")
     allowed_states = OBJECT_STATE_BY_TYPE.get(otype)
     if allowed_states is not None and state is not None and state not in allowed_states:
         problems.append(
@@ -552,7 +588,10 @@ def verify(con, key_shape: str = DEFAULT_KEY_SHAPE,
         ("objects", "actor", "VARCHAR", "v <> '' AND NOT regexp_matches(v, ?)", [ACTOR_RE]),
         ("objects", "head_commit", "VARCHAR", "v <> '' AND NOT regexp_matches(v, ?)", [HEAD_COMMIT_RE]),
         ("ingest_runs", "run_id", "VARCHAR", "NOT regexp_matches(v, ?)", [RUN_ID_RE]),
-        ("ingest_runs", "source", "VARCHAR", "v NOT IN ('fixture', 'bitbucket-dc')", []),
+        (
+            "ingest_runs", "source", "VARCHAR",
+            f"v NOT IN ({','.join('?' * len(SOURCES))})", list(SOURCES),
+        ),
     ]
     for table, column, dtype, predicate, params in shape_checks:
         bad = _scan(con, table, column, dtype, predicate, params)
@@ -607,6 +646,16 @@ def verify(con, key_shape: str = DEFAULT_KEY_SHAPE,
     ).fetchone()[0]
     if bad:
         problems.append(f"objects: {bad} PR(s) without a matched ticket key")
+    # A Jira Story/Epic *is* a ticket: its key must travel on the object, which
+    # is what joins the ticket layer to the PR layer (prd/03, prd/04 dev-status).
+    for otype in ("STORY", "EPIC"):
+        bad = con.execute(
+            "SELECT count(*) FROM objects WHERE object_type = ?"
+            " AND (ticket_keys IS NULL OR len(ticket_keys) = 0)",
+            [otype],
+        ).fetchone()[0]
+        if bad:
+            problems.append(f"objects: {bad} {otype}(s) without their ticket key")
 
     # Object ids must carry their type and a well-formed suffix.
     for otype, oid, state in con.execute(
@@ -635,7 +684,8 @@ def verify(con, key_shape: str = DEFAULT_KEY_SHAPE,
     if lonely:
         problems.append(f"events: {lonely} event(s) reference no object")
     unpaired = con.execute(
-        "SELECT count(*) FROM events e WHERE NOT EXISTS ("
+        "SELECT count(*) FROM events e WHERE e.repo IS NOT NULL AND e.pr_id IS NOT NULL"
+        " AND NOT EXISTS ("
         " SELECT 1 FROM objects o WHERE o.object_type = 'PR'"
         " AND o.repo = e.repo AND o.pr_id = e.pr_id)"
     ).fetchone()[0]

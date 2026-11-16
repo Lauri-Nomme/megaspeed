@@ -86,6 +86,12 @@ def _legacy_parser() -> argparse.ArgumentParser:
                       help="import a scrape bundle into the store (same as the 'import' subcommand)")
     mode.add_argument("--verify", action="store_true", help="check the pseudonymisation contract of an existing store")
     mode.add_argument("--write-fixtures", action="store_true", help="write the synthetic bundle to fixtures/ and exit")
+    ap.add_argument("--jira", action="store_true",
+                    help="ingest Jira (Epic/Story/Sprint + worklogs) instead of Bitbucket")
+    ap.add_argument("--project", action="append", default=None, metavar="KEY",
+                    help="--jira: override the configured Jira projects (repeatable)")
+    ap.add_argument("--limit", type=int, default=None, metavar="N",
+                    help="--jira: read at most N issues")
     ap.add_argument("--n", type=int, default=None,
                     help="fixture PRs to generate (default 50); with --fixture-file, cap how many "
                          "PRs are read (default: all of them)")
@@ -189,6 +195,17 @@ def main(argv: list[str] | None = None) -> int:
         print("--probe only makes sense with --live", file=sys.stderr)
         return 2
 
+    if args.jira:
+        return _run_jira(cfg, args)
+
+    if not cfg.repos:
+        print(
+            "no repos configured: set MEGASPEED_REPOS=PROJECT/REPO,PROJECT/REPO"
+            " (or --repo) for the Bitbucket ingest",
+            file=sys.stderr,
+        )
+        return 2
+
     limit = None
     try:
         if args.live:
@@ -253,6 +270,82 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(report, indent=2, default=str))
     else:
         _print_run(report)
+    if not report["verified"]:
+        print("\nPSEUDONYMISATION CONTRACT VIOLATED:", file=sys.stderr)
+        for problem in report["problems"]:
+            print(f"  - {problem}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _run_jira(cfg: Config, args) -> int:
+    """``python3 -m ingest --jira ...``: the Jira dev shortcut (scrape + import)."""
+    from .jira import JiraError
+    from .live import run_jira
+    from .scrape_cli import _jira_transport
+
+    if args.probe:
+        from .scrape_cli import _jira_probe
+
+        try:
+            transport, _source, _limit = _jira_transport(cfg, args)
+        except SystemExit as exc:
+            print(str(exc.code) if exc.code not in (0, None) else "bad configuration", file=sys.stderr)
+            return 2
+        return _jira_probe(cfg, transport, args.json)
+
+    projects = None
+    if args.project:
+        projects = tuple(str(p).strip().upper() for p in args.project if str(p).strip())
+    try:
+        transport, source, limit = _jira_transport(cfg, args)
+        report = run_jira(
+            cfg,
+            transport,
+            source,
+            limit if limit is not None else args.limit,
+            out=args.bundle,
+            state_dir=args.state_dir,
+            overlap_hours=args.overlap_hours,
+            full=args.full,
+            projects=projects,
+        )
+    except (JiraError, BitbucketError) as exc:
+        print(f"jira error: {exc}", file=sys.stderr)
+        return 2
+    except SystemExit as exc:
+        print(str(exc.code) if exc.code not in (0, None) else "bad configuration", file=sys.stderr)
+        return 2
+
+    if args.json:
+        print(json.dumps(report, indent=2, default=str))
+    else:
+        print(f"source         {report['source']} (run {report['run_id']})")
+        print(f"bundle         {report['bundle']}  ({report['bundle_bytes']} bytes)")
+        print(f"store          {report['db']}")
+        print(f"identity map   {report['identity_map']}  (raw zone, never served)")
+        print(f"projects       {', '.join(report['projects'])}")
+        print(
+            f"issues         {report['issues_seen']} seen -> {report['issues_kept']} kept,"
+            f" {report['issues_skipped']} skipped"
+        )
+        print(
+            f"events         {report['events_emitted']} emitted, {report['events_new']} new,"
+            f" {report['events_rewritten']} rewritten"
+        )
+        counts = report["counts"]
+        print(
+            f"objects        {report['objects']}  (epics={counts['epics']},"
+            f" stories={counts['stories']}, sprints={counts['sprints']})"
+        )
+        print(f"worklogs       {report['worklogs']}  ({report['log_delays']})")
+        print(f"requests       {report['requests']}")
+        s = report["summary"]
+        print(
+            f"store now      {s['events']} events, {s.get('epics', 0)} epics,"
+            f" {s.get('stories', 0)} stories, {s.get('sprints', 0)} sprints, as_of {s['as_of']}"
+        )
+        print(f"contract       {'OK — no free text, no canaries' if report['verified'] else 'VIOLATED'}")
     if not report["verified"]:
         print("\nPSEUDONYMISATION CONTRACT VIOLATED:", file=sys.stderr)
         for problem in report["problems"]:

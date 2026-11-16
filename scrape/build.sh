@@ -120,6 +120,24 @@ with tarfile.open(report["bundle"], "r:gz") as tar:
 assert names == ["export/events.jsonl", "export/manifest.json", "export/objects.jsonl", "export/sha256sums"], names
 print(f"  ok: {report['events']} events / {report['objects']} objects from {report['prs_kept']} PRs")
 EOF
+  # The Jira half is part of the same artifact: fixture source -> tgz, no
+  # credentials, no Bitbucket repos. The fixture's project is a default ticket
+  # project, so this needs no environment at all.
+  "$artifact" --jira --fixture --out "$tmp/jira.tgz" --json >"$tmp/jira.json"
+  "$PYTHON" - "$tmp/jira.json" <<'EOF'
+import json, sys, tarfile
+report = json.load(open(sys.argv[1]))
+assert report["events"] > 0, report
+assert report["counts"]["stories"] > 0, report
+assert report["counts"]["sprints"] > 0, report
+assert report["worklogs"] > 0, report
+with tarfile.open(report["bundle"], "r:gz") as tar:
+    names = sorted(tar.getnames())
+assert names == ["export/events.jsonl", "export/manifest.json", "export/objects.jsonl", "export/sha256sums"], names
+print(f"  ok: {report['events']} jira events / {report['objects']} objects"
+      f" ({report['counts']['epics']} epic, {report['counts']['stories']} stories,"
+      f" {report['worklogs']} worklogs)")
+EOF
   ls -l "$artifact"
 }
 

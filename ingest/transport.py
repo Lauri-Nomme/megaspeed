@@ -21,6 +21,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Iterator
 from urllib.parse import urlencode
 
@@ -141,3 +142,139 @@ def iter_pages(transport, path: str, params: dict | None = None, page_limit: int
         if page.get("isLastPage", True):
             return
         start = page.get("nextPageStart", start + page_limit)
+
+
+# --------------------------------------------------------------------------- #
+# Jira fixture transport
+# --------------------------------------------------------------------------- #
+_JIRA_ISSUE = re.compile(r"^/rest/api/2/issue/(?P<key>[^/]+?)(?:/(?P<sub>worklog))?$")
+_JIRA_SPRINT_ISSUES = re.compile(r"^/rest/agile/1\.0/sprint/(?P<id>\d+)/issue$")
+_JIRA_BOARD_SPRINTS = re.compile(r"^/rest/agile/1\.0/board/(?P<id>\d+)/sprint$")
+_JQL_KEY_IN = re.compile(r"key\s+in\s*\(([^)]*)\)", re.I)
+_JQL_PROJECT = re.compile(r"project\s*(?:=\s*|in\s*\()\s*\"?([A-Za-z0-9_]+)\"?", re.I)
+_JQL_UPDATED = re.compile(r"updated\s*>=\s*\"?([^\"]+)\"?", re.I)
+
+
+def _jql_time(value: str) -> datetime:
+    text = value.strip().replace("Z", "")
+    for pattern in ("%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M", "%Y/%m/%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, pattern).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return datetime.fromisoformat(text).astimezone(timezone.utc)
+
+
+def _jql_filter(issues: list[dict], jql: str) -> list[dict]:
+    """The tiny subset of JQL this fixture honours (keys, project, updated)."""
+    selected = list(issues)
+    match = _JQL_KEY_IN.search(jql or "")
+    if match:
+        wanted = {
+            token.strip().strip('"').upper() for token in match.group(1).split(",") if token.strip()
+        }
+        selected = [i for i in selected if str(i.get("key", "")).upper() in wanted]
+    else:
+        match = _JQL_PROJECT.search(jql or "")
+        if match:
+            project = match.group(1).strip().upper()
+            selected = [
+                i
+                for i in selected
+                if str(i.get("key", "")).upper().startswith(project + "-")
+            ]
+    match = _JQL_UPDATED.search(jql or "")
+    if match:
+        cutoff = _jql_time(match.group(1))
+        selected = [
+            i
+            for i in selected
+            if _jql_time(str((i.get("fields") or {}).get("updated") or "1970-01-01")) >= cutoff
+        ]
+    return selected
+
+
+class FixtureJiraTransport:
+    """An in-memory stand-in for the Jira DC + Agile REST API.
+
+    Serves the exact paths :class:`ingest.jira.JiraClient` builds, including the
+    paging envelopes (``startAt``/``maxResults``/``total``) and the Greenhopper
+    Sprint field blob, so fixture mode exercises the real parsing path.
+    """
+
+    def __init__(self, bundle: dict):
+        self.bundle = bundle
+        self._issues = {str(i["key"]): i for i in bundle.get("issues", [])}
+        self._sprints = {int(s["id"]): s for s in bundle.get("sprints", [])}
+        self._sprint_issues = {
+            int(sid): [str(k) for k in keys]
+            for sid, keys in (bundle.get("sprint_issues") or {}).items()
+        }
+
+    def get(self, path: str, params: dict | None = None) -> dict:
+        params = params or {}
+        if path == "/rest/api/2/serverInfo":
+            return {"version": "9.17.5-fixture", "versionNumbers": [9, 17, 5]}
+        if path == "/rest/api/2/field":
+            return list(self.bundle.get("fields", []))
+        if path == "/rest/api/2/status":
+            return list(self.bundle.get("statuses", []))
+        if path == "/rest/api/2/search":
+            rows = _jql_filter(list(self._issues.values()), str(params.get("jql") or ""))
+            rows.sort(key=lambda i: (str((i.get("fields") or {}).get("updated") or ""), i["key"]))
+            fields = [f.strip() for f in str(params.get("fields") or "key").split(",")]
+            projected = [_project_issue(i, fields) for i in rows]
+            return _jira_page(projected, params, "issues")
+        if path == "/rest/agile/1.0/board":
+            project = str(params.get("projectKeyOrId") or "").upper()
+            boards = [
+                b
+                for b in self.bundle.get("boards", [])
+                if not project or str(b.get("name", "")).upper().startswith(project)
+            ]
+            return _jira_page(boards, params, "values")
+        match = _JIRA_BOARD_SPRINTS.match(path)
+        if match:
+            board_id = int(match["id"])
+            sprints = [
+                s for s in self._sprints.values() if int(s.get("originBoardId") or 0) == board_id
+            ]
+            return _jira_page(sorted(sprints, key=lambda s: int(s["id"])), params, "values")
+        match = _JIRA_SPRINT_ISSUES.match(path)
+        if match:
+            keys = self._sprint_issues.get(int(match["id"]), [])
+            rows = [_project_issue(self._issues[k], ["key"]) for k in keys if k in self._issues]
+            return _jira_page(rows, params, "issues")
+        match = _JIRA_ISSUE.match(path)
+        if match:
+            key = match["key"]
+            issue = self._issues.get(key)
+            if issue is None:
+                raise BitbucketError(f"fixture has no issue {key}")
+            if match["sub"] == "worklog":
+                worklogs = ((issue.get("fields") or {}).get("worklog") or {}).get("worklogs") or []
+                return _jira_page(list(worklogs), params, "worklogs")
+            payload = json.loads(json.dumps(issue))
+            if "changelog" not in str(params.get("expand") or ""):
+                payload.pop("changelog", None)
+            return payload
+        raise BitbucketError(f"fixture has no Jira route for {path}")
+
+
+def _project_issue(issue: dict, fields: list[str]) -> dict:
+    """A search row carries only the requested fields (plus the key)."""
+    row = {"id": issue.get("id"), "key": issue["key"], "self": issue.get("self")}
+    source = issue.get("fields") or {}
+    row["fields"] = {name: source.get(name) for name in fields if name in source}
+    return row
+
+
+def _jira_page(values: list[Any], params: dict, key: str) -> dict:
+    start = int(params.get("startAt", 0))
+    limit = int(params.get("maxResults", 50))
+    window = values[start : start + limit]
+    page = {"startAt": start, "maxResults": limit, "total": len(values)}
+    page[key] = window
+    if key != "issues":
+        page["isLast"] = start + limit >= len(values)
+    return page

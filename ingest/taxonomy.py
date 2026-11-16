@@ -55,6 +55,30 @@ ACTIVITIES = frozenset(
 
 QUESTION_PHASE = frozenset({"breakdown", "refinement", "sprint", "implementation", "review"})
 SEVERITY = frozenset({"mandatory", "suggestion"})
+# Jira status *category* (``new`` / ``indeterminate`` / ``done``) projected onto
+# a closed label. The raw status name is workflow-specific ("In Review", "QA
+# Failed", ...) and is never stored; Jira's own category is the deterministic
+# projection (prd/02: "Status / assignee / sprint / points -- deterministic:
+# Jira changelog schema").
+STATUS_CLASS = frozenset({"todo", "in_progress", "done", "other"})
+# A story's resolution, projected onto a finite set. ``None`` (unresolved) is
+# carried as the object state ``open``, never as a label.
+RESOLUTION_CLASS = frozenset({"done", "wont_do", "duplicate", "other"})
+# prd/04 "worklog noise": the ``created - started`` gap, bucketed. The raw gap
+# in seconds travels too (``log_delay_seconds``); the bucket is the closed
+# dimension an analysis can group on without arithmetic.
+LOG_DELAY_BUCKET = frozenset({"same_day", "next_day", "within_week", "late"})
+# What an epic/story summary or a sprint goal is *about*, projected onto a
+# finite set. A summary is never stored and never paraphrased -- only this label
+# (prd/02: "a summary is NOT a classification ... classification is a
+# projection onto a pre-agreed closed vocabulary").
+SUMMARY_CLASS = frozenset(
+    {"feature", "fix", "refactor", "test", "docs", "chore", "spike", "other"}
+)
+# Jira Agile sprint states (future / active / closed), lower-cased.
+SPRINT_STATE = frozenset({"future", "active", "closed"})
+# Epic / Story object state: ``open`` until resolved, then the resolution class.
+ISSUE_STATE = frozenset({"open"}) | RESOLUTION_CLASS
 # prd/16 "Local LLM classification": what a comment *is*, projected onto a
 # closed set (never a summary, never a paraphrase -- prd/02).
 COMMENT_TYPE = frozenset(
@@ -78,14 +102,36 @@ OBJECT_STATE = frozenset({"open", "merged", "declined"})
 # prd/02 "Bot vs human": deterministic, from a known account set (DC user type
 # SERVICE plus configured CI/build slugs).
 ACTOR_KIND = frozenset({"bot", "human"})
-OBJECT_TYPES = frozenset({"PR", "COMMIT", "TICKET", "PERSON", "PRREV", "THREAD"})
+OBJECT_TYPES = frozenset(
+    {"PR", "COMMIT", "TICKET", "PERSON", "PRREV", "THREAD", "EPIC", "STORY", "SPRINT"}
+)
 
 # A commit hash: DC uses full 40-hex, abbreviated forms are still hashes.
 HASH = re.compile(r"^[0-9a-f]{7,40}$")
+# A ticket key used as an *attribute* value (the epic link on a Story object).
+# Ticket keys are explicitly allowed to cross (prd/02); this shape is the same
+# default ``key_shape`` the store validates, and it can never hold prose.
+KEY_TOKEN = re.compile(r"^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$")
+# A calendar date (``2026-09-11``), used for a Sprint's planned end. A date is a
+# timestamp, not text: it is shape-validated like a hash, so it can never carry
+# a summary or a comment.
+DATE_TOKEN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 # A classifier version / model tag: one token, no whitespace (``mock-v1``,
 # ``ollama-v1``, ``qwen3-30b-a3b:2507``). Shape-validated like a hash, so a
 # well-meaning "notes" field can never be smuggled in next to a label.
 CLASSIFIER_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,63}$")
+# An event's natural key. Two sources, one shape: Bitbucket's
+# ``project/repo#pr_id:natural`` (the natural part may contain colons:
+# ``act:12:q``) and Jira's ``KEY:natural`` (``DEL-100:changelog:10190:status:0``).
+# An identifier, never prose -- and never whitespace.
+#
+# It lives here, next to the other shapes, because both sides of the airgap need
+# it: the scrape-side tests must be able to check it without importing the store
+# (which would pull in DuckDB). ``ingest.store`` re-exports it.
+EVENT_KEY_RE = (
+    r"^(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+:[A-Za-z0-9_.:+-]+"
+    r"|[A-Z][A-Z0-9_]{0,9}-\d{1,6}:[A-Za-z0-9_.:+-]+)$"
+)
 
 
 class _NonNegativeInt:
@@ -125,6 +171,23 @@ ATTRIBUTE_SPEC: dict[str, Any] = {
     "review_rounds": int,
     "replies": int,
     "push_index": int,
+    # -- jira-side (Story/Epic/Sprint, prd/03/04) ------------------------------
+    # A status transition, both ends projected onto STATUS_CLASS.
+    "from_status": STATUS_CLASS,
+    "to_status": STATUS_CLASS,
+    # Which sprint a ``sprint_added`` / ``sprint_removed`` event is about. The
+    # SPRINT object id is on the event's object set; the id here saves a join.
+    "sprint_id": COUNT,
+    # ``sprint_added`` that Jira never recorded as a change: the issue was in
+    # the sprint from its start (membership-at-start vs added-later, prd/04).
+    "at_start": bool,
+    # ``pointed``: the new estimate, in whole points.
+    "points": COUNT,
+    # ``worklogged``: the logged amount, and the ``created - started`` gap that
+    # is the worklog-noise signal (prd/04).
+    "time_spent_seconds": COUNT,
+    "log_delay_seconds": COUNT,
+    "log_delay_bucket": LOG_DELAY_BUCKET,
 }
 
 # Object attributes live in ``objects.attributes`` (JSON). Same rule: closed
@@ -149,6 +212,17 @@ OBJECT_ATTRIBUTE_SPEC: dict[str, Any] = {
     # computed (the analysis layer reads that as "pending", never as zero).
     "lines_added": COUNT,
     "lines_removed": COUNT,
+    # -- jira-side object attributes -------------------------------------------
+    # The deterministic projection of an epic/story summary (never the summary).
+    "summary_class": SUMMARY_CLASS,
+    # The same projection of a sprint goal (prd/03: Sprint.goal-class).
+    "goal_class": SUMMARY_CLASS,
+    # A Story's epic link, as the epic's ticket key (keys may cross, prd/02).
+    "epic_key": KEY_TOKEN,
+    # A Story's current estimate, in whole points (absent = unestimated).
+    "points": COUNT,
+    # A Sprint's planned end; ``closed_at`` carries the actual completion.
+    "end_date": DATE_TOKEN,
 }
 
 # Bitbucket DC activity action -> activity vocabulary (PRD 02).

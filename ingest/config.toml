@@ -84,6 +84,40 @@ page_limit = 25
 seed = 20261115
 # path = "fixtures/bitbucket-dc-fixture.json"   # load a committed bundle instead of generating
 
+[jira]
+# Jira Data Center source (prd/04): the ticket layer -- Epic / Story / Sprint
+# objects plus status transitions and native worklogs -- that the Bitbucket PRs
+# join to on the ticket key. Credentials come from the environment only:
+#   MEGASPEED_JIRA_USER + MEGASPEED_JIRA_PASSWORD   (basic auth)
+#   MEGASPEED_JIRA_TOKEN                            (personal access token, bearer)
+# The base URL comes from MEGASPEED_JIRA_BASE_URL (env wins over this file).
+#
+# Local Jira DC 9.17.5 lab (jira-lab/): project DEL, epic DEL-1, stories
+# DEL-100..199, 3 sprints, 199 native worklogs.
+#   export MEGASPEED_JIRA_BASE_URL=http://127.0.0.1:8090
+#   export MEGASPEED_JIRA_USER=admin MEGASPEED_JIRA_PASSWORD=admin-lab-pw
+#   export MEGASPEED_JIRA_PROJECTS=DEL MEGASPEED_TICKET_PROJECTS=DEL
+#   .venv/bin/python -m ingest scrape --jira --live --project DEL --probe
+#   .venv/bin/python -m ingest scrape --jira --live --project DEL \
+#       --out export/del-jira.tgz --state-dir export/del.state
+base_url = ""          # e.g. http://127.0.0.1:8090
+# Projects to read. Empty => the ticket projects (the ingest is ticket-scoped,
+# so it reads exactly the projects it accepts keys from).
+projects = []
+page_limit = 50
+# Politeness delay between requests, in seconds (0 for a local lab).
+min_interval = 0.2
+# Scrum board to read sprints from; 0 = discover the project's scrum board.
+board = 0
+# Custom-field ids. Empty => discover them by name, which is what you want:
+# "Epic Link", "Sprint" and "Story Points" have different ids per installation
+# (customfield_10100 / _10104 / _10106 on the lab). Pin them only if a field is
+# ambiguous, e.g. two fields called "Story Points".
+#   MEGASPEED_JIRA_EPIC_LINK_FIELD / _SPRINT_FIELD / _STORY_POINTS_FIELD
+epic_link_field = ""
+sprint_field = ""
+story_points_field = ""
+
 [classify]
 # Scrape-side text classification (prd/16): comment bodies + PR descriptions are
 # read locally, projected onto the closed vocabulary (comment_type,

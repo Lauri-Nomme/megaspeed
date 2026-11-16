@@ -30,6 +30,7 @@ from .store import (
     HEAD_COMMIT_RE,
     REPO_RE,
     RUN_ID_RE,
+    SOURCES,
     connect,
     ensure_schema,
     object_shape_problems,
@@ -43,7 +44,7 @@ from .store import (
 
 #: Sources this build knows how to name in ``ingest_runs`` (store.verify enforces
 #: the same set, but the gate must reject before a single row is written).
-ALLOWED_SOURCES = ("fixture", "bitbucket-dc")
+ALLOWED_SOURCES = SOURCES
 
 
 class ImportRejected(RuntimeError):
@@ -117,6 +118,8 @@ def validate_bundle(
                 problems.append(f"objects.ticket_keys {key!r} is outside the configured scope ({oid})")
         if otype == "PR" and not obj.get("ticket_keys"):
             problems.append(f"PR object {oid} carries no matched ticket key")
+        if otype in ("STORY", "EPIC") and not obj.get("ticket_keys"):
+            problems.append(f"{otype} object {oid} carries no ticket key")
         try:
             taxonomy.check_object_attributes(obj.get("attributes") or {})
         except taxonomy.TaxonomyError as exc:
@@ -226,6 +229,9 @@ def import_bundle(cfg: Config, path: str | Path, *, verify_contract: bool = True
                     "prs_seen": int(run_info.get("prs_seen") or 0),
                     "prs_kept": int(run_info.get("prs_kept") or 0),
                     "prs_dropped": int(run_info.get("prs_dropped") or 0),
+                    "issues_seen": int(run_info.get("issues_seen") or 0),
+                    "issues_kept": int(run_info.get("issues_kept") or 0),
+                    "issues_skipped": int(run_info.get("issues_skipped") or 0),
                     "events_written": written,
                     "events_skipped": len(bundle.events) - written,
                 },
@@ -286,6 +292,11 @@ def _print_import(r: dict) -> None:
     print(f"objects        {r['objects']}")
     s = r["summary"]
     print(f"store now      {s['events']} events, {s['prs']} PRs, {s['commits']} commits, as_of {s['as_of']}")
+    if s.get("stories") or s.get("epics"):
+        print(
+            f"ticket layer   {s.get('epics', 0)} epics, {s.get('stories', 0)} stories,"
+            f" {s.get('sprints', 0)} sprints"
+        )
     if r["verified"] is None:
         print("contract       skipped (--no-verify)")
     else:

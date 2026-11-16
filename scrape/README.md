@@ -41,6 +41,48 @@ MEGASPEED_TICKET_PROJECTS=DEL \
 shortcut**: it scrapes and imports back-to-back through a real bundle file. It
 is not the production path (there is no airgap in one process).
 
+### The Jira half (ticket layer)
+
+Bitbucket gives the PR layer; Jira gives the **ticket layer** — Epic, Story and
+Sprint objects plus status transitions and native worklogs — and the two join on
+the ticket key (`DEL-100`). It is the same artifact and the same tgz contract,
+selected with `--jira`:
+
+```bash
+export MEGASPEED_JIRA_BASE_URL=http://127.0.0.1:8090     # the DC 9.17 lab
+export MEGASPEED_JIRA_USER=admin MEGASPEED_JIRA_PASSWORD=admin-lab-pw
+export MEGASPEED_JIRA_PROJECTS=DEL MEGASPEED_TICKET_PROJECTS=DEL
+
+./scrape/dist/megaspeed-scrape --jira --live --project DEL \
+  --out export/del-jira.tgz --state-dir export/del.state
+```
+
+Both bundles are imported into the same store with the same
+`MEGASPEED_IDENTITY` map, so a Jira assignee and a git author who are the same
+human get the same pseudonym (prd/03 "Identity resolution").
+
+What it reads (prd/04) and what it keeps:
+
+| Jira | becomes |
+| --- | --- |
+| issue snapshot (type, epic link, points, assignee, reporter, created, resolution) | `EPIC` / `STORY` objects (summary → `summary_class`, never the summary) |
+| changelog (`expand=changelog`) | `created`, `status_changed` (status *category*), `assigned`, `pointed`, `sprint_added` / `sprint_removed` |
+| Agile sprints + sprint membership | `SPRINT` objects (start, planned end, completion, state, `goal_class`) and the `at_start` carry-over signal |
+| native worklogs | `worklogged` with `time_spent_seconds`, `log_delay_seconds` = `created − started` and the `log_delay_bucket` — the **worklog-noise** signal |
+
+Jira-side local state, next to the output and never in the tgz:
+
+```
+<state-dir>/
+  watermark.json    # per-source cursor (shared with the Bitbucket scrape)
+  jira_issues.json  # per-issue cursor: {updated, done} (resolved issues settle)
+  identity.json     # RAW ZONE: Jira + Bitbucket identities -> pseudonym
+```
+
+Incremental: the JQL asks only for `updated >= watermark - overlap`, so a second
+run of an unchanged project costs the metadata requests plus a page of issue
+keys; an issue this scraper has never seen is always read in full.
+
 ### What the scraper keeps locally (never transferred)
 
 ```
@@ -150,6 +192,7 @@ PYTHON=/usr/bin/python3.12 scrape/build.sh
 
 ```
 megaspeed-scrape [--live | --fixture | --fixture-file PATH]
+                 [--jira [--project KEY ...] [--limit N]]
                  [--out PATH.tgz] [--state-dir DIR] [--identity PATH]
                  [--overlap-hours N] [--full] [--no-prefilter]
                  [--no-push-class] [--no-text-classify] [--text-backend ollama|mock]
@@ -163,11 +206,14 @@ megaspeed-scrape [--live | --fixture | --fixture-file PATH]
 | --- | --- |
 | `--live` | real Bitbucket DC REST (`MEGASPEED_BB_BASE_URL` + creds) |
 | `--fixture` / `--fixture-file` | synthetic source, no credentials (default generator: 50 PRs) |
-| `--out` | bundle path, default `export/megaspeed-scrape.tgz` |
-| `--state-dir` | watermark + prs + identity map, default `<out>.state/` next to the bundle |
+| `--jira` | scrape Jira instead of Bitbucket (`MEGASPEED_JIRA_BASE_URL` + creds); combines with `--live` / `--fixture` / `--probe` |
+| `--project KEY` | `--jira`: override the configured projects (repeatable; `MEGASPEED_JIRA_PROJECTS`) |
+| `--limit N` | `--jira`: read at most N issues (dev/demo) |
+| `--out` | bundle path, default `export/megaspeed-scrape.tgz` (`export/megaspeed-jira.tgz` for `--jira`) |
+| `--state-dir` | watermark + prs/issues + identity map, default `<out>.state/` next to the bundle |
 | `--identity` | use an existing identity map instead of `<state-dir>/identity.json` |
 | `--overlap-hours` | re-emit this far before the watermark (default 72) |
-| `--full` | ignore the watermark and the settled-PR set |
+| `--full` | ignore the watermark and the settled-PR / settled-issue sets |
 | `--no-prefilter` | fetch every PR's commits before filtering (old, slower path) |
 | `--no-push-class` | skip the deterministic `push_class` (no git cache) |
 | `--no-text-classify` | skip comment/description labels (no local LLM) |
@@ -237,3 +283,27 @@ export MEGASPEED_REPOS=DEL/delivery-api,DEL/delivery-web
 Expected: `131` PRs kept, `1316` events, `contract OK`; the first run costs
 `264` requests (2 list + 131 commits + 131 activities) and the incremental one
 `2` (the listing only).
+
+## 7. End-to-end check (Jira DEL corpus)
+
+```bash
+export MEGASPEED_JIRA_BASE_URL=http://127.0.0.1:8090
+export MEGASPEED_JIRA_USER=admin MEGASPEED_JIRA_PASSWORD=admin-lab-pw
+export MEGASPEED_JIRA_PROJECTS=DEL MEGASPEED_TICKET_PROJECTS=DEL
+
+./scrape/dist/megaspeed-scrape --jira --live --project DEL \
+  --out /tmp/opencode/ms-e2e/del-jira.tgz --state-dir /tmp/opencode/ms-e2e/del.state
+.venv/bin/python -m ingest import /tmp/opencode/ms-e2e/del-jira.tgz \
+  --db /tmp/opencode/ms-e2e/del.duckdb
+.venv/bin/python -m ingest --verify --db /tmp/opencode/ms-e2e/del.duckdb
+```
+
+Expected on the seeded lab: `1` epic, `100` stories, `3` sprints, `199`
+worklogs, `472` events, `contract OK`; the first run costs `110` requests
+(metadata + 101 issues + 3 sprint memberships). The worklog-noise signal is
+visible in `--json`: the lab backdated every log into its sprint but wrote it at
+seed time, so most logs land in the `late` bucket.
+
+`tests/test_jira_live.py` is that check as a test: it skips when the lab is not
+reachable and asserts the counts above against the real DC 9.17.5.
+
