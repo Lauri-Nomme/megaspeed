@@ -88,6 +88,10 @@ def _legacy_parser() -> argparse.ArgumentParser:
     mode.add_argument("--write-fixtures", action="store_true", help="write the synthetic bundle to fixtures/ and exit")
     ap.add_argument("--jira", action="store_true",
                     help="ingest Jira (Epic/Story/Sprint + worklogs) instead of Bitbucket")
+    ap.add_argument("--jira-cloud", action="store_true",
+                    help="ingest Jira **Cloud** (v3 + Bearer PAT, prd/24) instead of DC;"
+                         " implies --jira and reads MEGASPEED_JIRA_CLOUD_BASE_URL"
+                         " + MEGASPEED_JIRA_CLOUD_TOKEN")
     ap.add_argument("--project", action="append", default=None, metavar="KEY",
                     help="--jira: override the configured Jira projects (repeatable)")
     ap.add_argument("--limit", type=int, default=None, metavar="N",
@@ -138,6 +142,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.n is not None and args.n < 1:
         print(f"--n must be at least 1 (got {args.n}): an empty ingest is not a green run", file=sys.stderr)
         return 2
+
+    if args.jira_cloud:
+        # prd/24: one source, two shapes. Promote it here exactly like the
+        # scrape CLI, so every --jira flag keeps its meaning on this shortcut.
+        args.jira = True
 
     cfg: Config = load_config(args.config)
     if args.db:
@@ -292,11 +301,14 @@ def _run_jira(cfg: Config, args) -> int:
         from .scrape_cli import _jira_probe
 
         try:
-            transport, _source, _limit = _jira_transport(cfg, args)
+            # the helper returns (transport, source, limit, client): the client
+            # is the Cloud one in --jira-cloud mode, and the probe must use it
+            # (a DC client would talk the wrong API shape to a Cloud site).
+            transport, _source, _limit, client = _jira_transport(cfg, args)
         except SystemExit as exc:
             print(str(exc.code) if exc.code not in (0, None) else "bad configuration", file=sys.stderr)
             return 2
-        return _jira_probe(cfg, transport, args.json)
+        return _jira_probe(cfg, transport, args.json, client=client)
 
     projects = None
     if args.project:

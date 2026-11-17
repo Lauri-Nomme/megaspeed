@@ -22,6 +22,7 @@ from pathlib import Path
 from unittest import mock
 
 from ingest import fixtures, jira_fixtures, taxonomy
+from ingest.__main__ import main as ingest_main
 from ingest.bundle import read_bundle
 from ingest.config import Config
 from ingest.importer import import_bundle
@@ -530,6 +531,108 @@ class CliFixtureLimitTests(unittest.TestCase):
         generous = self.scrape("--n", "5", "--limit", "500")
         self.assertEqual(generous["issues_kept"], full["issues_kept"])
         self.assertFalse(generous["truncated"])
+
+
+class _ProbeClientStub:
+    """The Jira client surface ``_jira_probe`` drives, without a network."""
+
+    def __init__(self, transport, page_limit=None, min_interval=None):
+        self.transport = transport
+        self.requests = 0
+        self.requests_by_kind = {}
+
+    def check(self):
+        return {"version": "9.12.0"}
+
+    def field_ids(self):
+        return {"Epic Link": "cf-epic", "Sprint": "cf-sprint", "Story Points": "cf-points"}
+
+    def scrum_board(self, project):
+        return 11
+
+    def sprints(self, board):
+        return [{"id": 7, "state": "active", "name": "Sprint 7"}]
+
+    def search(self, jql, fields="key,updated"):
+        return [{"key": "PROJ-1", "fields": {"issuetype": {"name": "Story"}}}]
+
+
+class JiraProbeCliTests(unittest.TestCase):
+    """``python3 -m ingest --jira --probe --live`` must reach the probe.
+
+    ``_run_jira`` unpacked three values from ``_jira_transport`` (which returns
+    four), so the dev-shortcut probe died with ``ValueError: too many values to
+    unpack`` before printing a report. Drive the real CLI (parser + config +
+    probe wiring) with a stubbed transport/client: no network, no store.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        config = self.root / "empty.toml"
+        config.write_text("")
+        self.env = mock.patch.dict(os.environ, {
+            "MEGASPEED_CONFIG": str(config),
+            "MEGASPEED_TICKET_PROJECTS": "PROJ",
+            "MEGASPEED_QUIET": "1",
+            "MEGASPEED_JIRA_BASE_URL": "http://jira.invalid",
+            "MEGASPEED_JIRA_TOKEN": "test-token",
+            "MEGASPEED_JIRA_CLOUD_BASE_URL": "",
+            "MEGASPEED_JIRA_CLOUD_TOKEN": "",
+        })
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def probe(self, *argv: str) -> tuple[int, str, str]:
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("ingest.scrape_cli.HttpTransport", lambda *a, **k: object()), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ingest_main(["--jira", "--probe", "--live", "--json", *argv])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_probe_live_prints_a_report(self):
+        with mock.patch("ingest.jira.JiraClient", _ProbeClientStub):
+            code, out, err = self.probe()
+        self.assertEqual(code, 0, err)
+        report = json.loads(out)
+        self.assertEqual(report["version"], "9.12.0")
+        self.assertEqual(report["boards"], {"PROJ": 11})
+        self.assertEqual(report["sprints"]["PROJ"],
+                         [{"id": 7, "state": "active", "name": "Sprint 7"}])
+        self.assertEqual(report["issues"]["PROJ"], {"total": 1, "types": {"Story": 1}})
+        self.assertEqual(report["fields"]["epic_link"], "cf-epic")
+
+    def test_cloud_probe_uses_the_cloud_client(self):
+        built = {"dc": 0, "cloud": 0}
+
+        class Dc(_ProbeClientStub):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                built["dc"] += 1
+
+        class Cloud(_ProbeClientStub):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                built["cloud"] += 1
+
+            def check(self):
+                return {"version": "1001.0.0"}
+
+        env = mock.patch.dict(os.environ, {
+            "MEGASPEED_JIRA_CLOUD_BASE_URL": "http://cloud.invalid",
+            "MEGASPEED_JIRA_CLOUD_TOKEN": "cloud-token",
+        })
+        with env, mock.patch("ingest.jira.JiraClient", Dc), \
+                mock.patch("ingest.jira_cloud.CloudJiraClient", Cloud):
+            code, out, err = self.probe("--jira-cloud")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(json.loads(out)["version"], "1001.0.0")
+        # the client the transport built is handed to the probe; building a DC
+        # client here would talk the wrong API shape to a Cloud site.
+        self.assertEqual(built, {"dc": 0, "cloud": 1})
 
 
 if __name__ == "__main__":
