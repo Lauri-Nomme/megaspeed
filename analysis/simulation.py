@@ -48,17 +48,22 @@ and they need different fixes (prd/05: *slow server* vs *overloaded server*):
 * **queueing** — the reviewer is busy (capacity fixes this);
 * **service** — the work.
 
-Response times alone cannot separate them, so the split rests on one disclosed
-constant, :data:`SERVICE_SHARE`: that share of the observed response is work.
-The M/G/1 relation then prices the queue and the rest is attention
+Response times alone cannot separate them, so the split rests on two disclosed
+constants, :data:`SERVICE_SHARE` (that share of the observed response is work)
+and :data:`QUEUE_RECOVERY` (the share of the M/G/1 queue estimate a server fed
+by this pipeline's smoothed arrivals actually realises). The M/G/1 relation then
+prices the queue and the rest is attention
 
     q = (rho / (1 - rho)) * s * (1 + CV^2) / 2,   rho = lambda * s
 
 so at baseline the three terms add back to the observed response by
-construction, and a scenario changes ``rho`` and therefore ``q``. This is an
-**assumption, not a measurement** — and it is what turns "the sentinel answers
-in ~6 h" into "the gate is ~54 % loaded with ~2 h of queue" — which is the
-difference between "add a sentinel" being the answer or not.
+construction *and* by simulation, and a scenario changes ``rho`` and therefore
+``q``. This is an **assumption, not a measurement** — and it is what turns "the
+sentinel answers in ~6 h" into "the gate is ~54 % loaded with ~2 h of queue" —
+which is the difference between "add a sentinel" being the answer or not.
+``QUEUE_RECOVERY`` is the half of the identity the gate is sensitive to: with it
+at 1.0 the simulated server waits less than the P-K term, attention absorbs the
+loss, and the baseline under-predicts the cycle.
 
 What the model does **not** claim (prd/23 §"Out of scope")
 ---------------------------------------------------------
@@ -102,13 +107,32 @@ DEFAULT_REPLICATIONS = 6  # pooled runs, so Monte-Carlo noise cannot decide a po
 DEFAULT_BH_PER_DAY = 24.0
 # The one assumption the store cannot measure: how much of a reviewer's observed
 # response time is *work* rather than attention latency + queueing. Just under
-# half is the value at which the two independent checks agree on del3: the
-# baseline reproduces the historical cycle-time *median* (~−12 %) and the p90
-# stays within ~10 %, while both mechanisms remain present (the mandatory gate
-# comes out ~54 % loaded with ~1 h of attention latency). A much smaller share
-# makes the model ignore capacity; a larger one lets a single saturated queue
-# decide the answer.
+# half keeps both mechanisms visible (the mandatory gate comes out ~50-60 %
+# loaded), and it is not what the gate turns on: at baseline the three terms add
+# back to the observed response by construction, so changing this share moves
+# the split, not the level (see :func:`decompose_response`).
 SERVICE_SHARE = 0.45
+# The other half of that identity, and the constant the validation gate actually
+# turns on. The M/G/1 (P-K) queue term assumes *Poisson* arrivals; a server in
+# this pipeline is fed by arrivals the upstream stages have smoothed (a review
+# request can only arrive after the previous handover), so it realises only part
+# of the P-K estimate. Measured on del3 / del-combined by comparing each
+# simulated server's mean wait with its calibrated P-K term: peer reviews 0.52-
+# 0.55, author work 0.52-0.57, the sentinel gate 0.70-0.85 — a mean of ~0.6.
+# Attention takes the rest, which is what makes "attention + service + queue =
+# the observed response" true in the *model*, not only in the decomposition.
+# At 1.0 the model silently loses the difference (attention is floored at 0
+# whenever the P-K term exceeds ``observed - service``, which is exactly the
+# mandatory gate on a wall-clock axis) and the baseline median lands ~31 % below
+# history while the p90 survives on the heavy merge/residue draws.
+QUEUE_RECOVERY = 0.6
+# Attention is a cadence, not a work distribution: the reviewer checks the queue
+# at a roughly regular interval. The observed response's heavy tail belongs to
+# the queue and the work (both priced separately), so the attention delay keeps
+# the response's mean but not its spread — otherwise a cadence imports a
+# work-shaped tail into every handover and the cycle's p90 inflates with the
+# level correction.
+ATTENTION_MAX_SIGMA = 0.5
 MAX_REPLICATIONS = 8
 # Sizes: the store's own elasticity is used when positive; a negative one is a
 # selection effect (big PRs get attention), not a mechanism, so it is clipped.
@@ -241,19 +265,30 @@ def decompose_response(observed_mean: float, arrival_rate: float,
     three terms add back to ``R`` by construction; a scenario changes ``rho``
     and therefore ``q``, which is exactly the "add a sentinel" question.
 
-    The assumption is disclosed in the payload (``queueing.service_share``)
-    because it is the one thing the store cannot measure: response times alone
-    cannot tell a slow reviewer from an overloaded one.
+    The P-K formula assumes Poisson arrivals, which a server in this pipeline
+    does not see (its requests can only arrive after the upstream handover, so
+    the stream is smoothed). The queue term is therefore scaled by
+    :data:`QUEUE_RECOVERY` — the measured share of the P-K estimate a simulated
+    server actually waits — and attention takes the rest. Without that, the
+    decomposition still sums to ``R`` but the *simulation* does not (it realises
+    the smaller queue and loses the difference), which is what made the baseline
+    median ~31 % low on a wall-clock axis.
+
+    Both constants are disclosed in the payload (``queueing.service_share``,
+    ``queueing.queue_recovery``) because they are the things the store cannot
+    measure: response times alone cannot tell a slow reviewer from an overloaded
+    one.
     """
     if observed_mean is None or observed_mean <= 0:
         return {"service_hours": 0.0, "queue_hours": 0.0, "attention_hours": 0.0,
-                "service_share": SERVICE_SHARE, "utilisation": 0.0,
-                "service_scale": 0.0, "attention_scale": 0.0}
+                "service_share": SERVICE_SHARE, "queue_recovery": QUEUE_RECOVERY,
+                "utilisation": 0.0, "service_scale": 0.0, "attention_scale": 0.0}
     service = SERVICE_SHARE * observed_mean
     rate = max(0.0, float(arrival_rate))
     rho = min(0.98, rate * service)
     factor = (1.0 + max(0.0, cv) ** 2) / 2.0
     queue = (rho / (1.0 - rho)) * service * factor if rho < 1.0 else observed_mean
+    queue *= QUEUE_RECOVERY
     attention = observed_mean - service - queue
     if attention < 0.0:
         # the queue term cannot exceed the observation; take the excess out of
@@ -265,24 +300,38 @@ def decompose_response(observed_mean: float, arrival_rate: float,
         "queue_hours": round(queue, 2),
         "attention_hours": round(attention, 2),
         "service_share": SERVICE_SHARE,
+        "queue_recovery": QUEUE_RECOVERY,
         "utilisation": round(rate * service, 4),
         "service_scale": round(service / observed_mean, 4),
         "attention_scale": round(attention / observed_mean, 4),
     }
 
 
-def service_fit(fit: dict, observed_mean: float | None, scale: float) -> dict:
+def service_fit(fit: dict, observed_mean: float | None, scale: float,
+                max_sigma: float | None = None) -> dict:
     """The service distribution: the fitted shape with mean ``scale × observed``.
 
     Scaling the fit's own mean would drift whenever the fit is not perfectly
     mean-preserving, and the model's response would then no longer match the
     response it was calibrated from. This pins the target explicitly.
+
+    ``max_sigma`` caps the log-space spread while keeping the mean: attention
+    latency is a *cadence* (the reviewer has not looked yet), so it must not
+    import the heavy tail of the observed response — that tail is the queue and
+    the work, which the model already prices separately.
     """
     if not fit or fit.get("mu") is None or not observed_mean:
         return fit
     target = observed_mean * scale
     factor = target / fit["mean"] if fit.get("mean") else 1.0
-    return scale_fit(fit, factor)
+    scaled = scale_fit(fit, factor)
+    if max_sigma is not None and (scaled.get("sigma") or 0.0) > max_sigma and scaled.get("mean"):
+        sigma = max_sigma
+        scaled["sigma"] = sigma
+        scaled["mu"] = round(math.log(scaled["mean"]) - sigma * sigma / 2.0, 4)
+        scaled["median"] = round(math.exp(scaled["mu"]), 2)
+        scaled["p90"] = round(math.exp(scaled["mu"] + 1.2816 * sigma), 2)
+    return scaled
 
 
 def _histogram(values: list[int]) -> dict:
@@ -500,6 +549,8 @@ def _samples_by_person(court, window) -> dict:
             "review": review_hours,
             "author": author_hours,
             "merge": merge_hours,
+            "peer": peers,
+            "author_responses": responses,
             "cycle": (
                 sum(i.hours for i in state.intervals if i.measured)
                 if pr["state"] == "merged" and pr["closed_ts"] is not None else 0.0
@@ -692,7 +743,8 @@ def calibrate(court, window=None, conn=None, bots=None,
                     "p90_hours": _quantile(responses, 0.9),
                 },
                 "service": service_fit(review_fit, observed_review, split["service_scale"]),
-                "attention": service_fit(review_fit, observed_review, split["attention_scale"]),
+                "attention": service_fit(review_fit, observed_review, split["attention_scale"],
+                                        max_sigma=ATTENTION_MAX_SIGMA),
                 "decomposition": split,
                 "rate_per_hour": round(rate_review, 4),
             },
@@ -702,8 +754,11 @@ def calibrate(court, window=None, conn=None, bots=None,
                     "mean_hours": observed_author,
                     "median_hours": _median(reworks),
                 },
-                "service": service_fit(author_fit, observed_author, author_split["service_scale"]),
-                "attention": service_fit(author_fit, observed_author, author_split["attention_scale"]),
+                "service": service_fit(author_fit, observed_author,
+                                       author_split["service_scale"]),
+                "attention": service_fit(author_fit, observed_author,
+                                         author_split["attention_scale"],
+                                         max_sigma=ATTENTION_MAX_SIGMA),
                 "decomposition": author_split,
                 "rate_per_hour": round(rate_author, 4),
             },
@@ -735,6 +790,18 @@ def calibrate(court, window=None, conn=None, bots=None,
         for name in ("content", "pure_rebase", "rebase_conflict")
     }
     rounds = [count for count in samples["peer_actions"]]
+    # The action counts are *outcome-conditional*: a PR that is abandoned before
+    # the mandatory gate stops early, so the merged PRs the gate scores have
+    # more review rounds and author responses than the cohort average (del3:
+    # 2.51 peer actions / 1.44 author responses merged vs 2.40 / 1.32 pooled).
+    # Drawing the pooled histogram for every PR and then comparing merged PRs
+    # only under-counted the rounds a merged PR actually had.
+    merged_rounds = [e["peer"] for e in samples["per_pr"] if e["merged"]]
+    declined_rounds = [e["peer"] for e in samples["per_pr"] if not e["merged"]]
+    merged_responses = [e["author_responses"] for e in samples["per_pr"] if e["merged"]]
+    declined_responses = [
+        e["author_responses"] for e in samples["per_pr"] if not e["merged"]
+    ]
 
     # size: commits per PR, plus the optional changed-line size
     sizes = _pr_sizes(conn)
@@ -839,8 +906,11 @@ def calibrate(court, window=None, conn=None, bots=None,
                 "mean_hours": sentinel_observed,
                 "n": sum(len(samples["review"].get(p, [])) for p in sentinels),
             },
-            "service": service_fit(sentinel_fit, sentinel_observed, sentinel_split["service_scale"]),
-            "attention": service_fit(sentinel_fit, sentinel_observed, sentinel_split["attention_scale"]),
+            "service": service_fit(sentinel_fit, sentinel_observed,
+                                   sentinel_split["service_scale"]),
+            "attention": service_fit(sentinel_fit, sentinel_observed,
+                                     sentinel_split["attention_scale"],
+                                     max_sigma=ATTENTION_MAX_SIGMA),
             "decomposition": sentinel_split,
             "rate_per_hour": round(sentinel_rate, 4),
             "utilisation": sentinel_split["utilisation"],
@@ -859,12 +929,17 @@ def calibrate(court, window=None, conn=None, bots=None,
                 if unmeasured_mean is not None and cycle_mean else None
             ),
             "n": len(residuals),
+            "carried_as": "fixed mean delay",
             "note": (
                 "the part of the measured cycle that the review waits, the author "
                 "pushes and the merge handover do not account for (the ball was "
                 "with someone without producing one of those events). Carried as "
                 "one delay so the components add up to the cycle they were "
-                "calibrated from"
+                "calibrated from. It is a *balancing item*, not a mechanism: only "
+                "its mean is identified, and it is negatively correlated with the "
+                "parts by construction (a PR with long reviews has almost no "
+                "residue), so it is carried as its measured mean rather than as an "
+                "independent heavy-tailed draw that would re-add the cycle's tail"
             ),
         },
         "rework": {
@@ -876,15 +951,27 @@ def calibrate(court, window=None, conn=None, bots=None,
             "author_responses": {
                 "histogram": _histogram(samples["author_per_pr"]),
                 "mean": _mean([float(r) for r in samples["author_per_pr"]]),
+                "merged_histogram": _histogram(merged_responses),
+                "declined_histogram": _histogram(declined_responses),
+                "mean_merged": _mean([float(r) for r in merged_responses]),
+                "basis": "outcome-conditional",
                 "note": (
                     "how many times the author answered a reviewer action with a "
                     "push — the model's rework count (a response to a comment that "
-                    "precedes the first push is one too, so it is not pushes-1)"
+                    "precedes the first push is one too, so it is not pushes-1). "
+                    "The model draws the merged histogram for a PR that will merge "
+                    "and the declined one for a PR that will not: a PR abandoned "
+                    "before the gate stops early, so the pooled histogram is short "
+                    "of the rounds a merged PR actually had"
                 ),
             },
             "peer_actions": {
                 "histogram": _histogram(rounds),
                 "mean": _mean([float(r) for r in rounds]),
+                "merged_histogram": _histogram(merged_rounds),
+                "declined_histogram": _histogram(declined_rounds),
+                "mean_merged": _mean([float(r) for r in merged_rounds]),
+                "basis": "outcome-conditional",
             },
             "push_class": push_class,
             "push_class_note": (
@@ -919,18 +1006,32 @@ def calibrate(court, window=None, conn=None, bots=None,
         },
         "stack_depth": _stack_depth(court),
         "queueing": {
-            "model": "M/G/1: R = attention + service + (rho/(1-rho)) * service * (1+CV^2)/2",
+            "model": (
+                "M/G/1 with a realised-queue factor: "
+                "R = attention + service + QUEUE_RECOVERY * (rho/(1-rho)) * "
+                "service * (1+CV^2)/2"
+            ),
             "service_share": SERVICE_SHARE,
+            "queue_recovery": QUEUE_RECOVERY,
+            "attention_max_sigma": ATTENTION_MAX_SIGMA,
             "note": (
                 "an observed review response is split into attention latency (the "
                 "reviewer has not looked yet), service (the work) and queueing "
                 "(capacity contention). Response times alone cannot tell a slow "
-                "reviewer from an overloaded one, so the split rests on one stated "
-                "assumption: service is this share of the response. The value is "
-                "the one at which two independent checks agree on this store — the "
-                "baseline reproduces the historical cycle-time median and the p90 "
-                "stays close — while both mechanisms remain visible (see the "
-                "per-person 'decomposition': attention, queue, service)"
+                "reviewer from an overloaded one, so the split rests on two stated "
+                "constants: service is 'service_share' of the response, and the "
+                "queue is 'queue_recovery' of the P-K estimate — because the P-K "
+                "formula assumes Poisson arrivals while this pipeline's servers are "
+                "fed by arrivals the upstream stages have smoothed (measured: 0.52-"
+                "0.70 of the estimate on del3/del-combined). With 'queue_recovery' "
+                "at 1.0 the simulated server waits less than the decomposition "
+                "assumes, attention is floored at zero, and the baseline loses the "
+                "difference (on a wall-clock axis it under-predicted the cycle-time "
+                "median by 31 %). 'attention_max_sigma' keeps the cadence's spread "
+                "below the work's: the observed response's heavy tail is the queue "
+                "and the work, both priced separately. Both mechanisms stay "
+                "visible: see the per-person 'decomposition' (attention, queue, "
+                "service)"
             ),
             "min_fit_samples": MIN_FIT_SAMPLES,
         },
@@ -1020,15 +1121,21 @@ class _PR:
 
     __slots__ = ("author", "commits", "peer_actions", "author_pushes", "depth",
                  "parent", "arrived_at", "started_at", "finished_at", "merged_at",
-                 "abandoned", "touches", "author_hours", "rebase_hours", "done")
+                 "abandoned", "touches", "author_hours", "rebase_hours", "done",
+                 "merge_outcome")
 
-    def __init__(self, env, author, commits, peer_actions, author_pushes, depth, parent):
+    def __init__(self, env, author, commits, peer_actions, author_pushes, depth,
+                 parent, merge_outcome: bool = True):
         self.author = author
         self.commits = commits
         self.peer_actions = peer_actions
         self.author_pushes = author_pushes
         self.depth = depth
         self.parent = parent
+        # the outcome is drawn *before* the plan, so the plan can use the
+        # outcome-conditional action counts the store measured (a PR abandoned
+        # before the gate stops early, so it has fewer rounds)
+        self.merge_outcome = merge_outcome
         self.arrived_at = 0.0
         self.started_at = 0.0
         self.finished_at = None
@@ -1089,7 +1196,11 @@ class _Lab:
         self.decline_probability = (
             calibration.get("decline", {}).get("probability") or 0.0
         )
-        self.unmeasured = (calibration.get("unmeasured") or {}).get("fit") or {}
+        # the residue is a *balancing item* (cycle - review - author - merge):
+        # only its mean is identified, so it is carried as a fixed delay rather
+        # than drawn from the fitted lognormal (an independent heavy draw would
+        # re-add the cycle's tail, which the residue already balances)
+        self.unmeasured_hours = (calibration.get("unmeasured") or {}).get("mean_hours") or 0.0
         self.backlog = 0
         self.max_backlog = 0
         self.prs: list[_PR] = []
@@ -1160,14 +1271,28 @@ class _Lab:
         return min(self.sentinel_servers, key=lambda server: server.queue_length())
 
     # -- the plan of one PR -------------------------------------------------- #
-    def _plan(self, commits: int) -> tuple[int, int]:
+    def _plan(self, commits: int, merged: bool = True) -> tuple[int, int]:
+        """The PR's review rounds and author responses, conditional on outcome.
+
+        The store's action counts are outcome-conditional (a PR abandoned before
+        the gate stops early), and the gate scores merged PRs only, so a merged
+        PR draws the merged histogram and a declining one the declined
+        histogram. The pooled histogram is the fallback for a store whose
+        window has no declined PRs at all.
+        """
         rework = self.calibration["rework"]
+        actions_hist = rework["peer_actions"]
+        responses_hist = rework.get("author_responses") or rework["pushes"]
         actions = max(1, _weighted_choice(
-            self.rng, rework["peer_actions"]["histogram"], 2
+            self.rng,
+            actions_hist.get("merged_histogram" if merged else "declined_histogram")
+            or actions_hist["histogram"],
+            2,
         ))
         pushes = _weighted_choice(
             self.rng,
-            (rework.get("author_responses") or rework["pushes"])["histogram"],
+            responses_hist.get("merged_histogram" if merged else "declined_histogram")
+            or responses_hist["histogram"],
             0,
         )
         # a rework push needs a comment before it: the approval is the last action
@@ -1200,11 +1325,14 @@ class _Lab:
                 splits = min(12, math.ceil(commits / cap))
                 commits = max(1, round(commits / splits))
             author = self.rng.choice(self.authors)
-            actions, pushes = self._plan(commits)
+            # the outcome is drawn first: the plan is conditional on it
+            merge_outcome = self.rng.random() >= self.decline_probability
+            actions, pushes = self._plan(commits, merge_outcome)
             depth = self._depth()
             parent = self._last_by_depth.get((author, depth - 1)) if depth > 0 else None
             for _ in range(splits):
-                pr = _PR(self.env, author, commits, actions, pushes, depth, parent)
+                pr = _PR(self.env, author, commits, actions, pushes, depth, parent,
+                         merge_outcome)
                 pr.arrived_at = self.env.now
                 if depth > 0:
                     self._last_by_depth[(author, depth)] = pr
@@ -1231,9 +1359,10 @@ class _Lab:
         yield admission
         self.backlog -= 1
         pr.started_at = env.now
-        if self.unmeasured.get("mu") is not None:
-            # the measured residue: handover time no component names
-            yield env.timeout(sample_lognormal(self.rng, self.unmeasured))
+        if self.unmeasured_hours > 0:
+            # the measured residue: handover time no component names. It is a
+            # balancing item, so it is carried at its mean (see _Lab.__init__)
+            yield env.timeout(self.unmeasured_hours)
         peer = self.pick_peer(pr.author)
         peer_server = self.servers.get(peer)
         factor = self._size_factor(pr.commits)
@@ -1259,7 +1388,9 @@ class _Lab:
         # A PR can be abandoned before the mandatory gate (declined, or still open
         # at the snapshot). It consumed review time but never merged, so it is
         # censored out of the cycle-time median exactly like the historical metric.
-        if self.rng.random() < self.decline_probability:
+        # The outcome was drawn before the plan (see _plan): a PR that will be
+        # abandoned also planned fewer review rounds, as the store shows.
+        if not pr.merge_outcome:
             pr.abandoned = True
             pr.finished_at = env.now
             self.wip[pr.author].release(admission)
