@@ -25,6 +25,7 @@ import {
   impactSentence, entityMarkdown, deliveryMarkdown,
 } from '/tables.js';
 import { rulesMarkup, rulesStats, rulesMarkdown } from '/rules.js';
+import { sprintStrip } from '/sprints.js';
 import { ticketMarkdown, ticketMarkup, ticketStats } from '/ticket.js';
 import {
   defaultScenario, policyMarkdown, policyMarkup, predHours,
@@ -86,6 +87,8 @@ const state = {
   delivery: null,
   queues: null,
   blocking: null,
+  // prd/26 P6: the sprint lens (`/api/sprints`): bands, scope, carry-over.
+  sprints: null,
   rules: null,
   rulesLevel: 'team',
   policy: null,
@@ -139,6 +142,8 @@ const timeline = new Timeline({
   onSelect: (pr) => openPrDrawer(pr),
   onTicket: (key) => openTicket(key),
   onSelection: (range) => renderSelection(range),
+  // prd/26 P6: a band is a doorway to the sprint's own window
+  onSprint: (sprint) => scopeToSprint(sprint),
 });
 
 const blockingMap = new BlockingMap({
@@ -580,6 +585,7 @@ function resetTenantData() {
   state.delivery = null;
   state.blocking = null;
   state.queues = null;
+  state.sprints = null;
   state.rules = null;
   state.selection = null;
   state.drawerEntity = null;
@@ -599,6 +605,7 @@ function resetTenantData() {
   timeline.clearSelection();
   timeline.setTicketIndex({ epicKeys: state.epicKeys });
   timeline.setData([], [], {});
+  timeline.setSprints(null);
   blockingMap.setData({ nodes: [], edges: [] });
   queueChart.setData({ streams: [], buckets: 1, window: { start: '', end: '' } });
   $('selection').hidden = true;
@@ -653,10 +660,33 @@ function renderSelection(range) {
 function renderTimelinePage() {
   renderLegend();
   renderPhaseLegend();
+  renderSprintStrip();
   // Returning to the timeline with a preset active shows that preset again;
   // a custom brush/zoom window is the user's window and is left alone (B6).
   if (!state.timeframeCustom) applyTimeframeToTimeline();
   timeline.schedule();
+}
+
+/* prd/26 P6: the sprint strip under the timeline — the sprint view without a
+ * second page. Each row sets the timeframe to that sprint's measured band, so
+ * "what was in sprint 2" is one click from the bands. */
+function renderSprintStrip() {
+  const host = $('sprint-strip');
+  if (!host) return;
+  const markup = state.sprints ? sprintStrip(state.sprints, { base: appBase() }) : '';
+  host.innerHTML = markup;
+  host.hidden = !markup;
+}
+
+function scopeToSprint(sprint) {
+  if (!sprint || !Number.isFinite(sprint.start) || !Number.isFinite(sprint.end)) return;
+  timeline.setWindow(sprint.start, sprint.end);
+  // The sprint window is not a preset: leave `tfWindow` pointing at the preset
+  // so the top bar says "custom" (B6) instead of claiming the sprint is "1q".
+  state.timeframeCustom = true;
+  renderTimeframe();
+  flashStatus(`timeframe set to sprint ${sprint.id}`, 'live');
+  saveUI();
 }
 
 function renderLegend() {
@@ -1313,6 +1343,9 @@ function applyScopeToTimeline() {
   // must still prefer each PR's own ticket over the shared epic link (B2).
   timeline.setTicketIndex({ epicKeys: state.epicKeys });
   timeline.setData(events, scopedObjects(events), state.meta || {});
+  // prd/26 P6: bands and story membership are store-wide (a sprint's own scope
+  // is not the visible event window), so they are set after the data.
+  timeline.setSprints(state.sprints);
 }
 
 // --------------------------------------------------------------- timeframe
@@ -1514,6 +1547,22 @@ async function loadObjects(seq) {
   return objects;
 }
 
+/* prd/26 P6: the sprint lens is one small payload for the whole store — the
+ * bands must not shrink to the top-bar timeframe, because a sprint's scope is
+ * the store's, not the visible event window. A server older than the endpoint
+ * (404) or a store without the Jira layer simply draws no sprint furniture. */
+async function loadSprints(seq) {
+  try {
+    const payload = await getJSON(withTenant('/api/sprints'));
+    if (seq !== loadSeq) return null;
+    state.sprints = payload && payload.available ? payload : null;
+  } catch (err) {
+    if (seq !== loadSeq) return null;
+    state.sprints = null;
+  }
+  return state.sprints;
+}
+
 /** Show the cap and offer to lift it, with the cost stated (QA round 2, G5). */
 function renderLoadAll() {
   const button = $('load-all');
@@ -1643,6 +1692,8 @@ async function load({ force = false } = {}) {
     await loadEvents(seq);
     if (seq !== loadSeq) return;
     await loadObjects(seq);
+    if (seq !== loadSeq) return;
+    await loadSprints(seq);
     if (seq !== loadSeq) return;
   } catch (err) {
     if (seq !== loadSeq) return;
@@ -2016,6 +2067,19 @@ document.addEventListener('click', async (event) => {
   }
   if (event.target.closest('#ticket-copy')) {
     await copyText(state.ticket ? ticketMarkdown(state.ticket, appBase()) : '');
+    return;
+  }
+  // prd/26 P6: a sprint row (or a band, via the canvas callback) sets the
+  // timeframe to that sprint's measured window.
+  const sprintRow = event.target.closest('[data-sprint-start]');
+  if (sprintRow) {
+    const start = Number(sprintRow.dataset.sprintStart);
+    const end = Number(sprintRow.dataset.sprintEnd);
+    if (Number.isFinite(start) && Number.isFinite(end)) {
+      scopeToSprint({
+        id: sprintRow.dataset.sprintId, start, end,
+      });
+    }
     return;
   }
   if (event.target.closest('#ticket-back')) {

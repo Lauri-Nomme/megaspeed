@@ -592,6 +592,38 @@ def metrics(court: ballcourt.BallCourt, window: tuple[datetime, datetime]) -> di
         "unfinished_rounds": result["unfinished_rounds"],
         "unattributed_triggers": result["unattributed_triggers"],
         "critical_path": critical,
+        # prd/26 P5: one row per stacked PR, so "a lower-PR update triggered N
+        # rebases" opens into the PRs and the hours each one paid.
+        "rows": [
+            {
+                "kind": "pr",
+                "object_id": object_id,
+                "repo": graph.prs[object_id]["repo"],
+                "number": graph.prs[object_id]["pr_id"],
+                "id": (
+                    f"{(graph.prs[object_id].get('repo') or '').split('/')[-1]}"
+                    f"#{graph.prs[object_id]['pr_id']}"
+                ),
+                "tickets": list(graph.prs[object_id].get("ticket_keys") or ()),
+                "state": (
+                    graph.prs[object_id]["state"]
+                    if graph.prs[object_id].get("closed_ts") else "open"
+                ),
+                "depth": graph.depth.get(object_id, 0),
+                "re_review_hours": round(result["hours_by_pr"].get(object_id, 0.0), 2),
+                "rebases": result["rebases_by_pr"].get(object_id, 0),
+                "hours": round(result["hours_by_pr"].get(object_id, 0.0), 2),
+                "affected": object_id in result["hours_by_pr"],
+            }
+            for object_id in sorted(
+                stacked,
+                key=lambda oid: (
+                    -result["hours_by_pr"].get(oid, 0.0),
+                    -graph.depth.get(oid, 0),
+                    oid,
+                ),
+            )
+        ],
         "stacks_detail": [
             {
                 "repo": graph.prs[component[-1]]["repo"] if component else None,

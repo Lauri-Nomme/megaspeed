@@ -26,6 +26,8 @@ one failure this whole feature exists to prevent.
     GET  /api/queues?level=&days=&tenant=     per-person WIP / throughput series
     GET  /api/delivery?days=&tenant=          triage list: blocked / oldest waiting
     GET  /api/insights?level=&days=&tenant=   ranked "change this" rules (prd/17)
+    GET  /api/sprints?days=&tenant=     sprint lens (prd/26 P6): bands, scope
+                                        (in/out of a sprint) and carry-over
     GET  /api/simulate?days=&scenario=&tenant= policy lab: calibrated model,
                                               validation gate + one scenario (prd/23)
     GET  /api/calendar?tenant=          effective business-hours calendar (prd/19)
@@ -134,6 +136,7 @@ STORE_RETRY_DELAY = max(0.0, float(os.environ.get("MEGASPEED_STORE_RETRY_DELAY",
 sys.path.insert(0, str(REPO_ROOT))
 from analysis import ballcourt as analyse  # noqa: E402  (read-only projections)
 from analysis import calendar as workcal  # noqa: E402  (prd/19 business hours)
+from analysis import jira as jira_analysis  # noqa: E402  (prd/21 sprints)
 from analysis import rules as insights_rules  # noqa: E402  (prd/17 suggestions)
 from analysis import simulation as policy_lab  # noqa: E402  (prd/23 policy lab)
 from analysis import tickets as ticket_view  # noqa: E402  (prd/25 ticket detail)
@@ -827,6 +830,7 @@ ANALYSIS_PARAMS = {
     "queues": ("level", "days", "bucket_hours"),
     "delivery": ("days",),
     "insights": ("level", "days"),
+    "sprints": ("days",),
     "simulate": ("days", "scenario", "seed", "tolerance", "replications"),
 }
 
@@ -947,6 +951,55 @@ def insights(request: Request):
         return _store_error(exc)
     payload["tenant"] = tenant
     return payload
+
+
+@app.get("/api/sprints")
+def sprints(request: Request):
+    """The sprint lens (prd/26 P6): bands, scope and carry-over.
+
+    ``sprints`` is one band per SPRINT object over its measured window (start →
+    completion, or start → snapshot while active; ``planned_end`` is the plan,
+    never the band). ``scope`` counts the stories created in the window that
+    were committed to a sprint against the ones that were not, and lists the
+    unplanned keys. ``carry_over`` marks a story whose ``sprint_added`` names
+    more than one distinct sprint. A store with no Jira layer answers
+    ``available: false`` with the reason, not zeroes.
+    """
+    unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["sprints"]))
+    if unknown is not None:
+        return unknown
+    try:
+        days = _num_param(request, "days", minimum=0, maximum=3650)
+    except ValueError as exc:
+        return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["sprints"])))
+    try:
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    try:
+        with store_conn(path) as con:
+            court = _ballcourt(con, tenant, path)
+            jira = insights_rules.load_jira(con, court)
+            window = insights_rules.window_for(court, _days(days), jira)
+            payload = jira_analysis.sprints(court, jira, window)
+    except Exception as exc:  # noqa: BLE001
+        return _store_error(exc)
+    start, end = window
+    payload.update({
+        "ok": True,
+        "tenant": tenant,
+        "as_of": pstore.iso(court.snapshot),
+        "hours_mode": court.hours_mode,
+        "assumption": court.assumption,
+        **court.calendar_warning(),
+        "jira": jira.summary(),
+        "window": {
+            "start": pstore.iso(start),
+            "end": pstore.iso(end),
+            "days": round(max(0.0, (end - start).total_seconds()) / 86400.0, 1),
+        },
+    })
+    return JSONResponse(payload, headers={"X-Tenant": tenant})
 
 
 # --------------------------------------------------------------------------- #

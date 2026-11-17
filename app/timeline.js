@@ -81,6 +81,23 @@ const QUEUE_ORDER = ['review', 'author', 'CI', 'calendar'];
 const STORY_NEST_SPAN = 45 * DAY;
 const STORY_EPIC_SPAN = 60 * DAY;
 
+/** The sprint line of a story tooltip (prd/26 P6).
+ *
+ * The membership comes from ``/api/sprints``; a story with no membership is
+ * *out of sprint scope*, said in words rather than left blank (prd/10 §7).
+ */
+function sprintRow(membership) {
+  if (!membership) return '';
+  const sprints = membership.sprints || [];
+  if (!sprints.length) {
+    return '<div class="row"><span class="k">sprint</span>' +
+      '<span class="v">none — out of sprint scope</span></div>';
+  }
+  const mark = membership.carried_over ? ' · ↻ carried over' : '';
+  return `<div class="row"><span class="k">sprint</span>` +
+    `<span class="v">${esc(sprints.join(' → '))}${mark}</span></div>`;
+}
+
 function fit(ctx, text, maxWidth) {
   if (maxWidth <= 0) return '';
   if (ctx.measureText(text).width <= maxWidth) return text;
@@ -130,7 +147,7 @@ function phaseFor(state, pr, next, commits) {
 }
 
 export class Timeline {
-  constructor({ canvas, tip, onStats, onSelect, onTicket, onSelection }) {
+  constructor({ canvas, tip, onStats, onSelect, onTicket, onSelection, onSprint }) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.tip = tip;
@@ -138,6 +155,7 @@ export class Timeline {
     this.onSelect = onSelect;
     this.onTicket = onTicket;
     this.onSelection = onSelection;
+    this.onSprint = onSprint;
     this.selection = null;   // { start, end } picked by brushing the histogram
     this.brushing = null;
     this.density = 'M';
@@ -146,6 +164,11 @@ export class Timeline {
     this.events = [];
     this.prs = [];
     this.commitsByPr = new Map();
+    // prd/26 P6: the sprint bands and the per-story membership (carry-over).
+    this.sprints = [];
+    this.sprintStory = new Map();
+    this.sprintScope = null;
+    this.sprintCarry = null;
     // The epic/tracking keys across the whole store, set by the page (B2). When
     // null the census is taken over the PRs handed to setData().
     this.epicKeys = null;
@@ -168,6 +191,46 @@ export class Timeline {
   setTicketIndex(index = {}) {
     const keys = index.epicKeys;
     this.epicKeys = keys instanceof Set ? keys : new Set(keys || []);
+    this.schedule();
+  }
+
+  /** Sprint bands + the per-story membership (prd/26 P6).
+   *
+   * The payload is ``/api/sprints``: one band per SPRINT object over its
+   * measured window, the cohort's scope, and the carry-over rows. Bands are
+   * drawn behind the lanes; the story marks ride on the story lanes. A payload
+   * with ``available: false`` clears them, so a PR-only store draws no sprint
+   * furniture at all.
+   */
+  setSprints(payload = null) {
+    const data = payload && payload.available ? payload : null;
+    this.sprintScope = data ? data.scope || null : null;
+    this.sprintCarry = data ? data.carry_over || null : null;
+    this.sprints = ((data && data.sprints) || [])
+      .map((sprint) => ({
+        id: sprint.sprint_id,
+        state: sprint.state,
+        open: Boolean(sprint.open),
+        // an active sprint is one the store says is active (or an old row with
+        // no state but no completion); a closed sprint without an end is still
+        // closed, only its band has to stop at the snapshot
+        active: sprint.state === 'active'
+          || (Boolean(sprint.open) && !sprint.state),
+        start: Date.parse(sprint.band_start),
+        end: Date.parse(sprint.band_end),
+        plannedEnd: sprint.planned_end
+          ? Date.parse(`${sprint.planned_end}T23:59:59Z`) : null,
+        stories: sprint.story_count || 0,
+        points: sprint.points || 0,
+        done: sprint.done || 0,
+        carriedIn: sprint.carried_in || [],
+        carriedOut: sprint.carried_out || [],
+      }))
+      .filter((sprint) => Number.isFinite(sprint.start) && Number.isFinite(sprint.end));
+    this.sprintStory = new Map();
+    for (const row of (data && data.rows) || []) {
+      if (row && row.key) this.sprintStory.set(row.key, row);
+    }
     this.schedule();
   }
 
@@ -654,6 +717,7 @@ export class Timeline {
     ctx.fillRect(0, 0, g.width, g.height);
 
     this.drawTimeBands(ctx, g);
+    this.drawSprintBands(ctx, g);
     this.drawAxis(ctx, g);
     this.drawHistogram(ctx, g);
     this.drawLanes(ctx, g, m);
@@ -672,7 +736,8 @@ export class Timeline {
         : this.hover.pr ? this.hits.some((h) => h.kind === 'bar' && h.pr === this.hover.pr)
           : this.hover.story ? this.hits.some((h) => h.kind === 'story' && h.story === this.hover.story)
             : this.hover.interval ? this.hits.some((h) => h.kind === 'interval' && h.interval === this.hover.interval)
-              : false;
+              : this.hover.sprint ? this.hits.some((h) => h.kind === 'sprint' && h.sprint === this.hover.sprint)
+                : false;
       if (!ttl) this.clearHover();
     }
 
@@ -696,6 +761,10 @@ export class Timeline {
         nested: this.dim === 'story' ? Boolean(this._storyNested) : false,
         allHidden: hiddenAll,
         phases: stats,
+        // prd/26 P6: the sprint furniture currently drawn
+        sprints: this.sprints.length,
+        sprintScope: this.sprintScope,
+        sprintCarry: this.sprintCarry,
       });
     }
     this.canvas.setAttribute(
@@ -746,6 +815,56 @@ export class Timeline {
         }
       }
     }
+  }
+
+  /** Sprint bands (prd/26 P6): one tinted region per SPRINT object, behind the
+   *  lanes, with the measured window as the edges. The active sprint's band ends
+   *  at the snapshot; its *plan* is a dashed line, never the band itself. */
+  drawSprintBands(ctx, g) {
+    if (!this.sprints.length) return;
+    const top = g.laneTop;
+    const bottom = g.height;
+    const labelY = AXIS_H + HIST_H + 11;
+    this.sprints.forEach((sprint, index) => {
+      const left = Math.max(g.gutter, this.px(sprint.start));
+      const right = Math.min(g.gutter + g.plotW, this.px(sprint.end));
+      if (right <= left) return;
+      ctx.fillStyle = index % 2 === 0
+        ? 'rgba(140,152,212,.055)' : 'rgba(140,152,212,.022)';
+      ctx.fillRect(left, top, right - left, bottom - top);
+      ctx.fillStyle = 'rgba(140,152,212,.30)';
+      ctx.fillRect(left, top, 1, bottom - top);
+      if (right < g.gutter + g.plotW) ctx.fillRect(right - 1, top, 1, bottom - top);
+      // the plan of an active sprint: a dashed boundary, not a measured edge
+      if (sprint.active && Number.isFinite(sprint.plannedEnd)
+          && sprint.plannedEnd > this.view.start && sprint.plannedEnd < this.view.end) {
+        const planX = Math.round(this.px(sprint.plannedEnd)) + 0.5;
+        ctx.save();
+        ctx.setLineDash([3, 3]);
+        ctx.strokeStyle = 'rgba(251,205,88,.45)';
+        ctx.beginPath();
+        ctx.moveTo(planX, top);
+        ctx.lineTo(planX, bottom);
+        ctx.stroke();
+        ctx.restore();
+      }
+      if (right - left >= 30) {
+        ctx.font = `600 ${Math.max(10, g.label - 1)}px "JetBrains Mono", ui-monospace, monospace`;
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#8C98D4';
+        ctx.fillText(
+          fit(ctx, `S${sprint.id}${sprint.active ? ' · active' : ''}`, right - left - 12),
+          left + 6,
+          labelY,
+        );
+      }
+      // pushed before the lanes, so a bar / event / story hit always wins
+      this.hits.push({
+        kind: 'sprint', x0: left, x1: right,
+        y0: top - HEADER_H, y1: bottom, sprint,
+      });
+    });
   }
 
   /** B7: two legible label rows, measured and edge-clamped so nothing clips. */
@@ -1073,11 +1192,24 @@ export class Timeline {
           ? prs.flatMap((pr) => [pr.created, pr.closed || this.now])
           : storyEvents.map((event) => event.t);
         if (!times.length) return;
+        const membership = this.sprintStory.get(row.story);
+        if (membership && membership.carried_over) {
+          // prd/26 P6: a story re-added across sprints is marked at its end —
+          // the sprint plan's cost, on the lane the investigator is reading.
+          const endX = Math.min(g.gutter + g.plotW - 2, this.px(Math.max(...times)));
+          ctx.fillStyle = 'rgba(251,205,88,.9)';
+          ctx.fillRect(endX - 1, barY, 2, barH);
+          ctx.font = `700 ${Math.max(9, g.label)}px "JetBrains Mono", ui-monospace, monospace`;
+          ctx.textAlign = 'right';
+          ctx.textBaseline = 'middle';
+          ctx.fillStyle = '#FBCD58';
+          ctx.fillText('↻', endX - 4, y + g.laneH / 2);
+        }
         this.hits.push({
           kind: 'story', x0: this.px(Math.min(...times)),
           x1: Math.max(this.px(Math.max(...times)), this.px(Math.min(...times)) + 2),
           y0: y, y1: y + g.laneH, story: row.story, ticket: row.ticket,
-          prs, events: storyEvents, laneKey: row.key,
+          prs, events: storyEvents, membership, laneKey: row.key,
         });
         return;
       }
@@ -1241,7 +1373,8 @@ export class Timeline {
     this.hover = hit.kind === 'bar' ? { pr: hit.pr }
       : hit.kind === 'event' ? { event: hit.event }
         : hit.kind === 'interval' ? { interval: hit.interval, pr: hit.pr }
-          : { laneKey: hit.laneKey };
+          : hit.kind === 'sprint' ? { sprint: hit.sprint }
+            : { laneKey: hit.laneKey };
     if (hit.laneKey) this.hover.laneKey = hit.laneKey;
 
     if (hit.kind === 'event') {
@@ -1278,6 +1411,20 @@ export class Timeline {
         <div class="row"><span class="act mono">${esc(hit.ticket)}</span>
           <span class="muted">ticket key</span></div>
         <div class="row"><span class="k">open</span><span class="v">click to open the ticket detail page</span></div>`;
+    } else if (hit.kind === 'sprint') {
+      const sprint = hit.sprint;
+      this.tip.innerHTML = `
+        <div class="row"><span class="act">Sprint ${esc(sprint.id)}</span>
+          <span class="muted">${esc(sprint.state || (sprint.active ? 'active' : 'closed'))}</span></div>
+        <div class="row"><span class="k">band</span><span class="v">${esc(fmtStamp(sprint.start))}<br>${esc(fmtStamp(sprint.end))}${sprint.open ? ' · at the snapshot' : ''}</span></div>
+        ${sprint.active && Number.isFinite(sprint.plannedEnd)
+          ? `<div class="row"><span class="k">plan</span><span class="v">ends ${esc(fmtStamp(sprint.plannedEnd))} — dashed line, not measured</span></div>` : ''}
+        <div class="row"><span class="k">scope</span><span class="v">${sprint.stories} stor${sprint.stories === 1 ? 'y' : 'ies'} · ${sprint.points} points · ${sprint.done} done</span></div>
+        ${sprint.carriedIn.length
+          ? `<div class="row"><span class="k">carried in</span><span class="v">${esc(sprint.carriedIn.join(', '))}</span></div>` : ''}
+        ${sprint.carriedOut.length
+          ? `<div class="row"><span class="k">carried out</span><span class="v">${esc(sprint.carriedOut.join(', '))}</span></div>` : ''}
+        <div class="row"><span class="k">open</span><span class="v">click to set the timeframe to this sprint</span></div>`;
     } else if (hit.kind === 'story' || hit.kind === 'epic') {
       const prs = hit.kind === 'story'
         ? (hit.prs || [])
@@ -1293,6 +1440,7 @@ export class Timeline {
         <div class="row"><span class="act mono">${esc(hit.ticket)}</span>
           <span class="muted">${hit.kind === 'epic' ? 'epic' : 'story'} · ${prs.length} PR${prs.length === 1 ? '' : 's'}</span></div>
         ${from != null ? `<div class="row"><span class="k">span</span><span class="v">${esc(fmtDuration(to - from))}</span></div>` : ''}
+        ${hit.kind === 'story' ? sprintRow(hit.membership) : ''}
         ${[...totals.entries()].filter(([, ms]) => ms > 0).map(([phase, ms]) => `
           <div class="row"><span class="k">${esc(PHASE[phase].label)}</span>
             <span class="v" style="color:${PHASE[phase].color}">${esc(fmtDuration(ms))}</span></div>`).join('')}
@@ -1349,7 +1497,8 @@ export class Timeline {
         return;
       }
       const hit = this.hitTest(x, y);
-      const linked = hit && (hit.kind === 'label' || hit.kind === 'story' || hit.kind === 'epic');
+      const linked = hit && (hit.kind === 'label' || hit.kind === 'story'
+        || hit.kind === 'epic' || hit.kind === 'sprint');
       canvas.style.cursor = linked ? 'pointer' : '';
       this.showHover(hit, x, y);
       this.schedule();
@@ -1398,6 +1547,11 @@ export class Timeline {
       if ((hit.kind === 'label' || hit.kind === 'story' || hit.kind === 'epic')
           && hit.ticket && this.onTicket) {
         this.onTicket(hit.ticket);
+        return;
+      }
+      // prd/26 P6: clicking a sprint band scopes the timeline to that sprint
+      if (hit.kind === 'sprint' && this.onSprint) {
+        this.onSprint(hit.sprint);
         return;
       }
       if ((hit.kind === 'bar' || hit.kind === 'interval') && this.onSelect) {
