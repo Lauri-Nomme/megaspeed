@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **684** (`tests/`) + **73** (`scrape/tests`) + **99** (node `app/test`) green.
+Tests: **706** (`tests/`) + **73** (`scrape/tests`) + **101** (node `app/test`) green.
 
 ## Scrape (airgapped) — full value, reliable
 
@@ -11,6 +11,11 @@ Tests: **684** (`tests/`) + **73** (`scrape/tests`) + **99** (node `app/test`) g
   crash-resume, per-PR skip, partial-bundle guard, quiescence check. Import = pre-write gate, batched (~90×).
 - **Jira**: Story/Epic/Sprint objects + status/sprint/assign/point/worklog events, cross-source identity
   (one pseudonym per human), worklog-noise (`log_delay_bucket`).
+- **Workflow stages (prd/29)**: configurable status→stage projection — `backlog`/`ready`/`in_progress`/
+  `in_review`/`in_verification`/`done`/`other` — via `[jira.stages]` (TOML) or `MEGASPEED_JIRA_STAGES`.
+  Precedence: config name map → Jira category → name rules. The install's real workflow (Story:
+  OPEN→READY FOR REFINEMENT→REFINED→IN PROGRESS→IN REVIEW→IN VERIFICATION→CLOSED; Bug: NEW→TRIAGED→…
+  →RESOLVED) measures QA time separately.
 - **Scope**: `MEGASPEED_TICKET_KEYS` > `MEGASPEED_JIRA_EPICS` (resolves epics → children, one extra search)
   > `MEGASPEED_JIRA_PROJECTS`. Scope rides the manifest → `--verify` enforces it with only the epic env set.
 - **Cloud Jira** (`--jira-cloud`): `proxy/cloud_jira_proxy.py` emulates Cloud v3 over the DC lab
@@ -19,9 +24,9 @@ Tests: **684** (`tests/`) + **73** (`scrape/tests`) + **99** (node `app/test`) g
 ## Analysis → suggested rules (answers prd/15 Q1–Q4)
 
 - Ball-in-court → blocking/queue/delivery · **business-hours calendar** (overrides/vacations/EE holidays) ·
-  vacation-blocking · **flow efficiency** · **Kaplan–Meier survival** · **Jira-layer** (8-segment waiting
-  decomposition, carry-over, point churn, worklog cross-check) · **stacked-PR cascade** ·
-  **simulation** (calibrated SimPy + validation gate).
+  vacation-blocking · **flow efficiency** · **Kaplan–Meier survival** · **Jira-layer** (waiting
+  decomposition — 8 segments, or 9 with the QA split — carry-over, point churn, worklog cross-check) ·
+  **stacked-PR cascade** · **simulation** (calibrated SimPy + validation gate).
 - **Simulation** validates baseline within ±20% (median) on both `del3` and `del-combined`, all 8 seeds.
   `QUEUE_RECOVERY=0.6` (new, disclosed) fixes the median under-prediction — root cause was the Poisson
   P-K queue over-estimate, not `SERVICE_SHARE`.
@@ -37,11 +42,13 @@ Tests: **684** (`tests/`) + **73** (`scrape/tests`) + **99** (node `app/test`) g
 
 ## Deferred / not urgent
 
-1. **Tempo** install in jira-lab (cloud add-on absent, currently stubbed over native worklogs).
-2. **Production creds**: `MEGASPEED_BB_*` / `MEGASPEED_JIRA_*` / `MEGASPEED_JIRA_CLOUD_*` (DC labs only now).
-3. **Keepalive cron** for jira-lab (licence = 3 h rolling window per restart; re-arm via
+1. **Re-seed jira-lab with the install's workflow** (Story + Bug statuses above) and re-scrape
+   `del-combined` to show real review/QA numbers (currently demonstrated on a synthetic store).
+2. **Tempo** install in jira-lab (cloud add-on absent, currently stubbed over native worklogs).
+3. **Production creds**: `MEGASPEED_BB_*` / `MEGASPEED_JIRA_*` / `MEGASPEED_JIRA_CLOUD_*` (DC labs only now).
+4. **Keepalive cron** for jira-lab (licence = 3 h rolling window per restart; re-arm via
    `sudo nerdctl restart jira-lab`).
-4. Light theme / theme toggle / refresh cadence / rebuild-read-time provenance (prd/26 deferred).
+5. Light theme / theme toggle / refresh cadence / rebuild-read-time provenance (prd/26 deferred).
 
 ## Important
 
