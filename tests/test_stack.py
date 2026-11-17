@@ -44,10 +44,12 @@ from server import app as app_module
 REPO = "ENG/platform"
 T0 = datetime(2026, 1, 5, 9, 0)          # a Monday
 AS_OF = T0 + timedelta(days=7)
+#: The per-tenant pepper the ingest would hold in the raw zone (SEC-1).
+PEPPER = bytes.fromhex("5e" * 32)
 
 
 def digest(branch: str, repo: str = REPO) -> str:
-    return ref_digest(repo, {"displayId": branch})
+    return ref_digest(repo, {"displayId": branch}, PEPPER)
 
 
 # --------------------------------------------------------------------------- #

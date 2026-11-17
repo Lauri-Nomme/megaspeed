@@ -13,6 +13,8 @@ Local state, kept **next to the output** and never inside the tgz (prd/11 §3,§
   watermark.json   # per-source event cursor + per-repo updatedDate cursor
   prs.json         # per-PR cursor: {state, updated_date, done} (settled)
   identity.json    # RAW ZONE: slug/email -> pseudonym. Back this up.
+  pepper.json      # RAW ZONE: HMAC pepper for the prd/22 ref digests (0600).
+                   #   Back it up: a new pepper cannot match old digests.
   git/             # RAW ZONE: shallow/partial bare repo per PROJECT/repo,
                    #   used only for the deterministic push_class (prd/16)
 ```
@@ -99,7 +101,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import bundle as bundle_mod
-from . import classify, gitclass, taxonomy
+from . import classify, gitclass, pepper as pepper_mod, taxonomy
 from .bitbucket import BitbucketClient, PullRequest
 from .config import Config
 from .pipeline import KeyFilter, Reducer, Stats, _object
@@ -117,6 +119,9 @@ PR_STATE_SCHEMA_VERSION = 1
 STATE_FILE = "watermark.json"
 PR_STATE_FILE = "prs.json"
 IDENTITY_FILE = "identity.json"
+#: RAW ZONE: the per-tenant HMAC pepper for the prd/22 ref digests
+#: (:mod:`ingest.pepper`). Never enters the bundle or the store.
+PEPPER_FILE = pepper_mod.PEPPER_FILE
 # How far back to re-emit before the watermark, so a backdated/late activity is
 # not lost between transfers (prd/11 §3/§8: default 1-7 days).
 DEFAULT_OVERLAP_HOURS = 72
@@ -213,11 +218,16 @@ class ScrapeState:
         complete: bool = True,
         resumed: bool = False,
         count_run: bool = True,
+        ref_digest_key_id: str | None = None,
     ) -> None:
         entry = dict(self.sources.get(source) or {})
         stored = dict(entry.get("repos") or {})
         if repos is not None:
             stored = repos
+        # The ref-digest key id travels with the cursor: a changed pepper makes
+        # every new digest incomparable with the rows already in the store, so
+        # the next run must notice (see scrape()).
+        key_id = ref_digest_key_id or entry.get("ref_digest_key_id")
         self.sources[source] = {
             "watermark_ts": iso(watermark),
             # A checkpoint is not a run: only the final write counts.
@@ -229,6 +239,7 @@ class ScrapeState:
             # False while a run is in flight; the resume contract (see scrape()).
             "complete": bool(complete),
             "resumed": bool(resumed),
+            "ref_digest_key_id": key_id,
             "updated_at": iso(utcnow()),
             "repos": stored,
         }
@@ -407,6 +418,7 @@ def collect(
     checkpoint=None,
     checkpoint_every: int = 0,
     verify_quiet: bool = False,
+    pepper: bytes | None = None,
 ) -> Collected:
     """Read the source and reduce it in memory. Nothing is written here.
 
@@ -446,7 +458,7 @@ def collect(
     client = BitbucketClient(
         transport, page_limit=cfg.page_limit, min_interval=0.0 if source == "fixture" else 0.2
     )
-    reducer = Reducer(cfg, ident, key_filter, as_of, classifier=text_classifier)
+    reducer = Reducer(cfg, ident, key_filter, as_of, classifier=text_classifier, pepper=pepper)
     stats = Stats()
     out = Collected(
         source=source,
@@ -841,7 +853,7 @@ def default_state_dir(out: Path) -> Path:
 
 def build_manifest(collected: Collected, *, previous: datetime | None, watermark: datetime | None,
                    overlap_hours: int, full: bool, events_emitted: int,
-                   checkpoint: bool = False) -> dict:
+                   checkpoint: bool = False, ref_digest_key_id: str | None = None) -> dict:
     """The bundle's manifest: provenance + counts, and nothing raw (prd/11 §2)."""
     counts = collected.counts()
     counts["events"] = events_emitted
@@ -868,6 +880,11 @@ def build_manifest(collected: Collected, *, previous: datetime | None, watermark
         "overlap_hours": overlap_hours,
         "full": bool(full),
         "counts": counts,
+        # prd/22 + SEC-1: *which* per-tenant pepper produced this bundle's ref
+        # digests. A non-reversible label (never the key): two bundles with the
+        # same id produce comparable digests, and a changed id means the store's
+        # older ref rows can no longer be matched.
+        "ref_digest_key_id": ref_digest_key_id,
         "text_classifier": (
             collected.text_classifier.report()
             if collected.text_classifier is not None
@@ -1085,6 +1102,26 @@ def scrape(
     reporter = progress if progress is not None else ProgressReporter(
         interval=DEFAULT_PROGRESS_INTERVAL
     )
+    # SEC-1: the per-tenant ref-digest pepper lives in the raw zone (the state
+    # dir), never in the bundle. Loading it creates it on first use (0600).
+    pepper_path = state_dir / PEPPER_FILE
+    pepper = pepper_mod.load_pepper(pepper_path)
+    ref_digest_key_id = pepper_mod.key_id(pepper)
+    prior_key_id = (state.sources.get(source) or {}).get("ref_digest_key_id")
+    if prior_key_id and prior_key_id != ref_digest_key_id:
+        raise SystemExit(
+            f"ref-digest pepper changed under {state_dir} (was {prior_key_id}, now"
+            f" {ref_digest_key_id}): the new digests cannot be matched against the"
+            " rows already in the store, so the stack DAG would silently split."
+            " Restore the original pepper.json, or re-scrape with --full and"
+            " re-import into a fresh store."
+        )
+    if not prior_key_id and state.watermark(source) is not None:
+        reporter.emit(
+            f"[scrape] warning: {state_dir} has no recorded ref-digest key id:"
+            " refs scraped before this build were unkeyed (16 hex) and will not"
+            " match this run's digests -- re-scrape with --full to re-key them"
+        )
     classifier = (
         push_classifier
         if push_classifier is not None
@@ -1185,6 +1222,7 @@ def scrape(
             full=full,
             events_emitted=len(events_now),
             checkpoint=True,
+            ref_digest_key_id=ref_digest_key_id,
         )
         # Identity first: the bundle names these pseudonyms, so the map must
         # never lag behind a bundle that mentions them.
@@ -1199,6 +1237,7 @@ def scrape(
             source, watermark_now, collected_now.run_id, out,
             repos=_repo_entries(collected_now, current, final=False),
             complete=False, resumed=collected_now.resumed, count_run=False,
+            ref_digest_key_id=ref_digest_key_id,
         )
         state.save()
 
@@ -1220,6 +1259,7 @@ def scrape(
         checkpoint=checkpoint,
         checkpoint_every=max(0, int(checkpoint_every)),
         verify_quiet=quiet_check,
+        pepper=pepper,
     )
 
     events = _emitted_events(collected)
@@ -1233,6 +1273,7 @@ def scrape(
         overlap_hours=overlap_hours,
         full=full,
         events_emitted=len(events),
+        ref_digest_key_id=ref_digest_key_id,
     )
     if collected.identity is not None:
         collected.identity.save()
@@ -1245,6 +1286,7 @@ def scrape(
         source, watermark, collected.run_id, out,
         repos=_repo_entries(collected, None, final=True),
         complete=True, resumed=collected.resumed,
+        ref_digest_key_id=ref_digest_key_id,
     )
     state.save()
     partial = partial_report(collected, prior_repo_entries)
@@ -1260,6 +1302,10 @@ def scrape(
         "state_dir": str(state_dir),
         "pr_state": str(state_dir / PR_STATE_FILE),
         "identity_map": str(ident_path),
+        # SEC-1: the raw-zone pepper path + a non-reversible id for it. Neither
+        # the pepper nor anything derived from it beyond the id is reported.
+        "ref_digest_pepper": str(pepper_path),
+        "ref_digest_key_id": ref_digest_key_id,
         "watermark": iso(watermark),
         "previous_watermark": iso(previous),
         "repo_watermarks": {

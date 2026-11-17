@@ -28,5 +28,5 @@ __all__ = [
     "config", "taxonomy", "timeutil", "pseudonym", "fixtures", "bitbucket",
     "transport", "pipeline", "bundle", "scrape", "importer", "store", "live",
     "classify", "gitclass", "jira", "jira_fixtures", "jira_pipeline",
-    "scrape_jira",
+    "scrape_jira", "pepper",
 ]
