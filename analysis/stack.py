@@ -32,12 +32,32 @@ inside one stack: the hours one bottom-of-stack merge walks up the chain. A
 corpus with no ref digests reports ``available: false`` (re-ingest needed) and a
 corpus with refs but no stacks reports ``stacks: 0`` -- both are results, never
 a zero that looks like a measurement.
+
+Two guards keep the DAG from inventing edges (the store has digests, not branch
+names, so both are derived from the data rather than a name list):
+
+* **the trunk is not a PR.** A branch that two or more PRs target in a repo is
+  that repo's shared base (``main``/``master``/``develop``/a release branch). A
+  PR *from* a shared base is based on it, not stacked under anything, so it may
+  not be a parent: a ``main -> prod`` release PR must not adopt every PR that
+  targets ``main``. Dropped candidates are counted in
+  ``ignored_shared_branch_edges``;
+* **a stack is ordered in time.** A parent must exist before its child and be
+  open when the child is created (a PR that closed before the child was opened
+  cannot be the branch the child sits on). Dropped candidates are counted in
+  ``ignored_temporal_edges``.
+
+The cascade attribution is bounded the same way: a rebase is charged to a
+lower-PR update only when it happens within the child's next business day
+(:data:`DEFAULT_BUSINESS_DAY_HOURS` without a calendar). A push six weeks later
+is the child's own work, not the cascade; a trigger whose rebase fell outside
+the window is reported as ``unattributed_triggers`` rather than silently priced.
 """
 
 from __future__ import annotations
 
 import math
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -48,6 +68,12 @@ from analysis import ballcourt
 # ground under a child, so it is not a trigger.
 REBASE_CLASSES = frozenset({"pure_rebase", "rebase_conflict"})
 TRIGGER_PUSHES = frozenset({"pr_pushed", "rebased"})
+# How long after a lower-PR update a child's rebase still counts as the cascade:
+# one business day -- the calendar's daily window, or 24 wall-clock hours when
+# the tenant has none (prd/19), the same day the simulation uses. Beyond it the
+# push is the child's own work, and attributing it would charge six weeks of
+# drift to a merge that happened six weeks earlier.
+DEFAULT_BUSINESS_DAY_HOURS = 24.0
 # A stack deeper than this is a chain of waits, not a review: the advice caps
 # depth at two (a PR and the one it sits on).
 MAX_STACK_DEPTH = 2
@@ -82,6 +108,13 @@ class StackGraph:
     depth: dict[str, int]
     refs: int                 # PRs that carry at least one ref digest
     edges: list[tuple[str, str]] = field(default_factory=list)
+    # candidate edges dropped because the "parent" is based on the trunk: a
+    # shared base branch is not a stack edge (FR-5), and the count keeps the
+    # exclusion visible instead of silently shrinking the graph
+    ignored_shared_branch_edges: int = 0
+    # candidate edges dropped because the parent did not exist yet, or had
+    # already closed, when the child was opened
+    ignored_temporal_edges: int = 0
 
     def above(self, object_id: str) -> list[str]:
         """Every PR above ``object_id`` (transitive children), cycle-safe."""
@@ -138,9 +171,49 @@ def _depth(prs: dict[str, dict], parents: dict[str, list[str]]) -> dict[str, int
     return memo
 
 
+def _trunk_refs(prs: dict[str, dict]) -> dict[str, set[str]]:
+    """``repo -> the ref digests that are shared base branches``.
+
+    The store holds digests, never branch names (prd/02), so a shared base is
+    derived rather than listed: a branch that **two or more** PRs target is an
+    integration branch (``main``/``master``/``develop``/a release branch), while
+    a real stack base is targeted by exactly one child. A PR whose source is a
+    shared base is based on it, not stacked under anything, so it may not be a
+    parent -- otherwise a ``main -> prod`` release PR adopts every PR that
+    targets ``main`` (FR-5).
+
+    The threshold is deliberately conservative: two children forked off one
+    feature branch are indistinguishable from two PRs sharing a trunk using
+    digests alone, and the dropped edges are counted in
+    ``ignored_shared_branch_edges`` rather than hidden.
+    """
+    counts: dict[str, Counter] = defaultdict(Counter)
+    for pr in prs.values():
+        target = pr.get("target_ref")
+        if target:
+            counts[pr.get("repo") or ""][target] += 1
+    return {
+        repo: {ref for ref, count in counter.items() if count >= 2}
+        for repo, counter in counts.items()
+    }
+
+
+def _can_be_parent(parent: dict, child: dict) -> bool:
+    """A stack edge is ordered in time: the parent exists and is open first."""
+    created = parent.get("created_ts")
+    child_created = child.get("created_ts")
+    if created is not None and child_created is not None and created > child_created:
+        return False
+    closed = parent.get("closed_ts")
+    if closed is not None and child_created is not None and closed <= child_created:
+        return False
+    return True
+
+
 def build(court: ballcourt.BallCourt) -> StackGraph:
     """Derive the stack DAG from the PR ref digests on the store."""
     prs = {state.pr["object_id"]: state.pr for state in court.prs}
+    trunk = _trunk_refs(prs)
     by_source: dict[str, list[str]] = defaultdict(list)
     refs = 0
     for object_id, pr in prs.items():
@@ -155,6 +228,8 @@ def build(court: ballcourt.BallCourt) -> StackGraph:
     children: dict[str, list[str]] = defaultdict(list)
     parents: dict[str, list[str]] = defaultdict(list)
     edges: list[tuple[str, str]] = []
+    ignored_shared = 0
+    ignored_temporal = 0
     for object_id, pr in prs.items():
         target = pr.get("target_ref")
         if not target:
@@ -162,6 +237,17 @@ def build(court: ballcourt.BallCourt) -> StackGraph:
         # this PR sits on whichever PR *has* its target branch as its source
         for parent in sorted(by_source.get(target, ())):
             if parent == object_id:
+                continue
+            parent_pr = prs[parent]
+            # a PR from the trunk is based on the trunk, not stacked under
+            # anything -- otherwise a main -> prod release PR parents every PR
+            # that targets main (FR-5)
+            repo = parent_pr.get("repo") or pr.get("repo")
+            if parent_pr.get("source_ref") in trunk.get(repo, ()):
+                ignored_shared += 1
+                continue
+            if not _can_be_parent(parent_pr, pr):
+                ignored_temporal += 1
                 continue
             children[parent].append(object_id)
             parents[object_id].append(parent)
@@ -173,6 +259,8 @@ def build(court: ballcourt.BallCourt) -> StackGraph:
         depth=_depth(prs, parents),
         refs=refs,
         edges=sorted(edges),
+        ignored_shared_branch_edges=ignored_shared,
+        ignored_temporal_edges=ignored_temporal,
     )
 
 
@@ -197,6 +285,32 @@ def _response_push(events: list[dict], after: datetime) -> dict | None:
         if event["activity"] in TRIGGER_PUSHES:
             return event
     return None
+
+
+def _business_day_hours(court: ballcourt.BallCourt) -> float:
+    """One day on the tenant's clock: the calendar window, else 24 wall hours."""
+    calendar = court.calendar
+    if calendar is None or calendar.default_window is None:
+        return DEFAULT_BUSINESS_DAY_HOURS
+    start, end = calendar.default_window
+    return max(0.5, (end - start) / 60.0)
+
+
+def _within_response_window(court: ballcourt.BallCourt, pr: dict,
+                            at: datetime, push_ts: datetime) -> bool:
+    """Is ``push_ts`` close enough to ``at`` to be the rebase it forced?
+
+    A cascade rebase is the child's next move after its base changed; a push
+    that comes a day or a month later is the child's own work. The window is one
+    business day on the child author's calendar (prd/19), so a weekend does not
+    swallow a Monday rebase.
+    """
+    if push_ts < at:
+        return False
+    return (
+        court.business_hours(pr["actor"], at, push_ts)
+        <= _business_day_hours(court)
+    )
 
 
 def _round_hours(intervals: dict[str, list], object_id: str, push_ts: datetime) -> tuple[float, bool]:
@@ -285,6 +399,7 @@ def cascade(court: ballcourt.BallCourt, window: tuple[datetime, datetime],
     pairs: list[dict] = []
     unfinished = 0
     attributed: set[tuple[str, datetime]] = set()
+    late: set[tuple[str, datetime]] = set()
     states = {state.pr["object_id"]: state for state in court.prs}
     for at, object_id, kind, open_above in found:
         caused = 0
@@ -298,6 +413,13 @@ def cascade(court: ballcourt.BallCourt, window: tuple[datetime, datetime],
                 (push.get("attributes") or {}).get("push_class") in REBASE_CLASSES
             )
             if not is_rebase:
+                continue
+            if not _within_response_window(
+                court, states[child].pr, at, push["_ts"]
+            ):
+                # the child did rebase, but far too late to be this trigger's
+                # cascade: report the dropped attribution instead of pricing it
+                late.add((object_id, at))
                 continue
             attributed.add((child, push["_ts"]))
             hours, finished = _round_hours(intervals, child, push["_ts"])
@@ -328,6 +450,7 @@ def cascade(court: ballcourt.BallCourt, window: tuple[datetime, datetime],
         "triggers": triggers,
         "pairs": pairs,
         "unfinished_rounds": unfinished,
+        "unattributed_triggers": len(late),
         "hours_by_pr": dict(hours_by_pr),
         "rebases_by_pr": dict(rebases_by_pr),
     }
@@ -431,6 +554,12 @@ def metrics(court: ballcourt.BallCourt, window: tuple[datetime, datetime]) -> di
             "action; a round that had not ended at the snapshot is reported as "
             "unfinished, never as zero"
         )
+    if result["unattributed_triggers"]:
+        note += (
+            f"; {result['unattributed_triggers']} trigger(s) had a rebase outside "
+            f"the {_business_day_hours(court):g} business-hour attribution "
+            "window and were not priced"
+        )
 
     return {
         "available": available,
@@ -441,6 +570,10 @@ def metrics(court: ballcourt.BallCourt, window: tuple[datetime, datetime]) -> di
         # edges into the cohort (the child is the stacked PR), so a reader can
         # never see "0 stacks" next to "3 edges" from a stack outside the window
         "edges": sum(1 for _parent, child in graph.edges if child in cohort_ids),
+        # the exclusions that keep the DAG honest (FR-5): a PR based on the
+        # trunk is not a parent, and a parent must exist before its child
+        "ignored_shared_branch_edges": graph.ignored_shared_branch_edges,
+        "ignored_temporal_edges": graph.ignored_temporal_edges,
         # depth distribution over the stacked PRs in the cohort (prd/22)
         "depth": {
             "n": len(depths),
@@ -457,6 +590,7 @@ def metrics(court: ballcourt.BallCourt, window: tuple[datetime, datetime]) -> di
         "cascaded_rebases": rebases,
         "re_review_hours": hours,
         "unfinished_rounds": result["unfinished_rounds"],
+        "unattributed_triggers": result["unattributed_triggers"],
         "critical_path": critical,
         "stacks_detail": [
             {

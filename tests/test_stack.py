@@ -16,6 +16,11 @@ The honest negatives are pinned too: a store whose PRs carry no ref digests
 (ingested before prd/22) says ``available: false`` rather than "0 stacks", and a
 corpus where every PR targets main says ``stacks: 0`` -- both emit no rule.
 
+The guards against a fabricated DAG are pinned as well: a ``main -> prod``
+release PR must not adopt the PRs that target ``main`` (FR-5); an edge is
+ordered in time; and a rebase outside the child's next business day is reported
+as an unattributed trigger instead of being priced (FR-4).
+
 The ingest half (refs persisted as digests, ``--verify`` rejecting a branch
 name) is pinned in ``tests/test_ref_digest.py``.
 
@@ -242,6 +247,49 @@ class StackDagTests(StoreCase):
             {f"PR:{REPO}#1": 0, f"PR:{REPO}#2": 1, f"PR:{REPO}#3": 2},
         )
 
+    def test_a_release_pr_from_the_trunk_is_not_a_parent(self):
+        """A main -> prod release PR must not adopt every PR that targets main.
+
+        The store has digests, not branch names, so the shared base is derived:
+        a branch two or more PRs target is a trunk, not a stack base (FR-5).
+        """
+        fx = Fixture()
+        fx.pr(1, "main", "prod", opened=T0, state="merged",
+              closed=T0 + timedelta(hours=24))
+        for number in range(2, 7):
+            fx.pr(number, f"feature/ENG-{number}", "main",
+                  opened=T0 + timedelta(hours=number))
+        court = self.court(fx)
+        graph = stack.build(court)
+        self.assertEqual(graph.edges, [])
+        self.assertEqual(graph.ignored_shared_branch_edges, 5)
+        self.assertEqual(set(graph.depth.values()), {0})
+        metric = rules.metrics(court, [], rules.window_for(court, None), {})["stacked_cascade"]
+        self.assertTrue(metric["available"])
+        self.assertEqual(metric["stacks"], 0)
+        self.assertEqual(metric["stacked_prs"], 0)
+        self.assertEqual(metric["re_review_hours"], 0.0)
+        self.assertEqual(metric["ignored_shared_branch_edges"], 5)
+
+    def test_a_parent_must_exist_before_its_child(self):
+        """An edge is ordered in time: a child cannot sit on a later PR."""
+        fx = Fixture()
+        fx.pr(1, "feature/ENG-1-base", "main", opened=T0 + timedelta(days=29))
+        fx.pr(2, "feature/ENG-1-b", "feature/ENG-1-base", opened=T0)
+        graph = stack.build(self.court(fx))
+        self.assertEqual(graph.edges, [])
+        self.assertEqual(graph.ignored_temporal_edges, 1)
+
+    def test_a_parent_closed_before_the_child_opened_is_not_an_edge(self):
+        fx = Fixture()
+        fx.pr(1, "feature/ENG-1-base", "main", opened=T0, state="merged",
+              closed=T0 + timedelta(hours=2))
+        fx.pr(2, "feature/ENG-1-b", "feature/ENG-1-base",
+              opened=T0 + timedelta(hours=5))
+        graph = stack.build(self.court(fx))
+        self.assertEqual(graph.edges, [])
+        self.assertEqual(graph.ignored_temporal_edges, 1)
+
     def test_depth_distribution_is_median_and_max_over_stacked_prs(self):
         metric = rules.metrics(*self.metric_args(stack_fixture()))["stacked_cascade"]
         self.assertTrue(metric["available"])
@@ -326,6 +374,34 @@ class CascadeCostTests(StoreCase):
         self.assertEqual(metric["triggers"], 1)              # A's rebase
         self.assertEqual(metric["cascaded_rebases"], 2)      # B and C
         self.assertEqual(metric["re_review_hours"], 14.0)
+
+    def test_a_rebase_outside_the_response_window_is_not_attributed(self):
+        """A push 44 days later is the child's own work, not the cascade (FR-4).
+
+        The review's repro: one trigger (a merge), one upper PR, one rebase 44
+        days later, which used to be charged as six hours of re-review.
+        """
+        fx = Fixture()
+        fx.pr(1, "feature/ENG-1-base", "main", opened=T0, state="merged",
+              closed=T0 + timedelta(hours=24))
+        fx.pr(2, "feature/ENG-1-b", "feature/ENG-1-base",
+              opened=T0 + timedelta(hours=1))
+        fx.event(1, "pr_merged", "RrRr", 24)
+        fx.event(2, "pr_pushed", "AaAa", 44 * 24, push_class="pure_rebase")
+        fx.event(2, "pr_approved", "RrRr", 44 * 24 + 6)
+        metric = self.metric(fx)
+        self.assertEqual(metric["triggers"], 0)
+        self.assertEqual(metric["cascaded_rebases"], 0)
+        self.assertEqual(metric["re_review_hours"], 0.0)
+        self.assertEqual(metric["unattributed_triggers"], 1)
+        self.assertIn("outside", metric["note"])
+
+    def test_a_rebase_inside_the_window_is_still_attributed(self):
+        fx = stack_fixture()
+        metric = self.metric(fx)
+        self.assertEqual(metric["cascaded_rebases"], 2)
+        self.assertEqual(metric["re_review_hours"], 14.0)
+        self.assertEqual(metric["unattributed_triggers"], 0)
 
     def test_one_rebase_is_never_charged_to_two_triggers(self):
         # A merges, then B rebases: both move the branch under C, but C pushes
