@@ -276,6 +276,28 @@ class CloudLabEquivalenceTests(unittest.TestCase):
             "story_points": "customfield_10016",
         })
 
+    def test_epic_scoping_rides_the_cloud_cli(self):
+        # prd/27 + prd/24: MEGASPEED_JIRA_EPICS resolves through the Cloud v3
+        # search, and the run keeps exactly the epic and its children.
+        env = {**self.env, "MEGASPEED_JIRA_EPICS": f"{PROJECT}-1"}
+        out = io.StringIO()
+        with mock.patch.dict(os.environ, env), contextlib.redirect_stdout(out):
+            code = scrape_main(
+                [
+                    "--jira-cloud", "--live",
+                    "--out", str(self.root / "cloud-epic.tgz"),
+                    "--state-dir", str(self.root / "cloud-epic.state"),
+                    "--quiet", "--json",
+                ]
+            )
+        report = json.loads(out.getvalue()) if code == 0 else {}
+        self.assertEqual(code, 0, out.getvalue())
+        self.assertEqual(report["jira_epics"], [f"{PROJECT}-1"])
+        self.assertEqual(report["counts"]["epics"], EXPECTED["epics"])
+        self.assertEqual(report["counts"]["stories"], EXPECTED["stories"])
+        self.assertEqual(report["counts"]["worklogs"], EXPECTED["worklogs"])
+        self.assertEqual(len(report["ticket_keys"]), 1 + EXPECTED["stories"])
+
     def test_the_proxy_discovered_the_labs_field_ids(self):
         self.assertEqual(self.discovered, {
             "Epic Link": "customfield_10100",

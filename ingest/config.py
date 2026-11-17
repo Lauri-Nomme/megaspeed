@@ -42,6 +42,15 @@ _PROJECT_PREFIX = re.compile(r"^[A-Z][A-Z0-9_]*$")
 DEFAULT_TICKET_KEYS: tuple[str, ...] = ()
 _KEY_TOKEN = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,9}-\d{1,6}$")
 
+# An explicit *epic set* (prd/27): the middle ground between "the whole project"
+# and "these exact tickets". At scrape start each epic is resolved to its child
+# issues (one extra JQL search, ``"Epic Link" in (...)``) and the run is scoped
+# to the union, through the same ``key in (...)`` path an explicit key set uses.
+#   MEGASPEED_JIRA_EPICS=DEL-1,DEL-2
+# Precedence (most specific wins): MEGASPEED_TICKET_KEYS > MEGASPEED_JIRA_EPICS >
+# MEGASPEED_JIRA_PROJECTS.
+DEFAULT_JIRA_EPICS: tuple[str, ...] = ()
+
 # Known non-human accounts (prd/02 "Bot vs human": deterministic, known account
 # set). DC's user type SERVICE is always a bot; these slugs catch CI/build
 # accounts that DC reports as NORMAL users.
@@ -111,6 +120,11 @@ class Config:
     #: Jira projects to read. Empty => the ticket projects (the ingest is
     #: ticket-scoped, so it reads exactly the projects it accepts keys from).
     jira_projects: tuple[str, ...] = ()
+    #: An explicit epic set (prd/27). Resolved at scrape start to the epics plus
+    #: their children (``"Epic Link" in (...)``) and scraped through the explicit
+    #: key-set path. Ignored when ``ticket_keys`` is set: the more specific scope
+    #: wins (ticket keys > epics > projects).
+    jira_epics: tuple[str, ...] = DEFAULT_JIRA_EPICS
     jira_auth_user: str = ""
     jira_auth_password: str = ""
     jira_auth_token: str = ""
@@ -198,6 +212,20 @@ def parse_ticket_keys(value: str | list | tuple) -> tuple[str, ...]:
     an operator error: silently ignoring it would scope the run to a *smaller*
     set than intended, which is the one failure mode that must not be quiet.
     """
+    return _parse_key_set(value, "MEGASPEED_TICKET_KEYS=DEL-100,DEL-101")
+
+
+def parse_epic_keys(value: str | list | tuple) -> tuple[str, ...]:
+    """Parse an explicit epic set (``DEL-1,DEL-2`` or a list; prd/27).
+
+    An epic key has the same shape as a ticket key, so the same strictness
+    applies: a typo is an operator error, never a silently smaller scope.
+    """
+    return _parse_key_set(value, "MEGASPEED_JIRA_EPICS=DEL-1,DEL-2")
+
+
+def _parse_key_set(value: str | list | tuple, hint: str) -> tuple[str, ...]:
+    """One strict ``PROJECT-123`` list -> a de-duplicated upper-case tuple."""
     items = value if isinstance(value, (list, tuple)) else str(value).split(",")
     keys: list[str] = []
     for item in items:
@@ -205,10 +233,7 @@ def parse_ticket_keys(value: str | list | tuple) -> tuple[str, ...]:
         if not key:
             continue
         if not _KEY_TOKEN.fullmatch(key):
-            raise SystemExit(
-                f"bad ticket key {key!r}: expected PROJECT-123 "
-                "(MEGASPEED_TICKET_KEYS=DEL-100,DEL-101)"
-            )
+            raise SystemExit(f"bad ticket key {key!r}: expected PROJECT-123 ({hint})")
         if key not in keys:
             keys.append(key)
     return tuple(keys)
@@ -310,6 +335,11 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         parse_ticket_keys(os.environ.get("MEGASPEED_TICKET_KEYS", filt.get("ticket_keys", []))),
         load_ticket_keys_file(_resolve(keys_file, base)) if keys_file else (),
     )
+    # prd/27: the epic set is resolved to epics + children at scrape start, so a
+    # run scoped by epics needs no project-prefix list either.
+    jira_epics = parse_epic_keys(
+        os.environ.get("MEGASPEED_JIRA_EPICS", jira.get("epics", []))
+    )
     config = Config(
         db_path=_resolve(os.environ.get("MEGASPEED_DB", store.get("db", "data/megaspeed.duckdb")), base),
         identity_path=_resolve(
@@ -319,7 +349,7 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         key_shape=os.environ.get("MEGASPEED_KEY_SHAPE", filt.get("key_shape", DEFAULT_KEY_SHAPE)),
         ticket_projects=parse_projects(
             os.environ.get("MEGASPEED_TICKET_PROJECTS", filt.get("ticket_projects", list(DEFAULT_TICKET_PROJECTS))),
-            required=not ticket_keys,
+            required=not (ticket_keys or jira_epics),
         ),
         ticket_keys=ticket_keys,
         bot_slugs=_parse_slugs(
@@ -360,6 +390,8 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
             os.environ.get("MEGASPEED_JIRA_PROJECTS", jira.get("projects", [])),
             required=False,
         ),
+        # prd/27: the epic set is resolved to epics + children at scrape start.
+        jira_epics=jira_epics,
         jira_auth_user=os.environ.get("MEGASPEED_JIRA_USER", ""),
         jira_auth_password=os.environ.get("MEGASPEED_JIRA_PASSWORD", ""),
         jira_auth_token=os.environ.get("MEGASPEED_JIRA_TOKEN", ""),

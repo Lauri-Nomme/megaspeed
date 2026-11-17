@@ -87,6 +87,7 @@ ALLOWED: dict[str, set[str]] = {
     },
     "ingest_runs": {
         "run_id", "source", "as_of", "source_watermark", "classifier_version",
+        "ticket_keys",
         "prs_seen", "prs_kept", "prs_dropped", "events_written", "events_skipped",
         "issues_seen", "issues_kept", "issues_skipped",
     },
@@ -106,6 +107,10 @@ def ensure_schema(con) -> None:
     con.execute("ALTER TABLE objects ADD COLUMN IF NOT EXISTS attributes JSON")
     for column in ("issues_seen", "issues_kept", "issues_skipped"):
         con.execute(f"ALTER TABLE ingest_runs ADD COLUMN IF NOT EXISTS {column} INTEGER")
+    # prd/27: the explicit key set an import enforced, so ``--verify`` can scope
+    # the store the same way the bundle did (a store built from epics has no
+    # MEGASPEED_TICKET_KEYS to read).
+    con.execute("ALTER TABLE ingest_runs ADD COLUMN IF NOT EXISTS ticket_keys VARCHAR[]")
 
 
 # --------------------------------------------------------------------------- #
@@ -162,10 +167,10 @@ def _batches(rows: list, size: int = BATCH_ROWS):
 
 INSERT_RUN = """
 INSERT OR REPLACE INTO ingest_runs
-    (run_id, source, as_of, source_watermark, classifier_version,
+    (run_id, source, as_of, source_watermark, classifier_version, ticket_keys,
      prs_seen, prs_kept, prs_dropped, events_written, events_skipped,
      issues_seen, issues_kept, issues_skipped)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -297,7 +302,13 @@ def write_run(con, run: dict) -> None:
         INSERT_RUN,
         (
             run["run_id"], run["source"], run["as_of"], run["source_watermark"],
-            run["classifier_version"], run["prs_seen"], run["prs_kept"],
+            run["classifier_version"],
+            # prd/18/prd/27: the explicit key set this import enforced. NULL (not
+            # an empty list) means "prefix-scoped", which is what --verify reads
+            # to decide whether a set can be enforced store-wide at all.
+            sorted(str(k).strip().upper() for k in run.get("ticket_keys") or () if str(k).strip())
+            or None,
+            run["prs_seen"], run["prs_kept"],
             run["prs_dropped"], run["events_written"], run["events_skipped"],
             # Jira sources count issues where Bitbucket counts PRs; a run only
             # fills the half that belongs to its source (prd/11 §8: per-source
@@ -307,6 +318,26 @@ def write_run(con, run: dict) -> None:
             int(run.get("issues_skipped") or 0),
         ),
     )
+
+
+def imported_scope(con) -> tuple[str, ...]:
+    """The explicit key set this store's imports agreed on; ``()`` = prefixes.
+
+    ``--verify`` has no bundle to read, so it takes the scope from the runs that
+    built the store: a store imported only by key-scoped runs -- an explicit set
+    (prd/18) or an epic set resolved to epics + children (prd/27) -- must be
+    verified against that same set, because its keys need not share the
+    configured project prefixes. A store that also holds a prefix-scoped run, or
+    has no runs at all, reports no set: the two scopes cannot both be enforced.
+    """
+    try:
+        rows = con.execute("SELECT ticket_keys FROM ingest_runs").fetchall()
+    except Exception:  # a store from a build without the column
+        return ()
+    sets = [tuple(sorted(str(k) for k in (row[0] or ()))) for row in rows]
+    if not sets or any(not keys for keys in sets):
+        return ()
+    return tuple(dict.fromkeys(key for keys in sets for key in keys))
 
 
 # --------------------------------------------------------------------------- #
@@ -698,5 +729,8 @@ def verify(con, key_shape: str = DEFAULT_KEY_SHAPE,
         "ok": not problems,
         "problems": problems,
         "tables": {t: sorted(ALLOWED.get(t, set())) for t in sorted(tables)},
+        # prd/18/prd/27: the explicit key set the check enforced (empty = the
+        # project-prefix check), so a caller can report the scope it verified.
+        "ticket_keys": key_set,
         "summary": summary(con),
     }

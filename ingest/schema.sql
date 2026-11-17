@@ -57,6 +57,9 @@ CREATE TABLE IF NOT EXISTS ingest_runs (
     as_of              TIMESTAMP NOT NULL,    -- watermark: what we knew when
     source_watermark   TIMESTAMP,             -- newest updatedDate / issue updated observed
     classifier_version VARCHAR NOT NULL,
+    ticket_keys        VARCHAR[],             -- the explicit key set the import enforced
+                                              -- (prd/18, prd/27: the epic set resolved to
+                                              -- epics + children); NULL = prefix-scoped
     prs_seen           INTEGER,               -- bitbucket-dc sources
     prs_kept           INTEGER,
     prs_dropped        INTEGER,

@@ -178,5 +178,116 @@ class LiveJiraLabTests(unittest.TestCase):
             con.close()
 
 
+class LiveJiraEpicScopeTests(unittest.TestCase):
+    """prd/27 against the real lab: an epic set keeps the epic and its children.
+
+    ``MEGASPEED_JIRA_EPICS=DEL-1`` must resolve to ``DEL-1`` + ``DEL-100..199``
+    (one extra search), scrape exactly that union, and produce the *same* bundle
+    as handing the resolved keys to ``MEGASPEED_TICKET_KEYS``.
+    """
+
+    EPIC = f"{PROJECT}-1"
+
+    @classmethod
+    def setUpClass(cls):
+        if not _lab_is_up():
+            raise unittest.SkipTest(
+                f"Jira lab not reachable at {BASE_URL} (start jira-lab/lab-up.sh,"
+                " or set MEGASPEED_JIRA_BASE_URL)"
+            )
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.tmp.name)
+
+        def config(**overrides) -> Config:
+            values = dict(
+                db_path=cls.root / "store.duckdb",
+                identity_path=cls.root / "identity.json",
+                ticket_regex=r"\b[A-Z]+-\d+\b",
+                key_shape=r"^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$",
+                repos=[],
+                ticket_projects=(PROJECT,),
+                jira_base_url=BASE_URL,
+                jira_auth_user=USER,
+                jira_auth_password=PASSWORD,
+                jira_min_interval=0.0,
+            )
+            values.update(overrides)
+            return Config(**values)
+
+        transport = HttpTransport(BASE_URL, user=USER, password=PASSWORD)
+        cls.cfg = config(jira_epics=(cls.EPIC,))
+        cls.bundle_path = cls.root / "del-epic.tgz"
+        cls.report = scrape(
+            cls.cfg, transport, SOURCE, out=cls.bundle_path,
+            state_dir=cls.root / "del-epic.state",
+        )
+        cls.imported = import_bundle(cls.cfg, cls.bundle_path)
+        cls.bundle = read_bundle(cls.bundle_path)
+
+        # The explicit-key-set path over the very same keys: same walk, so the
+        # bundles must agree object for object.
+        cls.keys_cfg = config(ticket_keys=tuple(cls.report["ticket_keys"]))
+        cls.keys_bundle_path = cls.root / "del-keys.tgz"
+        cls.keys_report = scrape(
+            cls.keys_cfg, transport, SOURCE, out=cls.keys_bundle_path,
+            state_dir=cls.root / "del-keys.state",
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def test_the_epic_and_its_children_are_what_is_kept(self):
+        counts = self.report["counts"]
+        self.assertEqual(self.report["jira_epics"], [self.EPIC])
+        self.assertEqual(counts["epics"], EXPECTED_EPIC)
+        self.assertEqual(counts["stories"], EXPECTED_STORIES)
+        self.assertEqual(counts["worklogs"], EXPECTED_WORKLOGS)
+        self.assertEqual(self.report["issues_seen"], EXPECTED_EPIC + EXPECTED_STORIES)
+
+    def test_the_resolved_set_is_the_epic_plus_every_story(self):
+        expected = {self.EPIC} | {
+            f"{PROJECT}-{number}" for number in range(100, 100 + EXPECTED_STORIES)
+        }
+        self.assertEqual(set(self.report["ticket_keys"]), expected)
+        self.assertEqual(set(self.bundle.ticket_keys), expected)
+        self.assertEqual(self.bundle.manifest["jira_epics"], [self.EPIC])
+
+    def test_it_costs_exactly_one_extra_search(self):
+        self.assertEqual(
+            self.report["requests_by_kind"]["search"],
+            self.keys_report["requests_by_kind"]["search"] + 1,
+        )
+
+    def test_it_is_the_same_bundle_as_the_explicit_key_set(self):
+        self.assertEqual(
+            sorted(o["object_id"] for o in self.bundle.objects),
+            sorted(o["object_id"] for o in read_bundle(self.keys_bundle_path).objects),
+        )
+        self.assertEqual(
+            self.keys_report["counts"], self.report["counts"]
+        )
+
+    def test_the_import_and_the_verify_use_the_resolved_set(self):
+        self.assertTrue(self.imported["verified"], self.imported["problems"])
+        self.assertEqual(
+            set(self.imported["ticket_keys"]), set(self.report["ticket_keys"])
+        )
+        con = connect(self.cfg.db_path, read_only=True)
+        try:
+            report = verify(
+                con, self.cfg.key_shape, self.cfg.ticket_projects, self.bundle.ticket_keys
+            )
+            self.assertTrue(report["ok"], report["problems"])
+            self.assertEqual(
+                con.execute(
+                    "SELECT count(*) FROM objects WHERE object_type = 'STORY'"
+                ).fetchone()[0],
+                EXPECTED_STORIES,
+            )
+        finally:
+            con.close()
+
+
 if __name__ == "__main__":
     unittest.main()

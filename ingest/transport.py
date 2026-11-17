@@ -173,6 +173,8 @@ _JIRA_BOARD_SPRINTS = re.compile(r"^/rest/agile/1\.0/board/(?P<id>\d+)/sprint$")
 _JQL_KEY_IN = re.compile(r"key\s+in\s*\(([^)]*)\)", re.I)
 _JQL_PROJECT = re.compile(r"project\s*(?:=\s*|in\s*\()\s*\"?([A-Za-z0-9_]+)\"?", re.I)
 _JQL_UPDATED = re.compile(r"updated\s*>=\s*\"?([^\"]+)\"?", re.I)
+#: prd/27: the one search that resolves an epic set to its children.
+_JQL_EPIC_LINK = re.compile(r"\"?\s*Epic Link\s*\"?\s+in\s*\(([^)]*)\)", re.I)
 
 
 def _jql_time(value: str) -> datetime:
@@ -185,8 +187,8 @@ def _jql_time(value: str) -> datetime:
     return datetime.fromisoformat(text).astimezone(timezone.utc)
 
 
-def _jql_filter(issues: list[dict], jql: str) -> list[dict]:
-    """The tiny subset of JQL this fixture honours (keys, project, updated)."""
+def _jql_filter(issues: list[dict], jql: str, epic_field: str = "customfield_10100") -> list[dict]:
+    """The tiny subset of JQL this fixture honours (keys, project, updated, epic)."""
     selected = list(issues)
     match = _JQL_KEY_IN.search(jql or "")
     if match:
@@ -203,6 +205,17 @@ def _jql_filter(issues: list[dict], jql: str) -> list[dict]:
                 for i in selected
                 if str(i.get("key", "")).upper().startswith(project + "-")
             ]
+    # prd/27: ``"Epic Link" in (PROJ-1)`` -- the epic set resolved to its children.
+    match = _JQL_EPIC_LINK.search(jql or "")
+    if match:
+        wanted = {
+            token.strip().strip('"').upper() for token in match.group(1).split(",") if token.strip()
+        }
+        selected = [
+            i
+            for i in selected
+            if str((i.get("fields") or {}).get(epic_field) or "").upper() in wanted
+        ]
     match = _JQL_UPDATED.search(jql or "")
     if match:
         cutoff = _jql_time(match.group(1))
@@ -230,6 +243,16 @@ class FixtureJiraTransport:
             int(sid): [str(k) for k in keys]
             for sid, keys in (bundle.get("sprint_issues") or {}).items()
         }
+        # prd/27: the fixture resolves "Epic Link" by *name*, exactly like a real
+        # installation discovers the field id (it is not portable).
+        self._epic_field = next(
+            (
+                str(field["id"])
+                for field in bundle.get("fields", [])
+                if str(field.get("name") or "") == "Epic Link" and field.get("id")
+            ),
+            "customfield_10100",
+        )
 
     def get(self, path: str, params: dict | None = None) -> dict:
         params = params or {}
@@ -240,7 +263,9 @@ class FixtureJiraTransport:
         if path == "/rest/api/2/status":
             return list(self.bundle.get("statuses", []))
         if path == "/rest/api/2/search":
-            rows = _jql_filter(list(self._issues.values()), str(params.get("jql") or ""))
+            rows = _jql_filter(
+                list(self._issues.values()), str(params.get("jql") or ""), self._epic_field
+            )
             rows.sort(key=lambda i: (str((i.get("fields") or {}).get("updated") or ""), i["key"]))
             fields = [f.strip() for f in str(params.get("fields") or "key").split(",")]
             projected = [_project_issue(i, fields) for i in rows]

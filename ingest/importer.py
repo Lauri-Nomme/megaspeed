@@ -226,6 +226,9 @@ def import_bundle(cfg: Config, path: str | Path, *, verify_contract: bool = True
                     "as_of": as_of,
                     "source_watermark": bundle.watermark,
                     "classifier_version": bundle.classifier_version,
+                    # prd/27: the resolved scope the bundle was scraped with, so
+                    # ``--verify`` can enforce the same set on the store.
+                    "ticket_keys": list(keys),
                     "prs_seen": int(run_info.get("prs_seen") or 0),
                     "prs_kept": int(run_info.get("prs_kept") or 0),
                     "prs_dropped": int(run_info.get("prs_dropped") or 0),
@@ -290,6 +293,10 @@ def _print_import(r: dict) -> None:
         f"{r['events_rewritten']} rewritten, {r['events_derived']} re-derived"
     )
     print(f"objects        {r['objects']}")
+    if r.get("ticket_keys"):
+        # prd/27: the scope the bundle was scraped with (an epic set resolved to
+        # epics + children looks exactly like an explicit key set here).
+        print(f"scope          {len(r['ticket_keys'])} explicit ticket key(s)")
     s = r["summary"]
     print(f"store now      {s['events']} events, {s['prs']} PRs, {s['commits']} commits, as_of {s['as_of']}")
     if s.get("stories") or s.get("epics"):

@@ -196,7 +196,15 @@ def _print_jira_scrape(r: dict) -> None:
     print(f"state          {r['state_dir']}  (watermark + issues + identity, raw zone, never transferred)")
     print(f"identity map   {r['identity_map']}")
     print(f"projects       {', '.join(r['projects'])}")
-    scope = filter_scope(tuple(r['ticket_projects']), tuple(r.get('ticket_keys') or ()))
+    epics = tuple(r.get("jira_epics") or ())
+    keys = tuple(r.get("ticket_keys") or ())
+    scope = (
+        # prd/27: the epic set resolved to epics + children; listing 100 keys
+        # would bury the line, so name the epics and count the union.
+        f"epics {','.join(epics)} -> {len(keys)} key(s)"
+        if epics
+        else filter_scope(tuple(r['ticket_projects']), keys)
+    )
     print(f"ticket filter  {r['ticket_regex']}   ({scope})")
     fields = ", ".join(f"{k}={v}" for k, v in r["fields"].items())
     print(f"fields         {fields or '—'}")

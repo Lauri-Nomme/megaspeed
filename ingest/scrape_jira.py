@@ -12,6 +12,14 @@ python3 -m ingest scrape --jira-cloud --live --project DEL --out export/del-jira
 python3 -m ingest scrape --jira --fixture --out /tmp/jira-fixture.tgz
 ```
 
+The scope is chosen by the most specific setting available (prd/18, prd/27):
+an explicit ticket set (``MEGASPEED_TICKET_KEYS``) beats an epic set
+(``MEGASPEED_JIRA_EPICS``), which beats the project list
+(``MEGASPEED_JIRA_PROJECTS``). An epic set is resolved once, at the start of the
+run, with one extra search (``"Epic Link" in (DEL-1, DEL-2)``); from then on the
+walk is an ordinary explicit-key-set walk, and the resolved keys ride in the
+bundle manifest so import and ``--verify`` scope the store the same way.
+
 The Cloud variant (prd/24) is the *same* walk and the same reducer with a
 different client (:class:`ingest.jira_cloud.CloudJiraClient`): v3 paths, Bearer
 PAT, cursor pagination and Cloud's field ids, so both sources emit the same
@@ -191,7 +199,13 @@ class JiraCollected:
     requests_by_kind: dict[str, int] = field(default_factory=dict)
     ticket_regex: str = ""
     ticket_projects: tuple[str, ...] = ()
+    #: The explicit key set the walk was scoped to: ``MEGASPEED_TICKET_KEYS``
+    #: verbatim (prd/18), or the epic set *resolved* to epics + children
+    #: (prd/27). It rides in the manifest, so import and ``--verify`` scope the
+    #: store exactly the way the scrape did.
     ticket_keys: tuple[str, ...] = ()
+    #: The epic keys the operator asked for (prd/27); empty unless epic-scoped.
+    epic_keys: tuple[str, ...] = ()
     identity: IdentityTable | None = None
     watermark: datetime | None = None
     boards: dict[str, int] = field(default_factory=dict)
@@ -221,7 +235,8 @@ def jql_for(project: str, *, since: datetime | None = None, keys: tuple[str, ...
     ``since`` is the watermark overlap cursor; Jira's own ``yyyy/MM/dd HH:mm``
     form is used so the query is portable across DC versions. An explicit key
     set (prd/18) replaces the project clause entirely: on a shared project a
-    prefix would match everyone's tickets.
+    prefix would match everyone's tickets. The key set an epic scope resolves to
+    (prd/27) rides through here too, so the walk is the same either way.
     """
     if keys:
         scope = "key in (" + ",".join(keys) + ")"
@@ -232,6 +247,40 @@ def jql_for(project: str, *, since: datetime | None = None, keys: tuple[str, ...
     if since is not None:
         clauses.append(f'updated >= "{since.strftime("%Y/%m/%d %H:%M")}"')
     return " AND ".join(clauses) + " ORDER BY updated ASC"
+
+
+def jql_for_epics(epics: tuple[str, ...]) -> str:
+    """The one extra search that resolves an epic set to its children (prd/27)."""
+    return '"Epic Link" in (' + ",".join(epics) + ")"
+
+
+def resolve_epic_keys(
+    client: JiraClient,
+    epics: tuple[str, ...],
+    *,
+    progress: ProgressReporter | None = None,
+) -> tuple[str, ...]:
+    """An epic set -> the epics themselves **plus** their child issues (prd/27).
+
+    One search over the *keys* the scope is made of, so an epic-scoped run costs
+    exactly one request more than an explicit key set -- the walk, the manifest
+    and import then cannot tell the two apart. The epic keys come first (they
+    are what the operator asked for) and a child is de-duplicated, so the result
+    is a stable order regardless of the search's own ordering.
+    """
+    keys: list[str] = [str(key) for key in epics if str(key)]
+    for row in client.search(jql_for_epics(tuple(keys)), fields="key"):
+        key = str(row.get("key") or "")
+        if key and key not in keys:
+            keys.append(key)
+    if progress is not None:
+        progress.emit(f"[scrape] epics {', '.join(epics)} -> {len(keys)} key(s)")
+    return tuple(keys)
+
+
+def _projects_of(keys: tuple[str, ...]) -> tuple[str, ...]:
+    """The project prefixes of a key set, in first-seen order (``DEL-1`` -> DEL)."""
+    return tuple(dict.fromkeys(key.partition("-")[0] for key in keys if "-" in key))
 
 
 def collect(
@@ -283,9 +332,6 @@ def collect(
     as_of = utcnow()
     run_id = f"{source}-{as_of.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:6]}"
     ident = identity or IdentityTable(cfg.identity_path)
-    key_filter = KeyFilter.build(
-        cfg.ticket_regex, cfg.key_shape, cfg.ticket_projects, cfg.ticket_keys
-    )
     client = client or JiraClient(
         transport,
         page_limit=cfg.jira_page_limit,
@@ -293,7 +339,26 @@ def collect(
             0.0 if source.startswith(("fixture", "jira-fixture")) else cfg.jira_min_interval
         ),
     )
-    project_list = tuple(projects or cfg.jira_projects or cfg.ticket_projects)
+    # -- scope: ticket keys > epics > projects (prd/18, prd/27) -----------
+    # The most specific scope wins. An epic set is resolved here, once, to the
+    # epics plus their children, and from then on the run is an ordinary
+    # explicit-key-set run: same ``key in (...)`` query, same manifest, so
+    # import and ``--verify`` cannot tell the two paths apart.
+    epic_keys = () if cfg.ticket_keys else tuple(cfg.jira_epics)
+    scope_keys = tuple(cfg.ticket_keys)
+    if epic_keys:
+        scope_keys = resolve_epic_keys(client, epic_keys, progress=progress)
+    key_filter = KeyFilter.build(
+        cfg.ticket_regex, cfg.key_shape, cfg.ticket_projects, scope_keys
+    )
+    # The epics name the projects to read sprints from, so an epic-scoped run
+    # does not need (or inherit) an unrelated project list.
+    project_list = tuple(
+        projects
+        or (_projects_of(epic_keys) if epic_keys else ())
+        or cfg.jira_projects
+        or cfg.ticket_projects
+    )
     out = JiraCollected(
         source=source,
         as_of=as_of,
@@ -301,7 +366,8 @@ def collect(
         projects=project_list,
         ticket_regex=cfg.ticket_regex,
         ticket_projects=cfg.ticket_projects,
-        ticket_keys=cfg.ticket_keys,
+        ticket_keys=scope_keys,
+        epic_keys=epic_keys,
         identity=ident,
         resumed=bool(carry_events or carry_objects),
         carried_events=list(carry_events or []),
@@ -361,9 +427,10 @@ def collect(
     previous = None if full else (state.watermark(source) if state else None)
     cutoff = previous - timedelta(hours=overlap_hours) if previous else None
     prior = {} if full else (issue_state.entries(source) if issue_state else {})
-    # An explicit key set (prd/18) is one query across projects: `key in (...)`
-    # replaces the project clause, so only the first project is walked.
-    key_scoped = bool(cfg.ticket_keys)
+    # An explicit key set -- from MEGASPEED_TICKET_KEYS (prd/18) or resolved from
+    # an epic set (prd/27) -- is one query across projects: `key in (...)` replaces
+    # the project clause, so only the first project is walked.
+    key_scoped = bool(scope_keys)
     seen: set[str] = set()
     stop = False
     truncated = False
@@ -398,7 +465,7 @@ def collect(
         jql = jql_for(
             project,
             since=cutoff,
-            keys=cfg.ticket_keys if key_scoped else (),
+            keys=scope_keys if key_scoped else (),
         )
         for row in client.search(jql):
             key = str(row.get("key") or "")
@@ -640,6 +707,10 @@ def build_manifest(collected: JiraCollected, *, previous: datetime | None,
         "classifier_version": taxonomy.CLASSIFIER_VERSION,
         "ticket_projects": list(collected.ticket_projects),
         "ticket_keys": list(collected.ticket_keys),
+        # prd/27: the epic keys the operator asked for. ``ticket_keys`` above is
+        # the *resolved* set (epics + children), which is what import and
+        # ``--verify`` enforce; this is provenance for the request.
+        "jira_epics": list(collected.epic_keys),
         "ticket_regex": collected.ticket_regex,
         "projects": list(collected.projects),
         "repos": [],
@@ -932,7 +1003,10 @@ def scrape(
         "classifier_version": taxonomy.CLASSIFIER_VERSION,
         "ticket_regex": cfg.ticket_regex,
         "ticket_projects": list(cfg.ticket_projects),
-        "ticket_keys": list(cfg.ticket_keys),
+        # The scope the run actually used: the explicit set, or the epic set
+        # resolved to epics + children (prd/27). Import/--verify use this.
+        "ticket_keys": list(collected.ticket_keys),
+        "jira_epics": list(collected.epic_keys),
     }
 
 
@@ -942,5 +1016,7 @@ __all__ = [
     "JiraIssueState",
     "collect",
     "jql_for",
+    "jql_for_epics",
+    "resolve_epic_keys",
     "scrape",
 ]

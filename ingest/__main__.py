@@ -29,7 +29,7 @@ from . import fixtures as fixtures_mod
 from .config import Config, REPO_ROOT, filter_scope, load_config
 from .live import run
 from .scrape import DEFAULT_OVERLAP_HOURS
-from .store import connect, verify
+from .store import connect, imported_scope, verify
 from .transport import BitbucketError, FixtureTransport, HttpTransport
 
 
@@ -165,7 +165,11 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         con = connect(cfg.db_path, read_only=True)
         try:
-            report = verify(con, cfg.key_shape, cfg.ticket_projects, cfg.ticket_keys)
+            # prd/27: an epic-scoped (or key-scoped) store carries its scope in
+            # ingest_runs, so --verify enforces the same set the import did even
+            # though the operator only configured MEGASPEED_JIRA_EPICS.
+            keys = cfg.ticket_keys or imported_scope(con)
+            report = verify(con, cfg.key_shape, cfg.ticket_projects, keys)
         finally:
             con.close()
         if args.json:
@@ -382,6 +386,10 @@ def _print_verify(report: dict, db: Path) -> None:
     s = report["summary"]
     print(f"store          {db}")
     print(f"events         {s['events']}   PRs {s['prs']}   commits {s['commits']}   as_of {s['as_of']}")
+    keys = report.get("ticket_keys") or []
+    if keys:
+        shown = ", ".join(keys[:4]) + (" …" if len(keys) > 4 else "")
+        print(f"scope          {len(keys)} explicit ticket key(s): {shown}")
     print("tables:")
     for table, columns in report["tables"].items():
         print(f"  {table:14} {', '.join(columns)}")
