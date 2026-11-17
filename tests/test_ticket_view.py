@@ -118,7 +118,7 @@ class Fixture:
         self.event(key, ts, "pointed", points=points)
 
     def status(self, key: str, ts: datetime, to_status: str,
-               from_status: str = "todo") -> None:
+               from_status: str = "backlog") -> None:
         self.event(key, ts, "status_changed",
                    **{"from_status": from_status, "to_status": to_status})
 
@@ -262,7 +262,7 @@ class StoreCase(unittest.TestCase):
 # analysis/tickets.py
 # --------------------------------------------------------------------------- #
 class TicketCycleTests(StoreCase):
-    def test_the_eight_segments_and_nine_boundaries(self):
+    def test_the_eight_segments_and_the_boundary_timestamps(self):
         con, court, data = self.load()
         try:
             payload = tickets.ticket(court, data, "DEL-167")
@@ -294,13 +294,20 @@ class TicketCycleTests(StoreCase):
         )
         self.assertEqual(segments["largest"], "review_rounds")
         self.assertEqual(segments["largest_share"], round(20 / 90, 4))
-        # the 9 boundary timestamps, in order, each with an availability flag
+        # the boundary timestamps, in order, each with an availability flag.
+        # prd/29 adds the three workflow-stage boundaries; without a stage map
+        # (this store) the review/QA ones are honestly unavailable.
         self.assertEqual(
             list(segments["boundaries"]),
-            ["created", "refined", "sprint", "started", "pr_open",
-             "first_review", "approval", "merged", "done"],
+            ["created", "refined", "ready", "sprint", "started", "in_review",
+             "in_verification", "pr_open", "first_review", "approval", "merged",
+             "done"],
         )
-        self.assertTrue(all(entry["available"] for entry in segments["boundaries"].values()))
+        self.assertEqual(
+            sorted(name for name, entry in segments["boundaries"].items()
+                   if not entry["available"]),
+            ["in_review", "in_verification"],
+        )
         self.assertEqual(segments["boundaries"]["refined"]["ts"],
                          "2026-01-05T19:00:00Z")
         # flow efficiency is per segment, and the worklog lands in sprint→started
@@ -555,7 +562,7 @@ class TicketApiTests(unittest.TestCase):
         self.assertEqual(body["key"], "DEL-167")
         self.assertEqual(body["story"]["points"], 8)
         self.assertEqual(len(body["segments"]["rows"]), 8)
-        self.assertEqual(len(body["segments"]["boundaries"]), 9)
+        self.assertEqual(len(body["segments"]["boundaries"]), 12)
         self.assertEqual(body["pr_count"], 2)
         self.assertEqual(body["worklog"]["worklogs"], 1)
         self.assertEqual(body["sprints"]["memberships"][0]["sprint_id"], 1)

@@ -25,7 +25,7 @@ from ingest.jira_pipeline import (
     log_delay_bucket,
     points_value,
     resolution_class,
-    status_class,
+    status_stage,
 )
 from ingest.pseudonym import IdentityTable
 
@@ -33,6 +33,55 @@ UTC = timezone.utc
 T0 = datetime(2026, 8, 17, 9, 0, tzinfo=UTC)
 
 CATEGORIES = {"10000": "new", "10001": "indeterminate", "10002": "done"}
+
+# The install's real workflows (prd/29 §1): status name, status id, Jira
+# category. The category alone cannot tell IN REVIEW from IN PROGRESS, which is
+# why the stage map exists.
+STORY_WORKFLOW = (
+    ("OPEN", "10010", "new"),
+    ("READY FOR REFINEMENT", "10011", "new"),
+    ("REFINED", "10012", "indeterminate"),
+    ("IN PROGRESS", "10013", "indeterminate"),
+    ("IN REVIEW", "10014", "indeterminate"),
+    ("IN VERIFICATION", "10015", "indeterminate"),
+    ("CLOSED", "10016", "done"),
+)
+BUG_WORKFLOW = (
+    ("NEW", "10020", "new"),
+    ("TRIAGED", "10021", "indeterminate"),
+    ("IN PROGRESS", "10022", "indeterminate"),
+    ("IN REVIEW", "10023", "indeterminate"),
+    ("IN VERIFICATION", "10024", "indeterminate"),
+    ("RESOLVED", "10025", "done"),
+)
+WORKFLOW_CATEGORIES = {
+    status_id: category for _, status_id, category in STORY_WORKFLOW + BUG_WORKFLOW
+}
+#: ``[jira.stages]`` for the workflows above (prd/29 §2).
+WORKFLOW_STAGE_MAP = {
+    "open": "backlog",
+    "ready for refinement": "backlog",
+    "refined": "ready",
+    "in progress": "in_progress",
+    "in review": "in_review",
+    "in verification": "in_verification",
+    "closed": "done",
+    "new": "backlog",
+    "triaged": "ready",
+    "resolved": "done",
+}
+
+
+def _walk(workflow) -> list:
+    """One changelog history per step, with the exact status names and ids."""
+    histories = []
+    for index, ((name, sid, _c), (next_name, next_id, _n)) in enumerate(
+        zip(workflow, workflow[1:]), start=1
+    ):
+        histories.append(_history(index, T0 + timedelta(days=index), [
+            _item("status", name, next_name, sid, next_id),
+        ]))
+    return histories
 REPORTER = {"name": "lauri.nomme", "displayName": "Lauri Nomme", "emailAddress": "lauri.nomme@example.invalid"}
 DEV = {"name": "mari.tamm", "displayName": "Mari Tamm", "emailAddress": "mari.tamm@example.invalid"}
 
@@ -82,15 +131,48 @@ def _history(hid, when, items, author=REPORTER) -> dict:
 
 
 class PureFunctionTests(unittest.TestCase):
-    def test_status_class_uses_the_category_not_the_name(self):
-        self.assertEqual(status_class("10000", "To Do", CATEGORIES), "todo")
-        self.assertEqual(status_class("10001", "In Progress", CATEGORIES), "in_progress")
-        self.assertEqual(status_class("10002", "Done", CATEGORIES), "done")
+    def test_status_stage_uses_the_category_not_the_name(self):
+        # prd/29: the category projection is the deterministic default, and it
+        # is why an unconfigured store keeps the pre-prd/29 numbers.
+        self.assertEqual(status_stage("10000", "To Do", CATEGORIES), "backlog")
+        self.assertEqual(status_stage("10001", "In Progress", CATEGORIES), "in_progress")
+        self.assertEqual(status_stage("10002", "Done", CATEGORIES), "done")
+        # a review status is category ``indeterminate`` -> in_progress without a
+        # map: the collapse prd/29 exists to fix.
+        self.assertEqual(
+            status_stage("10003", "In Review", {"10003": "indeterminate"}), "in_progress"
+        )
         # an unknown id falls back to keyword rules over the name ...
-        self.assertEqual(status_class("99999", "In Review", {}), "in_progress")
+        self.assertEqual(status_stage("99999", "In Review", {}), "in_review")
+        self.assertEqual(status_stage("99999", "In Verification", {}), "in_verification")
+        self.assertEqual(status_stage("99999", "Refined", {}), "ready")
+        self.assertEqual(status_stage("99999", "Ready for Refinement", {}), "backlog")
         # ... and an unknown name is ``other``, never the name itself
-        self.assertEqual(status_class("99999", "Waiting for the vendor", {}), "other")
-        self.assertNotIn("Waiting for the vendor", taxonomy.STATUS_CLASS)
+        self.assertEqual(status_stage("99999", "Waiting for the vendor", {}), "other")
+        self.assertNotIn("Waiting for the vendor", taxonomy.STATUS_STAGE)
+
+    def test_the_stage_map_beats_the_category_beats_the_name(self):
+        stage_map = {"in review": "in_review", "in verification": "in_verification"}
+        # 1. the config map wins, even over a category that says otherwise
+        self.assertEqual(
+            status_stage("10003", "In Review", {"10003": "indeterminate"}, stage_map),
+            "in_review",
+        )
+        self.assertEqual(
+            status_stage("10004", "IN VERIFICATION", {"10004": "new"}, stage_map),
+            "in_verification",
+        )
+        # 2. the category wins over the name rules ("Refined" would be ready)
+        self.assertEqual(
+            status_stage("10005", "Refined", {"10005": "indeterminate"}, stage_map),
+            "in_progress",
+        )
+        # 3. name rules only for an id the categories map does not know
+        self.assertEqual(status_stage("99999", "Triaged", {}, stage_map), "ready")
+        # 4. every answer is a stage, and a name never crosses
+        for value in ("backlog", "ready", "in_progress", "in_review", "in_verification"):
+            self.assertIn(value, taxonomy.STATUS_STAGE)
+        self.assertEqual(status_stage("99999", "Escalated", {}, stage_map), "other")
 
     def test_resolution_class(self):
         self.assertIsNone(resolution_class(None))
@@ -217,7 +299,7 @@ class ReducerTests(unittest.TestCase):
         stats = self._reduce(_issue(histories=histories))
         changes = [e for e in stats.events if e["activity"] == "status_changed"]
         self.assertEqual(len(changes), 2)
-        self.assertEqual(changes[0]["attributes"]["from_status"], "todo")
+        self.assertEqual(changes[0]["attributes"]["from_status"], "backlog")
         self.assertEqual(changes[0]["attributes"]["to_status"], "in_progress")
         self.assertEqual(changes[1]["attributes"]["to_status"], "done")
         self.assertEqual(stats.transitions, 2)
@@ -229,6 +311,74 @@ class ReducerTests(unittest.TestCase):
         self._reduce(_issue(histories=histories))
         self.assertEqual([e for e in stats.events if e["activity"] == "status_changed"], [])
         self.assertEqual(stats.changelog_ignored, 1)
+
+    def test_the_install_workflows_project_onto_stages(self):
+        """Story and Bug changelogs -> the exact stage transitions (prd/29).
+
+        OPEN -> READY FOR REFINEMENT is two *backlog* statuses, so it is not a
+        stage transition and emits nothing; every other step does, and each row
+        passes the closed-vocabulary gate.
+        """
+        story = _issue(
+            key="DEL-200",
+            status={"id": "10010", "name": "OPEN"},
+            histories=_walk(STORY_WORKFLOW),
+        )
+        bug = _issue(
+            key="DEL-201", itype="Bug",
+            status={"id": "10020", "name": "NEW"},
+            histories=_walk(BUG_WORKFLOW),
+        )
+        self.reducer.stage_map = dict(WORKFLOW_STAGE_MAP)
+        self.reducer.status_categories = dict(WORKFLOW_CATEGORIES)
+        self.reducer.prime([story, bug], [])
+        self.reducer.reduce_issue(story, project="DEL", memberships={}, stats=self.stats)
+        self.reducer.reduce_issue(bug, project="DEL", memberships={}, stats=self.stats)
+        stats = self.stats
+        changes = [e for e in stats.events if e["activity"] == "status_changed"]
+
+        def pairs(key):
+            return [
+                (e["attributes"]["from_status"], e["attributes"]["to_status"])
+                for e in changes if e["event_key"].startswith(f"{key}:")
+            ]
+
+        self.assertEqual(pairs("DEL-200"), [
+            ("backlog", "ready"),
+            ("ready", "in_progress"),
+            ("in_progress", "in_review"),
+            ("in_review", "in_verification"),
+            ("in_verification", "done"),
+        ])
+        self.assertEqual(pairs("DEL-201"), [
+            ("backlog", "ready"),
+            ("ready", "in_progress"),
+            ("in_progress", "in_review"),
+            ("in_review", "in_verification"),
+            ("in_verification", "done"),
+        ])
+        # the closed-vocabulary gate accepts every emitted row
+        for event in changes:
+            taxonomy.check_attributes(event["attributes"])
+            self.assertIn(event["attributes"]["to_status"], taxonomy.STATUS_STAGE)
+        # OPEN -> READY FOR REFINEMENT (both backlog) was counted, not stored
+        self.assertGreaterEqual(stats.changelog_ignored, 1)
+
+    def test_without_a_stage_map_the_same_workflow_is_the_coarse_projection(self):
+        """No config => today's numbers: review/QA fold into in_progress."""
+        story = _issue(
+            key="DEL-202",
+            status={"id": "10010", "name": "OPEN"},
+            histories=_walk(STORY_WORKFLOW),
+        )
+        self.reducer.status_categories = dict(WORKFLOW_CATEGORIES)
+        stats = self._reduce(story)
+        changes = [e for e in stats.events if e["activity"] == "status_changed"]
+        self.assertEqual(
+            [(e["attributes"]["from_status"], e["attributes"]["to_status"])
+             for e in changes],
+            [("backlog", "in_progress"), ("in_progress", "done")],
+        )
 
     def test_points_assignee_and_sprint_changes(self):
         histories = [

@@ -120,7 +120,7 @@ class Fixture:
         self.event(key, ts, "pointed", points=points)
 
     def status(self, key: str, ts: datetime, to_status: str,
-               from_status: str = "todo") -> None:
+               from_status: str = "backlog") -> None:
         self.event(key, ts, "status_changed",
                    **{"from_status": from_status, "to_status": to_status})
 
@@ -294,7 +294,12 @@ class WaitingTimeTests(StoreCase):
                          round(20 / 90, 4))
         self.assertEqual(metric["segments"]["ready_refined"]["share"],
                          round(10 / 90, 4))
-        self.assertEqual(metric["missing_boundaries"], {})
+        # prd/29: no workflow map, so the review/QA stages do not exist -- the
+        # two stage boundaries are honestly reported missing, and the eight
+        # segments (with ``merge_done``) are unchanged.
+        self.assertEqual(
+            metric["missing_boundaries"], {"in_review": 1, "in_verification": 1}
+        )
         self.assertEqual(metric["order"], list(jira.SEGMENT_KEYS))
 
     def test_flow_efficiency_is_per_segment(self):

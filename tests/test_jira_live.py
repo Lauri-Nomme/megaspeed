@@ -144,11 +144,11 @@ class LiveJiraLabTests(unittest.TestCase):
         self.assertIn("late", self.report["log_delays"])
         self.assertGreater(sum(self.report["log_delays"].values()), 0)
 
-    def test_status_transitions_are_categories(self):
+    def test_status_transitions_are_stages(self):
         changes = [e for e in self.bundle.events if e["activity"] == "status_changed"]
         self.assertTrue(changes)
         for event in changes:
-            self.assertIn(event["attributes"]["to_status"], taxonomy.STATUS_CLASS)
+            self.assertIn(event["attributes"]["to_status"], taxonomy.STATUS_STAGE)
 
     def test_the_bundle_imports_and_passes_the_contract(self):
         self.assertTrue(self.imported["verified"], self.imported["problems"])

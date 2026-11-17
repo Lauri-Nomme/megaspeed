@@ -125,7 +125,7 @@ class Fixture:
         self.event(key, ts, "pointed", points=points)
 
     def status(self, key: str, ts: datetime, to_status: str,
-               from_status: str = "todo") -> None:
+               from_status: str = "backlog") -> None:
         self.event(key, ts, "status_changed",
                    **{"from_status": from_status, "to_status": to_status})
 

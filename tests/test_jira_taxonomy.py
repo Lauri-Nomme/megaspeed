@@ -40,8 +40,27 @@ class VocabularyTests(unittest.TestCase):
         self.assertEqual(taxonomy.ISSUE_STATE, {"open", "done", "wont_do", "duplicate", "other"})
         self.assertEqual(taxonomy.SPRINT_STATE, {"future", "active", "closed"})
 
-    def test_status_classes_are_a_projection_of_jira_categories(self):
-        self.assertEqual(taxonomy.STATUS_CLASS, {"todo", "in_progress", "done", "other"})
+    def test_status_stages_are_a_closed_set(self):
+        # prd/29: the fixed stage vocabulary. ``STATUS_CLASS`` is the pre-prd/29
+        # name for the same closed set (an alias, not a second vocabulary).
+        self.assertEqual(
+            taxonomy.STATUS_STAGE,
+            {"backlog", "ready", "in_progress", "in_review", "in_verification",
+             "done", "other"},
+        )
+        self.assertIs(taxonomy.STATUS_CLASS, taxonomy.STATUS_STAGE)
+
+    def test_normalize_stage_reads_every_store_generation(self):
+        # a legacy store wrote ``todo`` where the stage vocabulary writes backlog
+        self.assertEqual(taxonomy.normalize_stage("todo"), "backlog")
+        # stages pass through, including the coarse ones old stores already had
+        for stage in ("backlog", "ready", "in_progress", "in_review",
+                      "in_verification", "done", "other"):
+            self.assertEqual(taxonomy.normalize_stage(stage), stage)
+        # anything else is ``other``, never the value itself
+        self.assertEqual(taxonomy.normalize_stage("In Review"), "other")
+        self.assertEqual(taxonomy.normalize_stage(None), "other")
+        self.assertEqual(taxonomy.normalize_stage(""), "other")
 
     def test_worklog_noise_buckets_are_closed(self):
         self.assertEqual(
@@ -50,7 +69,7 @@ class VocabularyTests(unittest.TestCase):
 
     def test_jira_event_attributes_validate(self):
         ok = {
-            "from_status": "todo",
+            "from_status": "backlog",
             "to_status": "done",
             "sprint_id": 3,
             "at_start": True,
@@ -64,6 +83,12 @@ class VocabularyTests(unittest.TestCase):
     def test_a_raw_status_name_cannot_be_stored_as_an_attribute(self):
         with self.assertRaises(taxonomy.TaxonomyError):
             taxonomy.check_attributes({"to_status": "In Review"})
+        # ... and neither can the pre-prd/29 label: the gate accepts stages only
+        with self.assertRaises(taxonomy.TaxonomyError):
+            taxonomy.check_attributes({"from_status": "todo"})
+        # every stage does validate, both ends
+        for stage in taxonomy.STATUS_STAGE:
+            taxonomy.check_attributes({"from_status": stage, "to_status": stage})
         with self.assertRaises(taxonomy.TaxonomyError):
             taxonomy.check_attributes({"points": -1})
         with self.assertRaises(taxonomy.TaxonomyError):

@@ -135,15 +135,15 @@ class FixtureScrapeTests(unittest.TestCase):
             for object_id in event["objects"]:
                 self.assertIn(object_id, object_ids, event["key"])
 
-    def test_status_transitions_are_categories(self):
+    def test_status_transitions_are_stages(self):
         rows = self.con.execute(
             "SELECT attributes FROM events WHERE activity = 'status_changed'"
         ).fetchall()
         self.assertTrue(rows)
         for (attributes,) in rows:
             payload = json.loads(attributes) if isinstance(attributes, str) else attributes
-            self.assertIn(payload["from_status"], taxonomy.STATUS_CLASS)
-            self.assertIn(payload["to_status"], taxonomy.STATUS_CLASS)
+            self.assertIn(payload["from_status"], taxonomy.STATUS_STAGE)
+            self.assertIn(payload["to_status"], taxonomy.STATUS_STAGE)
             self.assertNotEqual(payload["from_status"], payload["to_status"])
 
     def test_sprint_events_cover_removal_and_membership_at_start(self):
