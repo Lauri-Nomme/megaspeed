@@ -59,6 +59,9 @@ const METRICS = {
 };
 
 const GUTTER = 176;
+// prd/28: on a 412px phone the 176px gutter would leave ~226px of plot; the
+// labels shrink to the ticket key so the time axis keeps most of the width.
+const GUTTER_PHONE = 88;
 const AXIS_H = 42;
 const HIST_H = 36;
 const HEADER_H = 22;
@@ -178,6 +181,13 @@ export class Timeline {
     this.hits = [];
     this.hover = null;
     this.drag = null;
+    // prd/28: touch state — one finger pans, two fingers pinch, a tap selects
+    // and a hold shows the tooltip. `_touchAt` suppresses the synthetic mouse
+    // events a browser fires after a touch so one tap never acts twice.
+    this._touchAt = 0;
+    this._pointers = new Map();
+    this._pinch = null;
+    this._holdTimer = 0;
     this.dirty = false;
     this.raf = 0;
     this._life = new Map();
@@ -657,13 +667,14 @@ export class Timeline {
     const height = AXIS_H + HIST_H + HEADER_H + lanes.length * laneH +
       (objectMode ? 0 : SECTION_GAP + HEADER_H + barRows.length * m.bar) + BOTTOM;
     const width = this.canvas.parentElement.clientWidth || 1200;
+    const gutter = width <= 640 ? GUTTER_PHONE : GUTTER;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     this.canvas.width = Math.round(width * dpr);
     this.canvas.height = Math.round(height * dpr);
     this.canvas.style.height = `${height}px`;
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.geom = {
-      width, height, gutter: GUTTER, plotW: Math.max(80, width - GUTTER - 10),
+      width, height, gutter, plotW: Math.max(80, width - gutter - 10),
       axisH: AXIS_H, histH: HIST_H, headerH: HEADER_H, laneH, barH: m.bar,
       label: m.label, marker: m.marker, objectMode,
       laneTop: AXIS_H + HIST_H + HEADER_H,
@@ -1004,7 +1015,12 @@ export class Timeline {
       ? `${rows.filter((row) => row.kind === 'story').length} stories · ` +
         `${rows.filter((row) => row.kind === 'pr').length} PRs`
       : String(rows.length);
-    ctx.fillText(`${section} · ${sectionCount}`, g.gutter - 10, AXIS_H + HIST_H + 11);
+    const narrow = g.gutter < 120;
+    ctx.fillText(
+      narrow ? `${section} ${sectionCount}` : `${section} · ${sectionCount}`,
+      g.gutter - 10,
+      AXIS_H + HIST_H + 11,
+    );
 
     rows.forEach((row, i) => {
       const y = g.laneTop + i * g.laneH;
@@ -1026,7 +1042,10 @@ export class Timeline {
       ctx.fillStyle = hovered ? '#E8E9EB' : linked ? '#94B4D4' : '#B9BBC0';
       ctx.textAlign = 'right';
       const indent = row.depth ? `${'  '.repeat(row.depth)}↳ ` : '';
-      const label = fit(ctx, `${indent}${row.label || row.key}`, g.gutter - 22);
+      const text = narrow
+        ? (row.ticket || (row.pr ? `#${row.pr.number}` : (row.label || row.key)))
+        : `${indent}${row.label || row.key}`;
+      const label = fit(ctx, text, narrow ? g.gutter - 12 : g.gutter - 22);
       ctx.fillText(label, g.gutter - 10, y + g.laneH / 2);
       if (linked) {
         this.hits.push({
@@ -1307,7 +1326,11 @@ export class Timeline {
     ctx.font = `600 ${Math.max(10, g.label - 1)}px Inter, system-ui, sans-serif`;
     ctx.textAlign = 'right';
     ctx.fillStyle = '#8A8D93';
-    ctx.fillText(`PR LIFECYCLE · ${g.barRows.length}`, g.gutter - 10, g.barTop - 11);
+    ctx.fillText(
+      g.gutter < 120 ? `PRs ${g.barRows.length}` : `PR LIFECYCLE · ${g.barRows.length}`,
+      g.gutter - 10,
+      g.barTop - 11,
+    );
 
     g.barRows.forEach((pr, i) => {
       const y = g.barTop + i * g.barH;
@@ -1321,8 +1344,10 @@ export class Timeline {
       ctx.textAlign = 'right';
       ctx.fillStyle = isHover ? '#E8E9EB' : '#B9BBC0';
       const key = pr.ticket ? `${pr.ticket} ` : '';
-      const label = `${key}#${pr.number} ${pr.repo}`;
-      ctx.fillText(fit(ctx, label, g.gutter - 22), g.gutter - 10, y + g.barH / 2);
+      const label = g.gutter < 120
+        ? (pr.ticket || `#${pr.number}`)
+        : `${key}#${pr.number} ${pr.repo}`;
+      ctx.fillText(fit(ctx, label, g.gutter < 120 ? g.gutter - 12 : g.gutter - 22), g.gutter - 10, y + g.barH / 2);
 
       const barY = y + 2;
       const barH = g.barH - 4;
@@ -1474,10 +1499,49 @@ export class Timeline {
   }
 
   // ---------------------------------------------------------------- input
+  /** A browser fires compatibility mouse events after a touch; ignore them. */
+  _recentTouch() {
+    return this._touchAt > 0 && Date.now() - this._touchAt < 800;
+  }
+
+  /** What a click/tap on a hit does (shared by mouse and touch). */
+  _activate(hit) {
+    if (!hit) return false;
+    // prd/25: a ticket label (or a story/epic bar) is a link to the ticket
+    // detail page; a PR bar still opens the PR drawer.
+    if ((hit.kind === 'label' || hit.kind === 'story' || hit.kind === 'epic')
+        && hit.ticket && this.onTicket) {
+      this.onTicket(hit.ticket);
+      return true;
+    }
+    // prd/26 P6: clicking a sprint band scopes the timeline to that sprint
+    if (hit.kind === 'sprint' && this.onSprint) {
+      this.onSprint(hit.sprint);
+      return true;
+    }
+    if ((hit.kind === 'bar' || hit.kind === 'interval') && this.onSelect) {
+      this.onSelect(hit.pr, { phase: hit.interval ? hit.interval.phase : null, kind: hit.kind });
+      return true;
+    }
+    return false;
+  }
+
+  _pinchState() {
+    const points = [...this._pointers.values()];
+    if (points.length < 2) return null;
+    const [a, b] = points;
+    return {
+      dist: Math.hypot(a.x - b.x, a.y - b.y),
+      x: (a.x + b.x) / 2,
+      y: (a.y + b.y) / 2,
+    };
+  }
+
   _bind() {
     const canvas = this.canvas;
 
     canvas.addEventListener('mousemove', (ev) => {
+      if (this._recentTouch()) return;
       const rect = canvas.getBoundingClientRect();
       const x = ev.clientX - rect.left;
       const y = ev.clientY - rect.top;
@@ -1505,11 +1569,13 @@ export class Timeline {
     });
 
     canvas.addEventListener('mouseleave', () => {
+      if (this._recentTouch()) return;
       this.clearHover();
       this.schedule();
     });
 
     canvas.addEventListener('mousedown', (ev) => {
+      if (this._recentTouch()) return;
       const rect = canvas.getBoundingClientRect();
       const x = ev.clientX - rect.left;
       const y = ev.clientY - rect.top;
@@ -1527,6 +1593,7 @@ export class Timeline {
     });
 
     window.addEventListener('mouseup', (ev) => {
+      if (this._recentTouch()) return;
       if (this.brushing) {
         const range = this.brushing;
         this.brushing = null;
@@ -1542,21 +1609,7 @@ export class Timeline {
       if (moved) return;
       const hit = this.hitTest(ev.clientX - rect.left, ev.clientY - rect.top);
       if (!hit) return;
-      // prd/25: a ticket label (or a story/epic bar) is a link to the ticket
-      // detail page; a PR bar still opens the PR drawer.
-      if ((hit.kind === 'label' || hit.kind === 'story' || hit.kind === 'epic')
-          && hit.ticket && this.onTicket) {
-        this.onTicket(hit.ticket);
-        return;
-      }
-      // prd/26 P6: clicking a sprint band scopes the timeline to that sprint
-      if (hit.kind === 'sprint' && this.onSprint) {
-        this.onSprint(hit.sprint);
-        return;
-      }
-      if ((hit.kind === 'bar' || hit.kind === 'interval') && this.onSelect) {
-        this.onSelect(hit.pr, { phase: hit.interval ? hit.interval.phase : null, kind: hit.kind });
-      }
+      this._activate(hit);
     });
 
     canvas.addEventListener('dblclick', (ev) => {
@@ -1586,6 +1639,112 @@ export class Timeline {
       else if (key === 'Home' || key === '0' || key === 'f' || key === 'F') { this.fit(); ev.preventDefault(); }
       else if (key === 'Escape') { this.clearHover(); this.clearSelection(); ev.preventDefault(); }
     });
+
+    // prd/28 §2: touch. One finger pans, two fingers pinch around their
+    // midpoint, a short tap selects/drills, and a 450 ms hold shows the
+    // tooltip the desktop gets from hover (never a hover-only affordance).
+    const local = (ev) => {
+      const rect = canvas.getBoundingClientRect();
+      return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+    };
+    const clearHold = () => {
+      clearTimeout(this._holdTimer);
+      this._holdTimer = 0;
+    };
+
+    canvas.addEventListener('pointerdown', (ev) => {
+      if (ev.pointerType === 'mouse') return;
+      this._touchAt = Date.now();
+      ev.preventDefault();
+      try { canvas.setPointerCapture(ev.pointerId); } catch { /* not fatal */ }
+      const point = local(ev);
+      this._pointers.set(ev.pointerId, {
+        ...point,
+        startX: point.x, startY: point.y,
+        lastX: point.x, lastY: point.y,
+        moved: false, held: false, t: Date.now(),
+      });
+      if (this._pointers.size > 1) {
+        clearHold();
+        for (const pointer of this._pointers.values()) pointer.moved = true;
+        this._pinch = this._pinchState();
+        this.tip.hidden = true;
+        return;
+      }
+      clearHold();
+      this._holdTimer = setTimeout(() => {
+        const pointer = this._pointers.get(ev.pointerId);
+        if (!pointer || pointer.moved || this._pointers.size > 1) return;
+        pointer.held = true;
+        const hit = this.hitTest(pointer.x, pointer.y);
+        this.showHover(hit, pointer.x, pointer.y);
+        this.schedule();
+      }, 450);
+    });
+
+    canvas.addEventListener('pointermove', (ev) => {
+      if (ev.pointerType === 'mouse') return;
+      const pointer = this._pointers.get(ev.pointerId);
+      if (!pointer) return;
+      ev.preventDefault();
+      const point = local(ev);
+      pointer.x = point.x;
+      pointer.y = point.y;
+      if (this._pointers.size > 1) {
+        const next = this._pinchState();
+        if (this._pinch && next) {
+          // spreading the fingers (dist grows) zooms in: factor < 1
+          this.zoom(this._pinch.dist / Math.max(1, next.dist), next.x);
+          this.panPixels(next.x - this._pinch.x);
+          this.tip.hidden = true;
+        }
+        this._pinch = next;
+        pointer.lastX = pointer.x;
+        pointer.lastY = pointer.y;
+        return;
+      }
+      if (!pointer.moved && Math.hypot(point.x - pointer.startX, point.y - pointer.startY) > 8) {
+        pointer.moved = true;
+        clearHold();
+      }
+      if (pointer.moved) {
+        this.panPixels(point.x - pointer.lastX);
+        this.tip.hidden = true;
+      }
+      pointer.lastX = point.x;
+      pointer.lastY = point.y;
+    });
+
+    const endPointer = (ev) => {
+      if (ev.pointerType === 'mouse') return;
+      const pointer = this._pointers.get(ev.pointerId);
+      if (!pointer) return;
+      clearHold();
+      this._pointers.delete(ev.pointerId);
+      if (this._pointers.size < 2) this._pinch = null;
+      if (this._pointers.size === 1) {
+        // the remaining finger carries on as a pan from where it is now
+        const rest = [...this._pointers.values()][0];
+        rest.startX = rest.x;
+        rest.startY = rest.y;
+        rest.lastX = rest.x;
+        rest.lastY = rest.y;
+        rest.moved = true;
+        return;
+      }
+      if (this._pointers.size > 0) return;
+      if (pointer.moved || pointer.held) return;
+      if (Date.now() - pointer.t > 600) return;
+      const hit = this.hitTest(pointer.x, pointer.y);
+      if (hit) {
+        this._activate(hit);
+        return;
+      }
+      this.clearHover();
+      this.schedule();
+    };
+    canvas.addEventListener('pointerup', endPointer);
+    canvas.addEventListener('pointercancel', endPointer);
 
     new ResizeObserver(() => this.schedule()).observe(canvas.parentElement);
   }

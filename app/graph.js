@@ -72,6 +72,14 @@ export class BlockingMap {
     this.hover = null;
     this.selected = null;
     this.renderQueued = false;
+    // prd/28: the phone view transform — pan/zoom without touching the layout.
+    this.pan = { x: 0, y: 0 };
+    this.zoom = 1;
+    this._pointers = new Map();
+    this._pinch = null;
+    this._holdTimer = 0;
+    this._touchAt = 0;
+    this._lastTap = 0;
     this._bind();
   }
 
@@ -191,9 +199,13 @@ export class BlockingMap {
     if (nodes.length < 2) return;
     // A hidden page has no box to lay out in; keep the last real positions.
     if (!this.canvas.parentElement || !this.canvas.parentElement.clientWidth) return;
+    // A panned/zoomed graph is a camera over a fixed layout; re-separating in
+    // screen space would rewrite the layout under the user's fingers.
+    if (this.zoom !== 1 || this.pan.x || this.pan.y) return;
     const ctx = this.ctx;
     const previousFont = ctx.font;
     ctx.font = '600 12px Inter, system-ui, sans-serif';
+    const maxRadius = this.maxRadius(g);
     const boxes = nodes.map((node) => {
       const p = this.nodePos(node, g);
       const labelW = ctx.measureText(node.id).width;
@@ -202,9 +214,9 @@ export class BlockingMap {
         x: p.x,
         y: p.y,
         // half extents: the largest ring and the centred name label
-        hx: Math.max(MAX_RADIUS, labelW / 2) + 8,
+        hx: Math.max(maxRadius, labelW / 2) + 8,
         // ring + name above + lens value below
-        hy: MAX_RADIUS + 22,
+        hy: maxRadius + 22,
       };
     });
     ctx.font = previousFont;
@@ -245,8 +257,9 @@ export class BlockingMap {
       if (!moved) break;
     }
     for (const box of boxes) {
-      box.node.x = (box.x - g.padX) / g.plotW;
-      box.node.y = (box.y - g.padY) / g.plotH;
+      const normalized = this.normPoint(box.x, box.y, g);
+      box.node.x = normalized.x;
+      box.node.y = normalized.y;
     }
   }
 
@@ -267,13 +280,44 @@ export class BlockingMap {
     this.canvas.height = Math.round(height * dpr);
     this.canvas.style.height = `${height}px`;
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    const padX = 90;
-    const padY = 60;
-    return { width, height, plotW: width - padX * 2, plotH: height - padY * 2, padX, padY };
+    // prd/28: the desktop padding is 90px each side; a 412px phone would lose
+    // half its plot to it, so the canvas keeps the room for the rings instead.
+    const phone = width <= 640;
+    const padX = phone ? 40 : 90;
+    const padY = phone ? 44 : 60;
+    return { width, height, plotW: width - padX * 2, plotH: height - padY * 2, padX, padY, phone };
   }
 
+  maxRadius(g) {
+    return g && g.phone ? 20 : MAX_RADIUS;
+  }
+
+  /** Normalised node position -> screen pixels, through the touch transform. */
   nodePos(node, g) {
-    return { x: g.padX + node.x * g.plotW, y: g.padY + node.y * g.plotH };
+    const x = g.padX + node.x * g.plotW;
+    const y = g.padY + node.y * g.plotH;
+    const cx = g.width / 2;
+    const cy = g.height / 2;
+    return {
+      x: cx + (x - cx) * this.zoom + this.pan.x,
+      y: cy + (y - cy) * this.zoom + this.pan.y,
+    };
+  }
+
+  /** Screen pixels -> normalised node space (the inverse of nodePos). */
+  normPoint(x, y, g) {
+    const cx = g.width / 2;
+    const cy = g.height / 2;
+    const rawX = cx + (x - this.pan.x - cx) / this.zoom;
+    const rawY = cy + (y - this.pan.y - cy) / this.zoom;
+    return { x: (rawX - g.padX) / g.plotW, y: (rawY - g.padY) / g.plotH };
+  }
+
+  /** Back to the fitted layout: the phone equivalent of "Fit". */
+  resetView() {
+    this.pan = { x: 0, y: 0 };
+    this.zoom = 1;
+    this.schedule();
   }
 
   render() {
@@ -303,7 +347,7 @@ export class BlockingMap {
 
     // radius is needed by the collision pass, so size the nodes first
     this.nodes.forEach((node, index) => {
-      node._r = Math.min(MAX_RADIUS, 13 + 15 * Math.sqrt((values[index] || 0) / maxValue));
+      node._r = Math.min(this.maxRadius(g), 13 + 15 * Math.sqrt((values[index] || 0) / maxValue));
     });
     this.separate(g);
 
@@ -474,18 +518,43 @@ export class BlockingMap {
     this.schedule();
   }
 
+  _recentTouch() {
+    return this._touchAt > 0 && Date.now() - this._touchAt < 800;
+  }
+
+  _pinchState() {
+    const points = [...this._pointers.values()];
+    if (points.length < 2) return null;
+    const [a, b] = points;
+    return {
+      dist: Math.hypot(a.x - b.x, a.y - b.y),
+      x: (a.x + b.x) / 2,
+      y: (a.y + b.y) / 2,
+    };
+  }
+
+  _clampPan(g) {
+    const limitX = g.plotW * 0.8 + 80;
+    const limitY = g.plotH * 0.8 + 80;
+    this.pan.x = Math.max(-limitX, Math.min(limitX, this.pan.x));
+    this.pan.y = Math.max(-limitY, Math.min(limitY, this.pan.y));
+  }
+
   _bind() {
     const canvas = this.canvas;
     canvas.addEventListener('mousemove', (ev) => {
+      if (this._recentTouch()) return;
       const rect = canvas.getBoundingClientRect();
       this.showHover(this.hitTest(ev.clientX - rect.left, ev.clientY - rect.top), ev.clientX - rect.left, ev.clientY - rect.top);
     });
     canvas.addEventListener('mouseleave', () => {
+      if (this._recentTouch()) return;
       this.hover = null;
       this.tip.hidden = true;
       this.schedule();
     });
     canvas.addEventListener('click', (ev) => {
+      if (this._recentTouch()) return;
       const rect = canvas.getBoundingClientRect();
       const hit = this.hitTest(ev.clientX - rect.left, ev.clientY - rect.top);
       if (hit && hit.kind === 'node') {
@@ -517,6 +586,131 @@ export class BlockingMap {
         this.schedule();
       }
     });
+    // prd/28 §2: pan + tap on the blocking map. One finger moves the camera,
+    // two fingers pinch, a tap selects a node (its queue opens), a hold shows
+    // the same tooltip hover gives the desktop, and a double-tap resets.
+    const local = (ev) => {
+      const rect = canvas.getBoundingClientRect();
+      return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+    };
+    const clearHold = () => {
+      clearTimeout(this._holdTimer);
+      this._holdTimer = 0;
+    };
+
+    canvas.addEventListener('pointerdown', (ev) => {
+      if (ev.pointerType === 'mouse') return;
+      this._touchAt = Date.now();
+      ev.preventDefault();
+      try { canvas.setPointerCapture(ev.pointerId); } catch { /* not fatal */ }
+      const point = local(ev);
+      this._pointers.set(ev.pointerId, {
+        ...point,
+        startX: point.x, startY: point.y,
+        lastX: point.x, lastY: point.y,
+        moved: false, held: false, t: Date.now(),
+      });
+      if (this._pointers.size > 1) {
+        clearHold();
+        for (const pointer of this._pointers.values()) pointer.moved = true;
+        this._pinch = this._pinchState();
+        this.tip.hidden = true;
+        return;
+      }
+      clearHold();
+      this._holdTimer = setTimeout(() => {
+        const pointer = this._pointers.get(ev.pointerId);
+        if (!pointer || pointer.moved || this._pointers.size > 1) return;
+        pointer.held = true;
+        this.showHover(this.hitTest(pointer.x, pointer.y), pointer.x, pointer.y);
+      }, 450);
+    });
+
+    canvas.addEventListener('pointermove', (ev) => {
+      if (ev.pointerType === 'mouse') return;
+      const pointer = this._pointers.get(ev.pointerId);
+      if (!pointer) return;
+      ev.preventDefault();
+      const point = local(ev);
+      pointer.x = point.x;
+      pointer.y = point.y;
+      if (this._pointers.size > 1) {
+        const next = this._pinchState();
+        if (this._pinch && next && next.dist > 0) {
+          const g = this.geometry();
+          const cx = g.width / 2;
+          const cy = g.height / 2;
+          const zoom = Math.min(3, Math.max(0.5, this.zoom * (next.dist / this._pinch.dist)));
+          const applied = zoom / this.zoom;
+          const mx = next.x - cx;
+          const my = next.y - cy;
+          this.pan.x = mx - (mx - this.pan.x) * applied;
+          this.pan.y = my - (my - this.pan.y) * applied;
+          this.zoom = zoom;
+          this._clampPan(g);
+          this.tip.hidden = true;
+          this.schedule();
+        }
+        this._pinch = next;
+        pointer.lastX = pointer.x;
+        pointer.lastY = pointer.y;
+        return;
+      }
+      if (!pointer.moved && Math.hypot(point.x - pointer.startX, point.y - pointer.startY) > 8) {
+        pointer.moved = true;
+        clearHold();
+      }
+      if (pointer.moved) {
+        this.pan.x += point.x - pointer.lastX;
+        this.pan.y += point.y - pointer.lastY;
+        const g = this.geometry();
+        this._clampPan(g);
+        this.tip.hidden = true;
+        this.schedule();
+      }
+      pointer.lastX = point.x;
+      pointer.lastY = point.y;
+    });
+
+    const endPointer = (ev) => {
+      if (ev.pointerType === 'mouse') return;
+      const pointer = this._pointers.get(ev.pointerId);
+      if (!pointer) return;
+      clearHold();
+      this._pointers.delete(ev.pointerId);
+      if (this._pointers.size < 2) this._pinch = null;
+      if (this._pointers.size === 1) {
+        const rest = [...this._pointers.values()][0];
+        rest.startX = rest.x;
+        rest.startY = rest.y;
+        rest.lastX = rest.x;
+        rest.lastY = rest.y;
+        rest.moved = true;
+        return;
+      }
+      if (this._pointers.size > 0) return;
+      if (pointer.moved || pointer.held) return;
+      if (Date.now() - pointer.t > 600) return;
+      const hit = this.hitTest(pointer.x, pointer.y);
+      if (!hit || hit.kind !== 'node') {
+        // a double-tap on empty space puts the camera back on the layout
+        if (Date.now() - this._lastTap < 320) {
+          this._lastTap = 0;
+          this.resetView();
+        } else {
+          this._lastTap = Date.now();
+          this.selected = null;
+          this.schedule();
+        }
+        return;
+      }
+      this.selected = this.selected === hit.node.id ? null : hit.node.id;
+      this.schedule();
+      if (this.onSelect) this.onSelect(hit.node);
+    };
+    canvas.addEventListener('pointerup', endPointer);
+    canvas.addEventListener('pointercancel', endPointer);
+
     new ResizeObserver(() => this.schedule()).observe(canvas.parentElement);
   }
 }

@@ -185,17 +185,17 @@ function signed(percent) {
 }
 
 function deltaCell(entry) {
-  if (!entry || entry.percent == null) return '<td class="c-delta muted">–</td>';
+  if (!entry || entry.percent == null) return '<td class="c-delta muted" data-label="Δ">–</td>';
   const cls = entry.better === true ? 'good' : entry.better === false ? 'bad' : 'muted';
   const arrow = entry.direction === 'down' ? '▾' : entry.direction === 'up' ? '▴' : '·';
-  return `<td class="c-delta ${cls}">${arrow} ${signed(entry.percent)}</td>`;
+  return `<td class="c-delta ${cls}" data-label="Δ">${arrow} ${signed(entry.percent)}</td>`;
 }
 
 function row(label, baseline, scenario, delta, note = '') {
   return `<tr>
-    <td class="c-metric">${esc(label)}${note ? `<span class="policy-row-note">${esc(note)}</span>` : ''}</td>
-    <td class="c-base">${baseline}</td>
-    <td class="c-scen">${scenario}</td>
+    <td class="c-metric" data-label="">${esc(label)}${note ? `<span class="policy-row-note">${esc(note)}</span>` : ''}</td>
+    <td class="c-base" data-label="baseline">${baseline}</td>
+    <td class="c-scen" data-label="scenario">${scenario}</td>
     ${deltaCell(delta)}
   </tr>`;
 }
@@ -232,14 +232,14 @@ export function abMarkup(data) {
       compare && compare.lead_hours, 'arrival → merge'),
   ].join('');
   const bottleneck = `<tr>
-    <td class="c-metric">bottleneck</td>
-    <td class="c-base">${esc((base.bottleneck && base.bottleneck.person) || '–')}
+    <td class="c-metric" data-label="">bottleneck</td>
+    <td class="c-base" data-label="baseline">${esc((base.bottleneck && base.bottleneck.person) || '–')}
       ${base.bottleneck ? `<span class="policy-row-note">${predPercent(base.bottleneck.utilisation)} busy</span>` : ''}</td>
-    <td class="c-scen">${scenario
+    <td class="c-scen" data-label="scenario">${scenario
       ? `${esc((scenario.bottleneck && scenario.bottleneck.person) || '–')}
         ${scenario.bottleneck ? `<span class="policy-row-note">${predPercent(scenario.bottleneck.utilisation)} busy</span>` : ''}`
       : '—'}</td>
-    <td class="c-delta muted">–</td></tr>`;
+    <td class="c-delta muted" data-label="Δ">–</td></tr>`;
   const noise = compare && compare.within_noise
     ? `<p class="policy-note">The cycle-time change is <b>smaller than the run-to-run spread</b>
         of the model (${predHours(left.spread && left.spread.median_min)} –
@@ -258,12 +258,12 @@ export function resourcesMarkup(result) {
     const state = resource.utilisation >= 0.85 ? 'overloaded'
       : resource.utilisation >= 0.5 ? 'slow' : 'healthy';
     return `<tr>
-      <td class="c-who">${esc(resource.person)}</td>
-      <td class="c-role">${esc(resource.role)}</td>
-      <td><span class="pill ${state}">${predPercent(resource.utilisation)}</span></td>
-      <td class="c-dur">${predHours(resource.mean_wait_hours)}</td>
-      <td class="c-dur">≈${resource.peak_queue}</td>
-      <td class="c-dur">≈${resource.requests}</td>
+      <td class="c-who" data-label="">${esc(resource.person)}</td>
+      <td class="c-role" data-label="role">${esc(resource.role)}</td>
+      <td data-label="utilisation"><span class="pill ${state}">${predPercent(resource.utilisation)}</span></td>
+      <td class="c-dur" data-label="mean wait">${predHours(resource.mean_wait_hours)}</td>
+      <td class="c-dur" data-label="peak queue">≈${resource.peak_queue}</td>
+      <td class="c-dur" data-label="requests">≈${resource.requests}</td>
     </tr>`;
   }).join('');
   const warnings = (result.warnings || []).map((warning) =>

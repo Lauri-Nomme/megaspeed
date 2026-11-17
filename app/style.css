@@ -960,3 +960,361 @@ a.child.ticket-link { color: var(--link); }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* ======================================================================
+ * prd/28 — responsive shell. Desktop (>1180px) and medium (641–1180px) are
+ * unchanged; everything below is additive and gated on <= 640px.
+ *
+ * The three phone mechanisms:
+ *   1. the sidebar becomes an off-canvas drawer (hamburger + scrim),
+ *   2. the detail panel / PR drawer become full-width bottom sheets,
+ *   3. tables stack into key-value cards (`data-label` on each cell).
+ * ==================================================================== */
+
+/* the desktop shell does not know these controls exist */
+.nav-toggle { display: none; }
+.scrim { display: none; }
+.sheet-handle, .sheet-close { display: none; }
+#blocking-hint:empty { display: none; }
+/* prd/28: the phone groups tenant/scope/timeframe on their own row. On desktop
+ * the wrapper is transparent, so the flex order is exactly the pre-phone one. */
+.ctx-row { display: contents; }
+/* a canvas is a gesture surface: the browser must not steal the drag */
+#timeline, #blocking, #queues { touch-action: none; }
+
+@media (max-width: 640px) {
+  /* -- shell ---------------------------------------------------------- */
+  .topbar {
+    flex-wrap: wrap;
+    height: auto;
+    min-height: 48px;
+    padding: 6px 10px;
+    gap: 6px 8px;
+    align-items: center;
+  }
+  .nav-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 44px;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    font-size: 18px;
+    line-height: 1;
+    background: transparent;
+    border: 1px solid var(--border-control);
+    border-radius: var(--radius-control);
+    color: var(--text-primary);
+  }
+  .nav-toggle { order: 1; }
+  .brand { order: 2; font-size: 0; }
+  .brand::before { margin-right: 0; }
+  .density { order: 3; }
+  .topbar .status { order: 4; margin-left: auto; font-size: 10.5px; max-width: 160px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .ctx-row {
+    display: flex;
+    order: 5;
+    flex-basis: 100%;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px 8px;
+    min-width: 0;
+  }
+  .topbar .grow { display: none; }
+  .topbar .tenant { order: 1; min-width: 0; max-width: 96px; }
+  .ctx-row .ctx:nth-of-type(1) { order: 2; }
+  .ctx-row .ctx:nth-of-type(2) { order: 3; }
+  .topbar .tenant-pill { max-width: 96px; padding: 0 8px; }
+  .tenant-key, .tenant-meta { display: none; }
+  .tenant-name, .tenant-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ctx { min-width: 0; }
+  .ctx-k { display: none; }        /* the value labels the pill on a phone */
+  .topbar select { max-width: 100px; }
+  #range { display: none; }
+  .range-meta { display: inline; font-size: 10.5px; }
+  .range-meta[hidden] { display: none; }
+  .range-meta::before { content: "· "; color: var(--border-control); }
+
+  /* -- touch targets: every control is at least 44 x 44 (prd/28 §2) ---- */
+  button, select, input[type="checkbox"], .link {
+    min-height: 44px;
+  }
+  .seg button, .density button, .legend button, .tabs button,
+  .sprint-row, .nav-item, .chip, .policy-run {
+    min-height: 44px;
+  }
+  .seg button { padding: 0 8px; font-size: 12px; min-width: 44px; }
+  .density button { width: 44px; }
+  .legend button { font-size: 11.5px; }
+  .chip { padding: 0 12px; }
+  .link { display: inline-flex; align-items: center; }
+
+  /* -- off-canvas sidebar --------------------------------------------- */
+  body.nav-open { overflow: hidden; }
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 45;
+    width: min(82vw, 312px);
+    height: 100dvh;
+    flex: 0 0 auto;
+    padding: 14px 10px calc(18px + env(safe-area-inset-bottom));
+    transform: translateX(-102%);
+    transition: transform .18s ease, visibility .18s ease;
+    visibility: hidden;
+    box-shadow: var(--shadow-popover);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  body.nav-open .sidebar { transform: none; visibility: visible; }
+  .nav-label { font-size: 10.5px; padding: 0 10px 6px; }
+  .nav-item { font-size: 14px; padding: 0 12px; }
+  .nav-foot { padding: 0 10px; }
+  .scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 44;
+    background: rgba(0, 0, 0, .55);
+  }
+  .scrim[hidden] { display: none; }
+
+  /* -- page chrome ---------------------------------------------------- */
+  .pagehead { padding: 12px 12px 6px; }
+  .pagehead h1 { font-size: 19px; }
+  .question { font-size: 12.5px; }
+  .scopebanner { padding: 6px 12px; font-size: 11.5px; }
+  .meta {
+    position: static;
+    padding: 6px 12px;
+    font-size: 11px;
+    gap: 4px;
+  }
+  .toolbar { padding: 6px 10px; gap: 8px; }
+  .toolbar.sub { padding: 4px 10px; }
+  .hint { font-size: 10.5px; }
+  .stats-strip { flex-wrap: wrap; gap: 6px 12px; }
+  .assumption { padding: 6px 12px 16px; }
+
+  /* -- detail panel -> bottom sheet ----------------------------------- */
+  .split { display: block; }
+  .detail {
+    display: none;
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    top: auto;
+    z-index: 38;
+    width: 100%;
+    max-height: 82dvh;
+    margin: 0;
+    padding: 18px 16px calc(18px + env(safe-area-inset-bottom));
+    border-left: 0;
+    border-top: 1px solid var(--border-control);
+    border-radius: 12px 12px 0 0;
+    box-shadow: var(--shadow-popover);
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+  .detail.has-selection { display: block; animation: sheet-in .18s ease; }
+  .detail.dragging, .drawer.dragging { animation: none; }
+  .sheet-handle {
+    display: block;
+    position: sticky;
+    top: -18px;
+    z-index: 2;
+    width: 44px;
+    height: 5px;
+    margin: -8px auto 10px;
+    border-radius: 3px;
+    background: var(--border-control);
+    touch-action: none;
+  }
+  .sheet-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    position: absolute;
+    top: 10px;
+    right: 8px;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: var(--text-secondary);
+    font-size: 20px;
+    line-height: 1;
+  }
+  .detail .facts dd { word-break: break-word; }
+  .detail-actions .chip { flex: 1 1 auto; }
+
+  /* -- PR drawer -> bottom sheet -------------------------------------- */
+  .drawer {
+    top: auto;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: 100%;
+    max-height: 85dvh;
+    padding: 18px 16px calc(18px + env(safe-area-inset-bottom));
+    border-left: 0;
+    border-top: 1px solid var(--border-control);
+    border-radius: 12px 12px 0 0;
+    overscroll-behavior: contain;
+  }
+  .drawer-close { width: 44px; height: 44px; font-size: 20px; }
+
+  /* -- tables -> key-value cards (prd/28 §4) -------------------------- */
+  .table-wrap { min-width: 0; }
+  .table, .table tbody, .table tr, .table td, .drill, .drill tbody, .drill tr, .drill td {
+    display: block;
+    width: 100%;
+  }
+  .table { table-layout: auto; font-size: var(--row-font); }
+  .table thead, .drill thead { display: none; }
+  .table tr, .drill tr {
+    border: 1px solid var(--border-hairline);
+    border-radius: var(--radius-control);
+    background: var(--bg-surface);
+    width: auto;
+    margin: 0 10px 8px;
+    padding: 8px 10px;
+    height: auto;
+  }
+  .table tr.row:hover { background: var(--bg-surface); }
+  .table tr.selected { background: rgba(99, 177, 255, .12); }
+  .table td, .drill td {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    width: auto;
+    height: auto;
+    min-height: 24px;
+    padding: 2px 0;
+    border: 0;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    text-align: left;
+  }
+  /* the desktop table pins each column's width; a card has one column */
+  .table .c-state, .table .c-id, .table .c-who, .table .c-phase,
+  .table .c-since, .table .c-dur, .table .c-impact, .table .c-rounds,
+  .table .c-push, .table .c-bar, .table .c-role,
+  .ticket-prs .c-id, .ticket-prs .c-state, .ticket-prs .c-since,
+  .ticket-prs .c-dur, .ticket-prs .c-rounds, .ticket-prs .c-push,
+  .ticket-prs .c-bar {
+    width: auto;
+  }
+  .table td::before, .drill td::before {
+    content: attr(data-label);
+    flex: 0 0 auto;
+    color: var(--text-tertiary);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+  }
+  .table td[data-label=""]::before, .drill td[data-label=""]::before { content: none; }
+  /* the key is the card's heading, the status pill sits right under it */
+  .table td.c-id { order: -2; font-size: 14px; padding-bottom: 4px; }
+  .table td.c-state { order: -1; padding-bottom: 6px; }
+  .table td.c-id .keys { font-size: 14px; }
+  .table td.c-id .id { font-size: 13px; }
+  .table .repo { margin-left: 4px; }
+  .table td.c-bar { display: block; }
+  .table td.c-bar::before { display: block; margin-bottom: 3px; }
+  .table td.c-bar .ticket-mini-bar { min-width: 100%; }
+  .table td.c-dur, .table td.c-impact, .table td.c-rounds { justify-content: space-between; }
+  .empty-row { padding: 14px 12px; }
+  .drill-wrap { max-height: none; overflow: visible; }
+  .drill { min-width: 0; }
+  .drill td { padding: 2px 0; max-width: none; }
+  .drill tr { background: transparent; }
+  .drill tr.affected { box-shadow: inset 2px 0 0 var(--warning); }
+  .drill tr.affected td:first-child { padding-left: 8px; }
+
+  /* -- timeline / blocking toolbars ----------------------------------- */
+  .zoom button { min-width: 44px; }
+  #blocking-lens { display: flex; flex-wrap: wrap; gap: 4px; }
+  #blocking-lens button {
+    border-left-width: 1px;
+    border-radius: var(--radius-control);
+    font-size: 11.5px;
+    padding: 0 10px;
+  }
+  /* a 10-key activity legend at 44px each would push the canvas off the
+     screen; a single scrollable strip keeps every key one swipe away */
+  .legend {
+    gap: 2px;
+    flex: 1 1 100%;
+    order: 20;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+  .legend::-webkit-scrollbar { display: none; }
+  .legend button { max-width: none; flex: 0 0 auto; }
+  .sprint-rows {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    overscroll-behavior-x: contain;
+    scrollbar-width: none;
+  }
+  .sprint-rows::-webkit-scrollbar { display: none; }
+  .sprint-row { flex: 0 0 auto; white-space: nowrap; }
+  .phase-legend { gap: 4px 10px; }
+  .sprint-rows { gap: 6px; }
+  .sprint-row { white-space: normal; }
+
+  /* -- ticket detail -------------------------------------------------- */
+  .ticket-head { padding: 12px 12px 2px; }
+  .ticket-head h2 { font-size: 17px; }
+  .ticket-answer { margin: 10px 12px; font-size: 13px; }
+  .ticket-panel { padding: 12px 12px 16px; }
+  .ticket-boundaries { gap: 6px 12px; }
+  .ticket-bar { height: 30px; }
+  .ticket-seg.absent { min-width: 64px; }
+  .worklog-row { grid-template-columns: 72px minmax(0, 1fr) 58px; gap: 6px; }
+  .ticket-prs .c-id, .ticket-prs .c-state, .ticket-prs .c-since,
+  .ticket-prs .c-dur, .ticket-prs .c-rounds, .ticket-prs .c-push,
+  .ticket-prs .c-bar { width: auto; }
+
+  /* -- rules ---------------------------------------------------------- */
+  .rule { grid-template-columns: 34px minmax(0, 1fr); padding: 10px 12px 12px; gap: 0 8px; }
+  .rule-title { font-size: var(--rule-title); }
+  .rule-top { flex-wrap: wrap; gap: 6px; }
+  .rule-impact { margin-left: 0; }
+  .rule-drill > summary, .sprint-out > summary {
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .rules-empty { padding: 18px 12px; }
+  .rule-evidence { gap: 4px 10px; }
+
+  /* -- overview / policy ---------------------------------------------- */
+  .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stat { padding: calc(var(--density-pad) + 4px) 12px; }
+  .panel-head { padding: calc(var(--density-pad) + 2px) 12px 6px; flex-wrap: wrap; }
+  .policy-panel { padding: 12px; }
+  .policy-table th, .policy-table td { padding: 4px 6px; }
+  .policy-knob { grid-template-columns: minmax(0, 1fr) auto; }
+  .policy-actions { flex-wrap: wrap; }
+  .facts { gap: 4px 12px; }
+  .facts dd { word-break: break-word; }
+  .stub { padding: 16px 12px 32px; }
+}
+
+@keyframes sheet-in {
+  from { transform: translateY(28px); opacity: .6; }
+  to { transform: none; opacity: 1; }
+}
+

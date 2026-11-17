@@ -162,14 +162,14 @@ export function prTable(payload) {
     const classes = Object.entries(pr.push_classes || {})
       .map(([name, count]) => `${esc(name)} ×${count}`).join(' · ') || '—';
     return `<tr class="pr-row" data-pr="${esc(pr.object_id)}">
-      <td class="c-id"><span class="mono id">#${esc(pr.number)}</span>
+      <td class="c-id" data-label=""><span class="mono id">#${esc(pr.number)}</span>
         <span class="repo">${esc(String(pr.repo || '').split('/').pop())}</span></td>
-      <td class="c-state">${state}</td>
-      <td class="c-since mono">${esc(stamp(pr.opened))}</td>
-      <td class="c-dur num">${esc(segmentHours(pr.cycle_hours))}</td>
-      <td class="c-rounds num">${esc(pr.review_rounds)}</td>
-      <td class="c-push mono">${classes}</td>
-      <td class="c-bar">${prPhaseBar(pr)}</td>
+      <td class="c-state" data-label="state">${state}</td>
+      <td class="c-since mono" data-label="opened">${esc(stamp(pr.opened))}</td>
+      <td class="c-dur num" data-label="cycle">${esc(segmentHours(pr.cycle_hours))}</td>
+      <td class="c-rounds num" data-label="rounds">${esc(pr.review_rounds)}</td>
+      <td class="c-push mono" data-label="push classes">${classes}</td>
+      <td class="c-bar" data-label="lifecycle">${prPhaseBar(pr)}</td>
     </tr>`;
   }).join('');
   return `<table class="table ticket-prs">${head}<tbody>${body}</tbody></table>`;
@@ -237,10 +237,10 @@ export function eventsList(payload, { limit = 40 } = {}) {
     const attrs = Object.entries(event.attributes || {})
       .map(([key, value]) => `${key}=${value}`).join(' ');
     return `<tr>
-      <td class="mono c-since">${esc(stamp(event.ts))}</td>
-      <td class="mono">${esc(event.activity)}</td>
-      <td class="mono c-who">${esc(event.actor)}</td>
-      <td class="mono muted c-attrs">${esc(attrs)}</td>
+      <td class="mono c-since" data-label="when">${esc(stamp(event.ts))}</td>
+      <td class="mono" data-label="activity">${esc(event.activity)}</td>
+      <td class="mono c-who" data-label="actor">${esc(event.actor)}</td>
+      <td class="mono muted c-attrs" data-label="attributes">${esc(attrs)}</td>
     </tr>`;
   }).join('');
   const more = events.length > shown.length

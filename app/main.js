@@ -35,6 +35,9 @@ import { annotateRow, epicKeySet, keyListsOf, rowTicket, ticketKey } from '/tick
 import {
   ROLE_QUEUES, filteredPages, queueLevelForNode, scopeBanner, scopeForNode, scopeForStream,
 } from '/scope.js';
+import {
+  bindLongPress, hintText, initMobile, isPhone, phoneEntryPage,
+} from '/mobile.js';
 
 const $ = (id) => document.getElementById(id);
 const LS_KEY = 'megaspeed.ui.v1';
@@ -118,6 +121,7 @@ const timeline = new Timeline({
     noteTimelineView(stats);
     if (state.page === 'timeline') {
       $('range').textContent = stats.total ? fmtRange(stats.start, stats.end) : 'no events';
+      syncRangeMeta();
     }
     // B7: the timeline's disclosure describes the timeline only. Every other
     // view writes its own line in render*Page(); an async repaint of a hidden
@@ -255,6 +259,17 @@ function renderTimeframe() {
     const view = timeline.captureView();
     if (view) $('range').textContent = fmtRange(view.start, view.end);
   }
+  syncRangeMeta();
+}
+
+/** prd/28: the phone hides the top bar's range pill; the meta line carries it,
+ * so the answer to "when am I looking at" is never lost with the space. */
+function syncRangeMeta() {
+  const meta = $('range-meta');
+  if (!meta) return;
+  const phone = isPhone();
+  meta.hidden = !phone;
+  if (phone) meta.textContent = $('range').textContent;
 }
 
 function noteTimelineView(stats) {
@@ -336,6 +351,9 @@ let statusTimer = 0;
 
 function liveStatusText() {
   if (!state.meta) return 'connecting';
+  // prd/28: the phone's top bar is two rows of context; the counts live in the
+  // provenance line, so the status is just the liveness dot and its word.
+  if (isPhone()) return 'live';
   return `live · ${state.events.length} events${state.tenant ? ` · ${state.tenant}` : ''}`;
 }
 
@@ -370,6 +388,19 @@ function renderScopeBanner() {
   banner.textContent = text;
 }
 
+/* prd/28 §2: the hint line names the gesture the device actually has. A phone
+ * has no wheel, no arrow keys and no right-click, so it must not be told to
+ * use them; a desktop keeps the modifiers it already knows. */
+function renderHints() {
+  const phone = isPhone();
+  const timelineHint = $('timeline-hint');
+  if (timelineHint) timelineHint.textContent = hintText('timeline', phone);
+  const deliveryHint = $('delivery-hint');
+  if (deliveryHint) deliveryHint.textContent = hintText('delivery', phone);
+  const blockingHint = $('blocking-hint');
+  if (blockingHint) blockingHint.textContent = hintText('blocking', phone);
+}
+
 function renderPage() {
   const page = state.page;
   for (const section of document.querySelectorAll('.page')) {
@@ -381,6 +412,7 @@ function renderPage() {
     if (active) item.setAttribute('aria-current', 'page');
     else item.removeAttribute('aria-current');
   }
+  renderHints();
   $('page-title').textContent = page === 'ticket' && state.ticketKey
     ? state.ticketKey
     : PAGES[page].title;
@@ -403,6 +435,9 @@ function renderPage() {
 
 async function showPage(page) {
   if (!PAGES[page]) return;
+  // prd/28: a phone bottom sheet belongs to the page that opened it; navigating
+  // through the drawer must not leave the old PR floating over the new view.
+  if (isPhone() && page !== state.page) closeDrawer();
   if (page !== 'ticket' && typeof location !== 'undefined' && location.hash.startsWith('#ticket/')) {
     // Leaving the ticket route: drop the hash so a reload lands on the page
     // the user is actually looking at.
@@ -816,11 +851,17 @@ function deliveryScope() {
 function renderDeliveryDetail() {
   const container = $('delivery-detail');
   const row = state.selection && state.selection.row;
+  // prd/28: on a phone the panel is a bottom sheet; it exists only while a row
+  // is selected, so the list keeps the full viewport until the user asks for
+  // detail. On desktop the class is inert and the column is unchanged.
+  container.classList.toggle('has-selection', Boolean(row));
   if (!row) {
     container.innerHTML = '<p class="empty-detail">Select a row to see its impact, facts and pivot chips.</p>';
     return;
   }
-  container.innerHTML = detailMarkup({
+  container.innerHTML = `<div class="sheet-handle" aria-hidden="true"></div>
+    <button type="button" class="sheet-close" data-sheet-close aria-label="close the detail panel">×</button>` +
+    detailMarkup({
     overline: 'PULL REQUEST',
     row,
     impact: impactSentence(row),
@@ -839,6 +880,15 @@ function renderDeliveryDetail() {
     ],
     children: [rowTicket(row), row.epic, row.id].filter(Boolean),
   });
+}
+
+/** prd/28: closing the phone's detail sheet clears the selection it showed. */
+function clearDeliverySelection() {
+  state.selection = null;
+  renderDeliveryDetail();
+  for (const tr of document.querySelectorAll('#delivery-table tr.row')) {
+    tr.classList.remove('selected');
+  }
 }
 
 // -------------------------------------------------------------------- ticket
@@ -1202,7 +1252,8 @@ function openPrDrawer(pr) {
 function openDrawer(entity) {
   state.drawerEntity = entity;
   const drawer = $('drawer');
-  drawer.innerHTML = `<button type="button" class="drawer-close" data-drawer="close" aria-label="close">×</button>` +
+  drawer.innerHTML = `<div class="sheet-handle" aria-hidden="true"></div>` +
+    `<button type="button" class="drawer-close" data-drawer="close" aria-label="close">×</button>` +
     detailMarkup(entity);
   drawer.hidden = false;
 }
@@ -1818,7 +1869,13 @@ window.__megaspeedShot = async function megaspeedShot(selector = '.app', options
   const element = document.querySelector(selector);
   if (!element) throw new Error(`selector not found: ${selector}`);
   const scale = Math.min(2, Number(options.scale) || window.devicePixelRatio || 1);
-  const rect = element.getBoundingClientRect();
+  const elementRect = element.getBoundingClientRect();
+  // prd/28: a phone review is a viewport, not a 3,000px scroll: `viewport: true`
+  // captures exactly what fits on the screen (fixed sheets included).
+  const viewport = options.viewport === true;
+  const rect = viewport
+    ? { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight }
+    : elementRect;
 
   const out = document.createElement('canvas');
   out.width = Math.max(1, Math.round(rect.width * scale));
@@ -1828,7 +1885,7 @@ window.__megaspeedShot = async function megaspeedShot(selector = '.app', options
   ctx.fillRect(0, 0, out.width, out.height);
 
   try {
-    const image = await domToImage(element, rect);
+    const image = await domToImage(element, rect, { viewport, elementRect });
     ctx.drawImage(image, 0, 0, out.width, out.height);
     return out.toDataURL('image/png');
   } catch (err) {
@@ -1846,7 +1903,7 @@ window.__megaspeedShot = async function megaspeedShot(selector = '.app', options
   }
 };
 
-async function domToImage(element, rect) {
+async function domToImage(element, rect, { viewport = false, elementRect = null } = {}) {
   const clone = element.cloneNode(true);
   // HTML comments may contain "--", which is illegal inside an XML comment; the
   // clone is serialised into an SVG foreignObject, so drop them all.
@@ -1886,11 +1943,18 @@ async function domToImage(element, rect) {
   // B21: fixed-position overlays (drawer, menu) are part of the screen but not
   // of the element's flow. Place their clones at the coordinates they occupy on
   // screen instead of letting the `.shot` rules flatten them below the page.
-  for (const live of [document.getElementById('drawer'), document.getElementById('menu')]) {
+  // prd/28: the delivery detail panel is a bottom sheet on a phone, so it is
+  // part of the visible screen too. On desktop it stays in the page flow (the
+  // pre-phone capture); the drawer and the pivot menu are overlays everywhere.
+  const overlays = [document.getElementById('drawer'), document.getElementById('menu')];
+  if (isPhone()) overlays.push(document.getElementById('delivery-detail'));
+  for (const live of overlays) {
     if (!live || live.hidden || live === element) continue;
+    if (getComputedStyle(live).display === 'none') continue;
     const target = clone.id === live.id ? clone : clone.querySelector(`#${live.id}`);
     if (!target) continue;
     const r = live.getBoundingClientRect();
+    if (!r.width || !r.height) continue;
     target.style.setProperty('position', 'absolute', 'important');
     target.style.setProperty('left', `${r.left - rect.left}px`, 'important');
     target.style.setProperty('top', `${r.top - rect.top}px`, 'important');
@@ -1913,9 +1977,16 @@ async function domToImage(element, rect) {
     img.style.display = 'block';
     target.replaceWith(img);
   });
-  clone.style.width = `${rect.width}px`;
-  clone.style.height = `${rect.height}px`;
+  const fullRect = viewport && elementRect ? elementRect : rect;
+  clone.style.width = `${fullRect.width}px`;
+  clone.style.height = `${fullRect.height}px`;
   clone.style.margin = '0';
+  if (viewport) {
+    // show the part of the page the user is actually looking at; the wrapper
+    // (viewport-sized, overflow hidden) does the clipping
+    clone.style.marginTop = `${-window.scrollY}px`;
+    clone.style.marginLeft = `${-window.scrollX}px`;
+  }
 
   const css = await fetch('/style.css', { cache: 'force-cache' }).then((r) => r.text());
   const wrapper = document.createElement('div');
@@ -1923,18 +1994,47 @@ async function domToImage(element, rect) {
   wrapper.setAttribute(
     'style',
     `position:relative;width:${rect.width}px;height:${rect.height}px;background:#191B1C;` +
-    'font-family:Inter,"Segoe UI",Roboto,sans-serif;font-size:13px;color:#E8E9EB;',
+    'font-family:Inter,"Segoe UI",Roboto,sans-serif;font-size:13px;color:#E8E9EB;' +
+    (viewport ? 'overflow:hidden;' : ''),
   );
   const style = document.createElement('style');
   // Sticky/fixed chrome has no scroll container inside foreignObject; flatten it
   // so the capture lays out like the live page instead of stacking at y=0.
   style.textContent = `${css}
-    .shot .topbar, .shot .sidebar, .shot .meta, .shot .table th, .shot .detail { position: static !important; }
+    /* a capture is a still frame: never mid-animation, never mid-transition */
+    .shot, .shot * { animation: none !important; transition: none !important; }
+    .shot:not(.viewport) .topbar, .shot:not(.viewport) .sidebar, .shot:not(.viewport) .meta,
+    .shot:not(.viewport) .table th, .shot:not(.viewport) .detail { position: static !important; }
     .shot .sidebar { height: auto !important; }
-    .shot .drawer { position: static !important; width: auto; box-shadow: none; }
+    .shot:not(.viewport) .drawer { position: static !important; width: auto; box-shadow: none; }
     .shot .app { min-height: 0 !important; }
-    .shot .table th { top: auto !important; }`;
+    .shot .table th { top: auto !important; }
+    /* prd/28: a phone capture is the viewport, not the off-canvas drawer. The
+       drawer is painted only when it is open, as an overlay on the page. */
+    .shot .scrim { display: none !important; }
+    @media (max-width: 640px) {
+      .nav-open .shot .scrim {
+        display: block !important;
+        position: absolute !important;
+        inset: 0 !important;
+        background: rgba(0, 0, 0, .55) !important;
+        z-index: 20 !important;
+      }
+      .shot .sidebar { display: none !important; }
+      .nav-open .shot .sidebar {
+        display: flex !important;
+        position: absolute !important;
+        left: 0 !important; top: 0 !important; bottom: auto !important;
+        width: min(82vw, 312px) !important;
+        height: ${rect.height}px !important;
+        z-index: 50 !important;
+        visibility: visible !important;
+        transform: none !important;
+      }
+    }`;
   clone.classList.add('shot');
+  if (viewport) clone.classList.add('viewport');
+  wrapper.className = document.body.className;
   wrapper.appendChild(style);
   wrapper.appendChild(clone);
 
@@ -1955,6 +2055,7 @@ window.__megaspeed = {
   timeline,
   blockingMap,
   queueChart,
+  get mobile() { return mobile; },
   get state() { return state; },
   get tenants() { return state.tenants; },
   refresh: load,
@@ -2243,6 +2344,9 @@ function saveUI() {
   } catch { /* private mode: not worth a banner */ }
 }
 
+// Did a saved UI preference exist? A first phone visit is list-first (prd/28).
+let uiRestored = false;
+
 function restoreUI() {
   let stored = null;
   try { stored = JSON.parse(localStorage.getItem(LS_KEY) || 'null'); } catch { stored = null; }
@@ -2251,6 +2355,7 @@ function restoreUI() {
     syncLevelSelects();
     return;
   }
+  uiRestored = true;
   // The tenant must be restored before anything reads state.scope: the scope
   // stored at the top level belongs to that dataset.
   if (typeof stored.tenant === 'string' && stored.tenant) state.tenant = stored.tenant;
@@ -2297,6 +2402,22 @@ function restoreUI() {
 
 // -------------------------------------------------------------------- boot
 restoreUI();
+// prd/28 §3: phone is list-first. A first visit lands on the Delivery list;
+// a stored choice (the user opened Timeline last time) is respected.
+if (isPhone() && !uiRestored) state.page = phoneEntryPage(null);
+// The phone shell: off-canvas sidebar + bottom sheets. Desktop markup is
+// untouched; every rule that does something lives under the 640px breakpoint.
+const mobile = initMobile({
+  onSheetDismiss: (sheet) => {
+    if (sheet && sheet.id === 'drawer') closeDrawer();
+    else if (sheet && sheet.id === 'delivery-detail') clearDeliverySelection();
+  },
+});
+// prd/28 §2: tap-and-hold is the touch pivot gesture (the right-click menu).
+bindLongPress((target, x, y) => {
+  const found = entityForTarget(target, { x, y });
+  if (found) openMenu(x, y, found.entity, found.label);
+});
 // prd/25: a direct link (`/#ticket/DEL-167`) opens the ticket page after the
 // dataset has loaded, exactly as a click does.
 const initialTicket = ticketFromHash();
@@ -2313,7 +2434,7 @@ window.addEventListener('hashchange', () => {
   if (state.page === 'ticket') showPage(state.ticketFrom || 'timeline');
 });
 syncChromeHeight();
-window.addEventListener('resize', syncChromeHeight);
+window.addEventListener('resize', () => { syncChromeHeight(); renderHints(); syncRangeMeta(); });
 buildLensButtons();
 renderPage();
 load().then(async () => {
