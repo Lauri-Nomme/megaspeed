@@ -8,6 +8,8 @@ Checks the contract the megaspeed ingest relies on:
 * epic ``DEL-1`` exists,
 * stories ``DEL-100`` .. ``DEL-199`` exist exactly once each, all linked to
   ``DEL-1``, assigned to alice/bob/carol/dave/erin,
+* story points are set (Fibonacci-like 1..13) and the created dates span the
+  PR window (``backdate.py`` ran),
 * three sprints exist (two closed, one active) with the expected story counts,
 * every story has native worklogs, authored by the expected engineers.
 
@@ -26,6 +28,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -63,6 +66,11 @@ RESULTS: list[tuple[bool, str]] = []
 def check(ok: bool, msg: str) -> None:
     RESULTS.append((bool(ok), msg))
     print(f"  [{'ok' if ok else 'FAIL'}] {msg}", flush=True)
+
+
+def jira_dt(value: str) -> datetime:
+    """Jira's ``2026-08-17T09:00:00.000+0000`` -> an aware datetime."""
+    return datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%f%z")
 
 
 class Api:
@@ -142,8 +150,13 @@ def main() -> int:
     code, fields = api.get("/rest/api/2/field")
     epic_link = next((f["id"] for f in fields if f.get("name") == "Epic Link"), None)
     sprint_field = next((f["id"] for f in fields if f.get("name") == "Sprint"), None)
+    points_field = next((f["id"] for f in fields if f.get("name") == "Story Points"), None)
     jql = f"project={PROJECT} AND issuetype=Story ORDER BY key ASC"
-    want = "summary,assignee,status,labels" + (f",{epic_link}" if epic_link else "")
+    want = "summary,assignee,status,labels,created"
+    if epic_link:
+        want += f",{epic_link}"
+    if points_field:
+        want += f",{points_field}"
     stories = list(api.pages("/rest/api/2/search", {"jql": jql, "fields": want}))
     keys = [s["key"] for s in stories]
     check(len(stories) == 100, f"story count = {len(stories)} (expected 100)")
@@ -166,6 +179,21 @@ def main() -> int:
                      + (f" (mismatches: {wrong[:5]})" if wrong else ""))
     names = sorted({(s["fields"].get("assignee") or {}).get("name") for s in stories})
     check(names == ["alice", "bob", "carol", "dave", "erin"], f"assignee set = {names}")
+    if points_field:
+        allowed = {1, 2, 3, 5, 8, 13}
+        missing = [s["key"] for s in stories
+                   if s["fields"].get(points_field) is None
+                   or int(s["fields"][points_field]) not in allowed]
+        check(not missing, f"story points set on {len(stories) - len(missing)}/100 stories "
+                           f"(Fibonacci 1/2/3/5/8/13)"
+                           + (f" (missing: {missing[:5]})" if missing else ""))
+    else:
+        check(False, "no 'Story Points' field found")
+    created = [jira_dt(s["fields"]["created"]) for s in stories]
+    span = (max(created) - min(created)).days
+    check(span >= 60, f"story created dates span {span} days "
+                      f"({min(created):%Y-%m-%d} .. {max(created):%Y-%m-%d}) — "
+                      "backdate.py put them on the PR timeline")
 
     # --- sprints ----------------------------------------------------------
     print("\nagile")

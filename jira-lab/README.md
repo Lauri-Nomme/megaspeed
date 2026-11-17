@@ -24,17 +24,19 @@ clicks, no manual license entry.
 ./jira-lab/lab-up.sh      # pull image, start container, wait for FIRST_RUN
 ./jira-lab/setup.py       # walk the setup wizard (license, base URL, admin)
 ./jira-lab/seed.py        # project DEL, epic DEL-1, DEL-100..199, sprints, worklogs
+./jira-lab/backdate.py    # put the stories on the PR timeline + set story points
 ./jira-lab/verify.py      # REST checks (exit 0 = fixture is intact)
 ```
 
 Total wall clock on this host: ~2 min for `lab-up.sh` + `setup.py`, ~15 s for
-`seed.py` once the app is warm.
+`seed.py` once the app is warm, ~1 min for `backdate.py` (it stops/restarts the
+container once).
 
 Reset to a blank instance (needed to re-arm the license window):
 
 ```bash
 PURGE=1 ./jira-lab/lab-down.sh && ./jira-lab/lab-up.sh
-./jira-lab/setup.py && ./jira-lab/seed.py
+./jira-lab/setup.py && ./jira-lab/seed.py && ./jira-lab/backdate.py
 ```
 
 ## Licensing (the one non-obvious part)
@@ -119,10 +121,12 @@ are safe (data and license live in the bind-mounted home) and only cost ~40 s:
 | Stories | `DEL-100` … `DEL-199` (100), same 20 themes/titles as the Bitbucket corpus |
 | Assignees | `AUTHORS[(i * 7 + 2) % 5]` — exactly the Bitbucket PR author rotation |
 | Epic link | every story linked to `DEL-1` (field id is discovered at runtime) |
-| Sprints | `DEL Sprint 1` (closed, DEL-100..129), `DEL Sprint 2` (closed, DEL-130..159), `DEL Sprint 3` (active, DEL-160..189) |
+| Sprints | `DEL Sprint 1` (closed, DEL-100..129, 2026-08-17 → 09-10), `DEL Sprint 2` (closed, DEL-130..159, 2026-09-11 → 10-07), `DEL Sprint 3` (active, DEL-160..189, 2026-10-08 → 11-27) |
 | Backlog | DEL-190..199 |
-| Statuses | all stories in closed sprints `Done`; active sprint ≈30 % Done / 40 % In Progress / 30 % To Do |
-| Worklogs | 199 **native Jira worklogs**, 1–3 per story, authored by the assignee (sometimes a second engineer), backdated into 2026-08-17 … 2026-11-12 |
+| Statuses | after `backdate.py`: every story with a merged PR is `Done`, the rest `In Progress` (no fake `To Do`) |
+| Story points | Fibonacci-like 1/2/3/5/8/13 from the story's changed lines (set by `backdate.py`) |
+| Worklogs | 199 **native Jira worklogs**, 1–3 per story, authored by the assignee (sometimes a second engineer), backdated into each story's active window and logged same/next day |
+| Timeline | `created` / refinement / sprint pull / in-progress / done follow the story's PRs (2026-08-17 … 11-12), not the seed instant |
 | Users | alice, bob, carol, dave, erin, frank (+ admin), password `lab-pw-<name>`, Jira Software access |
 
 Descriptions carry `Epic: DEL-1`, `Ticket: DEL-xxx`, `Area:` and `Repo:` — the
@@ -130,9 +134,58 @@ same shape as the Bitbucket PR descriptions, so both sources join on the ticket
 key. The seed is deterministic (fixed RNG seed `20261115`) and idempotent:
 re-running skips anything that already exists.
 
+## Backdating onto the PR timeline
+
+The seed writes every story at one instant, while the Bitbucket PRs the stories
+are about were opened and merged between 2026-08-13 and 2026-11-12. Read
+together, that makes the Jira-layer "merge → done" segment a fake ~36-day
+artifact. `backdate.py` fixes the ticket side:
+
+1. it reads each story's first PR open and last merged close from the megaspeed
+   store (`data/del-combined.duckdb`, falling back to `data/del3.duckdb`);
+2. it sets story points over REST (adding `Story Points` to the DEL screens
+   first — the scrum template leaves it off), so Jira writes a real changelog
+   row;
+3. it stops `jira-lab`, edits the embedded H2 database, and restarts:
+   * `JIRAISSUE.CREATED` / `UPDATED` / `RESOLUTIONDATE`,
+   * the status changelog as the two-step `To Do → In Progress → Done` (the seed
+     wrote a direct `To Do → Done`, which is why "sprint → in progress" had no
+     data),
+   * the `Sprint` and `Story Points` changelog timestamps,
+   * `WORKLOG.STARTDATE` / `CREATED` (inside the story's active window, logged
+     same/next day),
+   * the sprint start / end / complete dates and the workflow history tables;
+4. it restarts the container, rebuilds the search index and verifies through
+   REST.
+
+The plan is derived from the PR timeline and a fixed RNG seed, not from the
+current timestamps, so re-running is idempotent. The intended shape per story
+is: created in the backlog → refined (story points) → pulled into the sprint →
+in progress shortly before the first PR opens → done shortly after the last PR
+merges. A story whose PRs never merged stays `In Progress` (the honest state).
+
+```bash
+python3 jira-lab/backdate.py --plan-only   # print the timeline, change nothing
+python3 jira-lab/backdate.py               # apply + verify
+python3 jira-lab/backdate.py --verify      # only the REST check (container up)
+```
+
+After it runs, re-scrape Jira with `--full` (the backdated `updated` values are
+older than the previous watermark) and re-import into the combined store:
+
+```bash
+MEGASPEED_JIRA_BASE_URL=http://127.0.0.1:8090 \
+MEGASPEED_JIRA_USER=admin MEGASPEED_JIRA_PASSWORD=admin-lab-pw \
+MEGASPEED_JIRA_PROJECTS=DEL MEGASPEED_TICKET_PROJECTS=DEL \
+  .venv/bin/python -m ingest scrape --jira --live --project DEL --full \
+    --out /tmp/jira.tgz --state-dir /tmp/jira.state --identity data/identity.json
+MEGASPEED_TICKET_PROJECTS=DEL \
+  .venv/bin/python -m ingest import /tmp/jira.tgz --db data/del-combined.duckdb
+```
+
 ## REST verification
 
-`verify.py` runs 25 checks; the interesting endpoints are:
+`verify.py` runs 27 checks; the interesting endpoints are:
 
 ```bash
 # epic + stories (JQL)
@@ -169,12 +222,14 @@ Observed result on the seeded lab:
   [ok] keys are DEL-100..DEL-199
   [ok] 100/100 stories linked to DEL-1 (field customfield_10100)
   [ok] assignees match the Bitbucket author rotation
+  [ok] story points set on 100/100 stories (Fibonacci 1/2/3/5/8/13)
+  [ok] story created dates span 92 days (2026-08-06 .. 2026-11-06) — backdate.py put them on the PR timeline
   [ok] board 1 type 'scrum'
   [ok] sprint 'DEL Sprint 1' state=closed / 'DEL Sprint 2' state=closed / 'DEL Sprint 3' state=active
   [ok] sprint membership {'DEL Sprint 1': 30, 'DEL Sprint 2': 30, 'DEL Sprint 3': 30}
   [ok] 199 native worklogs across 100 stories
   [ok] worklog authors = {'alice': 45, 'bob': 40, 'carol': 38, 'dave': 38, 'erin': 38}
-25/25 checks passed
+27/27 checks passed
 ```
 ## Tempo: NOT installed (documented fallback)
 
@@ -225,10 +280,10 @@ reads the native worklog store), so the ingest contract does not change.
   the counter, so `seed.py` creates 98 filler issues after `DEL-1` and deletes
   them again to make the stories land on `DEL-100..DEL-199`. The project only
   ever contains the epic plus the 100 stories.
-* **Created/updated timestamps** are the seed time (Jira does not accept them
-  via REST); only the worklogs are backdated into the corpus window. If an
-  ingest rule needs ticket open dates spread over the window, that is a DB
-  update, not a REST one.
+* **Created/updated timestamps** are the seed time until `backdate.py` runs
+  (Jira does not accept them via REST). `backdate.py` rewrites them directly in
+  the H2 database, together with the changelog and worklog timestamps; see
+  *Backdating onto the PR timeline* below.
 * Restarting the container is safe (data and license live in the H2 DB under
   `jira-lab/home/jira-lab`); the Jira Software app stays enabled, and a restart
   is also what re-arms the 3-hour app-license window.
@@ -252,4 +307,5 @@ reads the native worklog store), so the ingest contract does not change.
 | `lab-down.sh` | remove the container (`PURGE=1` deletes the home) |
 | `setup.py` | unattended setup wizard + Jira Software app repair + 3-hourly app-license re-arm |
 | `seed.py` | idempotent DEL corpus seed (users, project, epic, stories, sprints, worklogs) |
-| `verify.py` | read-only REST/Agile verification (25 checks) |
+| `backdate.py` | rewrite story/sprint/worklog timestamps onto the PR timeline + set story points |
+| `verify.py` | read-only REST/Agile verification (27 checks) |

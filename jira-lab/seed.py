@@ -147,9 +147,14 @@ WORKLOG_COMMENTS = [
 
 SPRINTS = [
     # name, start, end, state, story offsets
-    ("DEL Sprint 1", date(2026, 8, 17), date(2026, 9, 11), "closed", range(0, 30)),
-    ("DEL Sprint 2", date(2026, 9, 14), date(2026, 10, 9), "closed", range(30, 60)),
-    ("DEL Sprint 3", date(2026, 11, 2), date(2026, 11, 27), "active", range(60, 90)),
+    #
+    # The windows tile the Bitbucket PR window (2026-08-17 .. 2026-11-12) and
+    # every story's first PR opens at/after its sprint's start, so the
+    # Jira-layer "sprint -> in progress" segment is never inverted.  They are
+    # the same dates ``jira-lab/backdate.py`` writes to the sprint objects.
+    ("DEL Sprint 1", date(2026, 8, 17), date(2026, 9, 10), "closed", range(0, 30)),
+    ("DEL Sprint 2", date(2026, 9, 11), date(2026, 10, 7), "closed", range(30, 60)),
+    ("DEL Sprint 3", date(2026, 10, 8), date(2026, 11, 27), "active", range(60, 90)),
 ]
 # DEL-190..DEL-199 stay in the backlog.
 

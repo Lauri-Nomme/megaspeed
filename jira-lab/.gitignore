@@ -1,4 +1,6 @@
 # Jira instance data (bind mount of $JIRA_HOME) - never commit
 home/
+# backdate working copies (H2 db + CSV dumps) - never commit
+build/
 __pycache__/
 *.pyc
