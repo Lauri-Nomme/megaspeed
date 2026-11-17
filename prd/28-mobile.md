@@ -1,31 +1,40 @@
-# 28 — Mobile use (assessment)
+# 28 — Responsive design (desktop + phone)
 
-## Status: desktop-first, by design — mobile is not supported
+The UI must be **optimal on both** a desktop monitor and a OnePlus IN2025-class phone
+(~412×915 CSS viewport). One codebase, two layouts, via breakpoints + touch detection.
 
-`prd/10`'s user model is explicit: "Large monitors, often several… full-width layouts." The UI has a
-viewport meta and one medium-screen breakpoint (`@media (max-width: 1180px)`), but no phone breakpoint,
-no touch gesture handling, and the core surfaces (canvas timeline, blocking graph, dense tables, the
-detail drawer) assume a mouse + a wide viewport. This is a desktop process-mining/analytics tool, not a
-mobile app.
+## Principles
 
-## What breaks on a phone (to verify)
+- **Desktop keeps the current dense, canvas-first experience** (prd/10) — unchanged.
+- **Phone is list-first**: the entry is the ticket / delivery / rules list; the timeline and blocking
+  graph are secondary "explore" views that still work with touch (pinch/pan), not crammed.
+- The phone's primary use case is the **ticket detail** — "why did DEL-167 take 3 weeks" — so that page
+  must be fully usable one-handed.
 
-- Canvas timeline/graph: wheel/box-zoom + drag pan are mouse-first; pinch/tap are unsupported.
-- Dense tables (delivery, drill-down, rules): horizontal overflow, tiny tap targets.
-- The detail drawer and sidebar: fixed-width, not a bottom-sheet / off-canvas.
-- The top bar (scope/timeframe/tenant/density) doesn't wrap.
+## Breakpoints
 
-## Decision
+- `>1180px` desktop (current). · `641–1180px` medium (collapsible sidebar, current). · `≤640px` **phone** (new).
 
-**Keep v1 desktop-only.** Mobile support is a substantial separate effort (responsive shell, touch
-gestures, canvas simplification, list-first mobile views) with little payoff for an internal
-delivery-flow analytics tool. If it's ever wanted, the scope is:
+## Phone layout (≤640px)
 
-1. Responsive shell: collapsible/off-canvas sidebar, wrapped top bar, bottom-sheet detail panel.
-2. Touch: pinch-to-zoom + one-finger pan on the timeline, tap-to-drill on the graph.
-3. Simplified mobile views: list-first (delivery/rules/ticket list) with the canvas as a secondary
-   "open in wide view" affordance, rather than cramming the full canvas onto a phone.
+1. **Shell** — sidebar → off-canvas (hamburger + slide-in + scrim); top bar → wraps to two rows
+   (scope/timeframe/tenant/density as pill groups); detail panel → full-width **bottom sheet** (swipe
+   to dismiss).
+2. **Touch** — pinch-to-zoom + one-finger pan on the timeline and graph; tap to select/drill; no
+   hover-only affordances (tooltips become tap-and-hold); tap targets ≥44px.
+3. **List-first** — the default phone entry is the **Delivery list** (or a compact "needs attention"
+   list) + the **ticket detail**; Timeline/Blocking/Queue/Rules reachable via the drawer.
+4. **Tables** — on phone, stack rows into key-value cards (or horizontal scroll with a pinned first
+   column); never horizontal-overflow the viewport.
+
+## Definition of done
+
+- Every view renders and is usable at 412×915 (no horizontal overflow, all controls reachable,
+  tap targets ≥44px).
+- Touch gestures work on the timeline (pinch/pan) and blocking graph (pan/tap).
+- The ticket detail page is fully usable on phone.
+- Desktop is unchanged (regression screenshot at 1600px + the existing node tests stay green).
 
 ## Out of scope
 
-Mobile-optimising the canvas itself (it stays a desktop artifact); native apps.
+Native apps · tablet-specific layout (640–1024 = the medium breakpoint).
