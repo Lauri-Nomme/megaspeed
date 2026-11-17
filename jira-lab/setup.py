@@ -22,6 +22,12 @@ without enabling the app, and a plain restart does not re-run the
 installation: the instance stays "Jira Core" (no ``/rest/agile``, no software
 project type). ``--fix-app`` (default) clears the install marker and restarts
 once so the app is installed with the license present.
+
+A second, unrelated trap: the Jira Software *application* license is
+Atlassian's developer-test key, which Jira refreshes on every start with a
+**3-hour window**. After ~3 h of uptime the app stays enabled but Agile REST
+answers 403 (``/rest/api/2`` is unaffected); ``--fix-license`` (default)
+detects that and restarts to re-arm the window.
 """
 from __future__ import annotations
 
@@ -298,12 +304,12 @@ def walk_wizard(br: Browser, timeout: int) -> None:
 # ---------------------------------------------------------------------------
 # REST helper + software-app repair
 # ---------------------------------------------------------------------------
-def api_get(path: str, ok=(200,)):
+def api_get(path: str, ok=(200,), accept: str = "application/json"):
     import base64
     import json
     url = BASE.rstrip("/") + path
     tok = base64.b64encode(f"{SYSADMIN[0]}:{SYSADMIN[1]}".encode()).decode()
-    req = urllib.request.Request(url, headers={"Accept": "application/json",
+    req = urllib.request.Request(url, headers={"Accept": accept,
                                                "Authorization": "Basic " + tok})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
@@ -337,6 +343,67 @@ def nerdctl(*args: str) -> None:
     subprocess.run(["bash", "-c", cmd], check=True)
 
 
+APP_LICENSE_PATH = "/rest/plugins/applications/1.0/installed/jira-software/license"
+AGILE_PROBE = "/rest/agile/1.0/board"
+
+
+def app_license_state() -> dict:
+    # the UPM application-license endpoint answers 406 to Accept: application/json
+    code, data = api_get(APP_LICENSE_PATH, accept="*/*")
+    return data if code == 200 and isinstance(data, dict) else {}
+
+
+def wait_agile(timeout: int) -> int:
+    """Wait for the Agile REST module, not just /status.
+
+    /status reports RUNNING before the Jira Software plugins finish starting,
+    so /rest/agile/1.0/board answers 503 for a few seconds after a restart.
+    """
+    deadline = time.time() + timeout
+    code = 0
+    while time.time() < deadline:
+        code, _ = api_get(AGILE_PROBE)
+        if code == 200:
+            return code
+        time.sleep(5)
+    return code
+
+
+def fix_app_license(timeout: int) -> None:
+    """Re-arm the Jira Software *application* license.
+
+    The image ships Atlassian's public developer-test license (SEN-500, "Test
+    license for app developers"). Jira refreshes that key on every start and
+    grants a **3-hour window counted from the start** - it is *not*
+    non-expiring, whatever the platform-license dump in the startup log says
+    (that dump only covers the platform license, which really has no expiry).
+
+    Once the window closes the Software application stays *enabled* - so
+    /rest/agile exists and answers **403** rather than 404 - while every
+    /rest/api/2 call keeps working. That is the confusing failure mode: the
+    instance looks healthy, Jira Core is fine, only Agile REST 403s. Restarting
+    re-arms the window for another 3 hours; no license has to be re-entered
+    (the app-license POST/PUT endpoint rejects headless updates with 405/415).
+    """
+    lic = app_license_state()
+    code = wait_agile(timeout)
+    if code == 200:
+        # the Agile probe is authoritative: an expired app license still leaves
+        # the app enabled, but every /rest/agile call answers 403
+        log(f"Jira Software app license valid until "
+            f"{lic.get('expiryDateString', 'unknown')} (agile REST {code})")
+        return
+    log(f"Jira Software app license lapsed (expired={lic.get('expired')!r}, "
+        f"agile probe {code}) - restarting to re-arm it")
+    nerdctl("restart", NAME)
+    wait_running(timeout)
+    code = wait_agile(timeout)
+    if code != 200:
+        raise SystemExit(f"/rest/agile/1.0/board still {code} after restart")
+    lic = app_license_state()
+    log(f"Jira Software app license re-armed until {lic.get('expiryDateString', 'unknown')}")
+
+
 def fix_software_app(timeout: int) -> None:
     """Re-run the Jira Software application installation with the license in place."""
     code, _ = api_get("/rest/api/2/project/type/software/accessible")
@@ -364,6 +431,8 @@ def main() -> int:
     ap.add_argument("--base", default=BASE)
     ap.add_argument("--no-fix-app", action="store_true",
                     help="skip the Jira Software app reinstall workaround")
+    ap.add_argument("--no-fix-license", action="store_true",
+                    help="skip the 3-hourly Jira Software app license re-arm")
     ap.add_argument("--timeout", type=int, default=READY_TIMEOUT)
     args = ap.parse_args()
 
@@ -386,6 +455,9 @@ def main() -> int:
 
     if not args.no_fix_app:
         fix_software_app(args.timeout)
+
+    if not args.no_fix_license:
+        fix_app_license(args.timeout)
 
     code, info = api_get("/rest/api/2/serverInfo")
     log(f"Jira {info.get('version')} '{info.get('serverTitle')}' is up at {BASE}")

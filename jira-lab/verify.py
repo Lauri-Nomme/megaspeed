@@ -70,12 +70,12 @@ class Api:
         self.base = base.rstrip("/")
         self.user = user
 
-    def get(self, path: str, params: dict | None = None):
+    def get(self, path: str, params: dict | None = None, accept: str = "application/json"):
         url = self.base + path
         if params:
             url += "?" + urllib.parse.urlencode(params)
         tok = base64.b64encode(f"{self.user[0]}:{self.user[1]}".encode()).decode()
-        req = urllib.request.Request(url, headers={"Accept": "application/json",
+        req = urllib.request.Request(url, headers={"Accept": accept,
                                                    "Authorization": "Basic " + tok})
         try:
             with urllib.request.urlopen(req, timeout=60) as r:
@@ -120,6 +120,11 @@ def main() -> int:
     check(bool(sw) and sw[0].get("numberOfSeats", 0) >= 10,
           f"Jira Software DC license: {sw[0].get('numberOfSeats') if sw else '?'} seats, "
           f"{sw[0].get('userCount') if sw else '?'} used")
+    code, app_lic = api.get("/rest/plugins/applications/1.0/installed/jira-software/license",
+                            accept="*/*")
+    check(code == 200 and bool(app_lic.get("valid")) and not app_lic.get("expired"),
+          f"Jira Software app license valid until {app_lic.get('expiryDateString', '?')} "
+          f"(Jira grants 3 h per start; ./jira-lab/setup.py re-arms it)")
 
     # --- project + epic ---------------------------------------------------
     print("\nproject")

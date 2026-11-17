@@ -51,18 +51,64 @@ license** for "Jira Software Data Center, 10 users":
   Jira has no unlicensed path, and it doesn't have to);
 * the key lives in `jira-lab/license.txt` (single line) and is applied by the
   wizard's license step;
-* Atlassian publishes this key as "expires in 3 hours", but on 9.17.5 Jira
-  stores it as a *developer test license*: `Evaluation: false`, `SEN-500`, and
-  **no expiry/maintenance date at all** in the startup license dump (verified
-  across restarts), so the lab stays writable. If a future build does enforce
-  the 3-hour window, Jira drops into read-only mode (REST GETs still work,
-  writes are refused) and the fix is to recreate the home
-  (`PURGE=1 … lab-down.sh`) and re-run `setup.py` + `seed.py`, or to drop a
-  30-day evaluation license into `license.txt`;
+* **the 3-hour window is real — but it applies to the *application* license,
+  not the platform one.** The startup dump (`___ License Details ___`) reports
+  the *platform* license (`Evaluation: false`, `SEN-500`, no expiry date) and
+  that one genuinely never expires; reading only that dump is what makes this
+  trap easy to fall into. The Jira Software **application** license
+  (`GET /rest/plugins/applications/1.0/installed/jira-software/license`) is
+  refreshed by Jira **on every start** and expires exactly 3 hours after that
+  start. Measured on this host:
+
+  | Jira start | app license expiry | delta |
+  |---|---|---|
+  | 17 Nov 01:22:17 | 17 Nov 04:22:25 | 3 h 07 s |
+  | 17 Nov 01:29:45 | 17 Nov 04:29:51 | 3 h 05 s |
+
+  So the fixture is healthy for ~3 h of uptime at a time:
+  * while the window is open everything works;
+  * once it lapses the Software application stays **enabled** — so `/rest/agile`
+    still exists and answers **403**, *not* 404 — while every `/rest/api/2`
+    call keeps working. The instance looks fine and only boards/sprints break.
+    This is **not** the "Jira Core" quirk below (that one 404s);
+  * **repair: restart the container** (`sudo nerdctl restart jira-lab`) — that
+    re-arms the window. `./jira-lab/setup.py` now detects the lapse and does
+    exactly that (`--no-fix-license` skips it). Re-posting `license.txt` over
+    REST is *not* an option: the UPM application-license endpoint rejects
+    headless updates with 405/415, it only accepts the interactive
+    *Manage apps → Jira Software → License* form;
+  * a lapsed app license does **not** make Jira read-only and never touches
+    data; it only closes Agile REST. (Read-only mode would mean the *platform*
+    license expired, which does not happen with this key on 9.17.5.)
 * 10 seats, 7 used (admin + alice/bob/carol/dave/erin/frank).
 
 `jira-lab/app-license.txt` holds the matching *Data Center app* timebomb
 license; it is unused because Tempo could not be installed (see below).
+
+### Troubleshooting: `/rest/agile/1.0/board` → 403
+
+| Symptom | Meaning | Fix |
+|---|---|---|
+| `/rest/api/2/*` 200, `/rest/agile/*` **403**, app `enabled` in the startup dump | the 3-hour **application** license window lapsed (uptime > 3 h) | `./jira-lab/setup.py`, or `sudo nerdctl restart jira-lab` |
+| `/rest/agile/*` **404**, `/rest/api/2/project/type/software/accessible` 404 | the app was never enabled — the first-boot / "Jira Core" quirk | `./jira-lab/setup.py` (`--fix-app`, default) |
+| `/rest/agile/*` **503** just after a start | plugins still warming up; `/status` says `RUNNING` too early | wait 30–60 s |
+
+Diagnose the license in one shot (note `Accept: */*` — this endpoint answers
+`406` to `Accept: application/json`):
+
+```bash
+curl -s -u admin:admin-lab-pw -H 'Accept: */*' \
+  http://localhost:8090/rest/plugins/applications/1.0/installed/jira-software/license \
+  | python3 -m json.tool | grep -E 'expiryDateString|expired|valid'
+```
+
+For a lab that must stay up longer than 3 h, restart it on a timer — restarts
+are safe (data and license live in the bind-mounted home) and only cost ~40 s:
+
+```cron
+# host crontab: keep the 3-hour app-license window open
+17 */2 * * * sudo nerdctl restart jira-lab >/dev/null 2>&1
+```
 
 ## What is seeded
 
@@ -86,7 +132,7 @@ re-running skips anything that already exists.
 
 ## REST verification
 
-`verify.py` runs 24 checks; the interesting endpoints are:
+`verify.py` runs 25 checks; the interesting endpoints are:
 
 ```bash
 # epic + stories (JQL)
@@ -116,6 +162,7 @@ Observed result on the seeded lab:
 ```
   [ok] Jira version 9.17.5
   [ok] Jira Software DC license: 10 seats, 7 used
+  [ok] Jira Software app license valid until 17 Nov 2026 (Jira grants 3 h per start)
   [ok] project DEL exists / project type 'software'
   [ok] epic DEL-1 = 'Delivery platform epic'
   [ok] story count = 100 (expected 100)
@@ -127,9 +174,8 @@ Observed result on the seeded lab:
   [ok] sprint membership {'DEL Sprint 1': 30, 'DEL Sprint 2': 30, 'DEL Sprint 3': 30}
   [ok] 199 native worklogs across 100 stories
   [ok] worklog authors = {'alice': 45, 'bob': 40, 'carol': 38, 'dave': 38, 'erin': 38}
-24/24 checks passed
+25/25 checks passed
 ```
-
 ## Tempo: NOT installed (documented fallback)
 
 Tempo Timesheets could not be installed in this lab, and worklogs are therefore
@@ -166,6 +212,12 @@ reads the native worklog store), so the ingest contract does not change.
   instance stays "Jira Core" (no `/rest/agile`, no `software` project type).
   `setup.py` detects this (`/rest/api/2/project/type/software/accessible`),
   clears the marker, restarts once and re-checks. `--no-fix-app` skips it.
+* **Jira Software app license is a 3-hour window per start.** Distinct from the
+  install-ordering quirk above (that one 404s): once the instance has been up
+  for ~3 h the *application* license lapses while the app stays enabled, so
+  `/rest/agile/*` answers **403** and `/rest/api/2/*` is unaffected. A restart
+  re-arms it; `setup.py` does that automatically. See
+  *Troubleshooting: `/rest/agile/1.0/board` → 403* above.
 * **The wizard's admin step** creates the account but re-renders the step
   instead of redirecting (reproduced on every fresh 9.17.5 install); `setup.py`
   notices the side effect and continues at the mail step.
@@ -178,7 +230,8 @@ reads the native worklog store), so the ingest contract does not change.
   ingest rule needs ticket open dates spread over the window, that is a DB
   update, not a REST one.
 * Restarting the container is safe (data and license live in the H2 DB under
-  `jira-lab/home/jira-lab`); the Jira Software app stays enabled.
+  `jira-lab/home/jira-lab`); the Jira Software app stays enabled, and a restart
+  is also what re-arms the 3-hour app-license window.
 * `/rest/api/2/serverInfo` reports `"deploymentType": "Server"` — Jira reports
   that for every self-managed instance. This *is* Data Center: DC license,
   `cluster.properties` (`jira.node.id=jira-lab-node-1`, shared home under
@@ -197,6 +250,6 @@ reads the native worklog store), so the ingest contract does not change.
 | `app-license.txt` | DC app 3-hour timebomb license (for a Tempo attempt) |
 | `lab-up.sh` | pull image, create/start `jira-lab`, wait for `/status` |
 | `lab-down.sh` | remove the container (`PURGE=1` deletes the home) |
-| `setup.py` | unattended setup wizard + Jira Software app repair |
+| `setup.py` | unattended setup wizard + Jira Software app repair + 3-hourly app-license re-arm |
 | `seed.py` | idempotent DEL corpus seed (users, project, epic, stories, sprints, worklogs) |
-| `verify.py` | read-only REST/Agile verification (24 checks) |
+| `verify.py` | read-only REST/Agile verification (25 checks) |
