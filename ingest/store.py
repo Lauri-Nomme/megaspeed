@@ -48,8 +48,10 @@ EVENT_KEY_RE = taxonomy.EVENT_KEY_RE
 # ``ingest_runs.run_id``: one token, no whitespace (``fixture-2026...-abcdef``).
 RUN_ID_RE = r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$"
 # The sources this store may hold. A source name is a closed label, not free
-# text: it is the provenance column of ``ingest_runs``.
-SOURCES = ("fixture", "bitbucket-dc", "jira-fixture", "jira-dc")
+# text: it is the provenance column of ``ingest_runs``. ``jira-cloud`` is the
+# Cloud shape of the same Jira source (prd/24): a different API surface, the
+# same objects and events.
+SOURCES = ("fixture", "bitbucket-dc", "jira-fixture", "jira-dc", "jira-cloud")
 OBJECT_ID_PREFIX = {
     "PR": "PR:",
     "COMMIT": "COMMIT:",

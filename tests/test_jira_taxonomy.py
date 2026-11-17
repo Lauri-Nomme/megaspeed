@@ -149,8 +149,14 @@ class ObjectShapeTests(unittest.TestCase):
 class SourceTests(unittest.TestCase):
     def test_both_source_families_are_known(self):
         self.assertEqual(
-            set(SOURCES), {"fixture", "bitbucket-dc", "jira-fixture", "jira-dc"}
+            set(SOURCES),
+            {"fixture", "bitbucket-dc", "jira-fixture", "jira-dc", "jira-cloud"},
         )
+
+    def test_the_cloud_source_is_the_jira_family(self):
+        # prd/24: the same ticket layer, a different API surface.
+        self.assertIn("jira-cloud", SOURCES)
+        self.assertIn("jira-dc", SOURCES)
 
 
 if __name__ == "__main__":
