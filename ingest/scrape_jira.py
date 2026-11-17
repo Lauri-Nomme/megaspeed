@@ -212,6 +212,9 @@ class JiraCollected:
     sprint_count: int = 0
     fields: dict[str, str] = field(default_factory=dict)
     statuses: int = 0
+    #: prd/29: the workflow status -> stage map this run projected with. Echoed
+    #: in the manifest so a store's stage labels are reproducible.
+    status_map: dict[str, str] = field(default_factory=dict)
     #: Issues that failed to fetch: ``[{key, error}]``. Counted, not fatal, and
     #: not recorded in the per-issue cursor, so a later run retries them (FR-2)
     #: -- within the watermark overlap window, exactly like the Bitbucket side.
@@ -392,6 +395,7 @@ def collect(
         if field_id
     }
     out.statuses = len(categories)
+    out.status_map = dict(sorted(cfg.jira_status_map.items()))
 
     # -- sprints + membership (agile API) --------------------------------
     sprints: list[tuple[str, dict]] = []
@@ -416,6 +420,9 @@ def collect(
         sprint_field=sprint_field,
         story_points_field=points_field,
         status_categories=categories,
+        # prd/29: the operator's workflow map, echoed in the manifest so the
+        # store's projection is reproducible.
+        stage_map=cfg.jira_status_map,
     )
     for project, sprint in sprints:
         reducer.reduce_sprint(sprint, project, stats)
@@ -729,6 +736,9 @@ def build_manifest(collected: JiraCollected, *, previous: datetime | None,
             "sprints": collected.sprint_count,
             "fields": dict(sorted(collected.fields.items())),
             "statuses": collected.statuses,
+            # prd/29: status name -> stage. Empty means the Jira category
+            # projection was used (3 coarse stages).
+            "status_map": dict(sorted(collected.status_map.items())),
             "worklogs": collected.stats.worklogs,
             "log_delays": dict(sorted(collected.stats.log_delays.items())),
         },
@@ -1007,6 +1017,7 @@ def scrape(
         # resolved to epics + children (prd/27). Import/--verify use this.
         "ticket_keys": list(collected.ticket_keys),
         "jira_epics": list(collected.epic_keys),
+        "jira_status_map": dict(sorted(collected.status_map.items())),
     }
 
 

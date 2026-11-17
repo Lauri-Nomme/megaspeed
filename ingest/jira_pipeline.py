@@ -7,8 +7,9 @@ purposes and then dropped:
    *keys* survive, and they are already the object ids;
 2. **deterministic classification** of a summary / sprint goal into one label
    from ``taxonomy.SUMMARY_CLASS`` (keyword rules, no model, no paraphrase);
-3. **deterministic projection** of the Jira schema: a status *category*, a
-   resolution class, a sprint id, a point value, a worklog gap.
+3. **deterministic projection** of the Jira schema: a status *stage* (the
+   operator's workflow map, else Jira's status category), a resolution class, a
+   sprint id, a point value, a worklog gap.
 
 Everything else that leaves this module is a key, a pseudonym, a timestamp or an
 enum label. There is no path that copies a summary, a description, a comment, a
@@ -68,10 +69,44 @@ _RESOLUTION_RULES = [
 ]
 
 _STATUS_BY_NAME = [
-    (re.compile(r"^(to do|todo|open|new|backlog|reopened|selected)\b", re.I), "todo"),
-    (re.compile(r"^(in progress|in review|in development|review|qa|testing|doing)\b", re.I), "in_progress"),
-    (re.compile(r"^(done|closed|resolved|released)\b", re.I), "done"),
+    # prd/29: the install's real workflow names. Longest/most specific first, so
+    # "ready for refinement" is backlog while "refined" is ready, and
+    # "in verification" is not read as "in review" by a prefix rule.
+    (
+        re.compile(
+            r"^(ready for refinement|refinement|refining|backlog|to do|todo|open|new"
+            r"|reopened)\b",
+            re.I,
+        ),
+        "backlog",
+    ),
+    (
+        re.compile(r"^(refined|ready|triaged|groomed|sized|estimated|selected)\b", re.I),
+        "ready",
+    ),
+    (
+        re.compile(
+            r"^(in verification|in qa|qa|verifying|verification|testing|in test)\b",
+            re.I,
+        ),
+        "in_verification",
+    ),
+    (
+        re.compile(r"^(in review|in code review|code review|review|under review|pr review)\b", re.I),
+        "in_review",
+    ),
+    (
+        re.compile(r"^(in progress|in development|in dev|development|doing|implementing)\b", re.I),
+        "in_progress",
+    ),
+    (re.compile(r"^(done|closed|resolved|released|verified|completed)\b", re.I), "done"),
 ]
+
+#: Jira's own status *category* -> stage. This is the deterministic projection
+#: (prd/02) and the reason an unconfigured store keeps today's numbers: review
+#: and verification statuses are category ``indeterminate``, so without a config
+#: map they stay ``in_progress`` (prd/29 §3).
+_STAGE_BY_CATEGORY = {"new": "backlog", "indeterminate": "in_progress", "done": "done"}
 
 #: Story/bug/task issue types become a STORY object; an epic becomes an EPIC.
 STORY_TYPES = frozenset({"story", "bug", "task", "improvement", "new feature", "technical task"})
@@ -97,26 +132,39 @@ def resolution_class(name: Any) -> str | None:
     return "other"
 
 
-def status_class(status_id: Any, name: Any, categories: dict[str, str]) -> str:
-    """Status id (or name) -> the closed ``STATUS_CLASS`` label.
+def status_stage(
+    status_id: Any,
+    name: Any,
+    categories: dict[str, str],
+    stage_map: dict[str, str] | None = None,
+) -> str:
+    """Status id (or name) -> one stage from ``taxonomy.STATUS_STAGE`` (prd/29).
 
-    The id is resolved through Jira's own status *category* (``new`` /
-    ``indeterminate`` / ``done``), which is the deterministic projection. Only
-    when the id is unknown does the name fall back to keyword rules; an unknown
-    name is ``other`` -- never the name itself.
+    Precedence, most specific first:
+
+    1. ``stage_map`` -- the operator's ``[jira.stages]`` / ``MEGASPEED_JIRA_STAGES``
+       mapping, keyed by the normalised status *name*. This is what lets a real
+       install distinguish review and QA;
+    2. Jira's own status *category* (``new`` / ``indeterminate`` / ``done``),
+       the deterministic projection prd/02 asks for -- and the reason an
+       unconfigured store is unchanged: review/QA statuses are category
+       ``indeterminate`` and stay ``in_progress``;
+    3. name keyword rules, for a status id the categories map does not know.
+
+    An unknown name is ``other`` -- never the name itself.
     """
+    value = str(name or "").strip()
+    if stage_map and value:
+        mapped = stage_map.get(value.lower())
+        if mapped is not None:
+            return taxonomy.normalize_stage(mapped)
     key = str(status_id or "").strip()
     category = categories.get(key)
     if category:
-        return {
-            "new": "todo",
-            "indeterminate": "in_progress",
-            "done": "done",
-        }.get(category, "other")
-    value = str(name or "").strip()
-    for pattern, label in _STATUS_BY_NAME:
+        return _STAGE_BY_CATEGORY.get(category, "other")
+    for pattern, stage in _STATUS_BY_NAME:
         if pattern.match(value):
-            return label
+            return stage
     return "other"
 
 
@@ -242,6 +290,7 @@ class JiraReducer:
         sprint_field: str = "",
         story_points_field: str = "",
         status_categories: dict[str, str] | None = None,
+        stage_map: dict[str, str] | None = None,
     ):
         self.cfg = cfg
         self.ident = ident
@@ -250,6 +299,14 @@ class JiraReducer:
         self.sprint_field = sprint_field
         self.story_points_field = story_points_field
         self.status_categories = dict(status_categories or {})
+        #: prd/29: normalised workflow status name -> stage, from
+        #: ``[jira.stages]`` / ``MEGASPEED_JIRA_STAGES``. Empty = the coarse
+        #: category projection (today's numbers).
+        self.stage_map = {
+            str(name).strip().lower(): taxonomy.normalize_stage(stage)
+            for name, stage in (stage_map or {}).items()
+            if str(name).strip()
+        }
         self.actor_kinds: dict[str, str] = {SYSTEM_ACTOR: "bot"}
         #: Object ids that exist in this bundle, so an event never references a
         #: dangling object (an epic outside the scrape scope, an unknown sprint).
@@ -525,11 +582,17 @@ class JiraReducer:
         return None
 
     def _status_change(self, stats, key, object_id, natural, ts, actor, item) -> None:
-        before = status_class(item.get("from"), item.get("fromString"), self.status_categories)
-        after = status_class(item.get("to"), item.get("toString"), self.status_categories)
+        before = status_stage(
+            item.get("from"), item.get("fromString"), self.status_categories, self.stage_map
+        )
+        after = status_stage(
+            item.get("to"), item.get("toString"), self.status_categories, self.stage_map
+        )
         if before == after:
-            # A no-op status write (Jira emits these on bulk edits): not a
-            # transition, and definitely not an event.
+            # A no-op status write (Jira emits these on bulk edits), or a move
+            # between two statuses of the same stage ("OPEN" -> "READY FOR
+            # REFINEMENT" are both backlog): not a stage transition, and
+            # definitely not an event.
             stats.changelog_ignored += 1
             return
         stats.transitions += 1
@@ -682,5 +745,5 @@ __all__ = [
     "log_delay_bucket",
     "points_value",
     "resolution_class",
-    "status_class",
+    "status_stage",
 ]

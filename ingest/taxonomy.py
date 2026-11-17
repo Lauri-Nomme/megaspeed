@@ -17,11 +17,11 @@ from typing import Any
 
 # Version of the raw -> label projection. Bumped when a mapping changes; stored
 # next to every event so a re-classification is reproducible.
-CLASSIFIER_VERSION = "deterministic-v1"
+CLASSIFIER_VERSION = "deterministic-v2"
 # Every version this codebase has ever emitted. Add a member when bumping: a
 # store may legitimately still hold rows from an older version until the next
 # re-ingest replays them (BUG-02), and --verify must accept those.
-CLASSIFIER_VERSIONS = frozenset({"deterministic-v1"})
+CLASSIFIER_VERSIONS = frozenset({"deterministic-v1", "deterministic-v2"})
 
 # --- closed sets ---------------------------------------------------------------
 
@@ -56,11 +56,29 @@ ACTIVITIES = frozenset(
 QUESTION_PHASE = frozenset({"breakdown", "refinement", "sprint", "implementation", "review"})
 SEVERITY = frozenset({"mandatory", "suggestion"})
 # Jira status *category* (``new`` / ``indeterminate`` / ``done``) projected onto
-# a closed label. The raw status name is workflow-specific ("In Review", "QA
-# Failed", ...) and is never stored; Jira's own category is the deterministic
+# a closed stage label. The raw status name is workflow-specific ("In Review",
+# "QA Failed", ...) and is never stored; Jira's own category is the deterministic
 # projection (prd/02: "Status / assignee / sprint / points -- deterministic:
 # Jira changelog schema").
-STATUS_CLASS = frozenset({"todo", "in_progress", "done", "other"})
+#
+# prd/29 widens that 3-bucket projection to the workflow *stages* a real install
+# runs: the coarse categories collapse review and QA into "in progress", so the
+# time a ticket spends waiting for review and for verification was never
+# measurable. The set is closed and fixed: a configured workflow status maps
+# onto one of these (``ingest.config.parse_status_map``), and ``other`` is the
+# explicit "the classifier could not decide" escape hatch.
+STATUS_STAGE = frozenset(
+    {"backlog", "ready", "in_progress", "in_review", "in_verification", "done", "other"}
+)
+# The pre-prd/29 name for the same closed set. Kept as an alias so a caller (or a
+# test) written against the 3-bucket vocabulary keeps reading, but the *values*
+# are stages now: ``todo`` is legacy and normalises to ``backlog`` on read.
+STATUS_CLASS = STATUS_STAGE
+#: Legacy label -> stage (prd/29). A store written before the bump carries
+#: ``todo`` in ``from_status`` / ``to_status``; analysis normalises on read, so an
+#: old store reads without a re-scrape.
+LEGACY_STATUS_STAGE = {"todo": "backlog"}
+
 # A story's resolution, projected onto a finite set. ``None`` (unresolved) is
 # carried as the object state ``open``, never as a label.
 RESOLUTION_CLASS = frozenset({"done", "wont_do", "duplicate", "other"})
@@ -185,9 +203,9 @@ ATTRIBUTE_SPEC: dict[str, Any] = {
     "replies": int,
     "push_index": int,
     # -- jira-side (Story/Epic/Sprint, prd/03/04) ------------------------------
-    # A status transition, both ends projected onto STATUS_CLASS.
-    "from_status": STATUS_CLASS,
-    "to_status": STATUS_CLASS,
+    # A status transition, both ends projected onto STATUS_STAGE (prd/29).
+    "from_status": STATUS_STAGE,
+    "to_status": STATUS_STAGE,
     # Which sprint a ``sprint_added`` / ``sprint_removed`` event is about. The
     # SPRINT object id is on the event's object set; the id here saves a join.
     "sprint_id": COUNT,
@@ -318,3 +336,18 @@ def check_message_class(value: str) -> str:
     if value not in MESSAGE_CLASS:
         return "other"
     return value
+
+
+def normalize_stage(value: Any) -> str:
+    """A status label from any store generation -> a stage (prd/29).
+
+    A stage passes through unchanged, legacy ``todo`` becomes ``backlog``, and
+    anything unrecognised is ``other`` -- never the value itself, so a stray
+    free-text label can never become a dimension an analysis groups on. Old
+    stores are read through this, which is why a pre-prd/29 ``todo`` row still
+    decomposes (as ``backlog``) without a re-scrape.
+    """
+    text = str(value or "").strip()
+    if text in STATUS_STAGE:
+        return text
+    return LEGACY_STATUS_STAGE.get(text, "other")

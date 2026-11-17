@@ -14,6 +14,7 @@ import tomllib
 from pathlib import Path
 
 from . import classify
+from . import taxonomy
 from .progress import DEFAULT_INTERVAL as DEFAULT_PROGRESS_INTERVAL
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -50,6 +51,15 @@ _KEY_TOKEN = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,9}-\d{1,6}$")
 # Precedence (most specific wins): MEGASPEED_TICKET_KEYS > MEGASPEED_JIRA_EPICS >
 # MEGASPEED_JIRA_PROJECTS.
 DEFAULT_JIRA_EPICS: tuple[str, ...] = ()
+
+# prd/29: the workflow status map. A real install's statuses (OPEN, READY FOR
+# REFINEMENT, REFINED, IN PROGRESS, IN REVIEW, IN VERIFICATION, CLOSED) project
+# onto the closed stage set; without a map the 3 Jira categories are used and
+# review/QA collapse into "in progress".
+#   [jira.stages]
+#   "in review" = "in_review"
+#   MEGASPEED_JIRA_STAGES="in review=in_review,in verification=in_verification"
+DEFAULT_JIRA_STATUS_MAP: dict[str, str] = {}
 
 # Known non-human accounts (prd/02 "Bot vs human": deterministic, known account
 # set). DC's user type SERVICE is always a bot; these slugs catch CI/build
@@ -125,6 +135,12 @@ class Config:
     #: key-set path. Ignored when ``ticket_keys`` is set: the more specific scope
     #: wins (ticket keys > epics > projects).
     jira_epics: tuple[str, ...] = DEFAULT_JIRA_EPICS
+    #: prd/29: normalised workflow status name -> stage. Empty => the Jira
+    #: category projection (new/indeterminate/done), i.e. the pre-prd/29
+    #: numbers with ``backlog`` in place of ``todo``.
+    jira_status_map: dict[str, str] = dataclasses.field(
+        default_factory=dict
+    )
     jira_auth_user: str = ""
     jira_auth_password: str = ""
     jira_auth_token: str = ""
@@ -222,6 +238,55 @@ def parse_epic_keys(value: str | list | tuple) -> tuple[str, ...]:
     applies: a typo is an operator error, never a silently smaller scope.
     """
     return _parse_key_set(value, "MEGASPEED_JIRA_EPICS=DEL-1,DEL-2")
+
+
+def parse_status_map(
+    value: str | dict[str, str] | None,
+    *,
+    hint: str = 'MEGASPEED_JIRA_STAGES="in review=in_review,in verification=in_verification"',
+) -> dict[str, str]:
+    """Parse a workflow status -> stage map (prd/29).
+
+    Two shapes, one normalisation:
+
+    * a TOML table (``[jira.stages]``) -- ``{"in review": "in_review"}``;
+    * an env string -- ``"in review=in_review,in verification=in_verification"``.
+
+    Names are lower-cased and stripped (the projection looks up
+    ``name.strip().lower()``). A stage outside ``taxonomy.STATUS_STAGE`` is an
+    operator error -- never a silent ``other``: a typo would otherwise silently
+    fold the QA wait back into "in progress", which is the exact measurement
+    this config exists to make. A later source (env over TOML) wins per name.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        items = list(value.items())
+    else:
+        text = str(value)
+        items = []
+        for entry in text.split(","):
+            if not entry.strip():
+                continue
+            name, sep, stage = entry.partition("=")
+            if not sep:
+                raise SystemExit(
+                    f"bad workflow stage {entry.strip()!r}: expected NAME=STAGE ({hint})"
+                )
+            items.append((name, stage))
+    out: dict[str, str] = {}
+    for raw_name, raw_stage in items:
+        name = str(raw_name).strip().lower()
+        stage = str(raw_stage).strip()
+        if not name:
+            raise SystemExit(f"bad workflow stage map entry with an empty name ({hint})")
+        if stage not in taxonomy.STATUS_STAGE:
+            raise SystemExit(
+                f"bad workflow stage {stage!r} for status {name!r}: expected one of "
+                f"{', '.join(sorted(taxonomy.STATUS_STAGE))} ({hint})"
+            )
+        out[name] = stage
+    return out
 
 
 def _parse_key_set(value: str | list | tuple, hint: str) -> tuple[str, ...]:
@@ -340,6 +405,13 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     jira_epics = parse_epic_keys(
         os.environ.get("MEGASPEED_JIRA_EPICS", jira.get("epics", []))
     )
+    # prd/29: the workflow status -> stage map. The TOML table is the record;
+    # the env var merges over it per status name, so a one-off run can widen the
+    # mapping without editing the committed config.
+    jira_status_map = parse_status_map(jira.get("stages", {}))
+    jira_status_map.update(
+        parse_status_map(os.environ.get("MEGASPEED_JIRA_STAGES", ""))
+    )
     config = Config(
         db_path=_resolve(os.environ.get("MEGASPEED_DB", store.get("db", "data/megaspeed.duckdb")), base),
         identity_path=_resolve(
@@ -392,6 +464,7 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         ),
         # prd/27: the epic set is resolved to epics + children at scrape start.
         jira_epics=jira_epics,
+        jira_status_map=jira_status_map,
         jira_auth_user=os.environ.get("MEGASPEED_JIRA_USER", ""),
         jira_auth_password=os.environ.get("MEGASPEED_JIRA_PASSWORD", ""),
         jira_auth_token=os.environ.get("MEGASPEED_JIRA_TOKEN", ""),
