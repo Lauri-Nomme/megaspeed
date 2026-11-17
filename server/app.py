@@ -954,11 +954,12 @@ def simulate(request: Request):
         with store_conn(path) as con:
             court = _ballcourt(con, tenant, path)
             window = analyse.window_from_events(court, _days(days))
-            calibration = policy_lab.calibrate(
-                court, window, conn=con, bots=insights_rules.load_bots(con)
-            )
+            # the calibration excludes the store's bot actors from the reviewer
+            # pool by default (FR-7): a service account is not capacity to staff
+            calibration = policy_lab.calibrate(court, window, conn=con)
             payload = policy_lab.simulate(
                 calibration, scenario, seed=seed, tolerance=tolerance,
+                replications=replications,
             )
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)

@@ -113,6 +113,16 @@ MAX_REPLICATIONS = 8
 # Sizes: the store's own elasticity is used when positive; a negative one is a
 # selection effect (big PRs get attention), not a mechanism, so it is clipped.
 MAX_SIZE_ELASTICITY = 0.5
+# A stacked child waits for its base's *outcome* (merged or abandoned), not for
+# a merge: an abandoned base can never satisfy a merge predicate, and polling it
+# used to stall the run 28x past its horizon (FR-3). The bound is a belt-and-
+# braces guard -- a base that has not resolved in four horizons is not a
+# modelled wait -- and a timeout is counted, never silent.
+STACK_WAIT_HORIZONS = 4.0
+# The drain runs past the horizon until every in-flight PR finishes. The guard
+# is the last resort against a pathological run; a PR still unfinished when it
+# trips is reported as censored, not as a zero.
+MAX_DRAIN_STEPS = 20_000
 
 
 class SimulationError(ValueError):
@@ -582,14 +592,32 @@ def _stack_depth(court) -> dict:
     }
 
 
-def calibrate(court, window=None, conn=None, bots=None) -> dict:
+def _store_bots(conn) -> set[str]:
+    """The store's bot pseudonyms (``actor_kind`` on the PERSON object).
+
+    A bot is not a person to staff: if the Bitbucket service account is in the
+    reviewer pool it becomes a capacity-1 server with the highest utilisation in
+    the model, so the bottleneck and every scenario number are nonsense (FR-7).
+    """
+    if conn is None:
+        return set()
+    from analysis import rules as rules_module
+
+    return rules_module.load_bots(conn)
+
+
+def calibrate(court, window=None, conn=None, bots=None,
+              include_bots: bool = False) -> dict:
     """Derive the model from the store. Every number here is recomputable.
 
     ``window`` defaults to the whole store (``ballcourt.window_from_events``).
-    ``conn`` is only used for the optional diff-size column; ``bots`` excludes
-    bot pseudonyms from the reviewer pool (a bot is not a person to staff).
+    ``conn`` is used for the optional diff-size column and for the bot list:
+    unless ``include_bots`` is set, the reviewer pool excludes every pseudonym
+    the store marks ``actor_kind: bot`` *and* every name passed in ``bots``, so
+    the obvious call ``calibrate(court, window, conn=con)`` cannot staff a
+    service account as a reviewer. ``include_bots=True`` is for debugging only.
     """
-    bots = set(bots or ())
+    bots = set() if include_bots else (set(bots or ()) | _store_bots(conn))
     start, end = window or ballcourt.window_from_events(court, None)
     business_hours = court.business_hours(None, start, end)
     bh_per_day = _bh_per_day(court.calendar)
@@ -992,9 +1020,9 @@ class _PR:
 
     __slots__ = ("author", "commits", "peer_actions", "author_pushes", "depth",
                  "parent", "arrived_at", "started_at", "finished_at", "merged_at",
-                 "abandoned", "touches", "author_hours", "rebase_hours")
+                 "abandoned", "touches", "author_hours", "rebase_hours", "done")
 
-    def __init__(self, author, commits, peer_actions, author_pushes, depth, parent):
+    def __init__(self, env, author, commits, peer_actions, author_pushes, depth, parent):
         self.author = author
         self.commits = commits
         self.peer_actions = peer_actions
@@ -1009,6 +1037,10 @@ class _PR:
         self.touches = 0
         self.author_hours = 0.0
         self.rebase_hours = 0.0
+        # the PR's *outcome* (merged or abandoned), which is what a stacked
+        # child waits on: a merge predicate can never fire for an abandoned
+        # base (FR-3)
+        self.done = simpy.Event(env)
 
 
 class _Lab:
@@ -1061,7 +1093,10 @@ class _Lab:
         self.backlog = 0
         self.max_backlog = 0
         self.prs: list[_PR] = []
-        self._last_by_depth: dict[int, _PR] = {}
+        # a stack is one author's chain: keying by depth alone parented a PR to
+        # an unrelated author's PR at the same level
+        self._last_by_depth: dict[tuple[str, int], _PR] = {}
+        self.stack_wait_timeouts = 0
 
     # -- service draws ------------------------------------------------------ #
     def _size_factor(self, commits: int) -> float:
@@ -1084,7 +1119,14 @@ class _Lab:
     def author_service(self, person: str) -> tuple[float, float]:
         """``(attention, service)`` for one rework push by ``person``."""
         entry = self.person_service.get(person, {}).get("author", {})
-        service_fit_ = entry.get("service") or self.calibration["author_service"]["pooled"]
+        service_fit_ = entry.get("service") or {}
+        if (service_fit_ or {}).get("mu") is None:
+            service_fit_ = self.calibration["author_service"]["pooled"] or {}
+        if (service_fit_ or {}).get("mu") is None:
+            # the window observed no author response at all (no rework), so a
+            # rework push borrows the pooled review service -- one handover of
+            # work -- instead of refusing to run or pricing the rebase as free
+            service_fit_ = self.calibration["review_service"]["pooled"]
         attention_fit = entry.get("attention") or {"mu": None}
         attention = (
             sample_lognormal(self.rng, attention_fit)
@@ -1102,7 +1144,12 @@ class _Lab:
         return attention, sample_lognormal(self.rng, entry["service"])
 
     def merge_service(self) -> float:
-        return sample_lognormal(self.rng, self.calibration["merge_delay"])
+        fit = self.calibration["merge_delay"]
+        if not fit or fit.get("mu") is None:
+            # no merge handover was observed in the window: a merge click is a
+            # floor, not a fitted distribution
+            return FLOOR_HOURS
+        return sample_lognormal(self.rng, fit)
 
     def pick_peer(self, author: str) -> str:
         choices = [person for person in self.peers if person != author] or self.peers
@@ -1155,12 +1202,12 @@ class _Lab:
             author = self.rng.choice(self.authors)
             actions, pushes = self._plan(commits)
             depth = self._depth()
-            parent = self._last_by_depth.get(depth - 1) if depth > 0 else None
+            parent = self._last_by_depth.get((author, depth - 1)) if depth > 0 else None
             for _ in range(splits):
-                pr = _PR(author, commits, actions, pushes, depth, parent)
+                pr = _PR(self.env, author, commits, actions, pushes, depth, parent)
                 pr.arrived_at = self.env.now
                 if depth > 0:
-                    self._last_by_depth[depth] = pr
+                    self._last_by_depth[(author, depth)] = pr
                 self.prs.append(pr)
                 self.env.process(self._lifecycle(pr))
 
@@ -1216,6 +1263,7 @@ class _Lab:
             pr.abandoned = True
             pr.finished_at = env.now
             self.wip[pr.author].release(admission)
+            pr.done.succeed()
             return
         # mandatory approval
         slot = self.pick_sentinel()
@@ -1225,10 +1273,21 @@ class _Lab:
             sla=sla, overflow=self.overflow,
         )
         pr.touches += 1
-        # stacked PRs cannot land before their base; landing after it costs a rebase
+        # Stacked PRs cannot land before their base. The base's outcome is what
+        # matters, not a merge: an abandoned base can never merge, so waiting for
+        # `merged_at` stalled the child (and the whole run) forever (FR-3).
+        # Either outcome moves the ground under the child -- it landed, or it was
+        # abandoned and the child re-targets the trunk -- so either way it costs
+        # one rebase and one re-review round.
         if pr.parent is not None and pr.parent.merged_at is None:
-            while pr.parent.merged_at is None:
-                yield env.timeout(0.25)
+            if not pr.parent.done.triggered:
+                bound = max(1.0, self.horizon * STACK_WAIT_HORIZONS)
+                yield pr.parent.done | env.timeout(bound)
+                if not pr.parent.done.triggered:
+                    # the base never resolved: count it and re-target rather
+                    # than spin. The guard should be unreachable now, but a
+                    # silent hang is worse than a counted one.
+                    self.stack_wait_timeouts += 1
             attention, rebase = self.author_service(pr.author)
             started = env.now
             yield from self._author_work(pr, attention, rebase)
@@ -1248,6 +1307,7 @@ class _Lab:
         pr.merged_at = env.now
         pr.finished_at = env.now
         self.wip[pr.author].release(admission)
+        pr.done.succeed()
 
     # -- run one replication ------------------------------------------------ #
     def run(self) -> dict:
@@ -1255,7 +1315,7 @@ class _Lab:
         self.env.run(until=self.horizon)
         # drain: PRs already in flight finish, so the sample is not truncated
         guard = 0
-        while any(pr.finished_at is None for pr in self.prs) and guard < 20_000:
+        while any(pr.finished_at is None for pr in self.prs) and guard < MAX_DRAIN_STEPS:
             self.env.run(until=self.env.now + 1.0)
             guard += 1
         merged = [pr for pr in self.prs if pr.merged_at is not None]
@@ -1279,7 +1339,10 @@ class _Lab:
                 "peak_queue": server.peak_queue,
             }
         return {
-            "span": max(self.horizon, self.env.now),
+            "horizon": self.horizon,
+            # how far past the horizon the drain ran: the divergence signal that
+            # the old utilisation denominator used to swallow (NFR-1)
+            "drain": max(0.0, self.env.now - self.horizon),
             "cycles": [pr.merged_at - pr.started_at for pr in merged],
             "leads": [pr.merged_at - pr.arrived_at for pr in merged],
             "active": [pr.author_hours + pr.rebase_hours for pr in merged],
@@ -1291,6 +1354,7 @@ class _Lab:
             "backlog_max": self.max_backlog,
             "backlog_end": self.backlog,
             "escalated": self.overflow.requests,
+            "stack_wait_timeouts": self.stack_wait_timeouts,
         }
 
 
@@ -1303,9 +1367,13 @@ def _summary(calibration: dict, scenario: Scenario, pooled: dict,
     touches = pooled["touches"]
     elapsed = sum(cycles)
     working = sum(active) + sum(touches) * TOUCH_HOURS
-    # utilisation divides by the time that actually elapsed (the drain runs past
-    # the horizon), so a saturated server reads ~1.0 and never above it
-    busy_hours = max(1e-9, pooled.get("span", horizon_hours * replications))
+    # Utilisation divides by the *modelled horizon*, not by the drained span
+    # (NFR-1). The drain runs past the horizon by however long the queues take,
+    # and it is longest exactly when a server is saturated -- dividing by it
+    # would hide the saturation it exists to expose. A server that was busy in
+    # the drain can therefore read above 1.0, which is the honest signal.
+    busy_hours = max(1e-9, horizon_hours * replications)
+    drain_hours = pooled.get("drain", 0.0) / max(1, replications)
     resources = []
     for name, entry in pooled["resources"].items():
         resources.append({
@@ -1317,6 +1385,8 @@ def _summary(calibration: dict, scenario: Scenario, pooled: dict,
             "mean_wait_hours": _round(
                 entry["wait"] / entry["requests"] if entry["requests"] else None
             ),
+            # Little's law against the same modelled horizon, so the queue and
+            # the utilisation share one denominator
             "mean_queue": round(entry["wait"] / busy_hours, 2),
             "peak_queue": entry["peak_queue"],
         })
@@ -1386,9 +1456,15 @@ def _summary(calibration: dict, scenario: Scenario, pooled: dict,
             "queue grows without bound, so the predicted distribution depends on the "
             "horizon rather than settling"
             for row in resources if row["utilisation"] >= 0.9
-        ],
+        ] + ([
+            f"the drain ran {drain_hours:.0f} h past the {horizon_hours:.0f} h "
+            "horizon: the run did not settle, so the predicted distribution "
+            "depends on the horizon"
+        ] if drain_hours > horizon_hours / 2.0 else []),
         "scenario": scenario.as_dict(),
         "horizon_business_days": round(horizon_days, 1),
+        "drain_hours": round(drain_hours, 2),
+        "stack_wait_timeouts": pooled.get("stack_wait_timeouts", 0),
     }
 
 
@@ -1416,9 +1492,10 @@ def run(calibration: dict, scenario: Scenario | None = None, seed: int = DEFAULT
     days = horizon_business_days or calibration["window"]["business_days"]
     horizon_hours = max(1.0, float(days) * bh_per_day)
     pooled = {
-        "span": 0.0, "cycles": [], "leads": [], "active": [], "touches": [],
+        "drain": 0.0, "cycles": [], "leads": [], "active": [], "touches": [],
         "resources": {}, "prs": 0, "merged": 0, "declined": 0,
         "backlog_max": 0, "backlog_end": 0, "escalated": 0,
+        "stack_wait_timeouts": 0,
     }
     per_replication: list[float] = []
     for index in range(replications):
@@ -1427,7 +1504,7 @@ def run(calibration: dict, scenario: Scenario | None = None, seed: int = DEFAULT
             horizon_hours=horizon_hours, bh_per_day=bh_per_day,
         )
         part = lab.run()
-        pooled["span"] = pooled.get("span", 0.0) + part["span"]
+        pooled["drain"] += part["drain"]
         if part["cycles"]:
             per_replication.append(statistics.median(part["cycles"]))
         for key in ("cycles", "leads", "active", "touches"):
@@ -1445,6 +1522,7 @@ def run(calibration: dict, scenario: Scenario | None = None, seed: int = DEFAULT
         pooled["backlog_max"] = max(pooled["backlog_max"], part["backlog_max"])
         pooled["backlog_end"] += part["backlog_end"]
         pooled["escalated"] += part["escalated"]
+        pooled["stack_wait_timeouts"] += part["stack_wait_timeouts"]
     result = _summary(calibration, scenario, pooled, replications,
                       horizon_hours, bh_per_day)
     result["seed"] = seed
@@ -1623,15 +1701,19 @@ def compare(baseline: dict, scenario: dict) -> dict:
 
 def simulate(calibration: dict, scenario: Scenario | None = None,
              seed: int = DEFAULT_SEED, tolerance: float = DEFAULT_TOLERANCE,
-             horizon_business_days: float | None = None) -> dict:
+             horizon_business_days: float | None = None,
+             replications: int = DEFAULT_REPLICATIONS) -> dict:
     """Baseline + validation gate + (if the gate passes) the scenario A/B.
 
     The gate is enforced here, once, so no caller can accidentally show a
     scenario number from an unvalidated model: when the baseline fails, the
-    payload carries the mismatch and ``scenario`` is ``None``.
+    payload carries the mismatch and ``scenario`` is ``None``. ``replications``
+    is honoured for both runs (it used to be accepted by the API and ignored
+    here, so a caller asking for one replication paid for six -- FR-6).
     """
     baseline = run(calibration, Scenario(), seed=seed,
-                   horizon_business_days=horizon_business_days)
+                   horizon_business_days=horizon_business_days,
+                   replications=replications)
     gate = validate(calibration, baseline, tolerance=tolerance, seed=seed)
     payload = {
         "ok": bool(baseline.get("ok")),
@@ -1663,7 +1745,8 @@ def simulate(calibration: dict, scenario: Scenario | None = None,
         )
         return payload
     result = run(calibration, scenario, seed=seed,
-                 horizon_business_days=horizon_business_days)
+                 horizon_business_days=horizon_business_days,
+                 replications=replications)
     payload["scenario"] = result
     payload["compare"] = compare(baseline, result)
     payload["note"] = "baseline validated; the scenario is a prediction, not a measurement"

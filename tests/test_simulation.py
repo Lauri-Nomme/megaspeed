@@ -13,6 +13,10 @@ Three things are pinned here, in order of importance:
 3. **The knobs move the prediction in the direction the mechanism implies.** A
    WIP limit trades lead time for cycle time; an SLA shortens the cycle; a
    scenario with no stacks does nothing.
+4. **The honesty edges.** A declined stack base must not stall the run (FR-3),
+   utilisation is busy hours over the modelled horizon rather than over the
+   unbounded drain (NFR-1), the requested replication count is honoured (FR-6),
+   and a store's bot actors are never staffed as reviewers (FR-7).
 
 Everything is deterministic: fixed seed, no wall clock, no real store.
 
@@ -61,7 +65,8 @@ class Fixture:
     def __init__(self, *, n_prs: int, days: float,
                  peer_first: float = 2.0, peer_second: float = 4.0,
                  gate: float = 6.0, merge: float = 7.0,
-                 push_class: str = "content"):
+                 push_class: str = "content",
+                 bot: str | None = None, bot_first: float = 0.5):
         self.as_of = T0 + timedelta(days=days)
         self.events: list[dict] = []
         self.objects: list[dict] = []
@@ -72,7 +77,18 @@ class Fixture:
         self.gate = gate
         self.merge = merge
         self.push_class = push_class
+        self.bot = bot
+        self.bot_first = bot_first
         self._count = 0
+        if bot:
+            # a bot is a PERSON with actor_kind=bot; the reviewer pool must not
+            # staff it (FR-7)
+            self.objects.append({
+                "object_type": "PERSON",
+                "object_id": f"PERSON:{bot}",
+                "actor": bot,
+                "attributes": {"actor_kind": "bot"},
+            })
         for number in range(1, n_prs + 1):
             self._pr(number)
 
@@ -105,6 +121,9 @@ class Fixture:
                     people=(SENTINEL,))
         self._event(number, "pr_pushed", author, 0.0, push_class=self.push_class,
                     push_index=1, commits_added=2, commits_removed=0)
+        if self.bot:
+            self._event(number, "comment_added", self.bot, self.bot_first,
+                        severity="suggestion", thread_state="open")
         self._event(number, "comment_added", peer, self.peer_first,
                     severity="suggestion", thread_state="open")
         self._event(number, "pr_approved", peer, self.peer_second, sentinel=False)
@@ -391,7 +410,179 @@ class ScenarioTests(StoreCase):
 
 
 # --------------------------------------------------------------------------- #
-# 5. the API
+# 5. the stacked wait (FR-3) and the utilisation denominator (NFR-1)
+# --------------------------------------------------------------------------- #
+def stacked(calibration: dict, decline: float) -> dict:
+    """The calibration with a synthetic stack-depth histogram and a decline rate.
+
+    The simulation fixtures carry no ref digests, so the stack knob is inert;
+    this is the shape the review used to reproduce the deadlock: half the PRs
+    are depth 1, half depth 2, and a share of the bases are abandoned.
+    """
+    calibration = copy.deepcopy(calibration)
+    calibration["decline"]["probability"] = decline
+    calibration["stack_depth"] = {
+        "available": True,
+        "prs_with_refs": calibration["prs"]["n"],
+        "histogram": {"1": 1, "2": 1},
+        "median": 1.5,
+        "max": 2,
+        "stacked_prs": 40,
+        "note": "synthetic: a two-deep stack histogram for the wait test",
+    }
+    return calibration
+
+
+class StackWaitTests(StoreCase):
+    def test_a_declined_stack_parent_does_not_stall_the_run(self):
+        """The child waits for the base's *outcome*, not for a merge (FR-3).
+
+        A declined base never merges, so polling ``merged_at`` spun until the
+        20 000-step drain guard (env.now ran to ~20 720 h against a 480 h
+        horizon) and the children were reported as merely censored.
+        """
+        calibration = stacked(self.calibrate(Fixture(n_prs=80, days=20)), 0.5)
+        result = simulation.run(calibration, simulation.Scenario(), seed=7)
+        self.assertTrue(result["ok"])
+        predicted = result["predicted"]
+        horizon_hours = result["horizon_business_days"] * 24
+        # the run settles near its horizon instead of draining the guard
+        self.assertLess(result["drain_hours"], horizon_hours)
+        self.assertEqual(result["stack_wait_timeouts"], 0)
+        self.assertEqual(predicted["censored"], 0)
+        # every PR reached an outcome: declined before the gate, or merged
+        # after the child re-targeted the trunk
+        self.assertEqual(
+            predicted["merged"] + predicted["declined"], predicted["prs"]
+        )
+        self.assertGreater(predicted["merged"], 0)
+        self.assertGreater(predicted["declined"], 0)
+
+    def test_an_abandoned_base_does_not_censor_the_children(self):
+        """Every base declined: the children re-target and still reach an outcome.
+
+        With a decline rate of 1.0 no child can ever land *on* its base, so this
+        is the pure abandoned-base path: the run still settles and nothing is
+        reported as censored.
+        """
+        calibration = stacked(self.calibrate(Fixture(n_prs=80, days=20)), 1.0)
+        result = simulation.run(calibration, simulation.Scenario(), seed=7)
+        self.assertEqual(result["predicted"]["censored"], 0)
+        self.assertEqual(result["stack_wait_timeouts"], 0)
+        self.assertLess(result["drain_hours"], result["horizon_business_days"] * 24)
+
+
+class UtilisationTests(StoreCase):
+    def test_utilisation_divides_by_the_horizon_not_the_drain(self):
+        """A saturated server reads busy/horizon, not busy/(horizon+drain)."""
+        pooled = {
+            "drain": 300.0,
+            "cycles": [1.0], "leads": [1.0], "active": [0.5], "touches": [1],
+            "resources": {
+                "Srv": {"person": "Srv", "role": "sentinel", "busy": 470.0,
+                        "requests": 10, "wait": 50.0, "peak_queue": 3},
+            },
+            "prs": 1, "merged": 1, "declined": 0, "backlog_max": 0,
+            "backlog_end": 0, "escalated": 0, "stack_wait_timeouts": 0,
+        }
+        summary = simulation._summary(
+            {}, simulation.Scenario(), pooled, 1, 480.0, 24.0
+        )
+        row = summary["resources"][0]
+        # 470 h of work in a 480 h horizon is ~98 %: the old denominator
+        # (480 + 300 = 780 h) would have reported 60 % and no warning
+        self.assertAlmostEqual(row["utilisation"], round(470.0 / 480.0, 4))
+        self.assertEqual(summary["bottleneck"]["person"], "Srv")
+        self.assertTrue(any("saturated" in w for w in summary["warnings"]))
+        self.assertEqual(summary["drain_hours"], 300.0)
+        self.assertTrue(any("drain ran" in w for w in summary["warnings"]))
+
+    def test_the_reported_utilisation_is_busy_over_the_horizon(self):
+        calibration = self.calibrate(Fixture(n_prs=320, days=20))
+        result = simulation.run(calibration, simulation.Scenario(), seed=5)
+        horizon = (
+            result["horizon_business_days"]
+            * calibration["window"]["hours_per_day"]
+        )
+        self.assertGreater(result["drain_hours"], 0.0)
+        for row in result["resources"]:
+            self.assertAlmostEqual(
+                row["utilisation"], round(row["busy_hours"] / horizon, 4),
+                places=3, msg=row["person"],
+            )
+
+
+# --------------------------------------------------------------------------- #
+# 6. bot actors are not capacity (FR-7)
+# --------------------------------------------------------------------------- #
+class BotPoolTests(StoreCase):
+    def test_calibrate_excludes_store_bots_by_default(self):
+        calibration = self.calibrate(
+            Fixture(n_prs=80, days=20, bot="BiBi", bot_first=0.5)
+        )
+        self.assertNotIn("BiBi", calibration["pool"]["people"])
+        self.assertNotIn(
+            "BiBi", {row["person"] for row in calibration["reviewers"]}
+        )
+        # the default calibration still validates: excluding the bot keeps the
+        # model on the humans it is supposed to describe
+        gate = simulation.validate(calibration, simulation.run(calibration, seed=7))
+        self.assertTrue(gate["ok"], gate)
+
+    def test_including_bots_is_an_explicit_opt_in(self):
+        calibration = self.calibrate(
+            Fixture(n_prs=80, days=20, bot="BiBi", bot_first=0.5)
+        )
+        con = connect(self.path, read_only=True)
+        try:
+            court = ballcourt.load(con)
+            with_bots = simulation.calibrate(
+                court, conn=con, include_bots=True
+            )
+        finally:
+            con.close()
+        self.assertIn("BiBi", with_bots["pool"]["people"])
+
+    def test_a_slow_bot_cannot_become_the_bottleneck_by_default(self):
+        """The review's failure: the service account tops the bottleneck list."""
+        fixture = Fixture(
+            n_prs=80, days=20, bot="BiBi", bot_first=20.0,
+            peer_first=24.0, peer_second=28.0, gate=30.0, merge=31.0,
+        )
+        calibration = self.calibrate(fixture)
+        result = simulation.run(calibration, seed=7)
+        self.assertNotEqual(result["bottleneck"]["person"], "BiBi")
+        con = connect(self.path, read_only=True)
+        try:
+            court = ballcourt.load(con)
+            with_bots = simulation.calibrate(court, conn=con, include_bots=True)
+        finally:
+            con.close()
+        with_bot_result = simulation.run(with_bots, seed=7)
+        self.assertEqual(with_bot_result["bottleneck"]["person"], "BiBi")
+        self.assertGreater(
+            with_bot_result["bottleneck"]["utilisation"],
+            result["bottleneck"]["utilisation"],
+        )
+
+
+# --------------------------------------------------------------------------- #
+# 7. replications (FR-6)
+# --------------------------------------------------------------------------- #
+class ReplicationTests(StoreCase):
+    def test_simulate_honours_the_requested_replications(self):
+        calibration = self.calibrate(Fixture(n_prs=80, days=20))
+        payload = simulation.simulate(
+            calibration, simulation.Scenario(), seed=7, replications=2
+        )
+        self.assertEqual(
+            payload["baseline"]["predicted"]["spread"]["replications"], 2
+        )
+        self.assertEqual(payload["baseline"]["predicted"]["replications"], 2)
+
+
+# --------------------------------------------------------------------------- #
+# 8. the API
 # --------------------------------------------------------------------------- #
 class Reply:
     def __init__(self, status: int, headers: dict[str, str], body: bytes):
@@ -495,6 +686,15 @@ class SimulateApiTests(unittest.TestCase):
         self.assertEqual(
             first["baseline"]["predicted"]["cycle_hours"],
             second["baseline"]["predicted"]["cycle_hours"],
+        )
+
+    def test_the_requested_replication_count_is_honoured(self):
+        """The API echoed ``replications`` but always ran six (FR-6)."""
+        body = get("/api/simulate", tenant="del", days=3650, replications=1).json()
+        self.assertEqual(body["params"]["replications"], 1)
+        self.assertEqual(body["baseline"]["predicted"]["replications"], 1)
+        self.assertEqual(
+            body["baseline"]["predicted"]["spread"]["replications"], 1
         )
 
     def test_a_bad_scenario_is_a_400_that_lists_the_knobs(self):
