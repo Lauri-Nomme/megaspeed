@@ -64,7 +64,7 @@ def request_kind(path: str) -> str:
         return "serverinfo"
     if "/worklog" in path:
         return "worklog"
-    if path.endswith("/search"):
+    if path.endswith(("/search", "/search/jql")):
         return "search"
     if re.search(r"/issue/[^/]+$", path):
         return "issue"

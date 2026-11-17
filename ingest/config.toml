@@ -118,6 +118,19 @@ epic_link_field = ""
 sprint_field = ""
 story_points_field = ""
 
+# Jira Cloud (prd/24): the same ticket layer over Cloud's v3 API + a Bearer PAT.
+# Credentials come from the environment only:
+#   MEGASPEED_JIRA_CLOUD_TOKEN   (a Cloud Personal Access Token)
+# and the base URL from MEGASPEED_JIRA_CLOUD_BASE_URL (env wins over this file).
+# In development that is the local emulation proxy in front of the DC lab:
+#   python3 -m proxy.cloud_jira_proxy --upstream http://127.0.0.1:8090 \
+#       --port 8091 --pat cloud-lab-pat --user admin --password admin-lab-pw
+#   export MEGASPEED_JIRA_CLOUD_BASE_URL=http://127.0.0.1:8091
+#   export MEGASPEED_JIRA_CLOUD_TOKEN=cloud-lab-pat
+#   .venv/bin/python -m ingest scrape --jira-cloud --live --project DEL --probe
+# Production: cloud_base_url = "https://acme.atlassian.net" + a real PAT.
+cloud_base_url = ""    # e.g. https://acme.atlassian.net (or the local proxy)
+
 [classify]
 # Scrape-side text classification (prd/16): comment bodies + PR descriptions are
 # read locally, projected onto the closed vocabulary (comment_type,

@@ -8,8 +8,15 @@ DuckDB store.
 
 ```
 python3 -m ingest scrape --jira --live --project DEL --out export/del-jira.tgz
+python3 -m ingest scrape --jira-cloud --live --project DEL --out export/del-jira-cloud.tgz
 python3 -m ingest scrape --jira --fixture --out /tmp/jira-fixture.tgz
 ```
+
+The Cloud variant (prd/24) is the *same* walk and the same reducer with a
+different client (:class:`ingest.jira_cloud.CloudJiraClient`): v3 paths, Bearer
+PAT, cursor pagination and Cloud's field ids, so both sources emit the same
+objects and events from the same data. Development points it at the local
+emulation proxy (``proxy/cloud_jira_proxy.py``); production at a real Cloud URL.
 
 What is read, and why (prd/04):
 
@@ -233,6 +240,7 @@ def collect(
     source: str,
     limit: int | None = None,
     *,
+    client: JiraClient | None = None,
     identity: IdentityTable | None = None,
     state: ScrapeState | None = None,
     issue_state: JiraIssueState | None = None,
@@ -248,6 +256,11 @@ def collect(
     checkpoint_every: int = 0,
 ) -> JiraCollected:
     """Read the source and reduce it in memory. Nothing is written here.
+
+    ``client`` lets the caller supply a differently-shaped client -- the Cloud
+    one (:class:`ingest.jira_cloud.CloudJiraClient`) -- so this walk, the
+    reduction and the object/event model are shared verbatim between DC and
+    Cloud (prd/24). Without it a DC client is built over ``transport``.
 
     Crash safety mirrors :func:`ingest.scrape.collect`:
 
@@ -273,7 +286,7 @@ def collect(
     key_filter = KeyFilter.build(
         cfg.ticket_regex, cfg.key_shape, cfg.ticket_projects, cfg.ticket_keys
     )
-    client = JiraClient(
+    client = client or JiraClient(
         transport,
         page_limit=cfg.jira_page_limit,
         min_interval=(
@@ -719,8 +732,14 @@ def scrape(
     progress: ProgressReporter | None = None,
     projects: tuple[str, ...] | None = None,
     checkpoint_every: int = DEFAULT_CHECKPOINT_EVERY,
+    client: JiraClient | None = None,
 ) -> dict:
     """Scrape Jira into ``out`` (a tgz) and update local state.
+
+    ``client`` is the shape adapter (DC by default, Cloud via
+    :class:`ingest.jira_cloud.CloudJiraClient`): everything below -- the walk,
+    the reduction, the bundle -- is shared, so ``--jira`` and ``--jira-cloud``
+    produce the same objects and events from the same data (prd/24).
 
     ``full`` ignores the watermark and the per-issue cursor and re-emits every
     issue; otherwise only issues whose ``updated`` is at/after
@@ -819,6 +838,7 @@ def scrape(
         transport,
         source,
         limit,
+        client=client,
         identity=IdentityTable(ident_path),
         state=state,
         issue_state=issue_state,
