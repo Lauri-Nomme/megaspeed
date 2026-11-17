@@ -25,11 +25,12 @@ import {
   impactSentence, entityMarkdown, deliveryMarkdown,
 } from '/tables.js';
 import { rulesMarkup, rulesStats, rulesMarkdown } from '/rules.js';
+import { ticketMarkdown, ticketMarkup, ticketStats } from '/ticket.js';
 import {
   defaultScenario, policyMarkdown, policyMarkup, predHours,
   PRESETS, readScenario, scenarioQuery,
 } from '/policy.js';
-import { annotateRow, epicKeySet, keyListsOf, rowTicket } from '/tickets.js';
+import { annotateRow, epicKeySet, keyListsOf, rowTicket, ticketKey } from '/tickets.js';
 import {
   ROLE_QUEUES, filteredPages, queueLevelForNode, scopeBanner, scopeForNode, scopeForStream,
 } from '/scope.js';
@@ -41,6 +42,7 @@ const PAGES = {
   overview: { title: 'Overview', question: 'What needs attention?' },
   delivery: { title: 'Delivery list', question: 'What needs attention?' },
   timeline: { title: 'Timeline', question: 'Where does the time go?' },
+  ticket: { title: 'Ticket', question: 'Why did this ticket take this long?' },
   blocking: { title: 'Blocking map', question: 'Who is blocking whom?' },
   queue: { title: 'Queue', question: 'Who is overloaded, and who is merely slow?' },
   rules: { title: 'Rules', question: 'What should we change first?' },
@@ -94,6 +96,13 @@ const state = {
   cache: new Map(),
   selection: null,
   drawerEntity: null,
+  // prd/25: the ticket detail page. `ticket` is the last payload, `ticketKey`
+  // the key it describes (so a late response for another key is dropped), and
+  // `ticketFrom` is where the back chip returns to.
+  ticket: null,
+  ticketKey: null,
+  ticketError: null,
+  ticketFrom: 'timeline',
   emptyReason: '',
 };
 
@@ -112,6 +121,11 @@ const timeline = new Timeline({
     // canvas must not overwrite it.
     if (state.page !== 'timeline') return;
     const bits = [];
+    if (stats.dim === 'story') {
+      bits.push(stats.nested
+        ? `${stats.storyLanes} stories · ${stats.prLanes} PRs nested beneath them`
+        : `${stats.storyLanes} stories · PRs collapsed — zoom in to nest them`);
+    }
     if (stats.aggregated) bits.push(`aggregated into ${fmtBucket(stats.bucketMs)} buckets — zoom in for individual events`);
     if (stats.openPrs) bits.push(`${stats.openPrs} PRs still open are right-censored at the snapshot time`);
     bits.push(`${stats.visible} of ${stats.total} events in view`);
@@ -123,6 +137,7 @@ const timeline = new Timeline({
     updateTimelineEmpty(stats);
   },
   onSelect: (pr) => openPrDrawer(pr),
+  onTicket: (key) => openTicket(key),
   onSelection: (range) => renderSelection(range),
 });
 
@@ -361,13 +376,16 @@ function renderPage() {
     if (active) item.setAttribute('aria-current', 'page');
     else item.removeAttribute('aria-current');
   }
-  $('page-title').textContent = PAGES[page].title;
+  $('page-title').textContent = page === 'ticket' && state.ticketKey
+    ? state.ticketKey
+    : PAGES[page].title;
   $('page-question').textContent = PAGES[page].question;
   syncLevelSelects();
   renderScopeBanner();
   setHonesty('');
   renderTimeframe();
   if (page === 'timeline') renderTimelinePage();
+  if (page === 'ticket') renderTicketPage();
   if (page === 'delivery') renderDeliveryPage();
   if (page === 'blocking') renderBlockingPage();
   if (page === 'queue') renderQueuePage();
@@ -380,6 +398,11 @@ function renderPage() {
 
 async function showPage(page) {
   if (!PAGES[page]) return;
+  if (page !== 'ticket' && typeof location !== 'undefined' && location.hash.startsWith('#ticket/')) {
+    // Leaving the ticket route: drop the hash so a reload lands on the page
+    // the user is actually looking at.
+    history.replaceState(null, '', `${location.pathname}${location.search}`);
+  }
   state.page = page;
   renderPage();
   try {
@@ -414,6 +437,19 @@ async function ensureData(page) {
     const key = `rules:${tenant}:${state.timeframe}:${state.rulesLevel}:${stamp}`;
     if (!cached(key)) state.cache.set(key, await getJSON(withTenant(`/api/insights?level=${state.rulesLevel}&${q}`)));
     state.rules = cached(key);
+  }
+  if (page === 'ticket') {
+    // prd/25: one ticket's cycle. The cache key includes the key, so two ticket
+    // pages cannot serve each other's payload.
+    if (!state.ticketKey) return;
+    const key = `ticket:${tenant}:${state.ticketKey}:${stamp}`;
+    if (!cached(key)) {
+      state.cache.set(key, await getJSON(
+        withTenant(`/api/ticket/${encodeURIComponent(state.ticketKey)}`),
+      ));
+    }
+    state.ticket = cached(key);
+    state.ticketError = null;
   }
   if (page === 'policy') {
     // prd/23: the scenario is part of the cache key — two knob settings are two
@@ -547,6 +583,9 @@ function resetTenantData() {
   state.rules = null;
   state.selection = null;
   state.drawerEntity = null;
+  state.ticket = null;
+  state.ticketKey = null;
+  state.ticketError = null;
   state.emptyReason = '';
   state.eventCapped = false;
   state.eventTotal = 0;
@@ -573,6 +612,9 @@ async function setTenant(name, { silent = false } = {}) {
   if (!name) return;
   toggleTenantMenu(false);
   if (name === state.tenant && state.meta) return;
+  // prd/25: a ticket page survives a dataset switch — the key is looked up in
+  // the new store, and its absence there is a stated 404, not a blank page.
+  const reopen = state.page === 'ticket' ? state.ticketKey : null;
   // Scope is per tenant (prd/12): pseudonyms are independent identity spaces,
   // so a person scoped in one dataset means nothing in the next.
   if (state.tenant) state.scopes[state.tenant] = state.scope;
@@ -588,6 +630,7 @@ async function setTenant(name, { silent = false } = {}) {
   if (state.tenant !== name) return; // a later switch won
   applyTimeframeToTimeline();
   renderPage();
+  if (reopen) await openTicket(reopen);
   if (!silent && state.meta) {
     setStatus(liveStatusText(), 'live');
   }
@@ -766,6 +809,81 @@ function renderDeliveryDetail() {
     ],
     children: [rowTicket(row), row.epic, row.id].filter(Boolean),
   });
+}
+
+// -------------------------------------------------------------------- ticket
+/* prd/25: the ticket detail page. It is a route (`#ticket/DEL-167`), not a
+ * modal, so every ticket key anywhere in the app can be a real anchor and a
+ * reload lands on the same page. The one-line answer is the page's contract:
+ * it names where the time went, or the boundary the store is missing. */
+function appBase() {
+  if (typeof location === 'undefined') return '';
+  return `${location.origin}${location.pathname}`;
+}
+
+function ticketFromHash() {
+  const match = /^#ticket\/(.+)$/.exec((typeof location !== 'undefined' && location.hash) || '');
+  return match ? decodeURIComponent(match[1]) : null;
+}
+
+function renderTicketPage() {
+  const body = $('ticket-body');
+  if (state.ticketError) {
+    body.innerHTML = `<div class="rules-empty">
+      <p>${esc(state.ticketError)}</p>
+      <p class="muted">A ticket is a STORY object or a PR.ticket_keys entry. Check the key,
+        or switch to a dataset that holds it.</p></div>`;
+  } else {
+    body.innerHTML = state.ticket
+      ? ticketMarkup(state.ticket, { base: appBase() })
+      : '<p class="empty-row">Loading the ticket…</p>';
+  }
+  $('ticket-stats').innerHTML = state.ticket ? ticketStats(state.ticket) : '';
+  $('ticket-back').textContent =
+    `← ${PAGES[state.ticketFrom] ? PAGES[state.ticketFrom].title : 'back'}`;
+  const data = state.ticket;
+  if (data) {
+    const missing = (data.segments && data.segments.missing) || [];
+    setHonesty(
+      `${data.pr_count} PR${data.pr_count === 1 ? '' : 's'} joined on ${data.key} · ` +
+      `${data.segments.measured}/8 segments measured · ` +
+      (data.hours_mode === 'business' ? 'business hours' : 'wall-clock hours') +
+      (missing.length ? ` · missing boundaries: ${missing.join(', ')}` : ''),
+    );
+    $('ticket-assumption').textContent =
+      `${data.assumption} · snapshot ${fmtStamp(Date.parse(data.snapshot))} · ` +
+      'a segment needs both boundaries; an absent one is named, never estimated.';
+  } else if (state.ticketError) {
+    setHonesty('the store cannot answer for this key');
+    $('ticket-assumption').textContent = '';
+  }
+}
+
+async function openTicket(key) {
+  const wanted = ticketKey(key);
+  if (!wanted) return;
+  if (state.page !== 'ticket') state.ticketFrom = state.page;
+  state.ticketKey = wanted;
+  state.ticket = null;
+  state.ticketError = null;
+  state.page = 'ticket';
+  // pushState (not location.hash) so opening a ticket does not fire the
+  // hashchange listener and fetch the same page twice.
+  const hash = `#ticket/${encodeURIComponent(wanted)}`;
+  if (typeof history !== 'undefined' && location.hash !== hash) {
+    history.pushState(null, '', hash);
+  }
+  renderPage();
+  try {
+    await ensureData('ticket');
+  } catch (err) {
+    if (state.ticketKey !== wanted) return;
+    state.ticket = null;
+    state.ticketError = err.status === 404
+      ? `No ticket ${wanted} in dataset ${state.tenant || 'this store'}.`
+      : `Could not load ticket ${wanted}: ${err.message}`;
+  }
+  if (state.page === 'ticket' && state.ticketKey === wanted) renderPage();
 }
 
 // ----------------------------------------------------------------- blocking
@@ -1794,6 +1912,9 @@ window.__megaspeed = {
   setTimeframe,
   setTenant,
   loadFullRange,
+  // prd/25: the harness opens a ticket page the way a link does.
+  openTicket,
+  get ticket() { return state.ticket; },
   // Test hook: lower the event cap so the capped path (and its "load the full
   // range" affordance) can be exercised on a small fixture.
   setEventLimit: (limit) => {
@@ -1882,11 +2003,29 @@ document.addEventListener('click', async (event) => {
   if (event.target.closest('#delivery-copy')) {
     const data = state.delivery;
     const rows = data ? tabRows(data, state.tab).filter((row) => matchesScopeRow(row)) : [];
-    await copyText(deliveryMarkdown(rows, data ? `${data.assumption}; snapshot ${data.snapshot}` : ''));
+    await copyText(deliveryMarkdown(
+      rows,
+      data ? `${data.assumption}; snapshot ${data.snapshot}` : '',
+      appBase(),
+    ));
     return;
   }
   if (event.target.closest('#rules-copy')) {
-    await copyText(rulesMarkdown(state.rules));
+    await copyText(rulesMarkdown(state.rules, appBase()));
+    return;
+  }
+  if (event.target.closest('#ticket-copy')) {
+    await copyText(state.ticket ? ticketMarkdown(state.ticket, appBase()) : '');
+    return;
+  }
+  if (event.target.closest('#ticket-back')) {
+    await showPage(state.ticketFrom || 'timeline');
+    return;
+  }
+  const ticket = event.target.closest('[data-ticket]');
+  if (ticket) {
+    event.preventDefault();
+    await openTicket(ticket.dataset.ticket);
     return;
   }
   if (event.target.closest('#policy-copy')) {
@@ -1997,7 +2136,7 @@ document.addEventListener('keydown', (event) => {
 
 async function copyMarkdown(entity) {
   const hoursMode = (state.delivery && state.delivery.hours_mode) || 'wall-clock';
-  await copyText(entity ? entityMarkdown(entity, hoursMode) : '');
+  await copyText(entity ? entityMarkdown(entity, hoursMode, appBase()) : '');
 }
 
 async function copyText(text) {
@@ -2019,7 +2158,9 @@ async function copyText(text) {
 function saveUI() {
   try {
     localStorage.setItem(LS_KEY, JSON.stringify({
-      page: state.page,
+      // The ticket route lives in the URL hash, not in localStorage: a saved
+      // `ticket` page without its key would reopen an empty page (prd/25).
+      page: state.page === 'ticket' ? state.ticketFrom : state.page,
       density: timeline.density,
       lanes: timeline.dim,
       timeframe: state.timeframe,
@@ -2054,7 +2195,7 @@ function restoreUI() {
       if (scope && scope.kind) state.scopes[name] = scope;
     }
   }
-  if (PAGES[stored.page]) state.page = stored.page;
+  if (PAGES[stored.page] && stored.page !== 'ticket') state.page = stored.page;
   if (TIMEFRAMES[stored.timeframe]) state.timeframe = stored.timeframe;
   if (stored.tab) {
     state.tab = stored.tab;
@@ -2092,12 +2233,28 @@ function restoreUI() {
 
 // -------------------------------------------------------------------- boot
 restoreUI();
+// prd/25: a direct link (`/#ticket/DEL-167`) opens the ticket page after the
+// dataset has loaded, exactly as a click does.
+const initialTicket = ticketFromHash();
+if (initialTicket) {
+  state.page = 'ticket';
+  state.ticketKey = initialTicket;
+}
+window.addEventListener('hashchange', () => {
+  const key = ticketFromHash();
+  if (key) {
+    if (state.page !== 'ticket' || state.ticketKey !== key) openTicket(key);
+    return;
+  }
+  if (state.page === 'ticket') showPage(state.ticketFrom || 'timeline');
+});
 syncChromeHeight();
 window.addEventListener('resize', syncChromeHeight);
 buildLensButtons();
 renderPage();
-load().then(() => {
-  showPage(state.page);
+load().then(async () => {
+  if (initialTicket) await openTicket(initialTicket);
+  else await showPage(state.page);
   connect();
   applyTimeframeToTimeline();
 });
