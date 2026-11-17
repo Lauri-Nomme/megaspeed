@@ -232,6 +232,95 @@ class CalibrationTests(StoreCase):
             calibration["historical"]["cycle_median_hours"], 7.0, places=2
         )
 
+    def test_the_queue_recovery_is_disclosed_and_closes_the_response_identity(self):
+        """attention + service + queue = the observed response *in the model*.
+
+        The M/G/1 queue term assumes Poisson arrivals; a server fed by this
+        pipeline's smoothed arrivals realises only ``QUEUE_RECOVERY`` of it. The
+        rest must land in attention, or the baseline silently loses it (the
+        median then lands ~31 % low on a wall-clock axis while the p90 survives
+        on the tail draws).
+        """
+        split = simulation.decompose_response(10.0, 0.02, 0.8)
+        self.assertAlmostEqual(
+            split["service_hours"] + split["queue_hours"] + split["attention_hours"],
+            10.0, places=2,
+        )
+        self.assertEqual(split["queue_recovery"], simulation.QUEUE_RECOVERY)
+        self.assertGreater(split["attention_hours"], 0.0)
+        # the disclosed queue is the P-K term times the recovery factor
+        service = simulation.SERVICE_SHARE * 10.0
+        rho = 0.02 * service
+        pk = (rho / (1.0 - rho)) * service * (1.0 + 0.8 ** 2) / 2.0
+        self.assertAlmostEqual(split["queue_hours"], pk * simulation.QUEUE_RECOVERY, places=2)
+
+        calibration = self.calibrate(Fixture(n_prs=80, days=20))
+        queueing = calibration["queueing"]
+        self.assertEqual(queueing["queue_recovery"], simulation.QUEUE_RECOVERY)
+        self.assertEqual(queueing["service_share"], simulation.SERVICE_SHARE)
+        self.assertEqual(queueing["attention_max_sigma"], simulation.ATTENTION_MAX_SIGMA)
+        self.assertIn("queue_recovery", queueing["note"])
+
+    def test_a_heavier_queue_recovery_raises_the_baseline(self):
+        """The gate turns on the constant: 1.0 (no recovery) under-predicts.
+
+        This is the regression for the -31 % median: at ``QUEUE_RECOVERY = 1``
+        the decomposition keeps its identity but the simulation realises less
+        queue than the P-K term, so attention is floored and the cycle shortens.
+        """
+        fixture = Fixture(n_prs=200, days=10)   # loaded enough for a queue
+        calibration = self.calibrate(fixture)
+        honest = simulation.run(calibration, seed=7)["predicted"]["cycle_hours"]["median"]
+        original = simulation.QUEUE_RECOVERY
+        try:
+            simulation.QUEUE_RECOVERY = 1.0
+            naive_calibration = self.calibrate(fixture)
+        finally:
+            simulation.QUEUE_RECOVERY = original
+        naive = simulation.run(naive_calibration, seed=7)["predicted"]["cycle_hours"]["median"]
+        self.assertLess(naive, honest)
+
+    def test_the_action_counts_are_outcome_conditional(self):
+        """A merged PR draws the merged histogram, a declining one the declined one.
+
+        The store's merged PRs have more review rounds and author responses than
+        the cohort average (an abandoned PR stops early), so drawing the pooled
+        histogram for every PR under-counts a merged PR's rounds — a selection
+        bias that pushed the baseline median down.
+        """
+        calibration = self.calibrate(Fixture(n_prs=80, days=20))
+        rework = calibration["rework"]
+        self.assertEqual(rework["peer_actions"]["basis"], "outcome-conditional")
+        self.assertEqual(rework["author_responses"]["basis"], "outcome-conditional")
+        for block in ("peer_actions", "author_responses"):
+            self.assertIn("merged_histogram", rework[block])
+            self.assertIn("declined_histogram", rework[block])
+
+        pinned = copy.deepcopy(calibration)
+        pinned["rework"]["peer_actions"].update(
+            histogram={"1": 100}, merged_histogram={"3": 100}, declined_histogram={"1": 100},
+        )
+        pinned["rework"]["author_responses"].update(
+            histogram={"0": 100}, merged_histogram={"1": 100}, declined_histogram={"0": 100},
+        )
+        lab = simulation._Lab(
+            pinned, simulation.Scenario(), seed=5, horizon_hours=480.0, bh_per_day=24.0,
+        )
+        for _ in range(50):
+            self.assertEqual(lab._plan(4, True), (3, 1))
+            self.assertEqual(lab._plan(4, False), (1, 0))
+
+    def test_the_residue_is_carried_at_its_measured_mean(self):
+        """The residue is a balancing item: its mean is added, not a heavy draw."""
+        calibration = self.calibrate(Fixture(n_prs=40, days=20))
+        self.assertEqual(calibration["unmeasured"]["carried_as"], "fixed mean delay")
+        base = simulation.run(calibration, seed=7)["predicted"]["cycle_hours"]["median"]
+        bumped = copy.deepcopy(calibration)
+        bumped["unmeasured"]["mean_hours"] = 2.0
+        raised = simulation.run(bumped, seed=7)["predicted"]["cycle_hours"]["median"]
+        # a fixed, non-capacity delay shifts every PR by exactly the same hours
+        self.assertAlmostEqual(raised - base, 2.0, places=2)
+
     def test_an_empty_store_is_unavailable_not_an_error(self):
         fixture = Fixture(n_prs=0, days=20)
         calibration = self.calibrate(fixture)
@@ -263,8 +352,16 @@ class ModelTests(StoreCase):
         first = simulation.run(calibration, simulation.Scenario(), seed=11)
         second = simulation.run(calibration, simulation.Scenario(), seed=11)
         self.assertEqual(first["predicted"]["cycle_hours"], second["predicted"]["cycle_hours"])
-        other = simulation.run(calibration, simulation.Scenario(), seed=12)
-        self.assertNotEqual(first["predicted"]["cycle_hours"], other["predicted"]["cycle_hours"])
+        # The fixture's handovers are fixed, so its cycle distribution is
+        # degenerate (every PR takes the same time) and the seed shows up in the
+        # *arrival stream* rather than in the distribution: over a range of
+        # seeds the number of PRs the generator draws must differ.
+        counts = {
+            simulation.run(calibration, simulation.Scenario(), seed=seed,
+                           replications=1)["predicted"]["prs"]
+            for seed in range(6, 16)
+        }
+        self.assertGreater(len(counts), 1, "the seed must drive the arrival stream")
 
     def test_flow_efficiency_and_throughput_are_reported(self):
         calibration = self.calibrate(Fixture(n_prs=80, days=20))
