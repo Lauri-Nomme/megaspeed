@@ -48,6 +48,13 @@ export const PHASE = {
   rebasing: { color: '#E25AB5', label: 'rebasing', hint: 'interval ended in a rebase push' },
   closed: { color: '#8A8D93', label: 'closed', hint: 'closed after the last event' },
   unobserved: { color: '#70747B', label: 'no events since', hint: 'not measured — no events in the store' },
+  // prd/29: the two Jira workflow stages that are not PR phases. A ticket can
+  // sit in review (no PR yet, or a PR the store cannot see) and in verification
+  // (merged, waiting for QA) — different waits, so different hues. They are not
+  // in PHASE_ORDER: that legend describes PR intervals, and these phases only
+  // colour the ticket-detail segments (ticket.js reuses the hues).
+  in_review: { color: '#4C8DFF', label: 'ticket in review', hint: 'Jira status → in review (workflow stage)' },
+  in_verification: { color: '#2FBFA0', label: 'in verification', hint: 'Jira status → in verification (QA)' },
 };
 
 export const PHASE_ORDER = ['waiting', 'active', 'review', 'ci', 'rebasing', 'closed', 'unobserved'];

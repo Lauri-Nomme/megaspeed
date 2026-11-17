@@ -16,7 +16,7 @@ import {
   isTicketKey, linkifyTickets, markdownLinkTickets, ticketHref, ticketKey, ticketLink,
 } from '../tickets.js';
 import { rulesMarkdown, rulesMarkup } from '../rules.js';
-import { Timeline } from '../timeline.js';
+import { PHASE, PHASE_ORDER, Timeline } from '../timeline.js';
 
 const DAY = 86_400_000;
 const T0 = Date.parse('2026-10-02T09:00:00Z');
@@ -135,6 +135,45 @@ test('the segment bar draws all eight segments and names the absent one', () => 
   assert.doesNotMatch(html, /data-segment="refined_sprint"[^>]*background:/);
 });
 
+test('the verification split renders as its own measured QA segment', () => {
+  // prd/29: a store whose workflow names a QA stage splits merge→done in two.
+  const rows = [
+    segment('ready_refined', 'ready → refined', ['created', 'refined'], 20),
+    segment('refined_sprint', 'refined → sprint', ['refined', 'sprint'], 4),
+    segment('sprint_in_progress', 'sprint → in progress', ['sprint', 'started'], 2),
+    segment('in_progress_pr_open', 'in progress → PR open', ['started', 'pr_open'], 8),
+    segment('pr_open_first_review', 'PR open → first review', ['pr_open', 'first_review'], 3),
+    segment('review_rounds', 'review rounds', ['first_review', 'approval'], 5),
+    segment('final_approval_merge', 'final approval → merge', ['approval', 'merged'], 1),
+    segment('merge_verification', 'merge → verification', ['merged', 'in_verification'], 6),
+    segment('verification_done', 'verification → done', ['in_verification', 'done'], 9),
+  ];
+  const html = segmentBar(payload({
+    segments: { ...payload().segments, order: rows.map((row) => row.key), rows },
+  }));
+  assert.equal((html.match(/data-segment=/g) || []).length, 9);
+  assert.match(html, /data-segment="verification_done" data-available="true"/);
+  assert.match(html, /data-segment="merge_verification" data-available="true"/);
+  // the QA segment is priced, not folded into "done"
+  assert.match(html, /verification → done<\/span> <b>9 h<\/b>/);
+  assert.doesNotMatch(html, /data-segment="merge_done"/);
+});
+
+test('the two workflow-stage hues are labelled and distinct from the PR phases', () => {
+  assert.ok(PHASE.in_review && PHASE.in_verification);
+  assert.equal(PHASE.in_review.label, 'ticket in review');
+  assert.equal(PHASE.in_verification.label, 'in verification');
+  assert.notEqual(PHASE.in_review.color, PHASE.review.color);
+  assert.notEqual(PHASE.in_verification.color, PHASE.review.color);
+  assert.notEqual(PHASE.in_review.color, PHASE.in_verification.color);
+  // the gantt legend stays PR phases only: a Jira stage is not a PR interval
+  assert.ok(!PHASE_ORDER.includes('in_review'));
+  assert.ok(!PHASE_ORDER.includes('in_verification'));
+  // ... and the ticket segments reuse those exact hues (one vocabulary)
+  assert.equal(SEGMENT_PHASE.merge_verification.color, PHASE.in_review.color);
+  assert.equal(SEGMENT_PHASE.verification_done.color, PHASE.in_verification.color);
+});
+
 test('the segment colours extend the PR gantt vocabulary in lifecycle order', () => {
   for (const key of Object.keys(SEGMENT_PHASE)) {
     assert.match(SEGMENT_PHASE[key].color, /^#[0-9A-F]{6}$/);
@@ -142,9 +181,15 @@ test('the segment colours extend the PR gantt vocabulary in lifecycle order', ()
   // the story-only phases are distinct from each other, and the PR phases are
   // reused by name (waiting / active / review / closed)
   const colors = Object.values(SEGMENT_PHASE).map((phase) => phase.color);
-  assert.equal(new Set(colors).size, 8);
+  assert.equal(new Set(colors).size, 10);
   assert.equal(SEGMENT_PHASE.in_progress_pr_open.phase, 'active');
   assert.equal(SEGMENT_PHASE.review_rounds.phase, 'review');
+  // prd/29: the verification split gets its own two hues, distinct from every
+  // other segment (the QA wait must not look like the merge or the review)
+  assert.equal(SEGMENT_PHASE.merge_verification.label, 'awaiting verification');
+  assert.equal(SEGMENT_PHASE.verification_done.label, 'in verification');
+  assert.notEqual(SEGMENT_PHASE.merge_verification.color, SEGMENT_PHASE.final_approval_merge.color);
+  assert.notEqual(SEGMENT_PHASE.verification_done.color, SEGMENT_PHASE.merge_done.color);
 });
 
 test('the prose answer is rendered first, and names the missing boundary', () => {

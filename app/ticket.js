@@ -2,8 +2,9 @@
  *
  * The timeline answers "where does the time go" per PR; this page answers it
  * per *ticket*: the eight segments (backlog → refinement → sprint → work →
- * review → merge → done) as one phase-coloured bar, the PRs that carry the
- * ticket beneath it, the sprints it was committed to, and the worklog-vs-active
+ * review → merge → done, plus the prd/29 verification split when the workflow
+ * has a QA stage) as one phase-coloured bar, the PRs that carry the ticket
+ * beneath it, the sprints it was committed to, and the worklog-vs-active
  * hours. The one-line prose answer at the top is the point of the page: it
  * either says where the time went or names the boundary the store is missing
  * (prd/10 §7 — never an estimate standing in for a measurement).
@@ -30,6 +31,10 @@ export const SEGMENT_PHASE = {
   review_rounds: { color: '#238FF9', phase: 'review', label: 'review rounds' },
   final_approval_merge: { color: '#73CF55', phase: 'review', label: 'merge' },
   merge_done: { color: '#70747B', phase: 'closed', label: 'done' },
+  // prd/29: the verification split, with the two workflow-stage hues from the
+  // shared phase vocabulary (a merged PR waiting for QA, and the QA time).
+  merge_verification: { color: PHASE.in_review.color, phase: 'review', label: 'awaiting verification' },
+  verification_done: { color: PHASE.in_verification.color, phase: 'review', label: 'in verification' },
 };
 
 export function segmentPhase(key) {
@@ -60,7 +65,7 @@ function shortStamp(iso) {
   return `${date.getUTCDate()} ${months[date.getUTCMonth()]} ${String(date.getUTCHours()).padStart(2, '0')}:${String(date.getUTCMinutes()).padStart(2, '0')}`;
 }
 
-/** The 8-segment bar: one block per segment, absent blocks are hatched. */
+/** The segment bar: one block per segment, absent blocks are hatched. */
 export function segmentBar(payload) {
   const segments = (payload && payload.segments) || {};
   const rows = segments.rows || [];
@@ -92,7 +97,8 @@ export function segmentBar(payload) {
       text: '',
     };
   });
-  const bar = `<div class="ticket-bar" role="img" aria-label="eight-segment ticket cycle">${
+  const count = rows.length === 8 ? 'eight' : String(rows.length);
+  const bar = `<div class="ticket-bar" role="img" aria-label="${count}-segment ticket cycle">${
     blocks.map((block) => `<span class="ticket-seg${block.absent ? ' absent' : ''}"
       data-segment="${esc(block.key)}" data-available="${String(!block.absent)}"
       style="${block.absent ? `flex:0 0 74px;--seg:${block.color}` : `flex:${block.grow} 1 0;background:${block.color}`}"
@@ -112,7 +118,7 @@ export function segmentBar(payload) {
   return `${bar}${legend}`;
 }
 
-/** The nine boundary timestamps, with the missing ones named. */
+/** The boundary timestamps, with the missing ones named. */
 export function boundaryChips(payload) {
   const boundaries = (payload && payload.segments && payload.segments.boundaries) || {};
   const entries = Object.entries(boundaries);
@@ -291,7 +297,7 @@ export function ticketMarkup(payload, { base = '' } = {}) {
     <p class="impact ticket-answer" id="ticket-answer" data-kind="${esc(payload.answer_kind || '')}">${esc(payload.answer || '')}</p>
     <div class="ticket-grid">
       <section class="ticket-panel wide">
-        <h2 class="policy-h">cycle · eight segments</h2>
+        <h2 class="policy-h">cycle · ${(segments.rows || []).length} segments</h2>
         ${segmentBar(payload)}
         ${boundaryChips(payload)}
         <p class="panel-note">${esc(segments.heuristic || '')}${segments.hours_mode === 'business' ? '' : ' · wall-clock hours (no calendar configured)'}</p>
