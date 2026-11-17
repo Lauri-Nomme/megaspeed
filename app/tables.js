@@ -87,15 +87,15 @@ export function deliveryTable(data, tab, { scope = null } = {}) {
     </tr></thead>`;
   const body = rows.map((row) => `
     <tr tabindex="0" data-id="${esc(row.object_id)}" class="row">
-      <td class="c-state">${rowState(row)}</td>
-      <td class="c-id">${ticketLink(rowTicket(row), { cls: 'keys' }) || '<span class="keys">—</span>'}
+      <td class="c-state" data-label="status">${rowState(row)}</td>
+      <td class="c-id" data-label="">${ticketLink(rowTicket(row), { cls: 'keys' }) || '<span class="keys">—</span>'}
         <span class="mono id">#${esc(row.number)}</span>
         <span class="repo">${esc(row.repo_short)}</span></td>
-      <td class="c-who">${esc(whoLabel(row.ball_label || row.ball))}</td>
-      <td class="c-phase"><span class="mono">${esc(row.phase)}</span></td>
-      <td class="c-since mono">${esc(fmtAbsolute(Date.parse(row.waiting_since)))}</td>
-      <td class="c-dur num">${esc(fmtHours(row.waiting_hours))}</td>
-      <td class="c-impact num">${impactCell(row)}</td>
+      <td class="c-who" data-label="waiting on">${esc(whoLabel(row.ball_label || row.ball))}</td>
+      <td class="c-phase" data-label="phase"><span class="mono">${esc(row.phase)}</span></td>
+      <td class="c-since mono" data-label="waiting since">${esc(fmtAbsolute(Date.parse(row.waiting_since)))}</td>
+      <td class="c-dur num" data-label="waiting">${esc(fmtHours(row.waiting_hours))}</td>
+      <td class="c-impact num" data-label="impact">${impactCell(row)}</td>
     </tr>`).join('');
   return `<table class="table delivery">${head}<tbody>${body}</tbody></table>`;
 }
@@ -171,11 +171,11 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
           <button type="button" class="link" data-go="delivery">Delivery list →</button></div>
         ${rows.length ? `<table class="table compact"><tbody>${rows.map((row) => `
           <tr tabindex="0" data-id="${esc(row.object_id)}" class="row">
-            <td class="c-state">${rowState(row)}</td>
-            <td class="c-id">${ticketLink(rowTicket(row))}
+            <td class="c-state" data-label="status">${rowState(row)}</td>
+            <td class="c-id" data-label="">${ticketLink(rowTicket(row))}
               <span class="mono id">#${esc(row.number)}</span>
               <span class="repo">${esc(row.repo_short)}</span></td>
-            <td class="c-dur num">${esc(fmtHours(row.waiting_hours))}</td>
+            <td class="c-dur num" data-label="waiting">${esc(fmtHours(row.waiting_hours))}</td>
           </tr>`).join('')}</tbody></table>`
     : '<div class="empty-row">No open item is waiting right now.</div>'}
       </section>
@@ -183,9 +183,9 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
         <div class="panel-head"><h2>Where waits accumulate</h2>
           <button type="button" class="link" data-go="blocking">Blocking map →</button></div>
         ${topBlocking.length ? `<table class="table compact"><tbody>${topBlocking.map((edge) => `
-          <tr><td class="c-who"><span class="mono">${esc(edge.from)}</span> waited on
+          <tr><td class="c-who" data-label="handover"><span class="mono">${esc(edge.from)}</span> waited on
             <span class="mono">${esc(edge.to)}</span></td>
-          <td class="c-dur num">${esc(fmtHours(edge.hours))}</td></tr>`).join('')}</tbody></table>`
+          <td class="c-dur num" data-label="wait">${esc(fmtHours(edge.hours))}</td></tr>`).join('')}</tbody></table>`
     : '<div class="empty-row">No measured handover in this window.</div>'}
         <p class="panel-note">${esc((blocking && blocking.assumption) || '')}</p>
       </section>
@@ -193,9 +193,9 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
         <div class="panel-head"><h2>${people ? 'People diagnosis' : 'Queue diagnosis'}</h2>
           <button type="button" class="link" data-go="queue">Queue view →</button></div>
         ${streams.length ? `<table class="table compact"><tbody>${streams.slice(0, 6).map((stream) => `
-          <tr><td class="c-who"><span class="mono">${esc(stream.id)}</span></td>
-            <td class="c-state">${pill(stream.summary.diagnosis, `≈ ${stream.summary.diagnosis}`)}</td>
-            <td class="c-dur num">≈${esc(fmtHours(stream.summary.mean_wait_hours))}</td></tr>`).join('')}</tbody></table>`
+          <tr><td class="c-who" data-label=""><span class="mono">${esc(stream.id)}</span></td>
+            <td class="c-state" data-label="diagnosis">${pill(stream.summary.diagnosis, `≈ ${stream.summary.diagnosis}`)}</td>
+            <td class="c-dur num" data-label="mean wait">≈${esc(fmtHours(stream.summary.mean_wait_hours))}</td></tr>`).join('')}</tbody></table>`
     : '<div class="empty-row">No measured waits in this window.</div>'}
       </section>
     </div>`;

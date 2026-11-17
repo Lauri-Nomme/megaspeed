@@ -216,9 +216,9 @@ function drillMarkup(suggestion, metrics, base) {
     const keyTag = item.key && item.kind !== 'story'
       ? `<span class="drill-key mono muted">${esc(item.key)}</span>` : '';
     return `<tr class="${item.affected ? 'affected' : ''}" data-drill-item="${esc(item.label)}">
-      <td class="drill-item">${link}${keyTag}</td>
-      <td class="drill-detail">${esc(item.detail)}</td>
-      <td class="drill-value mono">${esc(item.value)}</td>
+      <td class="drill-item" data-label="">${link}${keyTag}</td>
+      <td class="drill-detail" data-label="detail">${esc(item.detail)}</td>
+      <td class="drill-value mono" data-label="measured">${esc(item.value)}</td>
     </tr>`;
   }).join('');
   const cap = items.length > shown.length

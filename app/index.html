@@ -9,29 +9,33 @@
 <body>
 <div class="app" id="app">
   <header class="topbar">
+    <button type="button" class="nav-toggle" id="nav-toggle" aria-label="views"
+            aria-controls="sidebar" aria-expanded="false" title="views">☰</button>
     <span class="brand">megaspeed</span>
-    <div class="tenant" id="tenant-switcher">
-      <button type="button" class="tenant-pill" id="tenant-button" aria-haspopup="menu"
-              aria-expanded="false" title="dataset (tenant): one pseudonymised store per environment">
-        <span class="tenant-key">tenant</span>
-        <span class="tenant-name" id="tenant-name">—</span>
-        <span class="tenant-meta" id="tenant-meta"></span>
-        <span class="tenant-caret" aria-hidden="true">▾</span>
-      </button>
-      <div class="tenant-menu" id="tenant-menu" role="menu" aria-label="datasets (tenants)" hidden></div>
-    </div>
-    <label class="ctx"><span class="ctx-k">scope</span>
-      <select id="scope" aria-label="scope everything by person or queue"></select>
-    </label>
-    <div class="ctx"><span class="ctx-k">timeframe</span>
-      <div class="seg" id="timeframe" role="group" aria-label="timeframe">
-        <button type="button" data-tf="1w" aria-pressed="false">1w</button>
-        <button type="button" data-tf="4w" aria-pressed="false">4w</button>
-        <button type="button" data-tf="1q" aria-pressed="true">1q</button>
-        <button type="button" data-tf="all" aria-pressed="false">All</button>
+    <div class="ctx-row">
+      <div class="tenant" id="tenant-switcher">
+        <button type="button" class="tenant-pill" id="tenant-button" aria-haspopup="menu"
+                aria-expanded="false" title="dataset (tenant): one pseudonymised store per environment">
+          <span class="tenant-key">tenant</span>
+          <span class="tenant-name" id="tenant-name">—</span>
+          <span class="tenant-meta" id="tenant-meta"></span>
+          <span class="tenant-caret" aria-hidden="true">▾</span>
+        </button>
+        <div class="tenant-menu" id="tenant-menu" role="menu" aria-label="datasets (tenants)" hidden></div>
       </div>
-      <span class="tf-custom" id="tf-custom" hidden title="custom window from the timeline brush or zoom">custom</span>
-      <span id="range" class="mono">—</span>
+      <label class="ctx"><span class="ctx-k">scope</span>
+        <select id="scope" aria-label="scope everything by person or queue"></select>
+      </label>
+      <div class="ctx"><span class="ctx-k">timeframe</span>
+        <div class="seg" id="timeframe" role="group" aria-label="timeframe">
+          <button type="button" data-tf="1w" aria-pressed="false">1w</button>
+          <button type="button" data-tf="4w" aria-pressed="false">4w</button>
+          <button type="button" data-tf="1q" aria-pressed="true">1q</button>
+          <button type="button" data-tf="all" aria-pressed="false">All</button>
+        </div>
+        <span class="tf-custom" id="tf-custom" hidden title="custom window from the timeline brush or zoom">custom</span>
+        <span id="range" class="mono">—</span>
+      </div>
     </div>
     <span class="grow"></span>
     <div class="density" id="density" role="group" aria-label="density">
@@ -82,6 +86,7 @@
         <span id="honesty"></span>
         <span class="dot">·</span>
         <span class="timebasis" id="timebasis" title="prd/19: business hours when the tenant has a calendar, wall-clock otherwise">wall-clock hours</span>
+        <span class="range-meta mono" id="range-meta" hidden></span>
       </div>
 
       <!-- Timeline -->
@@ -113,7 +118,7 @@
           <span class="legend-label">lifecycle</span>
           <div class="phase-legend" id="phase-legend"></div>
           <span class="grow"></span>
-          <span class="hint">drag to pan · wheel to zoom · arrows pan · +/− zoom · Home fits</span>
+          <span class="hint" id="timeline-hint">drag to pan · wheel to zoom · arrows pan · +/− zoom · Home fits</span>
         </div>
         <!-- prd/26 P6: the sprint lens — bands are on the canvas, this strip is
              the sprint view (scope + carry-over) and a click sets the window -->
@@ -134,7 +139,7 @@
           <div class="tabs" id="delivery-tabs" role="tablist" aria-label="subset"></div>
           <span class="grow"></span>
           <button type="button" class="chip" id="delivery-copy">Copy as Markdown</button>
-          <span class="hint">click a row to inspect · right-click to pivot</span>
+          <span class="hint" id="delivery-hint">click a row to inspect · right-click to pivot</span>
         </div>
         <div class="split">
           <div class="table-wrap" id="delivery-table"></div>
@@ -168,6 +173,7 @@
           </label>
           <div class="seg" id="blocking-lens" role="group" aria-label="lens"></div>
           <span class="grow"></span>
+          <span class="hint" id="blocking-hint"></span>
           <div class="stats-strip" id="blocking-stats"></div>
         </div>
         <div class="stage blocking-stage" id="blocking-stage">
@@ -235,6 +241,7 @@
       <div class="menu" id="menu" role="menu" hidden></div>
     </main>
   </div>
+  <div class="scrim" id="scrim" hidden></div>
 </div>
 <script type="module" src="/main.js"></script>
 </body>

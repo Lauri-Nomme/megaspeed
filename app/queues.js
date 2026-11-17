@@ -40,6 +40,9 @@ export class QueueChart {
     this.hover = null;
     this.selected = null;
     this.renderQueued = false;
+    // prd/28: a phone has no hover; tap-and-hold shows the same tooltip.
+    this._touchAt = 0;
+    this._holdTimer = 0;
     this._bind();
   }
 
@@ -108,12 +111,16 @@ export class QueueChart {
     ctx.fillStyle = '#8A8D93';
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
-    const ticks = 5;
+    // prd/28: a phone's plot is ~136px wide; five 16-character stamps would
+    // overlap into an unreadable smear, so the narrow axis says date only and
+    // keeps two or three ticks.
+    const phone = g.width <= 640;
+    const ticks = phone ? (g.plotW >= 300 ? 3 : 2) : 5;
     for (let i = 0; i < ticks; i += 1) {
       const t = start + ((end - start) * i) / (ticks - 1);
       const x = GUTTER + (i / (ticks - 1)) * g.plotW;
       ctx.textAlign = i === 0 ? 'left' : i === ticks - 1 ? 'right' : 'center';
-      ctx.fillText(fmtStamp(t).slice(0, 16), x, 12);
+      ctx.fillText(phone ? fmtStamp(t).slice(0, 10) : fmtStamp(t).slice(0, 16), x, 12);
     }
     ctx.strokeStyle = 'rgba(255,255,255,.06)';
     ctx.beginPath();
@@ -241,10 +248,13 @@ export class QueueChart {
     ctx.fillStyle = '#8A8D93';
     ctx.textAlign = 'left';
     ctx.fillText(
-      `WIP sampled every ${fmtDuration(bucketMs)} · ` +
-        `${this.data && this.data.hours_mode === 'business' ? 'business hours' : 'wall-clock'} · ` +
-        `WIP scale 0–${fmtWipTick(maxWip)} items (shared) · completions in grey`,
-      GUTTER, g.height - 8,
+      phone
+        ? `WIP every ${fmtDuration(bucketMs)} · scale 0–${fmtWipTick(maxWip)}`
+        : `WIP sampled every ${fmtDuration(bucketMs)} · ` +
+          `${this.data && this.data.hours_mode === 'business' ? 'business hours' : 'wall-clock'} · ` +
+          `WIP scale 0–${fmtWipTick(maxWip)} items (shared) · completions in grey`,
+      phone ? 14 : GUTTER,
+      g.height - 8,
     );
   }
 
@@ -286,12 +296,14 @@ export class QueueChart {
   _bind() {
     const canvas = this.canvas;
     canvas.addEventListener('mousemove', (ev) => {
+      if (this._touchAt && Date.now() - this._touchAt < 800) return;
       const rect = canvas.getBoundingClientRect();
       const x = ev.clientX - rect.left;
       const y = ev.clientY - rect.top;
       this.showHover(x >= GUTTER ? this.hitTest(x, y) : null, x, y);
     });
     canvas.addEventListener('mouseleave', () => {
+      if (this._touchAt && Date.now() - this._touchAt < 800) return;
       this.hover = null;
       this.tip.hidden = true;
       this.schedule();
@@ -324,6 +336,40 @@ export class QueueChart {
         this.schedule();
       }
     });
+    // prd/28: tap-and-hold is the touch equivalent of hover on the WIP chart.
+    const local = (ev) => {
+      const rect = canvas.getBoundingClientRect();
+      return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+    };
+    let start = null;
+    canvas.addEventListener('pointerdown', (ev) => {
+      if (ev.pointerType === 'mouse') return;
+      this._touchAt = Date.now();
+      const point = local(ev);
+      start = { ...point, id: ev.pointerId };
+      clearTimeout(this._holdTimer);
+      this._holdTimer = setTimeout(() => {
+        if (!start) return;
+        const hit = point.x >= GUTTER ? this.hitTest(point.x, point.y) : null;
+        this.showHover(hit, point.x, point.y);
+      }, 450);
+    });
+    canvas.addEventListener('pointermove', (ev) => {
+      if (!start || ev.pointerId !== start.id) return;
+      const point = local(ev);
+      if (Math.hypot(point.x - start.x, point.y - start.y) > 10) {
+        clearTimeout(this._holdTimer);
+        start = null;
+      }
+    });
+    const end = (ev) => {
+      if (!start || ev.pointerId !== start.id) return;
+      clearTimeout(this._holdTimer);
+      start = null;
+    };
+    canvas.addEventListener('pointerup', end);
+    canvas.addEventListener('pointercancel', end);
+
     new ResizeObserver(() => this.schedule()).observe(canvas.parentElement);
   }
 }
