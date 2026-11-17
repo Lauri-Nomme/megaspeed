@@ -96,6 +96,34 @@ test('B10: a zero-event timeline has an empty state and scopes are validated', (
   assert.match(main, /No events for scope/);
 });
 
+test('prd/26 P5: the Rules page expands a suggestion into its items', () => {
+  const rules = read('rules.js');
+  assert.match(rules, /export function ruleItems/);
+  assert.match(rules, /export function metricRows/);
+  assert.match(rules, /rule-drill/);
+  assert.match(rules, /data-drill-item/);
+  // the page passes the metrics through, so a row can find its own list
+  assert.match(rules, /metrics: \(data && data\.metrics\) \|\| \{\}/);
+  assert.match(read('style.css'), /\.rule-drill/);
+});
+
+test('prd/26 P6: the sprint lens is fetched and drawn', () => {
+  const main = read('main.js');
+  assert.match(main, /async function loadSprints/);
+  assert.match(main, /\/api\/sprints/);
+  assert.match(main, /timeline\.setSprints\(state\.sprints\)/);
+  assert.match(main, /function renderSprintStrip/);
+  assert.match(main, /data-sprint-start/);
+  assert.match(main, /function scopeToSprint/);
+  assert.match(read('index.html'), /id="sprint-strip"/);
+  const timeline = read('timeline.js');
+  assert.match(timeline, /setSprints\(payload/);
+  assert.match(timeline, /drawSprintBands/);
+  assert.match(timeline, /carried_over/);
+  assert.match(timeline, /onSprint/);
+  assert.match(read('style.css'), /\.sprint-strip/);
+});
+
 test('B13: status and tooltips are transient', () => {
   const main = read('main.js');
   assert.match(main, /function flashStatus/);

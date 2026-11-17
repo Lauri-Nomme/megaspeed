@@ -365,6 +365,54 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .phase-legend .zero { color: var(--text-tertiary); }
 .phase-legend .zero i { opacity: .35; }
 
+/* --- sprint lens (prd/26 P6) ------------------------------------------- */
+/* Bands live on the canvas; the strip is the sprint view: one dense row per
+   sprint, its own scope and its carry-over, each row a window. */
+.sprint-strip {
+  border-bottom: 1px solid var(--border-hairline);
+  background: var(--bg-surface);
+  padding: 5px 14px 7px;
+}
+.sprint-strip[hidden] { display: none; }
+.sprint-strip-head {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  font-size: 11px; color: var(--text-secondary);
+}
+.sprint-strip-title {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--text-tertiary);
+}
+.sprint-scope-line { color: var(--text-primary); }
+.sprint-rows { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.sprint-row {
+  display: inline-flex; align-items: baseline; gap: 8px;
+  height: calc(var(--control-h) + 2px);
+  padding: 0 9px;
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-control);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.sprint-row:hover { background: var(--bg-hover); color: var(--text-primary); }
+.sprint-row.open { border-color: rgba(251, 205, 88, .35); }
+.sprint-row .sprint-id { color: var(--link); font-weight: 600; }
+.sprint-row.open .sprint-id { color: var(--warning); }
+.sprint-row .sprint-window { color: var(--text-primary); }
+.sprint-row .sprint-done, .sprint-row .sprint-scope-count { color: var(--text-secondary); }
+.sprint-carry { color: var(--warning); }
+.sprint-legend { color: var(--text-tertiary); }
+.sprint-plan { color: var(--text-tertiary); font-style: italic; }
+.sprint-carry-list, .sprint-out-keys {
+  margin: 5px 0 0; font-size: 11px; color: var(--text-secondary);
+}
+.sprint-carry-list { color: var(--warning); }
+.sprint-out { margin-top: 4px; font-size: 11px; color: var(--text-secondary); }
+.sprint-out > summary { cursor: pointer; color: var(--text-secondary); }
+.sprint-out > summary:hover { color: var(--text-primary); }
+.sprint-out .muted { color: var(--text-tertiary); }
+
 .selection {
   display: inline-flex;
   align-items: center;
@@ -702,6 +750,42 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .rule-evidence .fact { display: flex; align-items: baseline; gap: 5px; font-size: calc(var(--body-font) - 1px); }
 .rule-evidence dt { color: var(--text-tertiary); }
 .rule-evidence dd { margin: 0; color: var(--text-primary); }
+
+/* prd/26 P5: the evidence drill-down — every item behind the number, dense,
+   one line each, each item a doorway to its ticket page. */
+.rule-drill { margin-top: 7px; border-top: 1px solid var(--border-hairline); }
+.rule-drill > summary {
+  display: flex; align-items: baseline; gap: 10px; cursor: pointer;
+  padding: 6px 0 4px; font-size: calc(var(--body-font) - 1px); color: var(--link);
+  list-style: none;
+}
+.rule-drill > summary::-webkit-details-marker { display: none; }
+.rule-drill > summary::before { content: '▸'; color: var(--text-tertiary); width: 10px; }
+.rule-drill[open] > summary::before { content: '▾'; }
+.rule-drill > summary:hover { color: var(--link-strong); }
+.drill-hint { color: var(--text-tertiary); font-size: 11px; }
+.drill-wrap {
+  max-height: min(48vh, 420px); overflow-y: auto; overscroll-behavior: contain;
+  border-bottom: 1px solid var(--border-hairline);
+}
+.drill { width: auto; min-width: min(760px, 100%); border-collapse: collapse; font-size: calc(var(--row-font) - 1px); }
+.drill th {
+  position: sticky; top: 0; z-index: 1; background: var(--bg-surface);
+  text-align: left; font-weight: 500; font-size: 10px; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--text-tertiary);
+  padding: 3px 8px 3px 0; border-bottom: 1px solid var(--border-hairline);
+}
+.drill th.num, .drill td.drill-value { text-align: right; padding-left: 16px; }
+.drill td {
+  padding: 2px 20px 2px 0; border-bottom: 1px solid var(--border-hairline);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 46ch;
+}
+.drill tr.affected td:first-child { box-shadow: inset 2px 0 0 var(--warning); padding-left: 6px; }
+.drill td.drill-detail { color: var(--text-secondary); }
+.drill-link { color: var(--link); text-decoration: none; }
+.drill-link:hover { color: var(--link-strong); text-decoration: underline; }
+.drill-key { margin-left: 6px; font-size: 10.5px; }
+.drill-more { margin: 5px 0 0; font-size: 11px; color: var(--text-tertiary); }
 .rules-note {
   margin: 0; padding: 8px 14px; font-size: var(--body-font);
   color: var(--text-secondary);
