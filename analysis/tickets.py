@@ -2,10 +2,10 @@
 
 The delivery list, the timeline and the rules all describe PRs. The question a
 team actually asks — *why did DEL-167 take three weeks?* — is about the
-**ticket**: its eight segments (backlog, refinement, sprint, work, review,
-merge), the PRs that carry it, the sprints it was committed to, and the hours
-logged against it. This module assembles exactly that one ticket from the two
-halves of the store:
+**ticket**: its segments (backlog, refinement, sprint, work, review, merge,
+plus the prd/29 verification split when the workflow names a QA stage), the PRs
+that carry it, the sprints it was committed to, and the hours logged against it.
+This module assembles exactly that one ticket from the two halves of the store:
 
     STORY:<key>  ── events (created / status / sprint / pointed / worklog)
         │
@@ -39,9 +39,21 @@ from ingest.store import iso
 #: boundary, so the reader knows what the store is missing.
 BOUNDARY_REASON: dict[str, str] = {
     "created": "the story has no created event or object timestamp",
+    "ready": (
+        "no status change to a ready stage, and no 'pointed' event "
+        "(the estimate refinement produces)"
+    ),
     "refined": "no 'pointed' event (the estimate refinement produces)",
     "sprint": "no 'sprint_added' event",
     "started": "no status change to in progress",
+    "in_review": (
+        "no status change to in review (a [jira.stages] map must name the "
+        "workflow's review status)"
+    ),
+    "in_verification": (
+        "no status change to in verification (a [jira.stages] map must name "
+        "the workflow's QA status)"
+    ),
     "pr_open": "no PR names this key",
     "first_review": "no reviewer action on its PRs",
     "approval": "no approval on its PRs",
@@ -49,10 +61,11 @@ BOUNDARY_REASON: dict[str, str] = {
     "done": "no status change to done, and the story is still open",
 }
 
-#: The boundary order the payload reports (the nine timestamps of prd/25).
+#: The boundary order the payload reports (prd/25's nine timestamps, plus the
+#: prd/29 stage boundaries).
 BOUNDARY_ORDER = (
-    "created", "refined", "sprint", "started", "pr_open", "first_review",
-    "approval", "merged", "done",
+    "created", "refined", "ready", "sprint", "started", "in_review",
+    "in_verification", "pr_open", "first_review", "approval", "merged", "done",
 )
 
 PR_REVIEW_ACTIONS = ("pr_pushed", "pr_unapproved")
@@ -155,11 +168,15 @@ def _pr_rows(court: ballcourt.BallCourt, states: list) -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
-# the eight segments for one story
+# the segments for one story
 # --------------------------------------------------------------------------- #
-def _segment_rows(court: ballcourt.BallCourt, cycle: jira.Cycle | None) -> list[dict]:
+def _segment_rows(court: ballcourt.BallCourt, cycle: jira.Cycle | None,
+                  *, verification: bool = False) -> list[dict]:
     rows: list[dict] = []
-    for key in jira.SEGMENT_KEYS:
+    keys = jira.segment_keys(
+        cycle.boundaries if cycle is not None else {}, verification=verification
+    )
+    for key in keys:
         left, right = jira.SEGMENT_BOUNDS[key]
         t1 = cycle.boundaries.get(left) if cycle is not None else None
         t2 = cycle.boundaries.get(right) if cycle is not None else None
@@ -211,8 +228,9 @@ def _segment_rows(court: ballcourt.BallCourt, cycle: jira.Cycle | None) -> list[
     return rows
 
 
-def _segments(court: ballcourt.BallCourt, cycle: jira.Cycle | None) -> dict:
-    rows = _segment_rows(court, cycle)
+def _segments(court: ballcourt.BallCourt, cycle: jira.Cycle | None,
+              *, verification: bool = False) -> dict:
+    rows = _segment_rows(court, cycle, verification=verification)
     measured = [row for row in rows if row["available"]]
     total = round(sum(row["hours"] for row in measured), 2)
     active = round(sum(row["active_hours"] for row in measured), 2)
@@ -240,7 +258,7 @@ def _segments(court: ballcourt.BallCourt, cycle: jira.Cycle | None) -> dict:
     missing = [name for name in BOUNDARY_ORDER
                if cycle is None or cycle.boundaries.get(name) is None]
     return {
-        "order": list(jira.SEGMENT_KEYS),
+        "order": [row["key"] for row in rows],
         "rows": rows,
         "boundaries": boundaries,
         "measured": len(measured),
@@ -259,9 +277,10 @@ def _segments(court: ballcourt.BallCourt, cycle: jira.Cycle | None) -> dict:
         "hours_mode": court.hours_mode,
         "heuristic": (
             "the same boundaries and active-work accounting as the prd/21 "
-            "decomposition: refined = first 'pointed', sprint = first "
-            "'sprint_added', status categories for started/done, and the "
-            "story's PRs (joined on PR.ticket_keys) for open/review/merge"
+            "decomposition: refined = first 'pointed' (fallback: status → "
+            "ready), sprint = first 'sprint_added', status stages for "
+            "started/in-review/in-verification/done, and the story's PRs "
+            "(joined on PR.ticket_keys) for open/review/merge"
         ),
     }
 
@@ -412,9 +431,9 @@ def _answer(
         return (
             f"the store cannot say how long the {first['label']} segment took "
             f"because the {boundary} boundary is missing ({first['reason']}); the "
-            f"{len(measured)} of 8 segments it can measure cover {total:g} h, most "
-            f"of it in {biggest['label']} ({biggest['hours']:g} h, {percent}%)"
-            f"{suffix}.",
+            f"{len(measured)} of {len(segments['rows'])} segments it can measure "
+            f"cover {total:g} h, most of it in {biggest['label']} "
+            f"({biggest['hours']:g} h, {percent}%){suffix}.",
             "partial",
         )
     efficiency = segments["efficiency"]
@@ -453,7 +472,11 @@ def ticket(
         return None
 
     cycle = jira.cycle_for(story) if story is not None else None
-    segments = _segments(court, cycle)
+    # prd/29: the store's workflow decides whether the merge→done segment is
+    # split around verification, so a ticket that never reached QA still shows
+    # the QA segment as missing (with the boundary named) instead of silently
+    # folding it into "done".
+    segments = _segments(court, cycle, verification=jira.uses_verification(data))
     prs = _pr_rows(court, states)
     sprints = _sprint_rows(data, story)
     worklog_rows, worklog = _worklogs(story, prs)

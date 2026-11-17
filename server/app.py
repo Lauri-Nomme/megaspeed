@@ -20,7 +20,7 @@ one failure this whole feature exists to prevent.
     GET  /api/objects?type=&repo=&pr_id=&actor=&ticket=&limit=&offset=&tenant=
                                                         PR / COMMIT / TICKET / … objects
     GET  /api/ticket/{key}?tenant=            one ticket's full cycle (prd/25):
-                                              story + 8 segments + PRs + sprints
+                                              story + segments + PRs + sprints
                                               + worklogs + events + prose answer
     GET  /api/blocking?level=&days=&tenant=   wait-hours handover graph (prd/05)
     GET  /api/queues?level=&days=&tenant=     per-person WIP / throughput series
@@ -675,13 +675,14 @@ TICKET_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,9}-\d{1,6}$")
 def ticket_detail(key: str, request: Request):
     """One ticket's whole cycle (prd/25): the question a PR row cannot answer.
 
-    The payload joins the STORY object, its eight segments with the nine
-    boundary timestamps, its PRs (joined on ``PR.ticket_keys``) with review
-    rounds / ``push_class`` / censoring, its sprint memberships, its worklogs
-    and its events — plus a one-sentence ``answer`` that either says where the
-    time went or names the boundary the store is missing. A key the store has
-    never seen is a 404; a story without PRs (or a PR without a story) is a
-    real, partially measured ticket and says which half is missing.
+    The payload joins the STORY object, its segments (eight, or nine when the
+    workflow has a prd/29 verification stage) with the boundary timestamps, its
+    PRs (joined on ``PR.ticket_keys``) with review rounds / ``push_class`` /
+    censoring, its sprint memberships, its worklogs and its events — plus a
+    one-sentence ``answer`` that either says where the time went or names the
+    boundary the store is missing. A key the store has never seen is a 404; a
+    story without PRs (or a PR without a story) is a real, partially measured
+    ticket and says which half is missing.
     """
     unknown = _unknown_params(request, _params(()))
     if unknown is not None:

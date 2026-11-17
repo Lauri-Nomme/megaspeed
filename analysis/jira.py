@@ -11,10 +11,17 @@ it closed. prd/21 calls that the **waiting-time decomposition**:
                      └ PR-open→first-review ┘└ review rounds ┘
                               └ final-approval→merge ┘└ merge→done ┘
 
+prd/29 adds the workflow's own stages: when the store's ``[jira.stages]`` map
+names a QA status, ``merge→done`` splits into ``merge→verification`` and
+``verification→done`` so "time in QA" is measured rather than folded into
+"done". The ``ready``, ``in_review`` and ``in_verification`` boundaries come
+from the status stages; without a map they do not exist and are reported
+missing (an unconfigured store keeps the eight segments and today's numbers).
+
 The eight segments are built from three sources, joined on the story key:
 
-* the story's own events — ``created``, ``status_changed`` (both ends are
-  status *categories*, never a workflow name), ``pointed``, ``assigned``,
+* the story's own events — ``created``, ``status_changed`` (both ends are status
+  *stages*, never a workflow name), ``pointed``, ``assigned``,
   ``sprint_added`` / ``sprint_removed``, ``worklogged``;
 * its Sprint objects (start / planned end / completion);
 * its PRs, via ``PR.ticket_keys`` — the same key on both sides of the store, so
@@ -66,6 +73,7 @@ from analysis.effort import (
     ACTIVE_PHASES, TICKET_TOUCHES, TOUCH_ACTIVITIES, TOUCH_HOURS,
 )
 from ingest.store import iso, to_naive_utc
+from ingest.taxonomy import normalize_stage
 
 # --------------------------------------------------------------------------- #
 # the eight segments (prd/21)
@@ -80,8 +88,15 @@ SEGMENTS: tuple[tuple[str, str], ...] = (
     ("final_approval_merge", "final approval → merge"),
     ("merge_done", "merge → done"),
 )
+#: prd/29: when the store's workflow has an ``in_verification`` stage, the last
+#: segment splits in two — the wait from the merge to QA picking the ticket up,
+#: and the QA time itself. The other seven stay where they are.
+VERIFICATION_SEGMENTS: tuple[tuple[str, str], ...] = (
+    ("merge_verification", "merge → verification"),
+    ("verification_done", "verification → done"),
+)
 SEGMENT_KEYS = tuple(key for key, _ in SEGMENTS)
-SEGMENT_LABEL = dict(SEGMENTS)
+SEGMENT_LABEL = dict(SEGMENTS) | dict(VERIFICATION_SEGMENTS)
 #: Which two boundaries delimit each segment. A segment is measured only when
 #: both exist for that story.
 SEGMENT_BOUNDS: dict[str, tuple[str, str]] = {
@@ -93,7 +108,25 @@ SEGMENT_BOUNDS: dict[str, tuple[str, str]] = {
     "review_rounds": ("first_review", "approval"),
     "final_approval_merge": ("approval", "merged"),
     "merge_done": ("merged", "done"),
+    "merge_verification": ("merged", "in_verification"),
+    "verification_done": ("in_verification", "done"),
 }
+
+
+def segment_keys(boundaries: dict, *, verification: bool = False) -> tuple[str, ...]:
+    """The segment order for one story (or one store).
+
+    The eight base segments, except that the last one is replaced by
+    ``merge_verification`` + ``verification_done`` when the workflow has an
+    ``in_verification`` stage (prd/29). ``verification`` says the *store* has the
+    stage (so a story that never reached QA shows the segment as missing, with
+    ``in_verification`` named) while the per-story ``boundaries`` says whether
+    this story reached it.
+    """
+    if verification or boundaries.get("in_verification") is not None:
+        return SEGMENT_KEYS[:-1] + tuple(key for key, _ in VERIFICATION_SEGMENTS)
+    return SEGMENT_KEYS
+
 
 NO_JIRA_NOTE = (
     "no Jira data in this store (no STORY objects): the ticket layer needs the "
@@ -393,16 +426,33 @@ def story_for(data: JiraData | None, key: str) -> Story | None:
     return None
 
 
+def uses_verification(data: JiraData | None) -> bool:
+    """Does this store's workflow have an ``in_verification`` stage? (prd/29)
+
+    True when any story reached it. A store scraped with a stage map that names
+    a QA status does; an unconfigured store never does (its QA status projects
+    onto ``in_progress``), which is exactly how the unconfigured path keeps
+    today's eight segments.
+    """
+    if data is None:
+        return False
+    return any(_first_status(story, "in_verification") for story in data.stories)
+
+
 # --------------------------------------------------------------------------- #
 # boundaries and evidence spans
 # --------------------------------------------------------------------------- #
 def _first_status(story: Story, to_status: str, after: datetime | None = None) -> datetime | None:
-    """Earliest ``status_changed`` whose *to* category is ``to_status``."""
+    """Earliest ``status_changed`` whose *to* stage is ``to_status``.
+
+    A pre-prd/29 store wrote ``todo`` where the stage vocabulary writes
+    ``backlog``; ``normalize_stage`` makes both read the same (prd/29).
+    """
     found = None
     for event in story.events:
         if event["activity"] != "status_changed":
             continue
-        if _attrs(event).get("to_status") != to_status:
+        if normalize_stage(_attrs(event).get("to_status")) != to_status:
             continue
         if after is not None and event["_ts"] < after:
             continue
@@ -466,17 +516,33 @@ class Cycle:
 
 
 def _cycle(story: Story) -> Cycle:
-    """Derive the eight-segment boundaries for one story.
+    """Derive the segment boundaries for one story.
 
     The refinement signal is the first ``pointed`` event: Jira's changelog
     records the estimate when it is *set*, which is what refinement produces.
-    A story refined but never pointed has no refinement boundary — reported as
-    missing rather than guessed from the status history.
+    A story with neither a ``pointed`` event nor a status → ``ready`` has no
+    refinement boundary — reported as missing rather than guessed.
+
+    prd/29 adds the workflow's own stages as boundaries:
+
+    * ``ready`` — the first status → ``ready`` (the story is refined/triaged),
+      falling back to the first ``pointed`` for a workflow with no such status;
+    * ``in_review`` / ``in_verification`` — the first status → those stages.
+      They only exist when the store was projected with a stage map, so an
+      unconfigured store reports them missing (which is the honest answer: its
+      workflow was collapsed into three categories).
     """
     created = story.start
-    refined = _first_event_at(story, "pointed")
+    pointed = _first_event_at(story, "pointed")
+    ready_status = _first_status(story, "ready")
+    # ``refined`` stays the estimate (byte-compatible with prd/21), falling back
+    # to the workflow's "ready" status for a store that refines without pointing.
+    refined = pointed or ready_status
+    ready = ready_status or refined
     sprint = _first_event_at(story, "sprint_added")
     started = _first_status(story, "in_progress")
+    in_review = _first_status(story, "in_review")
+    in_verification = _first_status(story, "in_verification")
     done = _first_status(story, "done", after=started)
     if done is None:
         done = story.closed
@@ -495,9 +561,12 @@ def _cycle(story: Story) -> Cycle:
 
     boundaries = {
         "created": created,
+        "ready": ready,
         "refined": refined,
         "sprint": sprint,
         "started": started,
+        "in_review": in_review,
+        "in_verification": in_verification,
         "pr_open": pr_open,
         "first_review": first_review,
         "approval": approval,
@@ -610,12 +679,14 @@ def waiting_time_decomposition(
     reads as "no wait".
     """
     stories = cohort(data, window)
+    verification = uses_verification(data)
+    keys = segment_keys({}, verification=verification)
     segments: dict[str, dict] = {
         key: {
             "hours": 0.0, "active_hours": 0.0, "n": 0, "missing": 0,
             "inverted": 0, "efficiencies": [], "label": SEGMENT_LABEL[key],
         }
-        for key in SEGMENT_KEYS
+        for key in keys
     }
     missing_boundaries: dict[str, int] = defaultdict(int)
     rows: list[dict] = []
@@ -637,7 +708,7 @@ def waiting_time_decomposition(
         cycle_total += cycle_hours
         row: dict = {"key": story.key, "cycle_hours": cycle_hours, "segments": {}}
         measured = 0
-        for key in SEGMENT_KEYS:
+        for key in keys:
             left, right = SEGMENT_BOUNDS[key]
             t1 = cycle.boundaries.get(left)
             t2 = cycle.boundaries.get(right)
@@ -672,7 +743,7 @@ def waiting_time_decomposition(
 
     total_hours = round(sum(entry["hours"] for entry in segments.values()), 2)
     out_segments: dict[str, dict] = {}
-    for key in SEGMENT_KEYS:
+    for key in keys:
         entry = segments[key]
         hours = round(entry["hours"], 2)
         active = round(entry["active_hours"], 2)
@@ -688,7 +759,7 @@ def waiting_time_decomposition(
             "inverted": entry["inverted"],
             "bounds": list(SEGMENT_BOUNDS[key]),
         }
-    largest = max(SEGMENT_KEYS, key=lambda key: (out_segments[key]["hours"], key))
+    largest = max(keys, key=lambda key: (out_segments[key]["hours"], key))
     for row in rows:
         # prd/26 P5: which stories fed the largest segment, and by how much
         row["largest_hours"] = row["segments"].get(largest)
@@ -709,7 +780,7 @@ def waiting_time_decomposition(
         "stories": len(stories),
         "stories_decomposed": decomposed,
         "segments": out_segments,
-        "order": list(SEGMENT_KEYS),
+        "order": list(keys),
         "total_hours": total_hours,
         "cycle_hours": round(cycle_total, 2),
         "explained_share": _share(total_hours, cycle_total),
@@ -726,10 +797,14 @@ def waiting_time_decomposition(
         "rows": rows,
         "heuristic": (
             "refined = the first 'pointed' event (the estimate refinement "
-            "produces); sprint = the first 'sprint_added'; in progress / done = "
-            "the status *category* transitions; PR open / first review / "
-            "approval / merge come from the story's PRs via PR.ticket_keys. A "
-            "segment needs both boundaries, otherwise it is counted as missing"
+            "produces), falling back to the first status → ready; sprint = the "
+            "first 'sprint_added'; in progress / done = the status *stage* "
+            "transitions (the Jira category when no [jira.stages] map is "
+            "configured); in review / in verification bound the review and QA "
+            "waits when the workflow map names those stages; PR open / first "
+            "review / approval / merge come from the story's PRs via "
+            "PR.ticket_keys. A segment needs both boundaries, otherwise it is "
+            "counted as missing"
         ),
         "efficiency_note": (
             "active = measured work spans inside the segment (PR intervals with "
@@ -1370,15 +1445,35 @@ def conformance(
     not counted as "started before refined": the store cannot tell refinement
     from a missing estimate, so it is reported separately as
     ``started_unrefined`` rather than silently folded into the violation.
+
+    prd/29 adds the stage boundaries to the same check: a story that was *in
+    review* in Jira with no PR naming its key is reported as
+    ``in_review_without_pr`` — the ticket claims a review the store cannot see.
     """
     stories = cohort(data, window)
     started_before: list[str] = []
     started_unrefined: list[str] = []
     pr_before_start: list[str] = []
+    in_review_without_pr: list[str] = []
     rows: list[dict] = []
     for story in stories:
         cycle = _cycle(story)
         started = cycle.boundaries["started"]
+        in_review = cycle.boundaries["in_review"]
+        if in_review is not None and not story.prs:
+            in_review_without_pr.append(story.key)
+            rows.append({
+                "kind": "story",
+                "object_id": story.object_id,
+                "key": story.key,
+                "tickets": [story.key],
+                "state": story.state,
+                "points": story.points,
+                "started": iso(started) if started else None,
+                "in_review": iso(in_review),
+                "violations": ["in_review_without_pr"],
+                "affected": True,
+            })
         if started is None:
             continue
         refined = cycle.boundaries["refined"]
@@ -1409,7 +1504,10 @@ def conformance(
     carry = carry_metric if carry_metric is not None else carry_over(court, data, window)
     churn = churn_metric if churn_metric is not None else point_churn(court, data, window)
     started = sum(1 for story in stories if _first_status(story, "in_progress"))
-    violations = len(started_before) + churn["churned"] + carry["carried_over"]
+    violations = (
+        len(started_before) + churn["churned"] + carry["carried_over"]
+        + len(in_review_without_pr)
+    )
     # the churn and carry-over rows already carry the story key; merge them in
     # so one drill-down answers "which tickets" for every Jira conformance rule
     for row in churn["rows"]:
@@ -1436,15 +1534,20 @@ def conformance(
         "points_changed_after_start": churn["churned"],
         "carried_over": carry["carried_over"],
         "pr_opened_before_start": len(pr_before_start),
+        "in_review_without_pr": len(in_review_without_pr),
         "violations": violations,
         "examples": sorted(started_before)[:5],
         "unrefined_examples": sorted(started_unrefined)[:5],
+        "in_review_examples": sorted(in_review_without_pr)[:5],
         "rows": rows,
         "heuristic": (
-            "refined = first 'pointed'; started = first status_changed to "
-            "in_progress; a story with no pointed event is reported as "
-            "started_unrefined, not as a violation, because the store cannot "
-            "tell refinement from a missing estimate"
+            "refined = first 'pointed' (fallback: first status → ready); "
+            "started = first status_changed to in_progress; a story with no "
+            "pointed event is reported as started_unrefined, not as a "
+            "violation, because the store cannot tell refinement from a missing "
+            "estimate; in_review_without_pr = a status → in_review with no PR "
+            "naming the key (the workflow map must name a review status for "
+            "this boundary to exist)"
         ),
         "note": _note(data, "no story in this window", bool(stories)),
     }

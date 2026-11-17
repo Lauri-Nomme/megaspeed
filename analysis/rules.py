@@ -25,7 +25,8 @@ Every metric prd/17 lists is computed from the store, in one pass:
 ``vacation_blocking``    per vacation: items that waited on the person, no delegation
 ``stacked_cascade``      prd/22: stack depth (median/max) + the rebases and re-review
                          hours a lower-PR update forced up every stack above it
-``waiting_time_decomposition``  prd/21: the 8 ticket segments, hours + efficiency each
+``waiting_time_decomposition``  prd/21: the ticket segments, hours + efficiency each
+                         (prd/29 splits merge→done around verification)
 ``carry_over``           prd/21: stories added to more than one sprint
 ``point_churn``          prd/21: ``pointed`` events after the story started
 ``worklog_cross_check``  prd/21: ``log_delay_bucket`` + logged vs active hours
@@ -165,6 +166,19 @@ SEGMENT_ADVICE = {
     "merge_done": (
         "Close the ticket when the PR merges: the story is done at the merge, "
         "and a stale open ticket distorts every cycle-time number after it."
+    ),
+    # prd/29: the verification split. "merge → verification" is the wait for QA
+    # to pick the ticket up; "verification → done" is the QA time itself.
+    "merge_verification": (
+        "Hand the merge straight to verification: a merged PR with no QA owner "
+        "waits for someone to notice it. Put the QA item in the verifier's "
+        "queue at merge time, with the build to check and what 'verified' means."
+    ),
+    "verification_done": (
+        "Give verification a service level: a ticket in QA for longer than the "
+        "change takes to test means the QA queue, not the test, is the "
+        "bottleneck. Cap the queue in verification and test against the "
+        "acceptance criteria the refinement already wrote."
     ),
 }
 
@@ -2301,6 +2315,9 @@ def templates(
                 "points_changed_after_start": jc["points_changed_after_start"],
                 "carried_over": jc["carried_over"],
                 "pr_opened_before_start": jc["pr_opened_before_start"],
+                # prd/29: a ticket in review that no PR names (Jira-level
+                # cross-check of the PR review; reported, not ranked)
+                "in_review_without_pr": jc["in_review_without_pr"],
                 "hours_per_refinement": rc["hours"],
                 "examples": ", ".join(
                     sorted(set(jc["examples"]) | set(jc["unrefined_examples"]))
