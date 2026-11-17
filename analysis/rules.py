@@ -34,7 +34,11 @@ Every metric prd/17 lists is computed from the store, in one pass:
 
 Every suggestion is ``{id, metric, title, evidence, suggestion, severity,
 impact_hours}`` plus the ranking metadata (``rank``, ``confidence``,
-``impact_score``, ``sample``, ``scope``). Ranking is **impact hours ×
+``impact_score``, ``sample``, ``scope``). Each metric that measures items also
+reports them: ``metrics.<name>.rows`` is the per-item list (a PR, a story or a
+thread) with the numbers that metric used, its ``object_id`` and the ``tickets``
+it names, so the Rules page can expand a suggestion into the items behind it
+instead of stopping at a count (prd/26 P5). Ranking is **impact hours ×
 confidence**, where confidence is a sample-size ramp (``n / 20``, capped at 1).
 Person-level rules carry a pseudonym in ``scope`` and never a raw name — the
 store cannot hold one.
@@ -271,6 +275,44 @@ def _rounds(state) -> tuple[list[dict], list[dict]]:
     return pushes, unapprovals
 
 
+def _pr_row(pr: dict, **extra) -> dict:
+    """One PR as a drill-down item (prd/26 P5).
+
+    Every metric that measures PRs reports its items in this one shape, so the
+    Rules page can expand any suggestion into the *same* dense table and link
+    each row: ``object_id`` is the store's identity, ``tickets`` are the keys
+    the PR names (the UI links the PR's own story page), and
+    ``repo``/``number``/``id`` are its label. A metric adds its own numbers on
+    top (``hours``, ``rounds``, ``over_target``, …) and marks the rows the rule
+    is about with ``affected``.
+    """
+    row = {
+        "kind": "pr",
+        "object_id": pr["object_id"],
+        "repo": pr["repo"],
+        "number": pr["pr_id"],
+        "id": f"{pr['repo'].split('/')[-1]}#{pr['pr_id']}",
+        "tickets": list(pr.get("ticket_keys") or ()),
+        "state": pr["state"] if pr["closed_ts"] else "open",
+    }
+    row.update(extra)
+    return row
+
+
+def _drill_order(rows: list[dict]) -> list[dict]:
+    """Affected items first, then the largest number, then a stable identity.
+
+    The drill-down shows the *whole* list (prd/26 P5), so the order has to put
+    the items the rule is about on top without hiding the rest.
+    """
+    rows.sort(key=lambda row: (
+        not row.get("affected", False),
+        -float(row.get("hours") or 0.0),
+        str(row.get("id") or row.get("key") or row.get("object_id") or ""),
+    ))
+    return rows
+
+
 def _first_review(state) -> dict | None:
     """The first reviewer action on a PR: comment or approval, never the author."""
     pr = state.pr
@@ -438,15 +480,25 @@ def time_to_first_review(court: ballcourt.BallCourt, window) -> dict:
     samples: list[float] = []
     by_reviewer: dict[str, list[float]] = defaultdict(list)
     missing = 0
+    rows: list[dict] = []
     for state in cohort(court, window):
         pr = state.pr
         first = _first_review(state)
         if first is None:
             missing += 1
+            rows.append(_pr_row(
+                pr, reviewer=None, first_review_hours=None, over_target=False,
+                missing_review=True, affected=False,
+            ))
             continue
         hours = _span_hours(court, first["actor"], pr["created_ts"], first["_ts"])
         samples.append(hours)
         by_reviewer[first["actor"]].append(hours)
+        rows.append(_pr_row(
+            pr, reviewer=first["actor"], first_review_hours=hours,
+            over_target=hours > TARGET_FIRST_REVIEW_HOURS,
+            missing_review=False, affected=hours > TARGET_FIRST_REVIEW_HOURS,
+        ))
     return {
         "n": len(samples),
         "missing": missing,
@@ -458,6 +510,9 @@ def time_to_first_review(court: ballcourt.BallCourt, window) -> dict:
             person: {"n": len(values), "median_hours": _median(values)}
             for person, values in sorted(by_reviewer.items())
         },
+        # prd/26 P5: the items behind the number, so "16 PRs past 3 rounds" can
+        # be opened into the 16 PRs.
+        "rows": _drill_order(rows),
     }
 
 
@@ -480,16 +535,33 @@ def cycle_time(court: ballcourt.BallCourt, window) -> dict:
     samples: list[float] = []
     open_ages: list[float] = []
     declined = 0
+    rows: list[dict] = []
     states = cohort(court, window)
     for state in states:
         pr = state.pr
         if pr["closed_ts"] is None:
-            open_ages.append(_span_hours(court, None, pr["created_ts"], court.snapshot))
+            hours = _span_hours(court, None, pr["created_ts"], court.snapshot)
+            open_ages.append(hours)
+            rows.append(_pr_row(
+                pr, hours=hours, censored=True, declined=False, merged=False,
+                over_target=hours > TARGET_CYCLE_HOURS,
+                affected=hours > TARGET_CYCLE_HOURS,
+            ))
             continue
+        hours = _span_hours(court, None, pr["created_ts"], pr["closed_ts"])
         if pr["state"] != "merged":
             declined += 1
+            rows.append(_pr_row(
+                pr, hours=hours, censored=True, declined=True, merged=False,
+                over_target=False, affected=False,
+            ))
             continue
-        samples.append(_span_hours(court, None, pr["created_ts"], pr["closed_ts"]))
+        samples.append(hours)
+        rows.append(_pr_row(
+            pr, hours=hours, censored=False, declined=False, merged=True,
+            over_target=hours > TARGET_CYCLE_HOURS,
+            affected=hours > TARGET_CYCLE_HOURS,
+        ))
     return {
         "n": len(samples),
         "median_hours": _median(samples),
@@ -497,6 +569,7 @@ def cycle_time(court: ballcourt.BallCourt, window) -> dict:
         "target_hours": TARGET_CYCLE_HOURS,
         "over_target": sum(1 for h in samples if h > TARGET_CYCLE_HOURS),
         "cohort": len(states),
+        "rows": _drill_order(rows),
         "censored": {
             "open": len(open_ages),
             "declined": declined,
@@ -617,10 +690,13 @@ def flow_efficiency(court: ballcourt.BallCourt, window) -> dict:
             waiting_all.append(waiting)
 
         rows.append({
+            "kind": "pr",
             "object_id": pr["object_id"],
             "id": f"{pr['repo'].split('/')[-1]}#{pr['pr_id']}",
             "repo": pr["repo"],
             "number": pr["pr_id"],
+            # prd/26 P5: the drill-down links the PR's own story page
+            "tickets": list(pr.get("ticket_keys") or ()),
             "author": pr["actor"],
             "state": pr["state"] if pr["closed_ts"] else "open",
             "elapsed_hours": round(elapsed, 2),
@@ -636,6 +712,11 @@ def flow_efficiency(court: ballcourt.BallCourt, window) -> dict:
             "touches": len(touches),
             "credited_touches": len(credited),
             "commits": sum(i.commits for i in intervals),
+            # the same "excess waiting" the flow-efficiency rule prices, per PR
+            "affected": bool(
+                elapsed > 0
+                and waiting > elapsed * (1 - TARGET_FLOW_EFFICIENCY)
+            ),
         })
 
     rows.sort(key=lambda row: (
@@ -738,6 +819,7 @@ def time_to_merge(court: ballcourt.BallCourt, window) -> dict:
     open_ages: list[float] = []
     open_excess = 0.0
     declined = 0
+    rows: list[dict] = []
     for state in states:
         pr = state.pr
         if pr["closed_ts"] is None:
@@ -745,14 +827,28 @@ def time_to_merge(court: ballcourt.BallCourt, window) -> dict:
             open_ages.append(hours)
             open_excess += max(0.0, hours - TARGET_CYCLE_HOURS)
             observations.append(Observation(hours, False, pr["object_id"]))
+            rows.append(_pr_row(
+                pr, hours=hours, event=False, censored=True, declined=False,
+                over_target=hours > TARGET_CYCLE_HOURS,
+                affected=hours > TARGET_CYCLE_HOURS,
+            ))
             continue
         hours = _span_hours(court, None, pr["created_ts"], pr["closed_ts"])
         if pr["state"] == "merged":
             merged.append(hours)
             observations.append(Observation(hours, True, pr["object_id"]))
+            rows.append(_pr_row(
+                pr, hours=hours, event=True, censored=False, declined=False,
+                over_target=hours > TARGET_CYCLE_HOURS,
+                affected=hours > TARGET_CYCLE_HOURS,
+            ))
         else:
             declined += 1
             observations.append(Observation(hours, False, pr["object_id"]))
+            rows.append(_pr_row(
+                pr, hours=hours, event=False, censored=True, declined=True,
+                over_target=False, affected=False,
+            ))
 
     fit = kaplan_meier(observations)
     merged_median = _median(merged)
@@ -781,6 +877,7 @@ def time_to_merge(court: ballcourt.BallCourt, window) -> dict:
         "understatement_share": understatement_share,
         "target_hours": TARGET_CYCLE_HOURS,
         "events_over_target": sum(1 for h in merged if h > TARGET_CYCLE_HOURS),
+        "rows": _drill_order(rows),
         "censored": {
             "open": len(open_ages),
             "declined": declined,
@@ -814,6 +911,10 @@ def reviewer_responsiveness(court: ballcourt.BallCourt, window) -> dict:
     start, end = window
     review: dict[str, list[float]] = defaultdict(list)
     author: dict[str, list[float]] = defaultdict(list)
+    pr_meta = {state.pr["object_id"]: state.pr for state in court.prs}
+    # prd/26 P5: the waits behind a reviewer rule, aggregated per (person, PR)
+    # — the PR is the item an investigator opens, not each interval.
+    waits: dict[tuple[str, str], dict] = {}
     for interval in court.intervals:
         if not _overlap(interval, start, end):
             continue
@@ -822,8 +923,37 @@ def reviewer_responsiveness(court: ballcourt.BallCourt, window) -> dict:
                 if person in (ballcourt.REVIEW, ballcourt.CI, ballcourt.CALENDAR):
                     continue  # an unattributed queue wait is not a person's
                 review[person].append(interval.hours)
+                entry = waits.get((person, interval.object_id))
+                if entry is None:
+                    waits[(person, interval.object_id)] = {
+                        "person": person,
+                        "object_id": interval.object_id,
+                        "hours": interval.hours,
+                        "waits": 1,
+                        "longest_hours": interval.hours,
+                        "first_ts": interval.start,
+                        "last_ts": interval.end,
+                    }
+                else:
+                    entry["hours"] += interval.hours
+                    entry["waits"] += 1
+                    entry["longest_hours"] = max(entry["longest_hours"], interval.hours)
+                    entry["first_ts"] = min(entry["first_ts"], interval.start)
+                    entry["last_ts"] = max(entry["last_ts"], interval.end)
         elif interval.ball == "author":
             author[interval.author].append(interval.hours)
+    rows: list[dict] = []
+    for entry in waits.values():
+        pr = pr_meta.get(entry["object_id"])
+        if pr is None:
+            continue
+        rows.append(_pr_row(
+            pr, person=entry["person"], ball=ballcourt.REVIEW,
+            hours=round(entry["hours"], 2), waits=entry["waits"],
+            longest_hours=round(entry["longest_hours"], 2),
+            from_ts=iso(entry["first_ts"]), to_ts=iso(entry["last_ts"]),
+            affected=entry["longest_hours"] >= TARGET_FIRST_REVIEW_HOURS,
+        ))
 
     people = []
     for person in sorted(set(review) | set(author)):
@@ -863,6 +993,7 @@ def reviewer_responsiveness(court: ballcourt.BallCourt, window) -> dict:
             round(max(review_medians) - min(review_medians), 2)
             if len(review_medians) >= 2 else None
         ),
+        "rows": _drill_order(rows),
     }
 
 
@@ -870,9 +1001,11 @@ def rework_loops(court: ballcourt.BallCourt, window) -> dict:
     """Review rounds per PR (``pr_pushed`` + ``pr_unapproved``), by push class."""
     rounds: list[int] = []
     by_class: dict[str, dict] = defaultdict(lambda: {"pushes": 0, "prs": set()})
+    rows: list[dict] = []
     for state in cohort(court, window):
         pushes, unapprovals = _rounds(state)
-        rounds.append(len(pushes) + len(unapprovals))
+        count = len(pushes) + len(unapprovals)
+        rounds.append(count)
         classes = set()
         for event in pushes:
             push_class = _push_class(event)
@@ -880,6 +1013,12 @@ def rework_loops(court: ballcourt.BallCourt, window) -> dict:
             classes.add(push_class)
         for push_class in classes:
             by_class[push_class]["prs"].add(state.pr["object_id"])
+        rows.append(_pr_row(
+            state.pr, rounds=count, pushes=len(pushes),
+            unapprovals=len(unapprovals), push_classes=sorted(classes),
+            over_max_rounds=count > MAX_REVIEW_ROUNDS,
+            affected=count > MAX_REVIEW_ROUNDS,
+        ))
     return {
         "n": len(rounds),
         "total_rounds": sum(rounds),
@@ -890,6 +1029,7 @@ def rework_loops(court: ballcourt.BallCourt, window) -> dict:
         "prs_over_max": sum(1 for r in rounds if r > MAX_REVIEW_ROUNDS),
         "excess_rounds": sum(max(0, r - 2) for r in rounds),
         "max_rounds": MAX_REVIEW_ROUNDS,
+        "rows": _drill_order(rows),
         "by_push_class": {
             push_class: {"pushes": entry["pushes"], "prs": len(entry["prs"])}
             for push_class, entry in sorted(by_class.items())
@@ -902,8 +1042,10 @@ def rebase_waste(court: ballcourt.BallCourt, window) -> dict:
     lost: dict[str, int] = defaultdict(int)
     prs: set[str] = set()
     unapprovals = 0
+    rows: list[dict] = []
     for state in cohort(court, window):
         last_push_class: str | None = None
+        lost_here: dict[str, int] = defaultdict(int)
         for event in state.events:
             activity = event["activity"]
             if activity == "pr_pushed":
@@ -912,10 +1054,18 @@ def rebase_waste(court: ballcourt.BallCourt, window) -> dict:
                 unapprovals += 1
                 prs.add(state.pr["object_id"])
                 attributes = event.get("attributes") or {}
-                if attributes.get("cause") == "manual":
-                    lost["manual"] += 1
-                else:
-                    lost[last_push_class or "other"] += 1
+                cause = "manual" if attributes.get("cause") == "manual" else (last_push_class or "other")
+                lost[cause] += 1
+                lost_here[cause] += 1
+        if lost_here:
+            # prd/26 P5: only the PRs that actually lost an approval — the
+            # items the "don't rebase approved PRs" rule is about.
+            rows.append(_pr_row(
+                state.pr, unapprovals=sum(lost_here.values()),
+                lost=dict(sorted(lost_here.items())),
+                lost_on_pure_rebase=lost_here.get("pure_rebase", 0),
+                affected=True,
+            ))
     return {
         "n": unapprovals,
         "prs": len(cohort(court, window)),
@@ -926,6 +1076,7 @@ def rebase_waste(court: ballcourt.BallCourt, window) -> dict:
         "lost_on_other": lost.get("other", 0),
         "lost_manual": lost.get("manual", 0),
         "share_pure_rebase": round(lost.get("pure_rebase", 0) / unapprovals, 2) if unapprovals else 0.0,
+        "rows": _drill_order(rows),
     }
 
 
@@ -946,12 +1097,16 @@ def comment_tax(court: ballcourt.BallCourt, threads: list[dict], window) -> dict
     """
     start, end = window
     cohort_ids = {state.pr["object_id"] for state in cohort(court, window)}
+    pr_meta = {
+        f"PR:{state.pr['repo']}#{state.pr['pr_id']}": state.pr for state in court.prs
+    }
     matrix: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     by_type: dict[str, dict] = defaultdict(lambda: {"threads": 0, "wasted": 0})
     outcomes: dict[str, int] = defaultdict(int)
     considered = 0
     classified = 0
     wasted = 0
+    rows: list[dict] = []
     for thread in threads:
         in_cohort = (
             thread.get("pr_id") is not None
@@ -971,9 +1126,25 @@ def comment_tax(court: ballcourt.BallCourt, threads: list[dict], window) -> dict
         matrix[comment_type][outcome] += 1
         outcomes[outcome] += 1
         by_type[comment_type]["threads"] += 1
-        if outcome in ("rejected", "walked_back"):
+        wasted_here = outcome in ("rejected", "walked_back")
+        if wasted_here:
             wasted += 1
             by_type[comment_type]["wasted"] += 1
+        pr = pr_meta.get(f"PR:{thread.get('repo')}#{thread['pr_id']}")
+        rows.append({
+            "kind": "thread",
+            "object_id": thread["object_id"],
+            "repo": thread.get("repo"),
+            "number": thread.get("pr_id"),
+            "id": f"{(thread.get('repo') or '').split('/')[-1]}#{thread.get('pr_id')}",
+            # the PR's own keys, so the row links the ticket that owns the thread
+            "tickets": list((pr or {}).get("ticket_keys") or ()),
+            "comment_type": comment_type,
+            "outcome": outcome,
+            "wasted": wasted_here,
+            "affected": wasted_here,
+            "created_at": iso(thread["created_at"]) if thread.get("created_at") else None,
+        })
     return {
         "available": classified > 0,
         "threads": considered,
@@ -984,6 +1155,7 @@ def comment_tax(court: ballcourt.BallCourt, threads: list[dict], window) -> dict
         "walked_back": outcomes.get("walked_back", 0),
         "unresolved": outcomes.get("unresolved", 0),
         "acted_on": outcomes.get("acted_on", 0),
+        "rows": _drill_order(rows),
         "outcome_note": (
             "acted_on means a deterministic signal (the diff moved at the anchor) "
             "or a definite classifier read; unresolved includes threads whose "
@@ -1006,16 +1178,26 @@ def conformance(court: ballcourt.BallCourt, window) -> dict:
     merged = 0
     without_approval: list[str] = []
     over_rounds: list[tuple[str, int]] = []
+    rows: list[dict] = []
     for state in cohort(court, window):
         approvals = [e for e in state.events if e["activity"] == "pr_approved"]
         pushes, unapprovals = _rounds(state)
         rounds = len(pushes) + len(unapprovals)
+        unapproved = state.pr["state"] == "merged" and not approvals
         if state.pr["state"] == "merged":
             merged += 1
-            if not approvals:
+            if unapproved:
                 without_approval.append(state.pr["object_id"])
         if rounds > MAX_REVIEW_ROUNDS:
             over_rounds.append((state.pr["object_id"], rounds))
+        if unapproved or rounds > MAX_REVIEW_ROUNDS:
+            rows.append(_pr_row(
+                state.pr, merged=state.pr["state"] == "merged",
+                approvals=len(approvals), rounds=rounds,
+                merged_without_approval=unapproved,
+                over_max_rounds=rounds > MAX_REVIEW_ROUNDS,
+                affected=True,
+            ))
     return {
         "n": len(cohort(court, window)),
         "merged": merged,
@@ -1024,6 +1206,7 @@ def conformance(court: ballcourt.BallCourt, window) -> dict:
         "excess_rounds": sum(rounds - MAX_REVIEW_ROUNDS for _, rounds in over_rounds),
         "max_rounds": MAX_REVIEW_ROUNDS,
         "examples": sorted(without_approval)[:5],
+        "rows": _drill_order(rows),
     }
 
 
@@ -1045,20 +1228,24 @@ def pr_size(court: ballcourt.BallCourt, window, sizes: dict[str, dict] | None = 
         commits = len(state.commits)
         first = _first_review(state)
         pushes, unapprovals = _rounds(state)
-        rows.append({
-            "object_id": pr["object_id"],
-            "commits": commits,
-            "diff_size": diff_size,
-            "large": bool(
-                commits > SIZE_COMMIT_CAP
-                or (diff_size is not None and diff_size > SIZE_LINE_CAP)
-            ),
-            "first_review_hours": (
+        large = bool(
+            commits > SIZE_COMMIT_CAP
+            or (diff_size is not None and diff_size > SIZE_LINE_CAP)
+        )
+        rows.append(_pr_row(
+            pr,
+            commits=commits,
+            diff_size=diff_size,
+            large=large,
+            first_review_hours=(
                 _span_hours(court, first["actor"], pr["created_ts"], first["_ts"])
                 if first is not None else None
             ),
-            "rounds": len(pushes) + len(unapprovals),
-        })
+            rounds=len(pushes) + len(unapprovals),
+            # the drill-down is about the over-cap PRs, but the whole list is
+            # shown so the "large vs small" comparison can be checked
+            affected=large,
+        ))
 
     large = [row for row in rows if row["large"]]
     small = [row for row in rows if not row["large"]]
@@ -1101,6 +1288,7 @@ def pr_size(court: ballcourt.BallCourt, window, sizes: dict[str, dict] | None = 
         "small_median_first_review_hours": latency(small),
         "large_median_rounds": _median([float(row["rounds"]) for row in large]),
         "small_median_rounds": _median([float(row["rounds"]) for row in small]),
+        "rows": _drill_order(rows),
     }
 
 
@@ -1117,8 +1305,12 @@ def sentinel_queue(court: ballcourt.BallCourt, window) -> dict:
             "p90_hours": None,
             "target_hours": TARGET_FIRST_REVIEW_HOURS,
             "by_person": {},
+            "rows": [],
         }
     waits: dict[str, list[float]] = defaultdict(list)
+    pr_meta = {state.pr["object_id"]: state.pr for state in court.prs}
+    # per (sentinel, PR): the item a reader opens, not each interval
+    by_pr: dict[tuple[str, str], dict] = {}
     for interval in court.intervals:
         if not _overlap(interval, start, end):
             continue
@@ -1126,7 +1318,36 @@ def sentinel_queue(court: ballcourt.BallCourt, window) -> dict:
             for person in interval.holders:
                 if person in sentinels:
                     waits[person].append(interval.hours)
+                    entry = by_pr.get((person, interval.object_id))
+                    if entry is None:
+                        by_pr[(person, interval.object_id)] = {
+                            "person": person,
+                            "object_id": interval.object_id,
+                            "hours": interval.hours,
+                            "waits": 1,
+                            "longest_hours": interval.hours,
+                            "first_ts": interval.start,
+                            "last_ts": interval.end,
+                        }
+                    else:
+                        entry["hours"] += interval.hours
+                        entry["waits"] += 1
+                        entry["longest_hours"] = max(entry["longest_hours"], interval.hours)
+                        entry["first_ts"] = min(entry["first_ts"], interval.start)
+                        entry["last_ts"] = max(entry["last_ts"], interval.end)
     all_waits = [hours for values in waits.values() for hours in values]
+    rows: list[dict] = []
+    for entry in by_pr.values():
+        pr = pr_meta.get(entry["object_id"])
+        if pr is None:
+            continue
+        rows.append(_pr_row(
+            pr, person=entry["person"], hours=round(entry["hours"], 2),
+            waits=entry["waits"],
+            longest_hours=round(entry["longest_hours"], 2),
+            from_ts=iso(entry["first_ts"]), to_ts=iso(entry["last_ts"]),
+            affected=entry["longest_hours"] > TARGET_FIRST_REVIEW_HOURS,
+        ))
     return {
         "available": bool(all_waits),
         "sentinels": sorted(sentinels),
@@ -1138,6 +1359,7 @@ def sentinel_queue(court: ballcourt.BallCourt, window) -> dict:
             person: {"n": len(values), "median_hours": _median(values)}
             for person, values in sorted(waits.items())
         },
+        "rows": _drill_order(rows),
     }
 
 
@@ -1164,11 +1386,14 @@ def vacation_blocking(court: ballcourt.BallCourt, window) -> dict:
             "blocked_items": 0,
             "blocked_hours": 0.0,
             "delegated_items": 0,
+            "rows": [],
             "note": "no calendar configured, so no vacations are known",
         }
 
     pseudo = {ballcourt.REVIEW, ballcourt.CI, ballcourt.CALENDAR}
+    pr_meta = {state.pr["object_id"]: state.pr for state in court.prs}
     rows: list[dict] = []
+    drill: list[dict] = []
     for vacation in calendar.vacation_list():
         person = vacation["person"]
         v_start, v_end = calendar.day_bounds(
@@ -1210,6 +1435,16 @@ def vacation_blocking(court: ballcourt.BallCourt, window) -> dict:
             "blocked_hours": round(sum(per_item[oid] for oid in blocked_items), 1),
             "prs": sorted(per_item)[:10],
         })
+        for object_id, hours in per_item.items():
+            pr = pr_meta.get(object_id)
+            if pr is None:
+                continue
+            delegated_here = object_id in delegated
+            drill.append(_pr_row(
+                pr, person=person, hours=round(hours, 2),
+                delegated=delegated_here, affected=not delegated_here,
+                vacation_start=vacation["start"], vacation_end=vacation["end"],
+            ))
 
     rows.sort(key=lambda row: (-row["blocked_hours"], row["person"], row["start"]))
     return {
@@ -1221,6 +1456,8 @@ def vacation_blocking(court: ballcourt.BallCourt, window) -> dict:
         "blocked_items": sum(row["blocked_items"] for row in rows),
         "blocked_hours": round(sum(row["blocked_hours"] for row in rows), 1),
         "delegated_items": sum(row["delegated_items"] for row in rows),
+        # prd/26 P5: every item that waited, not the ten the vacation row lists
+        "rows": _drill_order(drill),
         "note": (
             "hours are the working time an item lost while it waited on the "
             "person, priced with that person's vacation ignored"
@@ -1870,6 +2107,9 @@ def templates(
             f"{wtd['largest_label']} segment",
             {
                 "segment": wtd["largest_label"],
+                # prd/26 P5: the drill-down needs the segment key, not just the
+                # label, to pick the column out of metrics…rows[].segments
+                "segment_key": wtd["largest"],
                 "segment_hours": hours,
                 "share": share,
                 "cycle_hours": wtd["total_hours"],

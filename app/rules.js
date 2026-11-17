@@ -7,7 +7,7 @@
  */
 
 import { fmtHours, esc } from './format.js';
-import { linkifyTickets, markdownLinkTickets } from './tickets.js';
+import { linkifyTickets, markdownLinkTickets, ticketHref } from './tickets.js';
 
 const SEVERITY_LABEL = {
   critical: 'critical',
@@ -66,7 +66,179 @@ function evidenceItems(evidence) {
     .map(([key, value]) => ({ key, label: evidenceLabel(key), value: evidenceValue(key, value) }));
 }
 
-export function ruleRow(suggestion, { base = '' } = {}) {
+/* ------------------------------------------------------- evidence drill-down
+ *
+ * prd/26 P5: a rule is "what to change"; its evidence is "which items". Every
+ * metric already measures per-item rows (`metrics.*.rows`, or `prs` for flow
+ * efficiency), so a suggestion expands in place into that list — dense, one
+ * line per item, each item a link to its ticket page (a PR links the story that
+ * owns it). The *whole* list is the evidence, not the five examples the rule
+ * title quotes; the render cap is stated with its cost when it bites.
+ */
+export const DRILL_LIMIT = 200;
+
+/** The per-item list a metric exposes, without knowing its shape in advance. */
+export function metricRows(metric) {
+  if (!metric || typeof metric !== 'object') return [];
+  if (Array.isArray(metric.rows)) return metric.rows;
+  // flow_efficiency has carried its per-PR list as `prs` since it was built
+  if (Array.isArray(metric.prs)) return metric.prs;
+  return [];
+}
+
+function drillItem(row, suggestion, base = '') {
+  const tickets = Array.isArray(row.tickets) && row.tickets.length
+    ? row.tickets
+    : (row.key ? [row.key] : []);
+  const key = tickets.length ? String(tickets[tickets.length - 1]) : '';
+  const kind = row.kind || (row.key ? 'story' : 'pr');
+  const label = kind === 'story'
+    ? String(row.key || row.object_id || '')
+    : String(row.id || row.object_id || row.key || '');
+  const metric = suggestion.metric;
+  const segment = (suggestion.evidence || {}).segment_key;
+  let value = '';
+  let detail = '';
+
+  if (metric === 'time_to_first_review') {
+    value = row.first_review_hours == null ? 'no review yet' : fmtHours(row.first_review_hours);
+    detail = row.reviewer ? `review by ${row.reviewer}` : 'no reviewer action';
+  } else if (metric === 'cycle_time') {
+    value = fmtHours(row.hours);
+    detail = row.censored
+      ? (row.declined ? 'declined — censored' : 'open — right-censored')
+      : 'merged';
+  } else if (metric === 'survival') {
+    value = fmtHours(row.hours);
+    detail = row.event
+      ? 'merged'
+      : (row.declined ? 'declined — censored' : 'open — censored at the snapshot');
+  } else if (metric === 'flow_efficiency') {
+    value = row.efficiency == null ? '–' : `${Math.round(row.efficiency * 100)}%`;
+    detail = `${fmtHours(row.elapsed_hours)} elapsed · ${fmtHours(row.active_hours)} active`;
+  } else if (metric === 'rework_loops') {
+    value = `${row.rounds ?? 0} round${row.rounds === 1 ? '' : 's'}`;
+    detail = `${row.pushes ?? 0} push${row.pushes === 1 ? '' : 'es'} · ` +
+      `${row.unapprovals ?? 0} unapproval${row.unapprovals === 1 ? '' : 's'}`;
+  } else if (metric === 'rebase_waste') {
+    value = `${row.unapprovals ?? 0} approval${row.unapprovals === 1 ? '' : 's'} lost`;
+    detail = Object.entries(row.lost || {})
+      .map(([cause, count]) => `${cause} ${count}`).join(' · ');
+  } else if (metric === 'comment_tax') {
+    value = row.outcome || 'unresolved';
+    detail = row.comment_type || 'unclassified';
+  } else if (metric === 'conformance') {
+    value = `${row.rounds ?? 0} round${row.rounds === 1 ? '' : 's'}`;
+    detail = row.merged_without_approval ? 'merged with no approval' : 'over the round cap';
+  } else if (metric === 'sentinel_queue') {
+    value = fmtHours(row.hours);
+    detail = `${row.person || 'sentinel'} · ${row.waits ?? 1} wait${row.waits === 1 ? '' : 's'}`;
+  } else if (metric === 'pr_size') {
+    value = `${row.commits ?? 0} commits`;
+    detail = row.diff_size == null ? 'diff size not captured' : `${row.diff_size} changed lines`;
+  } else if (metric === 'vacation_blocking') {
+    value = fmtHours(row.hours);
+    detail = `${row.person || ''} ${row.delegated ? 'delegated' : 'no delegation'}`.trim();
+  } else if (metric === 'stacked_cascade') {
+    value = fmtHours(row.re_review_hours);
+    detail = `depth ${row.depth ?? 0} · ${row.rebases ?? 0} rebase${row.rebases === 1 ? '' : 's'}`;
+  } else if (metric === 'waiting_time_decomposition') {
+    const hours = row.largest_hours != null
+      ? row.largest_hours
+      : (segment ? (row.segments || {})[segment] : null);
+    value = hours == null ? 'not measured' : fmtHours(hours);
+    detail = `cycle ${fmtHours(row.cycle_hours)}`;
+  } else if (metric === 'carry_over') {
+    value = (row.sprints || []).length
+      ? `sprints ${row.sprints.join(' → ')}` : 'no sprint';
+    detail = row.points == null ? '' : `${row.points} points`;
+  } else if (metric === 'point_churn') {
+    value = `${row.events ?? 0} re-point${row.events === 1 ? '' : 's'}`;
+    detail = row.points == null ? '' : `${row.points} points`;
+  } else if (metric === 'worklog_cross_check') {
+    value = fmtHours(row.logged_hours);
+    detail = `${row.worklogs ?? 0} worklog${row.worklogs === 1 ? '' : 's'} · ` +
+      `${row.late_worklogs ?? 0} late`;
+  } else if (metric === 'jira_conformance') {
+    value = (row.violations || []).join(', ');
+    detail = [row.started ? `started ${row.started}` : '',
+      row.refined ? `refined ${row.refined}` : ''].filter(Boolean).join(' · ');
+  } else if (metric === 'reviewer_responsiveness') {
+    value = fmtHours(row.hours);
+    detail = `${row.person || ''} · ${row.waits ?? 1} wait${row.waits === 1 ? '' : 's'}`.trim();
+  } else {
+    value = row.hours != null ? fmtHours(row.hours) : '';
+    detail = row.state || '';
+  }
+
+  return {
+    kind,
+    key,
+    label,
+    value,
+    detail,
+    affected: Boolean(row.affected),
+    href: key ? ticketHref(key, base) : '',
+    metric,
+  };
+}
+
+/** Every item behind a suggestion, affected first (the API already ordered). */
+export function ruleItems(suggestion, metrics = {}, base = '') {
+  if (!suggestion) return [];
+  const metric = metrics[suggestion.metric] || {};
+  const scope = suggestion.scope || {};
+  let rows = metricRows(metric);
+  if (scope.kind === 'person' && scope.person) {
+    // a person-scoped rule drills into *that person's* items, not the team's
+    rows = rows.filter((row) => row.person === scope.person);
+  }
+  // affected first, keeping each metric's own order inside the two groups
+  rows = rows.slice().sort((a, b) => Number(Boolean(b.affected)) - Number(Boolean(a.affected)));
+  return rows.map((row) => drillItem(row, suggestion, base)).filter((item) => item.label);
+}
+
+function drillMarkup(suggestion, metrics, base) {
+  const items = ruleItems(suggestion, metrics, base);
+  if (!items.length) return '';
+  const shown = items.slice(0, DRILL_LIMIT);
+  const affected = items.filter((item) => item.affected).length;
+  const count = `${items.length} item${items.length === 1 ? '' : 's'}`;
+  const hint = [
+    affected ? `${affected} affected first` : '',
+    'every item, each a link',
+  ].filter(Boolean).join(' · ');
+  const rows = shown.map((item) => {
+    const link = item.href
+      ? `<a class="drill-link" href="${esc(item.href)}" data-ticket="${esc(item.key)}"
+           title="open ${esc(item.key)}${item.kind === 'pr' ? ' — the ticket that owns this PR' : ''}">${esc(item.label)}</a>`
+      : `<span class="mono">${esc(item.label)}</span>`;
+    const keyTag = item.key && item.kind !== 'story'
+      ? `<span class="drill-key mono muted">${esc(item.key)}</span>` : '';
+    return `<tr class="${item.affected ? 'affected' : ''}" data-drill-item="${esc(item.label)}">
+      <td class="drill-item">${link}${keyTag}</td>
+      <td class="drill-detail">${esc(item.detail)}</td>
+      <td class="drill-value mono">${esc(item.value)}</td>
+    </tr>`;
+  }).join('');
+  const cap = items.length > shown.length
+    ? `<p class="drill-more">showing the first ${shown.length} of ${items.length} — the
+        full list is in <span class="mono">metrics.${esc(suggestion.metric)}.rows</span></p>`
+    : '';
+  return `<details class="rule-drill" data-rule-drill="${esc(suggestion.id)}">
+    <summary><span>${count}</span>
+      <span class="drill-hint">${hint}</span></summary>
+    <div class="drill-wrap">
+      <table class="drill">
+        <thead><tr><th>item</th><th>detail</th><th class="num">measured</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+    ${cap}
+  </details>`;
+}
+
+export function ruleRow(suggestion, { base = '', metrics = {} } = {}) {
   const severity = SEVERITY_LABEL[suggestion.severity] || 'info';
   const facts = evidenceItems(suggestion.evidence);
   const person = suggestion.scope && suggestion.scope.kind === 'person'
@@ -88,6 +260,7 @@ export function ruleRow(suggestion, { base = '' } = {}) {
           ${facts.map((fact) => `<div class="fact"><dt>${esc(fact.label)}</dt>
             <dd class="mono">${linkifyTickets(fact.value, base)}</dd></div>`).join('')}
         </dl>
+        ${drillMarkup(suggestion, metrics, base)}
       </div>
     </article>`;
 }
@@ -135,7 +308,8 @@ export function rulesMarkup(data, { base = '' } = {}) {
     </div>`;
   }
   return `${note ? `<p class="rules-note">${esc(note)}</p>` : ''}
-    <div class="rules-list">${suggestions.map((suggestion) => ruleRow(suggestion, { base })).join('')}</div>`;
+    <div class="rules-list">${suggestions.map((suggestion) =>
+      ruleRow(suggestion, { base, metrics: (data && data.metrics) || {} })).join('')}</div>`;
 }
 
 export function rulesMarkdown(data, base = '') {
@@ -168,8 +342,17 @@ export function rulesMarkdown(data, base = '') {
       `- impact: ${fmtImpact(suggestion.impact_hours)} (confidence ${suggestion.confidence})`,
       `- rule: ${suggestion.suggestion}`,
       `- evidence: ${facts}`,
-      '',
     );
+    // prd/26 P5: the exported rule carries its items too, not only the count.
+    const items = ruleItems(suggestion, data.metrics || {});
+    if (items.length) {
+      const shown = items.slice(0, 25).map((item) => (item.key
+        ? `[${item.label}](${ticketHref(item.key, base)})` : item.label));
+      lines.push(
+        `- items (${items.length}${items.length > 25 ? `, first 25` : ''}): ${shown.join(', ')}`,
+      );
+    }
+    lines.push('');
   }
   lines.push(`_${data.note || ''}_`);
   return lines.join('\n');

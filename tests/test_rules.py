@@ -704,6 +704,171 @@ class PrSizeTests(StoreCase):
 
 
 # --------------------------------------------------------------------------- #
+# the evidence drill-down (prd/26 P5)
+# --------------------------------------------------------------------------- #
+class DrillDownTests(StoreCase):
+    """Each suggestion must open into the *items* behind its number.
+
+    A metric that ranks "16 PRs past 3 rounds" but cannot say which 16 leaves the
+    reader at a dead end; these tests pin the per-item rows the Rules page
+    expands, the flags that mark the affected ones, and the ticket keys each row
+    links.
+    """
+
+    def fixture(self) -> Fixture:
+        fx = Fixture()
+        # PR 1: first review in 10 h, merged at 20 h — healthy
+        fx.pr(1, "AaAa", state="merged", closed=T0 + timedelta(hours=20),
+              tickets=("ENG-1",))
+        fx.event(1, "comment_added", "RrRr", 10, severity="suggestion")
+        fx.event(1, "pr_approved", "RrRr", 15)
+        fx.event(1, "pr_merged", "RrRr", 20)
+        # PR 2: first review in 100 h, merged at 120 h — over target
+        fx.pr(2, "AaAa", state="merged", closed=T0 + timedelta(hours=120),
+              tickets=("ENG-2",))
+        fx.event(2, "comment_added", "RrRr", 100, severity="suggestion")
+        fx.event(2, "pr_approved", "RrRr", 110)
+        fx.event(2, "pr_merged", "RrRr", 120)
+        # PR 3: open, never reviewed — the missing-review row
+        fx.pr(3, "AaAa", tickets=("ENG-3",))
+        return fx
+
+    def test_first_review_rows_are_the_prs_with_their_links(self):
+        metric = self.metric(self.fixture(), "time_to_first_review")
+        rows = metric["rows"]
+        # affected first, then by hours; the never-reviewed PR is last
+        self.assertEqual([row["id"] for row in rows],
+                         ["platform#2", "platform#1", "platform#3"])
+        self.assertTrue(rows[0]["over_target"])
+        self.assertEqual(rows[0]["tickets"], ["ENG-2"])
+        self.assertEqual(rows[0]["object_id"], f"PR:{REPO}#2")
+        self.assertEqual(rows[0]["reviewer"], "RrRr")
+        self.assertEqual(rows[0]["first_review_hours"], 100.0)
+        self.assertFalse(rows[1]["over_target"])
+        self.assertTrue(rows[2]["missing_review"])
+        self.assertIsNone(rows[2]["first_review_hours"])
+        self.assertEqual(rows[2]["tickets"], ["ENG-3"])
+
+    def test_the_suggestion_and_its_metric_agree_on_the_items(self):
+        payload = self.insights(self.fixture())
+        suggestion = by_id(payload, "review-sla")
+        self.assertIsNotNone(suggestion)
+        rows = payload["metrics"][suggestion["metric"]]["rows"]
+        self.assertEqual(len(rows), 3)
+        # the count in the evidence is the number of rows that are over target
+        self.assertEqual(
+            suggestion["evidence"]["over_target"],
+            sum(1 for row in rows if row["over_target"]),
+        )
+
+    def test_cycle_time_rows_include_the_censored_population(self):
+        fx = self.fixture()
+        fx.pr(4, "AaAa", tickets=("ENG-4",))          # still open
+        rows = self.metric(fx, "cycle_time")["rows"]
+        by_number = {row["number"]: row for row in rows}
+        self.assertEqual(set(by_number), {1, 2, 3, 4})
+        self.assertTrue(by_number[2]["over_target"])
+        self.assertFalse(by_number[1]["over_target"])
+        # an open PR is evidence too, marked censored rather than dropped
+        self.assertTrue(by_number[4]["censored"])
+        self.assertFalse(by_number[4]["merged"])
+        self.assertTrue(by_number[1]["merged"])
+
+    def test_rework_rows_carry_the_round_count_per_pr(self):
+        fx = Fixture()
+        fx.pr(1, "AaAa")
+        for index in range(4):
+            fx.event(1, "pr_pushed", "AaAa", 10 + index, push_class="content")
+        fx.pr(2, "AaAa")
+        fx.event(2, "pr_pushed", "AaAa", 10, push_class="content")
+        rows = self.metric(fx, "rework_loops")["rows"]
+        by_number = {row["number"]: row for row in rows}
+        self.assertEqual(by_number[1]["rounds"], 4)
+        self.assertTrue(by_number[1]["over_max_rounds"])
+        self.assertTrue(by_number[1]["affected"])
+        self.assertEqual(by_number[2]["rounds"], 1)
+        self.assertFalse(by_number[2]["affected"])
+
+    def test_conformance_rows_are_the_violating_prs_only(self):
+        fx = Fixture()
+        # PR 1: merged with no approval
+        fx.pr(1, "AaAa", state="merged", closed=T0 + timedelta(hours=10),
+              tickets=("ENG-1",))
+        fx.event(1, "pr_merged", "AaAa", 10)
+        # PR 2: merged with an approval
+        fx.pr(2, "AaAa", state="merged", closed=T0 + timedelta(hours=20),
+              tickets=("ENG-2",))
+        fx.event(2, "pr_approved", "RrRr", 15)
+        fx.event(2, "pr_merged", "RrRr", 20)
+        rows = self.metric(fx, "conformance")["rows"]
+        self.assertEqual([row["number"] for row in rows], [1])
+        self.assertTrue(rows[0]["merged_without_approval"])
+        self.assertEqual(rows[0]["tickets"], ["ENG-1"])
+
+    def test_comment_tax_rows_name_the_thread_and_its_pr(self):
+        fx = Fixture()
+        fx.pr(1, "AaAa", state="merged", closed=T0 + timedelta(hours=10),
+              tickets=("ENG-7",))
+        fx.thread(1, 0, "nit", "rejected")
+        fx.thread(1, 1, "nit", "acted_on")
+        rows = self.metric(fx, "comment_tax")["rows"]
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(rows[0]["wasted"])
+        self.assertEqual(rows[0]["outcome"], "rejected")
+        self.assertEqual(rows[0]["tickets"], ["ENG-7"])
+        self.assertEqual(rows[0]["object_id"], f"THREAD:{REPO}#1:0")
+        self.assertFalse(rows[1]["wasted"])
+
+    def test_pr_size_rows_keep_the_item_identity(self):
+        fx = Fixture()
+        fx.pr(1, "AaAa", tickets=("ENG-1",))
+        for _ in range(12):
+            fx.commit(1)
+        rows = self.metric(fx, "pr_size")["rows"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["id"], "platform#1")
+        self.assertEqual(rows[0]["tickets"], ["ENG-1"])
+        self.assertTrue(rows[0]["large"])
+        self.assertTrue(rows[0]["affected"])
+
+    def test_rebase_rows_are_the_prs_that_lost_an_approval(self):
+        fx = Fixture()
+        fx.pr(1, "AaAa", tickets=("ENG-1",))
+        fx.event(1, "pr_pushed", "AaAa", 10, push_class="pure_rebase")
+        fx.event(1, "pr_unapproved", "RrRr", 20, cause="push")
+        fx.pr(2, "AaAa", tickets=("ENG-2",))        # untouched: not in the rows
+        rows = self.metric(fx, "rebase_waste")["rows"]
+        self.assertEqual([row["number"] for row in rows], [1])
+        self.assertEqual(rows[0]["lost_on_pure_rebase"], 1)
+        self.assertEqual(rows[0]["lost"], {"pure_rebase": 1})
+        self.assertEqual(rows[0]["tickets"], ["ENG-1"])
+
+    def test_survival_rows_mark_the_censored_observations(self):
+        fx = self.fixture()
+        fx.pr(4, "AaAa", tickets=("ENG-4",))
+        rows = self.metric(fx, "survival")["rows"]
+        by_number = {row["number"]: row for row in rows}
+        self.assertTrue(by_number[1]["event"])
+        self.assertFalse(by_number[1]["censored"])
+        self.assertTrue(by_number[4]["censored"])
+        self.assertFalse(by_number[4]["event"])
+
+    def test_reviewer_rows_aggregate_the_waits_per_person_and_pr(self):
+        fx = Fixture()
+        fx.pr(1, "AaAa")
+        fx.event(1, "pr_needs_work", "XxXx", 10)
+        fx.event(1, "pr_pushed", "AaAa", 15, push_class="content")
+        fx.event(1, "pr_needs_work", "XxXx", 20)
+        fx.event(1, "pr_pushed", "AaAa", 25, push_class="content")
+        metric = self.metric(fx, "reviewer_responsiveness")
+        rows = [row for row in metric["rows"] if row["person"] == "XxXx"]
+        self.assertEqual(len(rows), 1)               # one row per (person, PR)
+        self.assertEqual(rows[0]["number"], 1)
+        self.assertGreaterEqual(rows[0]["waits"], 1)
+        self.assertEqual(rows[0]["id"], "platform#1")
+
+
+# --------------------------------------------------------------------------- #
 # the ranked list itself
 # --------------------------------------------------------------------------- #
 class RankingTests(StoreCase):
@@ -940,6 +1105,24 @@ class InsightsApiTests(unittest.TestCase):
         body = get("/api/insights", tenant="del", days=1).json()
         self.assertEqual(body["sample"]["prs"], 0)
         self.assertEqual(body["suggestions"], [])
+
+    def test_a_suggestion_expands_into_its_linked_items(self):
+        """prd/26 P5: the payload carries the rows the Rules page expands."""
+        body = get("/api/insights", tenant="del", level="team", days=3650).json()
+        self.assertTrue(body["suggestions"])
+        for suggestion in body["suggestions"]:
+            metric = body["metrics"][suggestion["metric"]]
+            rows = metric.get("rows") or metric.get("prs") or metric.get("people") or []
+            self.assertTrue(rows, suggestion["id"])
+            for row in rows[:3]:
+                if row.get("kind") in ("pr", "thread", "story"):
+                    # an item the UI can render and link: identity + ticket keys
+                    self.assertTrue(row.get("object_id"), suggestion["id"])
+                    self.assertIn("tickets", row, suggestion["id"])
+        # the rebase rows are the PRs that lost an approval, with the cause
+        rebase = body["metrics"]["rebase_waste"]["rows"]
+        self.assertEqual(rebase[0]["tickets"], ["ENG-1"])
+        self.assertEqual(rebase[0]["lost_on_pure_rebase"], 1)
 
     def test_an_unknown_tenant_is_a_clean_404(self):
         reply = get("/api/insights", tenant="nope")
