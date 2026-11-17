@@ -449,6 +449,7 @@ export class Timeline {
       return this.prs.map((pr) => ({
         key: `${pr.repo}#${pr.number}`,
         pr,
+        ticket: pr.ticket,
         count: pr.events.length,
         label: `${pr.ticket ? `${pr.ticket} ` : ''}#${pr.number} ${pr.repo}`,
       }));
@@ -1210,6 +1211,12 @@ export class Timeline {
         kind: 'bar', x0: this.px(pr.created), x1: Math.max(this.px(end), this.px(pr.created) + 2),
         y0: y, y1: y + g.barH, pr,
       });
+      if (pr.ticket) {
+        this.hits.push({
+          kind: 'label', x0: 0, x1: g.gutter, y0: y, y1: y + g.barH,
+          ticket: pr.ticket, laneKey: `bar:${pr.id}`,
+        });
+      }
     });
   }
 

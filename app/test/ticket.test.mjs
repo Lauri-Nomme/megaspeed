@@ -328,6 +328,14 @@ test('markdownLinkTickets links whole key tokens and leaves prose alone', () => 
   assert.equal(markdownLinkTickets('no keys here', ''), 'no keys here');
 });
 
+test('object lane labels carry the ticket so the gutter links it', () => {
+  const t = fakeTimeline([fakePr(52, 'DEL-167', 'DEL-1', T0)], 20 * DAY);
+  t.dim = 'object';
+  const rows = t.laneRows();
+  assert.equal(rows[0].ticket, 'DEL-167');
+  assert.match(rows[0].label, /DEL-167 #52/);
+});
+
 test('segmentHours never invents a duration for a missing segment', () => {
   assert.equal(segmentHours(45), '45 h');
   assert.equal(segmentHours(1.63), '1.6 h');
