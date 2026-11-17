@@ -24,6 +24,8 @@ import asyncio
 import json
 import os
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -255,6 +257,80 @@ class TokenTests(BridgeCase):
         with mock.patch.dict(os.environ, {app_module.HARNESS_TOKEN_FILE_ENV: str(path)}):
             self.assertEqual(app_module.harness_token(), TOKEN)
         self.assertFalse(path.exists())
+
+
+class TokenFileCollisionTests(unittest.TestCase):
+    """A throwaway server must not clobber the live server's token (SEC-2).
+
+    Two servers on the same tenant directory wrote the same ``.harness-token``,
+    so a test server on another port silently invalidated the live 8766 token:
+    the file no longer held it. Each "server" is a real process here (the token
+    is a module global), given its own ``MEGASPEED_HARNESS_TOKEN_FILE``.
+    """
+
+    ROOT = Path(__file__).resolve().parents[1]
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def server_token(self, **env: str) -> str:
+        """Run one server process far enough to mint/read its harness token."""
+        environ = {
+            **os.environ,
+            app_module.HARNESS_TOKEN_ENV: "",
+            app_module.HARNESS_TOKEN_FILE_ENV: "",
+            "MEGASPEED_TENANTS_DIR": str(self.root),
+            **env,
+        }
+        result = subprocess.run(
+            [sys.executable, "-c", "from server import app; print(app.harness_token())"],
+            cwd=str(self.ROOT), env=environ, capture_output=True, text=True, timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def test_two_servers_with_different_token_files_do_not_clobber(self):
+        live_file = self.root / "token-8766"
+        throwaway_file = self.root / "token-8767"
+        live = self.server_token(**{app_module.HARNESS_TOKEN_FILE_ENV: str(live_file)})
+        throwaway = self.server_token(**{app_module.HARNESS_TOKEN_FILE_ENV: str(throwaway_file)})
+
+        self.assertNotEqual(live, throwaway)
+        self.assertEqual(live_file.read_text().strip(), live)
+        self.assertEqual(throwaway_file.read_text().strip(), throwaway)
+        # ... and neither one touched the tenant directory's default file
+        self.assertFalse((self.root / ".harness-token").exists())
+
+    def test_a_second_server_shares_the_default_file_instead_of_overwriting_it(self):
+        first = self.server_token()
+        second = self.server_token()
+        path = self.root / ".harness-token"
+
+        self.assertEqual(first, second)
+        self.assertEqual(path.read_text().strip(), first)
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_an_explicit_token_never_touches_the_file(self):
+        path = self.root / "untouched-token"
+        token = self.server_token(**{
+            app_module.HARNESS_TOKEN_ENV: "stable-live-token",
+            app_module.HARNESS_TOKEN_FILE_ENV: str(path),
+        })
+        self.assertEqual(token, "stable-live-token")
+        self.assertFalse(path.exists())
+
+    def test_a_symlinked_token_file_is_neither_adopted_nor_written_through(self):
+        target = self.root / "elsewhere"
+        target.write_text("planted-" + "a" * 40)
+        (self.root / ".harness-token").symlink_to(target)
+
+        token = self.server_token()
+        self.assertNotEqual(token, target.read_text())
+        self.assertEqual(target.read_text(), "planted-" + "a" * 40)
 
 
 # --------------------------------------------------------------------------- #

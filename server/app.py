@@ -55,6 +55,7 @@ import math
 import os
 import re
 import secrets
+import stat
 import sys
 import tempfile
 import threading
@@ -104,10 +105,12 @@ SHOT_DIR = Path(
 #   1. transport: only a *direct loopback* request may drive it — loopback peer,
 #      loopback ``Host``, no proxy/forwarding header. A request that arrived
 #      through nginx is refused even when it carries a valid token.
-#   2. a shared secret: ``MEGASPEED_HARNESS_TOKEN``, or a per-process token
-#      generated on first use and written to ``MEGASPEED_HARNESS_TOKEN_FILE``
-#      (default ``<tenants-dir>/.harness-token``, mode 0600) so a local ``curl``
-#      can read it. Without it, a cross-site page in the operator's browser
+#   2. a shared secret: ``MEGASPEED_HARNESS_TOKEN``, or a token published to
+#      ``MEGASPEED_HARNESS_TOKEN_FILE`` (default ``<tenants-dir>/.harness-token``,
+#      mode 0600) so a local ``curl`` can read it. Give each server its own
+#      token file to run several at once; a file that already holds a token is
+#      adopted, not overwritten, so a throwaway server cannot clobber the live
+#      one's. Without the secret, a cross-site page in the operator's browser
 #      could still POST to ``127.0.0.1`` (CORS blocks reading the answer, not
 #      running the request).
 #   3. the websocket only delivers eval frames to, and only accepts answers
@@ -1113,9 +1116,13 @@ def _is_loopback(host: str | None) -> bool:
 def harness_token() -> str:
     """The shared secret for the eval/screenshot bridge.
 
-    ``MEGASPEED_HARNESS_TOKEN`` wins; otherwise one random token per process,
-    written to a 0600 file so a local tool can read it without the server
-    printing the secret into a log.
+    ``MEGASPEED_HARNESS_TOKEN`` wins and touches no file; otherwise the token
+    lives in ``MEGASPEED_HARNESS_TOKEN_FILE`` (default
+    ``<tenants-dir>/.harness-token``) so a local tool can read it without the
+    server printing the secret into a log. The file is the source of truth when
+    it already holds a token: a second server on the same directory (a
+    throwaway one on another port, say) adopts that token instead of
+    overwriting it, so it cannot invalidate the live server's token.
     """
     token = (os.environ.get(HARNESS_TOKEN_ENV) or "").strip()
     if token:
@@ -1123,8 +1130,7 @@ def harness_token() -> str:
     global _auto_token
     with _auto_token_lock:
         if _auto_token is None:
-            _auto_token = secrets.token_urlsafe(32)
-            _write_token_file(_auto_token)
+            _auto_token = _token_for_process()
         return _auto_token
 
 
@@ -1135,22 +1141,44 @@ def harness_token_file() -> Path:
     return TENANTS_DIR / ".harness-token"
 
 
-def _write_token_file(token: str) -> None:
-    """Persist the per-process token for local tooling; never fail the request."""
+def _token_for_process() -> str:
+    """This process's token: publish a fresh one, or share the file's.
+
+    Create the file exclusively and the first writer wins; anyone who loses the
+    race (or starts later against an existing file) uses the token already
+    there. Never fail a request over the file: an unusable path just means the
+    token stays in memory for this process.
+    """
     path = harness_token_file()
+    token = secrets.token_urlsafe(32)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        if path.is_symlink():
-            return  # do not follow a symlink planted in the tenant directory
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(token)
-        os.chmod(path, 0o600)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return _read_token_file(path) or token
     except OSError:
-        return
+        return token
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(token)
+    os.chmod(path, 0o600)
     if LOG:
-        print(f"megaspeed: harness token written to {path.name} in the tenant directory",
-              file=sys.stderr)
+        print(f"megaspeed: harness token written to {path}", file=sys.stderr)
+    return token
+
+
+def _read_token_file(path: Path) -> str | None:
+    """The token an existing file holds, if it is safe to adopt it."""
+    try:
+        # O_NOFOLLOW: never follow a symlink planted in the tenant directory.
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError:
+        return None
+    with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            return None  # a device/foreign file: not our secret to adopt
+        token = handle.read(512).strip()
+    return token if token.isascii() and 16 <= len(token) <= 512 else None
 
 
 def _presented_token(headers, query=None) -> str:
@@ -1198,7 +1226,7 @@ def _harness_denied(request: Request) -> JSONResponse | None:
                 "ok": False,
                 "error": "harness token required",
                 "hint": f"send {TOKEN_HEADER}: <token> — set {HARNESS_TOKEN_ENV} or read "
-                        "the per-process token file in the tenant directory",
+                        f"{harness_token_file()}",
             },
         )
     return None
