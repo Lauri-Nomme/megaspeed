@@ -72,12 +72,27 @@ def _probe(cfg: Config, as_json: bool, bypass_filter: bool) -> int:
     return 0
 
 
-def _jira_transport(cfg: Config, args) -> tuple[object, str, int | None]:
-    """Build the Jira transport + source name for the requested mode."""
+def _jira_transport(cfg: Config, args) -> tuple[object, str, int | None, object | None]:
+    """Build the Jira transport + source name (+ the Cloud client) for the mode."""
     from .jira_fixtures import generate
     from .transport import FixtureJiraTransport
 
     if args.live or args.probe:
+        if args.jira_cloud:
+            # prd/24: the Cloud shape -- v3, Bearer PAT, cursor search, Cloud
+            # field ids. Point the base URL at a real site in production, or at
+            # the local emulation proxy (proxy/cloud_jira_proxy.py) in dev.
+            if not cfg.jira_cloud_base_url:
+                raise SystemExit(
+                    "jira cloud mode needs MEGASPEED_JIRA_CLOUD_BASE_URL (and"
+                    " MEGASPEED_JIRA_CLOUD_TOKEN); in dev that is the proxy URL"
+                )
+            from .jira_cloud import CloudJiraClient
+
+            transport = HttpTransport(cfg.jira_cloud_base_url, token=cfg.jira_cloud_token)
+            client = CloudJiraClient(transport, page_limit=cfg.jira_page_limit)
+            client.check()
+            return transport, "jira-cloud", args.limit, client
         if not cfg.jira_base_url:
             raise SystemExit(
                 "jira live mode needs MEGASPEED_JIRA_BASE_URL (and"
@@ -92,14 +107,23 @@ def _jira_transport(cfg: Config, args) -> tuple[object, str, int | None]:
             password=cfg.jira_auth_password,
         )
         JiraClient(transport, page_limit=cfg.jira_page_limit).check()
-        return transport, "jira-dc", args.limit
+        return transport, "jira-dc", args.limit, None
+    if args.jira_cloud:
+        # Cloud has no local install and no fixture corpus of its own: the
+        # emulation proxy (proxy/cloud_jira_proxy.py) *is* the local Cloud, and
+        # it is reached over HTTP like the real thing.
+        raise SystemExit(
+            "jira cloud mode needs --live: point MEGASPEED_JIRA_CLOUD_BASE_URL at a"
+            " real Cloud site or at the local emulation proxy"
+            " (python3 -m proxy.cloud_jira_proxy)"
+        )
     path = Path(args.fixture_file).expanduser() if args.fixture_file else cfg.fixture_path
     bundle = (
         json.loads(path.read_text())
         if path and path.exists() and args.fixture_file
         else generate(n=args.n, seed=args.seed if args.seed is not None else cfg.seed)
     )
-    return FixtureJiraTransport(bundle), "jira-fixture", None
+    return FixtureJiraTransport(bundle), "jira-fixture", None, None
 
 
 def _issue_type_name(row: dict) -> str:
@@ -110,12 +134,12 @@ def _issue_type_name(row: dict) -> str:
     return str(value or "?")
 
 
-def _jira_probe(cfg: Config, transport, as_json: bool) -> int:
+def _jira_probe(cfg: Config, transport, as_json: bool, client=None) -> int:
     """Read-only Jira diagnostics: version, board, sprints, issue counts."""
     from .jira import FIELD_EPIC_LINK, FIELD_SPRINT, FIELD_STORY_POINTS, JiraClient
     from .scrape_jira import ISSUE_TYPES, jql_for
 
-    client = JiraClient(transport, page_limit=cfg.jira_page_limit, min_interval=0.05)
+    client = client or JiraClient(transport, page_limit=cfg.jira_page_limit, min_interval=0.05)
     version = (client.check() or {}).get("version")
     fields = client.field_ids()
     projects = tuple(cfg.jira_projects or cfg.ticket_projects)
@@ -328,6 +352,10 @@ def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
     mode.add_argument("--fixture-file", metavar="PATH", help="scrape a committed fixture bundle")
     ap.add_argument("--jira", action="store_true",
                     help="scrape Jira (Epic/Story/Sprint + worklogs) instead of Bitbucket")
+    ap.add_argument("--jira-cloud", action="store_true",
+                    help="scrape Jira **Cloud** (v3 + Bearer PAT, prd/24) instead of DC;"
+                         " implies --jira and reads MEGASPEED_JIRA_CLOUD_BASE_URL"
+                         " + MEGASPEED_JIRA_CLOUD_TOKEN")
     ap.add_argument("--project", action="append", default=None, metavar="KEY",
                     help="--jira: override the configured Jira projects (repeatable)")
     ap.add_argument("--limit", type=int, default=None, metavar="N",
@@ -433,6 +461,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.llm_model:
         cfg.llm_model = args.llm_model
 
+    if args.jira_cloud:
+        # prd/24: one source, two shapes. ``--jira-cloud`` is a Jira scrape with
+        # the Cloud adapter, so every downstream flag (--project, --limit, ...)
+        # means the same thing.
+        args.jira = True
+
     seed = args.seed if args.seed is not None else cfg.seed
     generate_n = args.n if args.n is not None else 50
     out = Path(args.out).expanduser() if args.out else Path(
@@ -458,12 +492,15 @@ def main(argv: list[str] | None = None) -> int:
             projects = tuple(str(p).strip().upper() for p in args.project if str(p).strip())
         try:
             if args.probe:
-                if not cfg.jira_base_url:
+                if args.jira_cloud and not cfg.jira_cloud_base_url:
+                    print("--jira-cloud --probe needs MEGASPEED_JIRA_CLOUD_BASE_URL", file=sys.stderr)
+                    return 2
+                if not args.jira_cloud and not cfg.jira_base_url:
                     print("--jira --probe needs MEGASPEED_JIRA_BASE_URL", file=sys.stderr)
                     return 2
-                transport, _source, _limit = _jira_transport(cfg, args)
-                return _jira_probe(cfg, transport, args.json)
-            transport, source, limit = _jira_transport(cfg, args)
+                transport, _source, _limit, client = _jira_transport(cfg, args)
+                return _jira_probe(cfg, transport, args.json, client=client)
+            transport, source, limit, client = _jira_transport(cfg, args)
             report = scrape_jira(
                 cfg,
                 transport,
@@ -477,6 +514,7 @@ def main(argv: list[str] | None = None) -> int:
                 progress=progress,
                 projects=projects,
                 checkpoint_every=args.checkpoint_every,
+                client=client,
             )
         except (JiraError, BitbucketError) as exc:
             print(f"jira error: {exc}", file=sys.stderr)

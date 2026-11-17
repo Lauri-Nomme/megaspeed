@@ -61,6 +61,34 @@ Both bundles are imported into the same store with the same
 `MEGASPEED_IDENTITY` map, so a Jira assignee and a git author who are the same
 human get the same pseudonym (prd/03 "Identity resolution").
 
+### The Cloud Jira half (`--jira-cloud`, prd/24)
+
+Atlassian Cloud is SaaS-only, so the Cloud surface is emulated locally in front
+of the DC lab (`proxy/cloud_jira_proxy.py`). The scrape is the *same* walk and
+the *same* reducer with a Cloud-shaped client: v3 paths, a Bearer PAT, cursor
+pagination and Cloud's documented field ids (`customfield_10014` Epic Link,
+`customfield_10020` Sprint, `customfield_10016` Story Points — bound to the DC
+lab's discovered ids by the proxy).
+
+```bash
+# the emulation proxy in front of the DC lab
+python3 -m proxy.cloud_jira_proxy --upstream http://127.0.0.1:8090 \
+  --port 8091 --pat cloud-lab-pat --user admin --password admin-lab-pw
+
+export MEGASPEED_JIRA_CLOUD_BASE_URL=http://127.0.0.1:8091
+export MEGASPEED_JIRA_CLOUD_TOKEN=cloud-lab-pat
+export MEGASPEED_JIRA_PROJECTS=DEL MEGASPEED_TICKET_PROJECTS=DEL
+
+./scrape/dist/megaspeed-scrape --jira-cloud --live --project DEL \
+  --out export/del-jira-cloud.tgz --state-dir export/del.state
+```
+
+In production the base URL is the real site (`https://acme.atlassian.net`) and
+the token a real Personal Access Token; nothing else changes.
+`tests/test_cloud_jira.py` asserts that `--jira-cloud` through the proxy emits
+exactly the objects, events and relations `--jira` emits from the same lab.
+
+
 What it reads (prd/04) and what it keeps:
 
 | Jira | becomes |
@@ -260,7 +288,7 @@ PYTHON=/usr/bin/python3.12 scrape/build.sh
 
 ```
 megaspeed-scrape [--live | --fixture | --fixture-file PATH]
-                 [--jira [--project KEY ...] [--limit N]]
+                 [--jira | --jira-cloud] [--project KEY ...] [--limit N]
                  [--out PATH.tgz] [--state-dir DIR] [--identity PATH]
                  [--overlap-hours N] [--checkpoint-every N] [--full]
                  [--allow-partial | --force] [--no-source-check] [--no-prefilter]
@@ -276,6 +304,7 @@ megaspeed-scrape [--live | --fixture | --fixture-file PATH]
 | `--live` | real Bitbucket DC REST (`MEGASPEED_BB_BASE_URL` + creds) |
 | `--fixture` / `--fixture-file` | synthetic source, no credentials (default generator: 50 PRs) |
 | `--jira` | scrape Jira instead of Bitbucket (`MEGASPEED_JIRA_BASE_URL` + creds); combines with `--live` / `--fixture` / `--probe` |
+| `--jira-cloud` | scrape Jira **Cloud** (prd/24): v3 + Bearer PAT (`MEGASPEED_JIRA_CLOUD_BASE_URL`, `MEGASPEED_JIRA_CLOUD_TOKEN`); implies `--jira` |
 | `--project KEY` | `--jira`: override the configured projects (repeatable; `MEGASPEED_JIRA_PROJECTS`) |
 | `--limit N` | `--jira`: read at most N issues (dev/demo) |
 | `--out` | bundle path, default `export/megaspeed-scrape.tgz` (`export/megaspeed-jira.tgz` for `--jira`) |

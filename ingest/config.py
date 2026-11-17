@@ -124,6 +124,12 @@ class Config:
     jira_epic_link_field: str = ""
     jira_sprint_field: str = ""
     jira_story_points_field: str = ""
+    # -- Jira Cloud source (prd/24) ----------------------------------------
+    #: Cloud base URL, e.g. https://acme.atlassian.net, or the local emulation
+    #: proxy (proxy/cloud_jira_proxy.py) during development.
+    jira_cloud_base_url: str = ""
+    #: Cloud Personal Access Token -- Bearer auth, never Basic.
+    jira_cloud_token: str = ""
 
     @property
     def live(self) -> bool:
@@ -136,6 +142,14 @@ class Config:
     @property
     def jira_live(self) -> bool:
         return bool(self.jira_base_url)
+
+    @property
+    def jira_cloud_live(self) -> bool:
+        return bool(self.jira_cloud_base_url)
+
+    @property
+    def has_jira_cloud_credentials(self) -> bool:
+        return bool(self.jira_cloud_token)
 
     @property
     def has_jira_credentials(self) -> bool:
@@ -363,6 +377,10 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         jira_story_points_field=str(
             os.environ.get("MEGASPEED_JIRA_STORY_POINTS_FIELD", jira.get("story_points_field", "")) or ""
         ),
+        jira_cloud_base_url=os.environ.get(
+            "MEGASPEED_JIRA_CLOUD_BASE_URL", jira.get("cloud_base_url", "")
+        ).rstrip("/"),
+        jira_cloud_token=os.environ.get("MEGASPEED_JIRA_CLOUD_TOKEN", ""),
     )
     if config.base_url and not config.has_credentials:
         raise SystemExit(
@@ -373,6 +391,11 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         raise SystemExit(
             "MEGASPEED_JIRA_BASE_URL is set but no credentials: set MEGASPEED_JIRA_TOKEN"
             " or MEGASPEED_JIRA_USER + MEGASPEED_JIRA_PASSWORD"
+        )
+    if config.jira_cloud_base_url and not config.has_jira_cloud_credentials:
+        raise SystemExit(
+            "MEGASPEED_JIRA_CLOUD_BASE_URL is set but no credentials: set"
+            " MEGASPEED_JIRA_CLOUD_TOKEN (a Cloud Personal Access Token)"
         )
     try:
         config.llm_url = classify.validate_llm_url(config.llm_url)
