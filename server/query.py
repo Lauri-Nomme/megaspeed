@@ -72,8 +72,12 @@ def parse_range(from_: str | None, to: str | None) -> tuple[datetime | None, dat
 # filters
 # --------------------------------------------------------------------------- #
 def _ticket_key(value: str) -> str:
-    """Accept ``PROJ-101`` or the object id ``TICKET:PROJ-101``."""
-    return value.partition(":")[2] if value.startswith("TICKET:") else value
+    """Accept ``PROJ-101``, ``TICKET:PROJ-101`` or ``STORY:PROJ-101``."""
+    text = str(value or "").strip()
+    for prefix in ("TICKET:", "STORY:"):
+        if text.startswith(prefix):
+            return text[len(prefix):]
+    return text
 
 
 def _event_where(
@@ -107,11 +111,16 @@ def _event_where(
         clauses.append("e.pr_id = ?")
         params.append(int(pr_id))
     if ticket:
+        # prd/25: a ticket filter must match the story's own events too, not
+        # only the PR-side TICKET links — otherwise the ticket detail page can
+        # show a status change the event log cannot filter to.
+        key = _ticket_key(ticket)
         clauses.append(
             "EXISTS (SELECT 1 FROM event_objects eo WHERE eo.event_key = e.event_key"
-            " AND eo.object_type = 'TICKET' AND eo.object_id = ?)"
+            " AND eo.object_type IN ('TICKET', 'STORY')"
+            " AND eo.object_id IN (?, ?))"
         )
-        params.append(f"TICKET:{_ticket_key(ticket)}")
+        params += [f"TICKET:{key}", f"STORY:{key}"]
     return (" WHERE " + " AND ".join(clauses)) if clauses else "", params
 
 
@@ -208,8 +217,10 @@ def list_objects(
         params.append(actor)
     if ticket:
         key = _ticket_key(ticket)
-        where.append("(object_id = ? OR list_contains(ticket_keys, ?))")
-        params += [f"TICKET:{key}", key]
+        # prd/25: the story object carries the same key as the PR links, so a
+        # ticket filter must return both or the detail page would look empty.
+        where.append("(object_id IN (?, ?) OR list_contains(ticket_keys, ?))")
+        params += [f"TICKET:{key}", f"STORY:{key}", key]
     clause = (" WHERE " + " AND ".join(where)) if where else ""
     total = int(con.execute(f"SELECT count(*) FROM objects{clause}", params).fetchone()[0])
 

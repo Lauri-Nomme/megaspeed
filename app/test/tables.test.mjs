@@ -55,9 +55,10 @@ test('the detail panel and markdown name the story key and keep the epic separat
     facts: [['ticket', 'DEL-197'], ['epic', 'DEL-1']],
     children: ['DEL-197', 'DEL-1'],
   });
-  assert.match(detail, /DEL-197 #52 delivery-web/);
+  assert.match(detail, /DEL-197 #52 delivery-web<\/a>/);
+  assert.match(detail, /data-ticket="DEL-197"/);
   assert.match(detail, /DEL-1/); // epic fact / related chip, never the name
   const markdown = entityMarkdown({ row });
-  assert.match(markdown, /## DEL-197 #52 delivery-web/);
+  assert.match(markdown, /## \[DEL-197\]\(#ticket\/DEL-197\) #52 delivery-web/);
   assert.match(markdown, /- epic: DEL-1/);
 });

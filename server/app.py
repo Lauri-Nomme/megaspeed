@@ -19,6 +19,9 @@ one failure this whole feature exists to prevent.
     GET  /api/events/counts?granularity=&…&tenant=      histogram + window totals
     GET  /api/objects?type=&repo=&pr_id=&actor=&ticket=&limit=&offset=&tenant=
                                                         PR / COMMIT / TICKET / … objects
+    GET  /api/ticket/{key}?tenant=            one ticket's full cycle (prd/25):
+                                              story + 8 segments + PRs + sprints
+                                              + worklogs + events + prose answer
     GET  /api/blocking?level=&days=&tenant=   wait-hours handover graph (prd/05)
     GET  /api/queues?level=&days=&tenant=     per-person WIP / throughput series
     GET  /api/delivery?days=&tenant=          triage list: blocked / oldest waiting
@@ -48,6 +51,7 @@ import contextlib
 import json
 import math
 import os
+import re
 import secrets
 import sys
 import tempfile
@@ -132,6 +136,7 @@ from analysis import ballcourt as analyse  # noqa: E402  (read-only projections)
 from analysis import calendar as workcal  # noqa: E402  (prd/19 business hours)
 from analysis import rules as insights_rules  # noqa: E402  (prd/17 suggestions)
 from analysis import simulation as policy_lab  # noqa: E402  (prd/23 policy lab)
+from analysis import tickets as ticket_view  # noqa: E402  (prd/25 ticket detail)
 from ingest import store as pstore  # noqa: E402  (read helpers + schema guard only)
 from ingest import taxonomy  # noqa: E402  (closed vocabularies, read-only)
 from server import query as query  # noqa: E402  (filters, paging, aggregation)
@@ -652,6 +657,59 @@ def objects(request: Request):
             "X-Tenant": tenant,
         },
     )
+
+
+# A ticket key as the store writes it (``DEL-167``). The endpoint accepts the
+# object-id forms too, but a path segment is never a query, so validating the
+# shape keeps a stray ``/api/ticket/../../x`` from reading as a lookup.
+TICKET_KEY_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,9}-\d{1,6}$")
+
+
+@app.get("/api/ticket/{key}")
+def ticket_detail(key: str, request: Request):
+    """One ticket's whole cycle (prd/25): the question a PR row cannot answer.
+
+    The payload joins the STORY object, its eight segments with the nine
+    boundary timestamps, its PRs (joined on ``PR.ticket_keys``) with review
+    rounds / ``push_class`` / censoring, its sprint memberships, its worklogs
+    and its events — plus a one-sentence ``answer`` that either says where the
+    time went or names the boundary the store is missing. A key the store has
+    never seen is a 404; a story without PRs (or a PR without a story) is a
+    real, partially measured ticket and says which half is missing.
+    """
+    unknown = _unknown_params(request, _params(()))
+    if unknown is not None:
+        return unknown
+    wanted = ticket_view.normalize_key(key)
+    if not TICKET_KEY_RE.match(wanted):
+        return _bad_request(
+            f"ticket key {key!r} is not shaped like PROJ-123",
+            valid=["a key such as DEL-167 (the STORY:/TICKET: prefixes are accepted too)"],
+        )
+    try:
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    try:
+        with store_conn(path) as con:
+            court = _ballcourt(con, tenant, path)
+            data = insights_rules.load_jira(con, court)
+            payload = ticket_view.ticket(court, data, wanted)
+    except Exception as exc:  # noqa: BLE001
+        return _store_error(exc)
+    if payload is None:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "ok": False,
+                "error": f"unknown ticket {wanted}",
+                "tenant": tenant,
+                "hint": "a ticket is a STORY object or a PR.ticket_keys entry; "
+                        "this key appears in neither in this dataset",
+            },
+        )
+    payload["tenant"] = tenant
+    return JSONResponse(payload, headers={"X-Tenant": tenant})
 
 
 # --------------------------------------------------------------------------- #

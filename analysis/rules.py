@@ -1876,6 +1876,7 @@ def templates(
                 "stories": wtd["stories_decomposed"],
                 "flow_efficiency": wtd["largest_efficiency"],
                 "impact_basis": "half the largest segment's hours",
+                "examples": ", ".join(wtd.get("largest_examples") or []),
             },
             f"{advice} The largest wait is {_human_hours(hours)} per story in "
             f"the {wtd['largest_label']} segment, {percent}% of the measured "
@@ -1907,6 +1908,8 @@ def templates(
                 "wait_hours": co["wait_hours"],
                 "median_wait_hours": co["median_wait_hours"],
                 "target_share": co["target_share"],
+                # prd/25: ticket keys in evidence are doorways to the detail page
+                "examples": ", ".join(row["key"] for row in co["rows"][:5]),
             },
             "Plan from a refined backlog and finish what you commit: a story "
             "carried into a second sprint takes capacity from the next plan "
@@ -1936,6 +1939,7 @@ def templates(
                 "repoint_events": pc["churned_events"],
                 "hours_per_refinement": rc["hours"],
                 "refinement_basis": rc["basis"],
+                "examples": ", ".join(row["key"] for row in pc["rows"][:5]),
             },
             "Settle the estimate in refinement: a re-point after work starts "
             "means the sprint was planned on a number that was not final, so "
@@ -2058,6 +2062,9 @@ def templates(
                 "carried_over": jc["carried_over"],
                 "pr_opened_before_start": jc["pr_opened_before_start"],
                 "hours_per_refinement": rc["hours"],
+                "examples": ", ".join(
+                    sorted(set(jc["examples"]) | set(jc["unrefined_examples"]))
+                ),
             },
             "Run the ticket in the order the process describes: refine and "
             "estimate, then start. Work that begins on an unestimated story "

@@ -58,7 +58,8 @@ test('B19: delivery Markdown exports the same state words as the table', () => {
   assert.equal(rowStateText(row({ phase: 'active', waiting_hours: 2 })), 'in progress');
   assert.equal(rowStateText(row({ phase: 'review', waiting_hours: 2 })), 'in review');
   const markdown = deliveryMarkdown([row({ waiting_hours: 200 })], 'meta');
-  assert.match(markdown, /\| waiting 1w\+ \| DEL-197 #52 web/);
+  // prd/25: the key is a link to the ticket detail page, not plain text
+  assert.match(markdown, /\| waiting 1w\+ \| \[DEL-197\]\(#ticket\/DEL-197\) #52 web/);
   assert.doesNotMatch(markdown, /\| review \|/);
   const dependents = entityMarkdown({ row: row({ dependents: 1, impact_hours: 2 }) });
   assert.match(dependents, /over 1 dependent PR/);

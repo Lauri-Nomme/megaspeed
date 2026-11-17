@@ -7,6 +7,7 @@
  */
 
 import { fmtHours, esc } from './format.js';
+import { linkifyTickets, markdownLinkTickets } from './tickets.js';
 
 const SEVERITY_LABEL = {
   critical: 'critical',
@@ -61,11 +62,11 @@ export function evidenceValue(key, value) {
 
 function evidenceItems(evidence) {
   return Object.entries(evidence || {})
-    .filter(([, value]) => value !== null && value !== undefined)
+    .filter(([, value]) => value !== null && value !== undefined && value !== '')
     .map(([key, value]) => ({ key, label: evidenceLabel(key), value: evidenceValue(key, value) }));
 }
 
-export function ruleRow(suggestion) {
+export function ruleRow(suggestion, { base = '' } = {}) {
   const severity = SEVERITY_LABEL[suggestion.severity] || 'info';
   const facts = evidenceItems(suggestion.evidence);
   const person = suggestion.scope && suggestion.scope.kind === 'person'
@@ -85,7 +86,7 @@ export function ruleRow(suggestion) {
         <p class="rule-action">${esc(suggestion.suggestion)}</p>
         <dl class="rule-evidence">
           ${facts.map((fact) => `<div class="fact"><dt>${esc(fact.label)}</dt>
-            <dd class="mono">${esc(fact.value)}</dd></div>`).join('')}
+            <dd class="mono">${linkifyTickets(fact.value, base)}</dd></div>`).join('')}
         </dl>
       </div>
     </article>`;
@@ -121,7 +122,7 @@ export function personSignalNote(data, { below = true } = {}) {
     (below ? '; the team rules below still apply.' : '.');
 }
 
-export function rulesMarkup(data) {
+export function rulesMarkup(data, { base = '' } = {}) {
   const suggestions = (data && data.suggestions) || [];
   const note = personSignalNote(data, { below: suggestions.length > 0 });
   if (!suggestions.length) {
@@ -134,10 +135,10 @@ export function rulesMarkup(data) {
     </div>`;
   }
   return `${note ? `<p class="rules-note">${esc(note)}</p>` : ''}
-    <div class="rules-list">${suggestions.map(ruleRow).join('')}</div>`;
+    <div class="rules-list">${suggestions.map((suggestion) => ruleRow(suggestion, { base })).join('')}</div>`;
 }
 
-export function rulesMarkdown(data) {
+export function rulesMarkdown(data, base = '') {
   if (!data) return '';
   const note = personSignalNote(data, { below: (data.suggestions || []).length > 0 });
   const personRules = (data.suggestions || [])
@@ -158,7 +159,7 @@ export function rulesMarkdown(data) {
   if (note) lines.push(`_${note}_`, '');
   for (const suggestion of data.suggestions) {
     const facts = evidenceItems(suggestion.evidence)
-      .map((fact) => `${fact.label} ${fact.value}`).join(' · ');
+      .map((fact) => `${fact.label} ${markdownLinkTickets(fact.value, base)}`).join(' · ');
     lines.push(
       `## ${suggestion.rank}. ${suggestion.title}`,
       '',

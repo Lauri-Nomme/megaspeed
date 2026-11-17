@@ -71,6 +71,23 @@ test('B9/B11/B12: stale selections and tabs cannot outlive their data', () => {
   assert.match(main, /timeline\.clearSelection\(\);\n  timeline\.setTicketIndex/);
 });
 
+test('prd/25: the ticket page is a route, and keys are links everywhere', () => {
+  const main = read('main.js');
+  assert.match(main, /ticket: \{ title: 'Ticket'/);
+  assert.match(main, /\/api\/ticket\//);
+  assert.match(main, /async function openTicket/);
+  assert.match(main, /ticketFromHash/);
+  assert.match(main, /data-ticket/);
+  assert.match(main, /ticketMarkup\(state\.ticket, \{ base: appBase\(\) \}\)/);
+  assert.match(read('index.html'), /id="page-ticket"/);
+  assert.match(read('index.html'), /<option value="story">stories<\/option>/);
+  const timeline = read('timeline.js');
+  assert.match(timeline, /storyRows\(\)/);
+  assert.match(timeline, /onTicket/);
+  assert.match(read('tables.js'), /ticketLink\(rowTicket\(row\)/);
+  assert.match(read('rules.js'), /linkifyTickets/);
+});
+
 test('B10: a zero-event timeline has an empty state and scopes are validated', () => {
   const main = read('main.js');
   assert.match(main, /function updateTimelineEmpty/);

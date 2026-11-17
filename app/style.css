@@ -784,6 +784,87 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
   .policy-panel { border-right: 0; border-bottom: 1px solid var(--border-hairline); }
 }
 
+/* --- ticket detail (prd/25) -------------------------------------------- */
+/* The one-line answer first, then the bar, then the evidence. Colour follows
+   the phase vocabulary: the story-only segments extend the PR gantt hues. */
+.ticket-head { padding: 14px 16px 2px; }
+.ticket-head h2 { margin: 2px 0 0; font-size: 18px; font-weight: 600; }
+.ticket-head .context { margin: 2px 0 0; font-size: 12px; color: var(--text-secondary); font-style: italic; }
+.ticket-answer { margin: 10px 16px 12px; font-size: 13.5px; max-width: 120ch; }
+.ticket-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  align-items: start;
+  border-top: 1px solid var(--border-hairline);
+  border-bottom: 1px solid var(--border-hairline);
+}
+.ticket-panel { padding: 12px 16px 16px; min-width: 0; border-bottom: 1px solid var(--border-hairline); }
+.ticket-panel.wide { border-right: 1px solid var(--border-hairline); }
+.ticket-bar {
+  display: flex; height: 26px; gap: 1px; margin: 6px 0 8px;
+  background: var(--bg-surface); border-radius: 3px; overflow: hidden;
+}
+.ticket-seg {
+  display: flex; align-items: center; justify-content: center;
+  min-width: 3px; font-size: 10px; color: rgba(0, 0, 0, .62);
+  overflow: hidden; white-space: nowrap;
+}
+.ticket-seg.absent {
+  background: repeating-linear-gradient(135deg, rgba(255, 255, 255, .05) 0 4px, transparent 4px 8px);
+  border: 1px dashed var(--seg, #8A8D93);
+  color: var(--text-tertiary); min-width: 74px;
+}
+.ticket-seg-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11px; color: var(--text-secondary); }
+.ticket-seg-key { display: inline-flex; align-items: baseline; gap: 5px; }
+.ticket-seg-key i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.ticket-seg-key i.hatch {
+  background: repeating-linear-gradient(135deg, rgba(255, 255, 255, .10) 0 2px, transparent 2px 4px);
+  border: 1px dashed var(--c);
+}
+.ticket-seg-key.zero { color: var(--text-tertiary); }
+.ticket-seg-key b { font-family: var(--font-mono); color: var(--text-primary); font-weight: 600; }
+.ticket-boundaries { display: flex; flex-wrap: wrap; gap: 4px 12px; margin: 10px 0 4px; font-size: 11px; }
+.ticket-boundary { color: var(--text-secondary); display: inline-flex; gap: 5px; }
+.ticket-boundary .k {
+  color: var(--text-tertiary); text-transform: uppercase; font-size: 9.5px; letter-spacing: .06em;
+}
+.ticket-boundary.missing { color: var(--warning); border-bottom: 1px dashed rgba(251, 205, 88, .4); }
+.ticket-mini-bar {
+  display: flex; height: 10px; width: 100%; min-width: 90px; gap: 1px;
+  border-radius: 2px; overflow: hidden;
+}
+.ticket-mini-bar .ticket-seg { min-width: 2px; }
+.ticket-prs .c-id { width: 190px; }
+.ticket-prs .c-state { width: 150px; }
+.ticket-prs .c-since { width: 150px; }
+.ticket-prs .c-dur { width: 80px; }
+.ticket-prs .c-rounds { width: 70px; }
+.ticket-prs .c-push { width: 150px; }
+.ticket-prs .c-bar { width: 180px; }
+.sprint-strip { display: flex; flex-direction: column; gap: 4px; }
+.sprint-chip {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
+  font-size: 11.5px; padding: 4px 0; border-bottom: 1px solid var(--border-hairline);
+}
+.worklog-bars { margin: 6px 0 8px; display: flex; flex-direction: column; gap: 4px; }
+.worklog-row {
+  display: grid; grid-template-columns: 84px minmax(0, 1fr) 64px;
+  gap: 8px; align-items: center; font-size: 11px;
+}
+.worklog-row .k { color: var(--text-secondary); }
+.worklog-row b { text-align: right; }
+.worklog-track { height: 8px; background: var(--bg-surface-raised); border-radius: 2px; overflow: hidden; }
+.worklog-track i { display: block; height: 100%; }
+.ticket-events .c-attrs { color: var(--text-tertiary); }
+.ticket-link { color: var(--link); text-decoration: none; }
+.ticket-link:hover { color: var(--link-strong); text-decoration: underline; }
+a.child.ticket-link { color: var(--link); }
+
+@media (max-width: 1180px) {
+  .ticket-grid { grid-template-columns: minmax(0, 1fr); }
+  .ticket-panel.wide { border-right: 0; }
+}
+
 @media (max-width: 1180px) {
   .split { grid-template-columns: minmax(0, 1fr); }
   .detail { border-left: 0; border-top: 1px solid var(--border-hairline); position: static; max-height: none; }

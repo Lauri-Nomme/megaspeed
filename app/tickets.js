@@ -85,3 +85,61 @@ export function keyListsOf(objects) {
     .filter((obj) => obj && obj.object_type === 'PR')
     .map((obj) => obj.ticket_keys || []);
 }
+
+/* ------------------------------------------------------------------ links
+ *
+ * prd/25: a ticket key is a doorway, not a label. Every surface that prints
+ * one renders an anchor to the ticket detail page, so "why did DEL-167 take
+ * three weeks" is one click from wherever the key appears. The hash route
+ * (`#ticket/DEL-167`) needs no server route and survives a reload; a Markdown
+ * export passes a base so the pasted link opens the same page.
+ */
+
+/** The store's key shape (mirrors the server's TICKET_KEY_RE). */
+export const TICKET_KEY_RE = /^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$/;
+
+/** Strip a `STORY:` / `TICKET:` object-id prefix. */
+export function ticketKey(value) {
+  const text = String(value == null ? '' : value).trim();
+  return text.replace(/^(STORY|TICKET):/, '');
+}
+
+/** Is this whole string a ticket key (and not a sentence containing one)? */
+export function isTicketKey(value) {
+  return TICKET_KEY_RE.test(ticketKey(value));
+}
+
+/** The in-app route for a ticket. `base` is the page URL for copied Markdown. */
+export function ticketHref(key, base = '') {
+  return `${base}#ticket/${encodeURIComponent(ticketKey(key))}`;
+}
+
+/** An anchor for a ticket key; `cls` lets the caller match its surface. */
+export function ticketLink(key, { base = '', cls = 'ticket-link', label = null } = {}) {
+  const clean = ticketKey(key);
+  if (!clean) return '';
+  return `<a class="${cls}" href="${esc(ticketHref(clean, base))}" data-ticket="${esc(clean)}"` +
+    ` title="open the ticket detail page for ${esc(clean)}">${esc(label || clean)}</a>`;
+}
+
+/** Escape plain text and turn any whole ticket-key token into a link. */
+export function linkifyTickets(text, base = '') {
+  const source = String(text == null ? '' : text);
+  return source.split(/(\b[A-Z][A-Z0-9_]{0,9}-\d{1,6}\b)/).map((part) =>
+    TICKET_KEY_RE.test(part) ? ticketLink(part, { base }) : esc(part)).join('');
+}
+
+/** Markdown links for whole ticket-key tokens (for "Copy as Markdown"). */
+export function markdownLinkTickets(text, base = '') {
+  return String(text == null ? '' : text)
+    .replace(/\b[A-Z][A-Z0-9_]{0,9}-\d{1,6}\b/g, (key) =>
+      isTicketKey(key) ? `[${key}](${ticketHref(key, base)})` : key);
+}
+
+/** Minimal HTML escape (tickets.js is imported by tests without format.js). */
+function esc(value) {
+  return String(value == null ? '' : value).replace(/[&<>"']/g, (ch) => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[ch]));
+}
+

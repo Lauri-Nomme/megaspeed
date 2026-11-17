@@ -96,6 +96,7 @@
             <select id="lanes" aria-label="swimlane dimension">
               <option value="actor">actors</option>
               <option value="object">PRs</option>
+              <option value="story">stories</option>
               <option value="queue">queues</option>
             </select>
           </label>
@@ -139,6 +140,18 @@
           </aside>
         </div>
         <p class="assumption" id="delivery-assumption"></p>
+      </section>
+
+      <!-- Ticket detail (prd/25): the whole cycle of one ticket -->
+      <section class="page" id="page-ticket" aria-labelledby="page-title" hidden>
+        <div class="toolbar">
+          <button type="button" class="chip" id="ticket-back">← back</button>
+          <span class="grow"></span>
+          <div class="stats-strip" id="ticket-stats"></div>
+          <button type="button" class="chip" id="ticket-copy">Copy as Markdown</button>
+        </div>
+        <div id="ticket-body"></div>
+        <p class="assumption" id="ticket-assumption"></p>
       </section>
 
       <!-- Blocking map -->

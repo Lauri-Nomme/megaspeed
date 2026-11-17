@@ -7,7 +7,7 @@
  */
 
 import { fmtAbsolute, fmtHours, esc, whoLabel } from './format.js';
-import { rowTicket } from './tickets.js';
+import { isTicketKey, rowTicket, ticketHref, ticketLink } from './tickets.js';
 
 export const TABS = [
   { id: 'blocked', label: 'Blocked' },
@@ -88,7 +88,7 @@ export function deliveryTable(data, tab, { scope = null } = {}) {
   const body = rows.map((row) => `
     <tr tabindex="0" data-id="${esc(row.object_id)}" class="row">
       <td class="c-state">${rowState(row)}</td>
-      <td class="c-id"><span class="keys">${esc(rowTicket(row)) || '—'}</span>
+      <td class="c-id">${ticketLink(rowTicket(row), { cls: 'keys' }) || '<span class="keys">—</span>'}
         <span class="mono id">#${esc(row.number)}</span>
         <span class="repo">${esc(row.repo_short)}</span></td>
       <td class="c-who">${esc(whoLabel(row.ball_label || row.ball))}</td>
@@ -114,7 +114,7 @@ export function matchesScope(row, scope) {
   return true;
 }
 
-export function deliveryMarkdown(rows, meta) {
+export function deliveryMarkdown(rows, meta, base = '') {
   const header = [
     `# Delivery list — ${rows.length} open item${rows.length === 1 ? '' : 's'}`,
     '',
@@ -123,7 +123,11 @@ export function deliveryMarkdown(rows, meta) {
     '| status | ticket / PR | waiting on | since | waiting | impact |',
     '| --- | --- | --- | --- | --- | --- |',
   ];
-  const body = rows.map((row) => `| ${rowStateText(row)} | ${rowTicket(row) || '—'} #${row.number} ${row.repo_short} | ${whoLabel(row.ball_label || row.ball)} | ${fmtAbsolute(Date.parse(row.waiting_since))} | ${fmtHours(row.waiting_hours)} | ${row.dependents ? `≈${fmtHours(row.impact_hours)}` : '—'} |`);
+  const body = rows.map((row) => {
+    const key = rowTicket(row);
+    const ticket = key ? `[${key}](${ticketHref(key, base)})` : '—';
+    return `| ${rowStateText(row)} | ${ticket} #${row.number} ${row.repo_short} | ${whoLabel(row.ball_label || row.ball)} | ${fmtAbsolute(Date.parse(row.waiting_since))} | ${fmtHours(row.waiting_hours)} | ${row.dependents ? `≈${fmtHours(row.impact_hours)}` : '—'} |`;
+  });
   return [...header, ...body].join('\n');
 }
 
@@ -168,7 +172,8 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
         ${rows.length ? `<table class="table compact"><tbody>${rows.map((row) => `
           <tr tabindex="0" data-id="${esc(row.object_id)}" class="row">
             <td class="c-state">${rowState(row)}</td>
-            <td class="c-id"><span class="mono id">#${esc(row.number)}</span>
+            <td class="c-id">${ticketLink(rowTicket(row))}
+              <span class="mono id">#${esc(row.number)}</span>
               <span class="repo">${esc(row.repo_short)}</span></td>
             <td class="c-dur num">${esc(fmtHours(row.waiting_hours))}</td>
           </tr>`).join('')}</tbody></table>`
@@ -197,30 +202,41 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
 }
 
 /** Detail panel body for one item (over- + name + context + impact + facts). */
-export function detailMarkup(entity) {
+export function detailMarkup(entity, { base = '' } = {}) {
   const pr = entity.pr;
   const row = entity.row || null;
   const overline = entity.overline || 'PULL REQUEST';
-  const name = pr
-    ? `${pr.ticket ? `${pr.ticket} ` : ''}#${pr.number} ${pr.repo}`
-    : `${row ? `${rowTicket(row)} ` : ''}#${row.number} ${row.repo_short}`;
+  const key = pr ? (pr.ticket || '') : rowTicket(row);
+  const rest = pr ? `#${pr.number} ${pr.repo}` : `#${row.number} ${row.repo_short}`;
+  // The heading is the doorway: one anchor whose text is the whole name, so a
+  // copied heading still reads "DEL-197 #52 repo" and the click opens the
+  // ticket page (prd/25).
+  const nameHtml = key
+    ? ticketLink(key, { base, label: `${key} ${rest}` })
+    : esc(rest);
   const context = pr
     ? `author ${pr.actor} · ${pr.state}${pr.closed ? '' : ' · right-censored'}`
     : `author ${row.author} · ${row.state}`;
   const facts = entity.facts || [];
+  const factValue = (value) => {
+    if (value == null || value === '') return '–';
+    return isTicketKey(value) ? ticketLink(value, { base }) : esc(value);
+  };
   return `
     <div class="detail-head">
       <span class="overline">${esc(overline)}</span>
-      <h2 class="mono">${esc(name)}</h2>
+      <h2 class="mono">${nameHtml}</h2>
       <p class="context">${esc(context)}</p>
     </div>
     ${entity.impact ? `<p class="impact">${esc(entity.impact)}</p>` : ''}
-    <dl class="facts">${facts.map(([key, value]) => `
-      <dt>${esc(key)}</dt><dd class="mono">${value == null || value === '' ? '–' : esc(value)}</dd>`).join('')}
+    <dl class="facts">${facts.map(([factKey, value]) => `
+      <dt>${esc(factKey)}</dt><dd class="mono">${factValue(value)}</dd>`).join('')}
     </dl>
     ${entity.children && entity.children.length ? `
       <div class="children"><span class="overline">Related</span>
-        ${entity.children.map((child) => `<span class="child">${esc(child)}</span>`).join('')}
+        ${entity.children.map((child) => (isTicketKey(child)
+          ? ticketLink(child, { base, cls: 'child ticket-link' })
+          : `<span class="child">${esc(child)}</span>`)).join('')}
       </div>` : ''}
     <div class="detail-actions">
       <button type="button" class="chip" data-detail="timeline">Timeline</button>
@@ -245,11 +261,15 @@ export function impactSentence(row) {
     `so ≈${fmtHours(row.impact_hours)} of downstream wait accumulate behind it.`;
 }
 
-export function entityMarkdown(entity, hoursMode = 'wall-clock') {
+export function entityMarkdown(entity, hoursMode = 'wall-clock', base = '') {
   if (entity.row) {
     const row = entity.row;
+    const key = rowTicket(row);
+    const heading = key
+      ? `[${key}](${ticketHref(key, base)}) #${row.number} ${row.repo_short}`
+      : `— #${row.number} ${row.repo_short}`;
     return [
-      `## ${rowTicket(row) || '—'} #${row.number} ${row.repo_short}`,
+      `## ${heading}`,
       '',
       `- status: ${row.blocked ? 'blocked' : row.phase}`,
       `- waiting on: ${whoLabel(row.ball_label || row.ball)}`,
@@ -265,8 +285,12 @@ export function entityMarkdown(entity, hoursMode = 'wall-clock') {
   }
   const pr = entity.pr;
   if (!pr) return '';
+  const key = pr.ticket || '';
+  const heading = key
+    ? `[${key}](${ticketHref(key, base)}) #${pr.number} ${pr.repo}`
+    : `— #${pr.number} ${pr.repo}`;
   return [
-    `## ${pr.ticket || pr.keys.join(' ') || '—'} #${pr.number} ${pr.repo}`,
+    `## ${heading}`,
     '',
     `- author: ${pr.actor}`,
     `- state: ${pr.state}`,

@@ -145,9 +145,18 @@ def _share(part: float, whole: float) -> float:
     return round(part / whole, 4) if whole else 0.0
 
 
-def _note(data: "JiraData", empty: str) -> str | None:
-    """Why a metric is unavailable: the store's own reason, else the local one."""
-    return data.note or empty
+def _note(data: "JiraData", empty: str, available: bool = False) -> str | None:
+    """Why a metric is unavailable: the store's own reason, else the local one.
+
+    A metric that *did* measure something carries no note: the "no … event in
+    this window" line is the explanation for an unavailable result, and printing
+    it next to a populated number reads as a contradiction (prd/25). The store's
+    own note still wins, because "no Jira data" is true even when a local
+    population is non-empty.
+    """
+    if data.note:
+        return data.note
+    return None if available else empty
 
 
 def _attrs(event: dict) -> dict:
@@ -347,6 +356,22 @@ def cohort(data: JiraData, window: tuple[datetime, datetime]) -> list[Story]:
     ]
 
 
+def story_for(data: JiraData | None, key: str) -> Story | None:
+    """The STORY object whose key is ``key`` (prd/25's ticket detail lookup).
+
+    A store may hold a story key as ``STORY:DEL-167`` or the bare key; the
+    comparison is on the key the object itself carries, never a prefix match, so
+    ``DEL-16`` cannot resolve ``DEL-167``.
+    """
+    if data is None:
+        return None
+    wanted = str(key or "").strip()
+    for story in data.stories:
+        if story.key == wanted:
+            return story
+    return None
+
+
 # --------------------------------------------------------------------------- #
 # boundaries and evidence spans
 # --------------------------------------------------------------------------- #
@@ -385,6 +410,25 @@ def _first_review(pr_state) -> datetime | None:
 def _pr_merge(pr_state) -> datetime | None:
     pr = pr_state.pr
     return pr["closed_ts"] if pr["state"] == "merged" else None
+
+
+# Public wrappers for the ticket detail view (prd/25). The cohort metrics use
+# the private helpers; a per-ticket read needs the same answers, not a second
+# implementation that could disagree with them.
+def first_review(pr_state) -> datetime | None:
+    return _first_review(pr_state)
+
+
+def pr_merge(pr_state) -> datetime | None:
+    return _pr_merge(pr_state)
+
+
+def sprint_id(object_id: str) -> int | None:
+    return _sprint_id(object_id)
+
+
+def attributes(event: dict) -> dict:
+    return _attrs(event)
 
 
 @dataclass(slots=True)
@@ -512,6 +556,21 @@ def _active_hours(
     return total
 
 
+def cycle_for(story: Story) -> Cycle:
+    """Public name for the boundary/evidence derivation (prd/25 detail view)."""
+    return _cycle(story)
+
+
+def active_hours(
+    court: ballcourt.BallCourt,
+    cycle: Cycle,
+    t1: datetime,
+    t2: datetime,
+) -> float:
+    """Public name for the measured-work accounting inside one segment."""
+    return _active_hours(court, cycle, t1, t2)
+
+
 # --------------------------------------------------------------------------- #
 # 1. waiting-time decomposition (prd/21 §1)
 # --------------------------------------------------------------------------- #
@@ -609,8 +668,19 @@ def waiting_time_decomposition(
             "bounds": list(SEGMENT_BOUNDS[key]),
         }
     largest = max(SEGMENT_KEYS, key=lambda key: (out_segments[key]["hours"], key))
+    largest_examples = [
+        key for key, hours in sorted(
+            (
+                (row["key"], row["segments"].get(largest))
+                for row in rows
+                if row["segments"].get(largest)
+            ),
+            key=lambda item: (-item[1], item[0]),
+        )[:5]
+    ]
+    available = any(entry["n"] for entry in segments.values())
     return {
-        "available": any(entry["n"] for entry in segments.values()),
+        "available": available,
         "stories": len(stories),
         "stories_decomposed": decomposed,
         "segments": out_segments,
@@ -623,6 +693,7 @@ def waiting_time_decomposition(
         "largest_hours": out_segments[largest]["hours"],
         "largest_share": out_segments[largest]["share"],
         "largest_efficiency": out_segments[largest]["efficiency"],
+        "largest_examples": largest_examples,
         "review_rounds": rounds_total,
         "missing_boundaries": dict(sorted(missing_boundaries.items())),
         "clamped": clamped,
@@ -646,6 +717,7 @@ def waiting_time_decomposition(
             data,
             "no story in this window had two measurable boundaries, so no "
             "segment could be priced",
+            available,
         ),
     }
 
@@ -732,6 +804,7 @@ def carry_over(
             data,
             "no 'sprint_added' event in this window, so there is no sprint "
             "membership to check for carry-over",
+            with_sprints > 0,
         ),
     }
 
@@ -793,6 +866,7 @@ def point_churn(
             data,
             "no 'pointed' event in this window, so the store cannot tell "
             "whether an estimate moved",
+            pointed_stories > 0,
         ),
     }
 
@@ -897,7 +971,7 @@ def worklog_cross_check(
             "intervals in an active or rebasing phase, so a story with no PR "
             "adds nothing to the denominator"
         ),
-        "note": _note(data, "no 'worklogged' event in this window"),
+        "note": _note(data, "no 'worklogged' event in this window", worklogs > 0),
     }
 
 
@@ -967,7 +1041,7 @@ def conformance(
             "started_unrefined, not as a violation, because the store cannot "
             "tell refinement from a missing estimate"
         ),
-        "note": _note(data, "no story in this window"),
+        "note": _note(data, "no story in this window", bool(stories)),
     }
 
 

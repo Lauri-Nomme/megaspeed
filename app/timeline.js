@@ -73,6 +73,14 @@ const STEPS = [
 const ACTIVITY_STATES = ['on', 'faint', 'hide'];
 const QUEUE_ORDER = ['review', 'author', 'CI', 'calendar'];
 
+/* prd/25: semantic zoom for the `stories` dimension. A wide window shows the
+ * epic → story hierarchy (PRs would be unreadable), a medium window nests each
+ * story's PRs beneath it, and the event markers on those PR bars are the third
+ * level. The thresholds are in time, not pixels, so the hierarchy is stable
+ * while panning. */
+const STORY_NEST_SPAN = 45 * DAY;
+const STORY_EPIC_SPAN = 60 * DAY;
+
 function fit(ctx, text, maxWidth) {
   if (maxWidth <= 0) return '';
   if (ctx.measureText(text).width <= maxWidth) return text;
@@ -122,12 +130,13 @@ function phaseFor(state, pr, next, commits) {
 }
 
 export class Timeline {
-  constructor({ canvas, tip, onStats, onSelect, onSelection }) {
+  constructor({ canvas, tip, onStats, onSelect, onTicket, onSelection }) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.tip = tip;
     this.onStats = onStats;
     this.onSelect = onSelect;
+    this.onTicket = onTicket;
     this.onSelection = onSelection;
     this.selection = null;   // { start, end } picked by brushing the histogram
     this.brushing = null;
@@ -435,10 +444,12 @@ export class Timeline {
 
   // ---------------------------------------------------------------- lanes
   laneRows() {
+    if (this.dim === 'story') return this.storyRows();
     if (this.dim === 'object') {
       return this.prs.map((pr) => ({
         key: `${pr.repo}#${pr.number}`,
         pr,
+        ticket: pr.ticket,
         count: pr.events.length,
         label: `${pr.ticket ? `${pr.ticket} ` : ''}#${pr.number} ${pr.repo}`,
       }));
@@ -455,6 +466,104 @@ export class Timeline {
     const keys = [...new Set(this.events.map((e) => e.actor))];
     keys.sort((a, b) => (counts.get(b) - counts.get(a)) || a.localeCompare(b));
     return keys.map((key) => ({ key, count: counts.get(key) }));
+  }
+
+  /** Stories as lanes with their PRs nested beneath (prd/25, epic → story → PR).
+   *
+   * At a wide zoom the rows are the epic → story hierarchy; below
+   * :data:`STORY_NEST_SPAN` each story's PRs become child rows. The event
+   * markers on those PR bars are the third semantic level, drawn by the same
+   * `paintLifecycle` the object lanes use.
+   */
+  storyRows() {
+    // The grouping is a function of the loaded data, not of the zoom, so it is
+    // built once per setData (a pan/zoom only re-reads it).
+    let groups;
+    if (this._storyCache && this._storyCache.prs === this.prs
+        && this._storyCache.events === this.events) {
+      groups = this._storyCache.groups;
+    } else {
+      groups = new Map();
+      for (const pr of this.prs) {
+        const story = pr.ticket || '(no ticket)';
+        if (!groups.has(story)) {
+          groups.set(story, { story, epic: '', prs: [], events: [] });
+        }
+        const group = groups.get(story);
+        if (!group.epic && pr.epic) group.epic = pr.epic;
+        group.prs.push(pr);
+      }
+      // A story with no PR is still a lane (prd/25: story → event): its own
+      // created/status/sprint/pointed events are in the log and name the STORY.
+      for (const event of this.events) {
+        for (const objectId of event.objects || []) {
+          if (!String(objectId).startsWith('STORY:')) continue;
+          const story = String(objectId).slice('STORY:'.length);
+          if (!groups.has(story)) {
+            groups.set(story, { story, epic: '', prs: [], events: [] });
+          }
+          groups.get(story).events.push(event);
+        }
+      }
+      this._storyCache = { prs: this.prs, events: this.events, groups };
+    }
+    const span = this.span();
+    const nested = span <= STORY_NEST_SPAN;
+    const showEpics = !nested && span > STORY_EPIC_SPAN
+      && [...groups.values()].some((group) => group.epic);
+    const stories = [...groups.values()].sort((a, b) => {
+      const start = (group) => Math.min(
+        ...group.prs.map((pr) => pr.created),
+        ...group.events.map((event) => event.t),
+        Infinity,
+      );
+      return start(a) - start(b) || a.story.localeCompare(b.story);
+    });
+    const rows = [];
+    let epic = null;
+    for (const group of stories) {
+      if (showEpics && group.epic && group.epic !== epic) {
+        epic = group.epic;
+        const members = stories.filter((entry) => entry.epic === epic);
+        rows.push({
+          key: `epic:${epic}`,
+          kind: 'epic',
+          epic,
+          ticket: epic,
+          count: members.reduce((sum, entry) => sum + entry.prs.length, 0),
+          label: epic,
+        });
+      }
+      rows.push({
+        key: `story:${group.story}`,
+        kind: 'story',
+        story: group.story,
+        ticket: group.story,
+        epic: group.epic,
+        prs: group.prs,
+        events: group.events,
+        count: group.prs.reduce((sum, pr) => sum + pr.events.length, 0) + group.events.length,
+        label: group.story,
+        depth: showEpics && group.epic ? 1 : 0,
+      });
+      if (nested) {
+        for (const pr of group.prs) {
+          rows.push({
+            key: `pr:${pr.id}`,
+            kind: 'pr',
+            pr,
+            story: group.story,
+            ticket: group.story,
+            count: pr.events.length,
+            label: `#${pr.number} ${pr.repo}`,
+            depth: showEpics && group.epic ? 2 : 1,
+          });
+        }
+      }
+    }
+    this._storyNested = nested;
+    this._storyEpics = showEpics;
+    return rows;
   }
 
   queueHours(queue) {
@@ -479,7 +588,7 @@ export class Timeline {
   layout() {
     const m = METRICS[this.density];
     const lanes = this.laneRows();
-    const objectMode = this.dim === 'object';
+    const objectMode = this.dim === 'object' || this.dim === 'story';
     const laneH = objectMode ? Math.max(m.bar + 6, m.lane) : m.lane;
     const barRows = objectMode ? [] : this.prs;
     const height = AXIS_H + HIST_H + HEADER_H + lanes.length * laneH +
@@ -561,8 +670,9 @@ export class Timeline {
     if (this.hover) {
       const ttl = this.hover.event ? this.hits.some((h) => h.kind === 'event' && h.event === this.hover.event)
         : this.hover.pr ? this.hits.some((h) => h.kind === 'bar' && h.pr === this.hover.pr)
-          : this.hover.interval ? this.hits.some((h) => h.kind === 'interval' && h.interval === this.hover.interval)
-            : false;
+          : this.hover.story ? this.hits.some((h) => h.kind === 'story' && h.story === this.hover.story)
+            : this.hover.interval ? this.hits.some((h) => h.kind === 'interval' && h.interval === this.hover.interval)
+              : false;
       if (!ttl) this.clearHover();
     }
 
@@ -581,6 +691,9 @@ export class Timeline {
         openPrs: this.prs.filter((p) => p.state === 'open').length,
         lanes: g.lanes.length,
         dim: this.dim,
+        storyLanes: this.dim === 'story' ? g.lanes.filter((row) => row.kind === 'story').length : 0,
+        prLanes: this.dim === 'story' ? g.lanes.filter((row) => row.kind === 'pr').length : 0,
+        nested: this.dim === 'story' ? Boolean(this._storyNested) : false,
         allHidden: hiddenAll,
         phases: stats,
       });
@@ -589,7 +702,7 @@ export class Timeline {
       'aria-label',
       `Event timeline, ${fmtDay(this.view.start)} ${fmtClock(this.view.start)} to ` +
       `${fmtDay(this.view.end)} ${fmtClock(this.view.end)}; ${visibleWord(this)} events, ` +
-      `${g.lanes.length} ${this.dim === 'actor' ? 'actor' : this.dim === 'object' ? 'PR' : 'queue'} lanes. ` +
+      `${g.lanes.length} ${this.dim === 'actor' ? 'actor' : this.dim === 'object' ? 'PR' : this.dim === 'story' ? 'story' : 'queue'} lanes. ` +
       'Arrow keys pan, plus and minus zoom, Home fits.',
     );
   }
@@ -765,8 +878,14 @@ export class Timeline {
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'right';
     ctx.fillStyle = '#8A8D93';
-    const section = this.dim === 'actor' ? 'ACTORS' : this.dim === 'object' ? 'PULL REQUESTS' : 'QUEUES';
-    ctx.fillText(`${section} · ${rows.length}`, g.gutter - 10, AXIS_H + HIST_H + 11);
+    const section = this.dim === 'actor' ? 'ACTORS'
+      : this.dim === 'object' ? 'PULL REQUESTS'
+        : this.dim === 'story' ? 'STORIES' : 'QUEUES';
+    const sectionCount = this.dim === 'story'
+      ? `${rows.filter((row) => row.kind === 'story').length} stories · ` +
+        `${rows.filter((row) => row.kind === 'pr').length} PRs`
+      : String(rows.length);
+    ctx.fillText(`${section} · ${sectionCount}`, g.gutter - 10, AXIS_H + HIST_H + 11);
 
     rows.forEach((row, i) => {
       const y = g.laneTop + i * g.laneH;
@@ -782,14 +901,28 @@ export class Timeline {
 
       const hovered = this.hover && this.hover.laneKey === row.key;
       ctx.font = `500 ${g.label}px "JetBrains Mono", ui-monospace, monospace`;
-      ctx.fillStyle = hovered ? '#E8E9EB' : '#B9BBC0';
+      // A ticket key is a doorway (prd/25): the label is drawn in the link hue
+      // and the gutter is a hit target that opens the ticket detail page.
+      const linked = Boolean(row.ticket);
+      ctx.fillStyle = hovered ? '#E8E9EB' : linked ? '#94B4D4' : '#B9BBC0';
       ctx.textAlign = 'right';
-      const label = fit(ctx, row.label || row.key, g.gutter - 22);
+      const indent = row.depth ? `${'  '.repeat(row.depth)}↳ ` : '';
+      const label = fit(ctx, `${indent}${row.label || row.key}`, g.gutter - 22);
       ctx.fillText(label, g.gutter - 10, y + g.laneH / 2);
+      if (linked) {
+        this.hits.push({
+          kind: 'label', x0: 0, x1: g.gutter, y0: y, y1: y + g.laneH,
+          ticket: row.ticket, laneKey: row.key,
+        });
+      }
     });
 
     if (this.dim === 'queue') {
       this.drawQueueLanes(ctx, g, rows);
+      return;
+    }
+    if (this.dim === 'story') {
+      this.drawStoryLanes(ctx, g, rows);
       return;
     }
     if (this.dim === 'object') {
@@ -868,6 +1001,103 @@ export class Timeline {
       const end = pr.closed || this.now;
       this.hits.push({
         kind: 'bar', x0: this.px(pr.created), x1: Math.max(this.px(end), this.px(pr.created) + 2),
+        y0: y, y1: y + g.laneH, pr, laneKey: row.key,
+      });
+    });
+  }
+
+  drawStoryLanes(ctx, g, rows) {
+    this.aggregated = 0;
+    rows.forEach((row, i) => {
+      const y = g.laneTop + i * g.laneH;
+      const barY = y + 3;
+      const barH = g.laneH - 6;
+      if (row.kind === 'epic') {
+        const prs = rows
+          .filter((entry) => entry.kind === 'story' && entry.epic === row.epic)
+          .flatMap((entry) => entry.prs || []);
+        if (!prs.length) return;
+        const from = Math.min(...prs.map((pr) => pr.created));
+        const to = Math.max(...prs.map((pr) => pr.closed || this.now));
+        const x0 = Math.max(g.gutter, this.px(from));
+        const x1 = Math.min(g.gutter + g.plotW, this.px(to));
+        if (x1 <= x0) return;
+        // A bracket, not a lifecycle: the epic has no phases of its own.
+        ctx.fillStyle = 'rgba(140,152,212,.16)';
+        ctx.fillRect(x0, barY, x1 - x0, barH);
+        ctx.fillStyle = 'rgba(140,152,212,.65)';
+        ctx.fillRect(x0, barY, 2, barH);
+        ctx.fillRect(x1 - 2, barY, 2, barH);
+        this.hits.push({
+          kind: 'epic', x0, x1, y0: y, y1: y + g.laneH,
+          epic: row.epic, ticket: row.ticket, laneKey: row.key,
+        });
+        return;
+      }
+      if (row.kind === 'story') {
+        const prs = row.prs || [];
+        const storyEvents = row.events || [];
+        if (prs.length) {
+          // One thin lifecycle per PR, stacked inside the story lane: overlapping
+          // PRs stay individually visible instead of overpainting each other.
+          const shown = prs.slice(0, 6);
+          const slice = Math.max(2, barH / shown.length);
+          shown.forEach((pr, index) => {
+            this.paintLifecycle(ctx, g, pr, barY + index * slice, Math.max(2, slice - 1));
+          });
+        } else if (storyEvents.length) {
+          // A story with no code still has a lane: a neutral baseline for its
+          // own life, so its events have something to sit on.
+          const first = storyEvents[0].t;
+          const last = storyEvents[storyEvents.length - 1].t;
+          const x0 = Math.max(g.gutter, this.px(first));
+          const x1 = Math.min(g.gutter + g.plotW, this.px(last));
+          if (x1 > x0) {
+            ctx.fillStyle = 'rgba(138,141,147,.28)';
+            ctx.fillRect(x0, barY + barH / 2 - 1, x1 - x0, 2);
+          }
+        }
+        // story → event: the ticket's own markers on the story lane
+        for (const event of storyEvents) {
+          if (event.t < this.view.start || event.t > this.view.end) continue;
+          const state = this.stateOf(event.activity);
+          if (state === 'hide') continue;
+          const x = this.px(event.t);
+          ctx.fillStyle = rgba(
+            ACTIVITY_COLOR[event.activity] || '#8A8D93',
+            state === 'faint' ? 0.25 : 0.9,
+          );
+          ctx.fillRect(x, barY, 1.5, barH);
+        }
+        const times = prs.length
+          ? prs.flatMap((pr) => [pr.created, pr.closed || this.now])
+          : storyEvents.map((event) => event.t);
+        if (!times.length) return;
+        this.hits.push({
+          kind: 'story', x0: this.px(Math.min(...times)),
+          x1: Math.max(this.px(Math.max(...times)), this.px(Math.min(...times)) + 2),
+          y0: y, y1: y + g.laneH, story: row.story, ticket: row.ticket,
+          prs, events: storyEvents, laneKey: row.key,
+        });
+        return;
+      }
+      const pr = row.pr;
+      if (!pr) return;
+      this.paintLifecycle(ctx, g, pr, barY, barH);
+      if (barH >= 9) {
+        for (const event of pr.events) {
+          if (event.t < this.view.start || event.t > this.view.end) continue;
+          const state = this.stateOf(event.activity);
+          if (state === 'hide') continue;
+          const x = this.px(event.t);
+          ctx.fillStyle = rgba(ACTIVITY_COLOR[event.activity] || '#8A8D93', state === 'faint' ? 0.2 : 0.85);
+          ctx.fillRect(x, barY, 1.5, barH);
+        }
+      }
+      const end = pr.closed || this.now;
+      this.hits.push({
+        kind: 'bar', x0: this.px(pr.created),
+        x1: Math.max(this.px(end), this.px(pr.created) + 2),
         y0: y, y1: y + g.laneH, pr, laneKey: row.key,
       });
     });
@@ -981,6 +1211,12 @@ export class Timeline {
         kind: 'bar', x0: this.px(pr.created), x1: Math.max(this.px(end), this.px(pr.created) + 2),
         y0: y, y1: y + g.barH, pr,
       });
+      if (pr.ticket) {
+        this.hits.push({
+          kind: 'label', x0: 0, x1: g.gutter, y0: y, y1: y + g.barH,
+          ticket: pr.ticket, laneKey: `bar:${pr.id}`,
+        });
+      }
     });
   }
 
@@ -1037,6 +1273,30 @@ export class Timeline {
         <div class="row"><span class="k">pr</span><span class="v">${pr.ticket ? `${esc(pr.ticket)} ` : ''}#${esc(pr.number)} ${esc(pr.repo)}</span></div>
         <div class="row"><span class="k">window</span><span class="v">${esc(fmtStamp(seg.from))}<br>${esc(fmtStamp(seg.to))}</span></div>
         <div class="row"><span class="k">basis</span><span class="v">${esc(PHASE[seg.phase].hint)}</span></div>`;
+    } else if (hit.kind === 'label') {
+      this.tip.innerHTML = `
+        <div class="row"><span class="act mono">${esc(hit.ticket)}</span>
+          <span class="muted">ticket key</span></div>
+        <div class="row"><span class="k">open</span><span class="v">click to open the ticket detail page</span></div>`;
+    } else if (hit.kind === 'story' || hit.kind === 'epic') {
+      const prs = hit.kind === 'story'
+        ? (hit.prs || [])
+        : this.laneRows().filter((row) => row.kind === 'story' && row.epic === hit.epic)
+          .flatMap((row) => row.prs || []);
+      const totals = new Map();
+      for (const pr of prs) {
+        for (const [phase, ms] of this.phases(pr)) totals.set(phase, (totals.get(phase) || 0) + ms);
+      }
+      const from = prs.length ? Math.min(...prs.map((pr) => pr.created)) : null;
+      const to = prs.length ? Math.max(...prs.map((pr) => pr.closed || this.now)) : null;
+      this.tip.innerHTML = `
+        <div class="row"><span class="act mono">${esc(hit.ticket)}</span>
+          <span class="muted">${hit.kind === 'epic' ? 'epic' : 'story'} · ${prs.length} PR${prs.length === 1 ? '' : 's'}</span></div>
+        ${from != null ? `<div class="row"><span class="k">span</span><span class="v">${esc(fmtDuration(to - from))}</span></div>` : ''}
+        ${[...totals.entries()].filter(([, ms]) => ms > 0).map(([phase, ms]) => `
+          <div class="row"><span class="k">${esc(PHASE[phase].label)}</span>
+            <span class="v" style="color:${PHASE[phase].color}">${esc(fmtDuration(ms))}</span></div>`).join('')}
+        <div class="row"><span class="k">open</span><span class="v">click for the ticket detail page</span></div>`;
     } else {
       const pr = hit.pr;
       const totals = this.phases(pr);
@@ -1088,7 +1348,10 @@ export class Timeline {
         this.tip.hidden = true;
         return;
       }
-      this.showHover(this.hitTest(x, y), x, y);
+      const hit = this.hitTest(x, y);
+      const linked = hit && (hit.kind === 'label' || hit.kind === 'story' || hit.kind === 'epic');
+      canvas.style.cursor = linked ? 'pointer' : '';
+      this.showHover(hit, x, y);
       this.schedule();
     });
 
@@ -1129,7 +1392,15 @@ export class Timeline {
       this.canvas.classList.remove('dragging');
       if (moved) return;
       const hit = this.hitTest(ev.clientX - rect.left, ev.clientY - rect.top);
-      if (hit && (hit.kind === 'bar' || hit.kind === 'interval') && this.onSelect) {
+      if (!hit) return;
+      // prd/25: a ticket label (or a story/epic bar) is a link to the ticket
+      // detail page; a PR bar still opens the PR drawer.
+      if ((hit.kind === 'label' || hit.kind === 'story' || hit.kind === 'epic')
+          && hit.ticket && this.onTicket) {
+        this.onTicket(hit.ticket);
+        return;
+      }
+      if ((hit.kind === 'bar' || hit.kind === 'interval') && this.onSelect) {
         this.onSelect(hit.pr, { phase: hit.interval ? hit.interval.phase : null, kind: hit.kind });
       }
     });
