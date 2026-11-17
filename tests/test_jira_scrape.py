@@ -12,16 +12,21 @@ event set, the worklog-noise gap).
 
 from __future__ import annotations
 
+import contextlib
+import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ingest import fixtures, jira_fixtures, taxonomy
 from ingest.bundle import read_bundle
 from ingest.config import Config
 from ingest.importer import import_bundle
 from ingest.jira_fixtures import PROJECT
+from ingest.scrape_cli import main as scrape_main
 from ingest.scrape_jira import JiraIssueState, jql_for, scrape
 from ingest.store import EVENT_KEY_RE, connect, list_events, list_objects, verify
 from ingest.transport import FixtureJiraTransport, FixtureTransport
@@ -461,6 +466,70 @@ class CrossSourceIdentityTests(unittest.TestCase):
         for key, entry in linked.items():
             self.assertTrue(key.startswith("jira:"), key)
             self.assertEqual(identity[entry["linked_to"]]["pseudonym"], entry["pseudonym"])
+
+
+class CliFixtureLimitTests(unittest.TestCase):
+    """FR-8: ``--jira --fixture --limit N`` must actually read at most N issues.
+
+    The CLI used to hand ``None`` to ``scrape_jira`` on the fixture path while
+    the live path passed ``args.limit``, so a "dev/demo" cap silently read the
+    whole fixture. Drive the real CLI (config + transport + reducer) twice and
+    compare the reports: the capped run must emit fewer issues *and* say it was
+    truncated, so the cursor is left alone for the next run.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        # an empty config: the fixture needs no repos/credentials, and the
+        # defaults (PROJ/OPS/ARCH) already match the Jira fixture project.
+        self.config = self.root / "empty.toml"
+        self.config.write_text("")
+        self.env = mock.patch.dict(
+            os.environ,
+            {
+                "MEGASPEED_CONFIG": str(self.config),
+                "MEGASPEED_TICKET_PROJECTS": "PROJ",
+                "MEGASPEED_QUIET": "1",
+            },
+        )
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def scrape(self, *argv: str) -> dict:
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = scrape_main(
+                [
+                    "--jira", "--fixture", "--json",
+                    "--out", str(self.root / f"jira-{len(argv)}.tgz"),
+                    "--state-dir", str(self.root / f"jira-{len(argv)}.state"),
+                    *argv,
+                ]
+            )
+        self.assertEqual(code, 0, err.getvalue())
+        return json.loads(out.getvalue())
+
+    def test_limit_caps_the_fixture_run(self):
+        full = self.scrape("--n", "12")
+        capped = self.scrape("--n", "12", "--limit", "3")
+
+        self.assertGreater(full["issues_kept"], 3, full)
+        self.assertEqual(capped["issues_kept"], 3)
+        self.assertLess(capped["issues_kept"], full["issues_kept"])
+        # the cap is a stop, not a silent success: the run reports it and the
+        # watermark stays put so the unread issues are read next time.
+        self.assertTrue(capped["truncated"])
+        self.assertFalse(full["truncated"])
+
+    def test_limit_above_the_fixture_size_reads_everything(self):
+        full = self.scrape("--n", "5")
+        generous = self.scrape("--n", "5", "--limit", "500")
+        self.assertEqual(generous["issues_kept"], full["issues_kept"])
+        self.assertFalse(generous["truncated"])
 
 
 if __name__ == "__main__":

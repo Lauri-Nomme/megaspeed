@@ -123,7 +123,9 @@ def _jira_transport(cfg: Config, args) -> tuple[object, str, int | None, object 
         if path and path.exists() and args.fixture_file
         else generate(n=args.n, seed=args.seed if args.seed is not None else cfg.seed)
     )
-    return FixtureJiraTransport(bundle), "jira-fixture", None, None
+    # FR-8: --limit means the same thing in every mode. The fixture path used to
+    # return None, so `--jira --fixture --limit 3` read all 13 issues.
+    return FixtureJiraTransport(bundle), "jira-fixture", args.limit, None
 
 
 def _issue_type_name(row: dict) -> str:
