@@ -27,7 +27,7 @@ Local state, kept next to the output and never inside the tgz (prd/11 §3,§5):
 ```
 <state-dir>/
   watermark.json    # per-source event cursor (shared with the Bitbucket scrape)
-  jira_issues.json  # per-issue cursor: {updated, done} (settled = resolved)
+  jira_issues.json  # per-issue cursor: {updated, done, run_id} (settled = resolved)
   identity.json     # RAW ZONE: Jira + Bitbucket identities -> pseudonym
 ```
 
@@ -36,6 +36,27 @@ is the max issue ``updated`` seen, the JQL asks for ``updated >= watermark -
 overlap``, and an issue that is already recorded and sits below that cutoff is
 not fetched again. An issue this scraper has *never* seen is always read in full,
 no matter how old it is (the FR-1 rule) -- its history is what we are missing.
+
+Two rules the Jira side needs because its walk is *not* the Bitbucket walk:
+
+* **A capped run does not consume the cursor.** The search is ordered by
+  ``updated ASC``, so ``--limit`` reads the *oldest* issues first; a watermark
+  taken from every row the page returned would put the unread ones below the
+  next run's cutoff and delete them silently. The cap therefore stops the walk
+  (no row past it is even read) and the cursor is left where it was, with
+  ``truncated: true`` in the manifest.
+* **One bad issue is skipped, not fatal.** A 404 on a moved/deleted issue, a
+  permission error or a 5xx that outlived the transport retries is counted in
+  ``failures`` and skipped; it is not recorded in the per-issue cursor, so a
+  later run inside the overlap window retries it.
+
+Crash safety is the Bitbucket contract, adapted to a walk that reduces as it
+goes: identity -> partial bundle -> ``jira_issues.json`` -> ``watermark.json``
+are checkpointed every ``--checkpoint-every`` issues and at every project
+boundary, the next run resumes from that bundle, and the issues the interrupted
+run already checkpointed are skipped by their ``run_id`` (their events ride in
+the carried rows). A checkpoint never advances the global cursor -- the walk is
+per project, so a mid-run cursor would strand a later project's older issues.
 """
 
 from __future__ import annotations
@@ -54,13 +75,23 @@ from .jira import (
     FIELD_SPRINT,
     FIELD_STORY_POINTS,
     JiraClient,
+    JiraError,
 )
 from .jira_pipeline import JiraReducer, JiraStats
 from .pipeline import KeyFilter, _object
 from .progress import DEFAULT_INTERVAL as DEFAULT_PROGRESS_INTERVAL
 from .progress import ProgressReporter
 from .pseudonym import IdentityTable
-from .scrape import IDENTITY_FILE, STATE_FILE, ScrapeState, default_state_dir
+from .scrape import (
+    DEFAULT_CHECKPOINT_EVERY,
+    IDENTITY_FILE,
+    STATE_FILE,
+    ScrapeState,
+    _merge_events,
+    _merge_objects,
+    _write_bundle_atomic,
+    default_state_dir,
+)
 from .timeutil import iso, iso_precise, to_naive_utc, utcnow
 
 ISSUE_STATE_FILE = "jira_issues.json"
@@ -104,11 +135,16 @@ class JiraIssueState:
     def done_count(self, source: str) -> int:
         return sum(1 for entry in self.entries(source).values() if entry.get("done"))
 
-    def record(self, source: str, key: str, *, updated: datetime | None, done: bool) -> None:
+    def record(self, source: str, key: str, *, updated: datetime | None, done: bool,
+               run_id: str = "") -> None:
         self.sources.setdefault(source, {})[key] = {
             "updated": iso_precise(updated),
             "done": bool(done),
             "scraped_at": iso(utcnow()),
+            # The run that wrote this entry: a resume skips the issues its own
+            # interrupted run checkpointed (their events are in the partial
+            # bundle), instead of re-fetching them (mirrors ``prs.json``).
+            "run_id": str(run_id or ""),
         }
 
     def save(self) -> None:
@@ -155,6 +191,18 @@ class JiraCollected:
     sprint_count: int = 0
     fields: dict[str, str] = field(default_factory=dict)
     statuses: int = 0
+    #: Issues that failed to fetch: ``[{key, error}]``. Counted, not fatal, and
+    #: not recorded in the per-issue cursor, so a later run retries them (FR-2)
+    #: -- within the watermark overlap window, exactly like the Bitbucket side.
+    failures: list[dict] = field(default_factory=list)
+    #: The run hit ``--limit``: issues it never read must not advance the cursor
+    #: (FR-1). Mirrors the Bitbucket ``truncated`` per-repo flag.
+    truncated: bool = False
+    #: Crash-safety provenance (mirrors the Bitbucket scrape).
+    resumed: bool = False
+    carried_events: list[dict] = field(default_factory=list)
+    carried_objects: list[dict] = field(default_factory=list)
+    carried_relations: list[tuple[str, str, str]] = field(default_factory=list)
 
     def counts(self) -> dict:
         return self.stats.counts()
@@ -192,8 +240,33 @@ def collect(
     progress: ProgressReporter | None = None,
     projects: tuple[str, ...] | None = None,
     overlap_hours: int = 72,
+    resume_run_id: str | None = None,
+    carry_events: list[dict] | None = None,
+    carry_objects: list[dict] | None = None,
+    carry_relations: list[tuple[str, str, str]] | None = None,
+    checkpoint=None,
+    checkpoint_every: int = 0,
 ) -> JiraCollected:
-    """Read the source and reduce it in memory. Nothing is written here."""
+    """Read the source and reduce it in memory. Nothing is written here.
+
+    Crash safety mirrors :func:`ingest.scrape.collect`:
+
+    * ``checkpoint(collected, project)`` is called every ``checkpoint_every``
+      kept issues and at every project boundary, so the caller can persist a
+      partial bundle + both cursors without waiting for the end of the run. The
+      reduction therefore happens **as each issue arrives**, not in a final pass
+      -- a cursor without the events it covers would skip those issues forever.
+    * ``resume_run_id`` / ``carry_events`` / ``carry_objects`` resume an
+      interrupted run: issues its own run already checkpointed are skipped (the
+      carried bundle holds their events), and the rows are carried into this
+      run's bundle.
+
+    A per-issue fetch failure (a 404 on a moved/deleted issue, a permission
+    error, a 5xx that outlived the transport retries) is **skipped and
+    counted** in ``failures`` -- one bad issue never aborts the run, and it is
+    not recorded in the per-issue cursor, so a later run retries it (within the
+    watermark overlap window, the same bound the Bitbucket walk has).
+    """
     as_of = utcnow()
     run_id = f"{source}-{as_of.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:6]}"
     ident = identity or IdentityTable(cfg.identity_path)
@@ -217,6 +290,10 @@ def collect(
         ticket_projects=cfg.ticket_projects,
         ticket_keys=cfg.ticket_keys,
         identity=ident,
+        resumed=bool(carry_events or carry_objects),
+        carried_events=list(carry_events or []),
+        carried_objects=list(carry_objects or []),
+        carried_relations=list(carry_relations or []),
     )
     stats = out.stats
 
@@ -263,6 +340,9 @@ def collect(
     )
     for project, sprint in sprints:
         reducer.reduce_sprint(sprint, project, stats)
+    # Register the sprint ids/starts before the walk; each issue registers
+    # itself as it is fetched (the reduction is incremental, see below).
+    reducer.prime([], sprints)
 
     # -- issues ----------------------------------------------------------
     previous = None if full else (state.watermark(source) if state else None)
@@ -271,9 +351,34 @@ def collect(
     # An explicit key set (prd/18) is one query across projects: `key in (...)`
     # replaces the project clause, so only the first project is walked.
     key_scoped = bool(cfg.ticket_keys)
-    fetched: list[dict] = []
     seen: set[str] = set()
     stop = False
+    truncated = False
+    pending = 0  # kept issues since the last checkpoint
+
+    def _refresh() -> None:
+        """Fill the row views from the in-flight accumulator.
+
+        ``stats`` is the accumulator during the walk (``out.events`` is only
+        filled by a refresh), so a mid-run checkpoint must ask for one first --
+        otherwise it would write an empty (or stale) bundle.
+        """
+        fresh_events = list(stats.events)
+        out.events = _merge_events(out.carried_events, fresh_events)
+        out.objects = _merge_objects(
+            out.carried_objects, [*stats.objects, *_people_objects(stats, reducer)]
+        )
+        out.relations = _finalize_relations(
+            out.events,
+            out.objects,
+            _merge_relations(out.carried_relations, fresh_events, list(stats.relations)),
+        )
+        out.watermark = stats.watermark
+
+    def _checkpoint(project: str | None) -> None:
+        _refresh()
+        checkpoint(out, project)
+
     for index, project in enumerate(project_list):
         if stop or (key_scoped and index > 0):
             break
@@ -286,6 +391,16 @@ def collect(
             key = str(row.get("key") or "")
             if not key or key in seen:
                 continue
+            # FR-1: the cap is a *stop*, not a skip. A row beyond the limit was
+            # never read, so it must not advance the cursor (mirrors the
+            # Bitbucket walk, scrape.py ``if limit ... truncated = True``): the
+            # search is ordered by ``updated ASC``, so everything unread is at
+            # or after the last read row and the next run asks for it again.
+            if limit is not None and stats.issues_kept >= limit:
+                truncated = True
+                out.truncated = True
+                stop = True
+                break
             seen.add(key)
             stats.issues_seen += 1
             updated = _updated(row)
@@ -296,16 +411,26 @@ def collect(
             if not key_filter.accepts(key):
                 stats.issues_skipped += 1
                 continue
-            if limit is not None and stats.issues_kept >= limit:
+            reason = _unchanged(key, updated, prior, cutoff, resume_run_id)
+            if reason is not None:
                 stats.issues_skipped += 1
-                stop = True
+                if reason == "resumed":
+                    stats.issues_skipped_resumed += 1
                 continue
-            if _unchanged(key, updated, prior, cutoff):
-                stats.issues_skipped += 1
+            # FR-2: a per-issue fetch failure (a 404 on a moved/deleted issue, a
+            # permission error, a 5xx that outlived the transport retries) skips
+            # *this* issue: one bad issue must never abort a two-hour walk.
+            # Nothing is recorded for it, so the next run retries it (within the
+            # watermark overlap, like a failed PR on the Bitbucket side).
+            try:
+                issue = client.issue(key)
+                _complete_worklogs(client, issue)
+            except JiraError as exc:
+                stats.issues_failed += 1
+                out.failures.append({"key": key, "error": str(exc)})
+                if progress is not None:
+                    progress.emit(f"[scrape] skipped {key}: {exc}")
                 continue
-            issue = client.issue(key)
-            _complete_worklogs(client, issue)
-            fetched.append(issue)
             stats.issues_kept += 1
             if issue_state is not None:
                 resolved = bool((issue.get("fields") or {}).get("resolution"))
@@ -314,7 +439,17 @@ def collect(
                     key,
                     updated=_updated({"fields": issue.get("fields")}) or updated,
                     done=resolved,
+                    run_id=run_id,
                 )
+            # Reduce now, not in a final pass: a checkpoint has to carry this
+            # issue's events with its cursor (see the docstring).
+            reducer.prime([issue], [])
+            reducer.reduce_issue(
+                issue,
+                project=_project_of(issue, project_list),
+                memberships=memberships,
+                stats=stats,
+            )
             if progress is not None:
                 progress.tick(
                     prs_seen=stats.issues_seen,
@@ -323,34 +458,92 @@ def collect(
                     requests=client.requests,
                     events=len(stats.events),
                 )
+            if checkpoint is not None and checkpoint_every > 0:
+                pending += 1
+                if pending >= checkpoint_every:
+                    pending = 0
+                    _checkpoint(project)
+        if stop:
+            break
+        # A project boundary is a free checkpoint: nothing is half-read.
+        if checkpoint is not None and checkpoint_every > 0:
+            pending = 0
+            _checkpoint(None)
 
-    # -- reduction (two passes: object ids first, then events) ------------
-    reducer.prime(fetched, sprints)
-    for issue in fetched:
-        reducer.reduce_issue(
-            issue,
-            project=_project_of(issue, project_list),
-            memberships=memberships,
-            stats=stats,
-        )
-
-    for pseudonym in sorted(stats.people):
-        stats.objects.append(
-            _object(
-                "PERSON",
-                f"PERSON:{pseudonym}",
-                actor=pseudonym,
-                attributes={"actor_kind": reducer.actor_kind(pseudonym)},
-            )
-        )
-
-    out.events = stats.events
-    out.relations = stats.relations
-    out.objects = stats.objects
+    _refresh()
+    out.truncated = truncated or out.truncated
     out.requests = client.requests
     out.requests_by_kind = dict(sorted(client.requests_by_kind.items()))
-    out.watermark = stats.watermark
     return out
+
+
+def _people_objects(stats: JiraStats, reducer: JiraReducer) -> list[dict]:
+    """PERSON rows for every actor seen so far (idempotent; derived, not stored)."""
+    return [
+        _object(
+            "PERSON",
+            f"PERSON:{pseudonym}",
+            actor=pseudonym,
+            attributes={"actor_kind": reducer.actor_kind(pseudonym)},
+        )
+        for pseudonym in sorted(stats.people)
+    ]
+
+
+def _merge_relations(
+    carried: list[tuple[str, str, str]],
+    fresh_events: list[dict],
+    fresh: list[tuple[str, str, str]],
+) -> list[tuple[str, str, str]]:
+    """Carried relations minus the events this run re-reduced, then this run's."""
+    replaced = {str(event["event_key"]) for event in fresh_events}
+    return [row for row in carried if row[0] not in replaced] + list(fresh)
+
+
+def _finalize_relations(
+    events: list[dict],
+    objects: list[dict],
+    relations: list[tuple[str, str, str]],
+) -> list[tuple[str, str, str]]:
+    """Drop relations to objects this bundle does not emit; (re)add epic links.
+
+    A dangling relation is a contract violation (``store.verify``), not a
+    tolerable edge, so the filter is the last word. The epic link is derived from
+    the STORY object's ``epic_key`` instead of the reducer's ``known`` set: that
+    makes it independent of fetch order and idempotent across a checkpoint/
+    resume, where the carried STORY object is the only record left.
+    """
+    emitted = {str(obj.get("object_id")) for obj in objects}
+    present = {str(event.get("event_key")) for event in events}
+    kept = [row for row in relations if row[2] in emitted and row[0] in present]
+    have = {(row[0], row[2]) for row in kept}
+    for obj in objects:
+        if obj.get("object_type") != "STORY":
+            continue
+        epic_key = (obj.get("attributes") or {}).get("epic_key")
+        if not epic_key:
+            continue
+        epic_id = f"EPIC:{epic_key}"
+        if epic_id not in emitted:
+            continue
+        story_key = str(obj.get("object_id") or "").partition(":")[2]
+        if not story_key:
+            continue
+        event_key = f"{story_key}:created"
+        if event_key not in present or (event_key, epic_id) in have:
+            continue
+        kept.append((event_key, "EPIC", epic_id))
+        have.add((event_key, epic_id))
+    return kept
+
+
+def _cursor(a: datetime | None, b: datetime | None) -> datetime | None:
+    """The *earlier* of two optional cursors (``None`` is "no constraint")."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return min(a, b)
 
 
 def _updated(row: dict) -> datetime | None:
@@ -365,24 +558,39 @@ def _project_of(issue: dict, projects: tuple[str, ...]) -> str:
 
 
 def _unchanged(
-    key: str, updated: datetime | None, prior: dict[str, dict], cutoff: datetime | None
-) -> bool:
-    """True when this issue is already recorded and nothing moved since.
+    key: str,
+    updated: datetime | None,
+    prior: dict[str, dict],
+    cutoff: datetime | None,
+    resume_run_id: str | None = None,
+) -> str | None:
+    """Why this issue needs no fetch (``"resumed"`` / ``"watermark"``), or ``None``.
 
     Strictly-below-the-cutoff only: an issue *at* the cursor is ambiguous (ties
     are common) and is re-read, which is harmless because import is idempotent
     while dropping it could lose an event. An unrecorded issue is never skipped
     (FR-1: its whole history is missing).
+
+    ``"resumed"`` -- this issue was already read and checkpointed by the run we
+    are resuming (its entry carries that run's ``run_id`` and the same
+    ``updated``). Its events are in the carried bundle, so paying for it again
+    would only re-do work the crash already paid for. This check comes *before*
+    the cutoff, because a checkpointed issue can sit at or above it.
+
+    ``"watermark"`` -- recorded and below the cutoff: nothing new in it.
     """
-    if cutoff is None or updated is None:
-        return False
-    if updated >= cutoff:
-        return False
     entry = prior.get(key)
     if not entry:
-        return False
+        return None
+    if resume_run_id and entry.get("run_id") == resume_run_id:
+        if updated is not None and entry.get("updated") == iso_precise(updated):
+            return "resumed"
+    if cutoff is None or updated is None:
+        return None
+    if updated >= cutoff:
+        return None
     recorded = entry.get("updated")
-    return bool(recorded) and updated <= to_naive_utc(recorded)
+    return "watermark" if recorded and updated <= to_naive_utc(recorded) else None
 
 
 def _complete_worklogs(client: JiraClient, issue: dict) -> None:
@@ -406,9 +614,10 @@ def _complete_worklogs(client: JiraClient, issue: dict) -> None:
 # scrape (reduction -> tgz)
 # --------------------------------------------------------------------------- #
 def build_manifest(collected: JiraCollected, *, previous: datetime | None,
-                   watermark: datetime | None, overlap_hours: int, full: bool) -> dict:
+                   watermark: datetime | None, overlap_hours: int, full: bool,
+                   checkpoint: bool = False, truncated: bool = False) -> dict:
     """The bundle's manifest: provenance + counts, and nothing raw (prd/11 §2)."""
-    counts = collected.counts()
+    counts = _bundle_counts(collected)
     return {
         "schema_version": bundle_mod.SCHEMA_VERSION,
         "generator": {"name": "megaspeed-scrape", "version": _version()},
@@ -426,6 +635,10 @@ def build_manifest(collected: JiraCollected, *, previous: datetime | None,
         "previous_watermark_ts": iso(previous),
         "overlap_hours": overlap_hours,
         "full": bool(full),
+        # FR-1: this run hit --limit, so the cursor was deliberately not
+        # advanced past the issues it never read. Recorded so an operator (or a
+        # resume) can tell a capped run from a complete one.
+        "truncated": bool(truncated),
         "counts": counts,
         "jira": {
             "boards": dict(sorted(collected.boards.items())),
@@ -444,6 +657,12 @@ def build_manifest(collected: JiraCollected, *, previous: datetime | None,
             "issues_kept": collected.stats.issues_kept,
             "issues_skipped": collected.stats.issues_skipped,
             "issues_skipped_type": collected.stats.issues_skipped_type,
+            "issues_failed": collected.stats.issues_failed,
+            "issues_skipped_resumed": collected.stats.issues_skipped_resumed,
+            "truncated": bool(truncated),
+            # Provenance for the crash-safety machinery (mirrors scrape.py).
+            "checkpoint": bool(checkpoint),
+            "resumed": bool(collected.resumed),
             "transitions": collected.stats.transitions,
             "sprint_changes": collected.stats.sprint_changes,
             "sprint_at_start": collected.stats.sprint_at_start,
@@ -465,6 +684,27 @@ def _version() -> str:
     return __version__
 
 
+def _bundle_counts(collected: JiraCollected) -> dict:
+    """Counts of what the *bundle* holds, not just what this run read.
+
+    A resumed run carries the interrupted run's events and objects, so the
+    reducer's own tallies (this run only) would undercount the tgz. The run
+    tallies stay in ``manifest["run"]``; these describe the file.
+    """
+    counts = collected.counts()
+    counts["events"] = len(collected.events)
+    counts["objects"] = len(collected.objects)
+    for label, object_type in (("epics", "EPIC"), ("stories", "STORY"),
+                               ("sprints", "SPRINT"), ("people", "PERSON")):
+        counts[label] = sum(
+            1 for obj in collected.objects if obj.get("object_type") == object_type
+        )
+    counts["worklogs"] = sum(
+        1 for event in collected.events if event.get("activity") == "worklogged"
+    )
+    return counts
+
+
 def scrape(
     cfg: Config,
     transport,
@@ -478,13 +718,21 @@ def scrape(
     identity_path: str | Path | None = None,
     progress: ProgressReporter | None = None,
     projects: tuple[str, ...] | None = None,
+    checkpoint_every: int = DEFAULT_CHECKPOINT_EVERY,
 ) -> dict:
     """Scrape Jira into ``out`` (a tgz) and update local state.
 
     ``full`` ignores the watermark and the per-issue cursor and re-emits every
     issue; otherwise only issues whose ``updated`` is at/after
     ``watermark - overlap_hours`` are fetched (the overlap keeps a backdated
-    edit from being lost). The new watermark never moves backwards.
+    edit from being lost). The new watermark never moves backwards, and a
+    **capped** run (``limit``) does not move it at all: the issues it never read
+    are not consumed (FR-1).
+
+    Crash safety mirrors :func:`ingest.scrape.scrape`: the identity map, a valid
+    partial bundle, ``jira_issues.json`` and ``watermark.json`` are checkpointed
+    every ``checkpoint_every`` issues and at every project boundary, and the
+    next run resumes from that bundle instead of starting over (FR-2).
     """
     out = Path(out).expanduser()
     state_dir = Path(state_dir).expanduser() if state_dir else default_state_dir(out)
@@ -496,6 +744,76 @@ def scrape(
     )
 
     previous = None if full else state.watermark(source)
+
+    # -- resume an interrupted run (module docstring "crash safety") --------
+    resume_run_id: str | None = None
+    resume_bundle: Path | None = None
+    carry_events: list[dict] = []
+    carry_objects: list[dict] = []
+    carry_relations: list[tuple[str, str, str]] = []
+    if not full and state.incomplete(source):
+        resume_run_id = state.last_run_id(source)
+        resume_bundle = state.last_bundle_path(source) or out
+        if resume_bundle.is_file():
+            try:
+                carried = bundle_mod.read_bundle(resume_bundle)
+            except bundle_mod.BundleError as exc:
+                reporter.emit(f"[scrape] cannot resume from {resume_bundle}: {exc}")
+                resume_run_id, resume_bundle = None, None
+            else:
+                if carried.source != source:
+                    reporter.emit(
+                        f"[scrape] not resuming {resume_bundle}: it holds source"
+                        f" {carried.source!r}, not {source!r}"
+                    )
+                    resume_run_id, resume_bundle = None, None
+                else:
+                    # Drop the per-event object lists: the merged relations are
+                    # the authority, so a dangling edge from a partial bundle
+                    # cannot survive the resume.
+                    carry_events = [{**event, "objects": []} for event in carried.events]
+                    carry_objects, carry_relations = carried.objects, carried.relations
+                    reporter.emit(
+                        f"[scrape] resuming interrupted run {resume_run_id}"
+                        f" from {resume_bundle}: carrying {len(carry_events)} event(s),"
+                        f" {len(carry_objects)} object(s)"
+                    )
+
+    def checkpoint(collected_now: JiraCollected, project: str | None) -> None:
+        """Persist identity + a valid partial bundle + both cursors, mid-run."""
+        # The cursor is **not** advanced here. The Jira watermark is one global
+        # value but the walk is per project: after project A, a cursor at A's
+        # newest ``updated`` would put project B's older issues outside the next
+        # run's JQL window -- and those were never read. So a checkpoint keeps
+        # the previous cursor (a resume re-walks it and skips the issues this run
+        # already recorded by ``run_id``); only a completed run advances it.
+        # FR-1: likewise, a capped run never advances it (mirrors scrape.py's
+        # ``if not truncated``).
+        watermark_now = previous
+        manifest = build_manifest(
+            collected_now,
+            previous=previous,
+            watermark=watermark_now,
+            overlap_hours=overlap_hours,
+            full=full,
+            checkpoint=True,
+            truncated=collected_now.truncated,
+        )
+        # Identity first: the bundle names these pseudonyms, so the map must
+        # never lag behind a bundle that mentions them.
+        if collected_now.identity is not None:
+            collected_now.identity.save()
+        _write_bundle_atomic(
+            out, manifest=manifest, events=collected_now.events,
+            objects=collected_now.objects, relations=collected_now.relations,
+        )
+        issue_state.save()
+        state.record(
+            source, watermark_now, collected_now.run_id, out, repos={},
+            complete=False, resumed=collected_now.resumed, count_run=False,
+        )
+        state.save()
+
     collected = collect(
         cfg,
         transport,
@@ -508,12 +826,21 @@ def scrape(
         progress=reporter,
         projects=projects,
         overlap_hours=overlap_hours,
+        resume_run_id=resume_run_id,
+        carry_events=carry_events,
+        carry_objects=carry_objects,
+        carry_relations=carry_relations,
+        checkpoint=checkpoint,
+        checkpoint_every=max(0, int(checkpoint_every)),
     )
 
     # The Jira cursor is the max issue ``updated`` (the column the JQL filters
     # on), not the newest event timestamp: a worklog's ``created`` can be older
     # than the issue's ``updated`` and the two must not drift apart.
-    watermark = max((w for w in (previous, collected.watermark) if w is not None), default=None)
+    # FR-1: a capped run keeps the old cursor -- the issues it never read are
+    # below the watermark it would otherwise write, and would never be asked for
+    # again.
+    watermark = previous if collected.truncated else _cursor(previous, collected.watermark)
 
     manifest = build_manifest(
         collected,
@@ -521,17 +848,19 @@ def scrape(
         watermark=watermark,
         overlap_hours=overlap_hours,
         full=full,
+        truncated=collected.truncated,
     )
-    written = bundle_mod.write_bundle(
+    if collected.identity is not None:
+        collected.identity.save()
+    written = _write_bundle_atomic(
         out, manifest=manifest, events=collected.events, objects=collected.objects,
         relations=collected.relations,
     )
 
-    state.record(source, watermark, collected.run_id, out, repos={})
-    state.save()
     issue_state.save()
-    if collected.identity is not None:
-        collected.identity.save()
+    state.record(source, watermark, collected.run_id, out, repos={},
+                 complete=True, resumed=collected.resumed)
+    state.save()
 
     return {
         "mode": "scrape",
@@ -548,6 +877,12 @@ def scrape(
         "previous_watermark": iso(previous),
         "overlap_hours": overlap_hours,
         "full": bool(full),
+        "truncated": bool(collected.truncated),
+        "resumed": bool(collected.resumed),
+        "resumed_from": str(resume_bundle) if resume_bundle else None,
+        "events_carried": len(carry_events),
+        "checkpoint_every": max(0, int(checkpoint_every)),
+        "failures": list(collected.failures),
         "projects": list(collected.projects),
         "boards": dict(sorted(collected.boards.items())),
         "fields": dict(sorted(collected.fields.items())),
@@ -555,6 +890,8 @@ def scrape(
         "issues_kept": collected.stats.issues_kept,
         "issues_skipped": collected.stats.issues_skipped,
         "issues_skipped_type": collected.stats.issues_skipped_type,
+        "issues_failed": collected.stats.issues_failed,
+        "issues_skipped_resumed": collected.stats.issues_skipped_resumed,
         "issues_resolved_total": issue_state.done_count(source),
         "events": len(collected.events),
         "objects": len(collected.objects),

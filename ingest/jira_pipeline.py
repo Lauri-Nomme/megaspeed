@@ -182,6 +182,12 @@ class JiraStats:
     issues_seen: int = 0
     issues_kept: int = 0
     issues_skipped: int = 0
+    #: Issues whose fetch failed (404 / moved / permission / 5xx past the
+    #: transport retries). Skipped and counted, never fatal; not recorded in the
+    #: per-issue cursor, so the next run retries them (FR-2).
+    issues_failed: int = 0
+    #: Issues skipped because an interrupted run already checkpointed them.
+    issues_skipped_resumed: int = 0
     #: Issue types outside the closed set (sub-tasks, custom types): dropped.
     issues_skipped_type: int = 0
     epics: int = 0
@@ -219,6 +225,7 @@ class JiraStats:
             "issues_seen": self.issues_seen,
             "issues_kept": self.issues_kept,
             "issues_skipped": self.issues_skipped,
+            "issues_failed": self.issues_failed,
         }
 
 

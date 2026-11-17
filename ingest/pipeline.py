@@ -19,6 +19,7 @@ an enum label.
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import re
 from dataclasses import dataclass, field
@@ -87,8 +88,8 @@ def _digest(payload: Any) -> str:
     ).hexdigest()
 
 
-def ref_digest(repo: str, ref: Any) -> str | None:
-    """One-way digest of a branch ref (prd/22), or ``None`` when absent.
+def ref_digest(repo: str, ref: Any, pepper: bytes | str) -> str | None:
+    """Keyed digest of a branch ref (prd/22), or ``None`` when absent.
 
     The stack DAG only ever asks "is this the same branch?", so equality is all
     we need -- and a digest is the only form prd/02 allows: a DC branch name is
@@ -96,15 +97,28 @@ def ref_digest(repo: str, ref: Any) -> str | None:
     storing it would smuggle ticket content into the store (``schema.sql`` has no
     branch column, and the object-attribute spec accepts only this digest shape).
 
-    The repo is part of the digest because a branch ref is repo-scoped: two
+    **The digest must be keyed.** A plain hash of ``repo|branch`` is reversible
+    by dictionary: the repo is in the clear on the PR object, the ticket key is
+    ``PR.ticket_keys``, and branch names are ``KEY-<slug of the summary>``. So
+    this is ``HMAC-SHA256(pepper, "repo|branch")`` truncated to 128 bits, where
+    the pepper is the per-tenant raw-zone secret of :mod:`ingest.pepper`. Without
+    the pepper the digest cannot be reproduced or dictionary-recovered, and the
+    same branch in two tenants gives unrelated digests (no cross-tenant
+    correlation).
+
+    The repo stays part of the message because a branch ref is repo-scoped: two
     repos' ``main`` must not look like the same branch, or a cross-repo
-    "stack" would be invented. 16 hex chars, the same shape as
-    ``events.content_hash``.
+    "stack" would be invented. 32 hex chars (128 bits); there is deliberately no
+    unkeyed mode -- callers that have no pepper emit no ref attributes rather
+    than a reversible digest.
     """
     branch = str((ref or {}).get("displayId") or "").strip()
     if not branch:
         return None
-    return hashlib.blake2b(f"{repo}|{branch}".encode(), digest_size=8).hexdigest()
+    key = pepper.encode() if isinstance(pepper, str) else bytes(pepper or b"")
+    if not key:
+        raise ValueError("ref_digest needs a non-empty pepper (an unkeyed digest is reversible)")
+    return hmac.new(key, f"{repo}|{branch}".encode(), hashlib.sha256).hexdigest()[:32]
 
 
 def _line_count(value: Any) -> bool:
@@ -224,6 +238,7 @@ class Reducer:
         key_filter: KeyFilter,
         as_of: datetime,
         classifier: classify.Classifier | None = None,
+        pepper: bytes | None = None,
     ):
         self.cfg = cfg
         self.ident = ident
@@ -232,6 +247,10 @@ class Reducer:
         #: prd/16: the local text classifier. ``None`` = no text is read (and no
         #: text labels are emitted); the scrape always passes one in practice.
         self.classifier = classifier
+        #: prd/22: the per-tenant HMAC key for ref digests. ``None`` = no ref
+        #: attributes at all -- never an unkeyed (reversible) digest. Only the
+        #: scrape has the raw zone; the read-only probe has nothing to persist.
+        self.pepper = pepper
         self.sentinels = set(cfg.sentinel_slugs)
         self.bot_slugs = {str(s).strip().lower() for s in cfg.bot_slugs if str(s).strip()}
         self.actor_kinds: dict[str, str] = {}
@@ -316,14 +335,16 @@ class Reducer:
         merge_properties = (pr.pr.get("properties") or {}).get("mergeCommit") or {}
         if merge_properties.get("id"):
             pr_record["attributes"]["merge_commit"] = str(merge_properties["id"])
-        # prd/22: the source/target refs as one-way digests. Equal digests mean
-        # "same branch", which is the whole of the stack edge; the branch name
-        # never enters the store (see :func:`ref_digest`).
-        for attribute, ref in (("source_ref", pr.pr.get("fromRef")),
-                               ("target_ref", pr.pr.get("toRef"))):
-            digest = ref_digest(repo_label, ref)
-            if digest:
-                pr_record["attributes"][attribute] = digest
+        # prd/22: the source/target refs as keyed one-way digests. Equal digests
+        # mean "same branch", which is the whole of the stack edge; the branch
+        # name never enters the store (see :func:`ref_digest`). No pepper = no
+        # ref attributes: an unkeyed digest would be reversible.
+        if self.pepper is not None:
+            for attribute, ref in (("source_ref", pr.pr.get("fromRef")),
+                                   ("target_ref", pr.pr.get("toRef"))):
+                digest = ref_digest(repo_label, ref, self.pepper)
+                if digest:
+                    pr_record["attributes"][attribute] = digest
         # prd/16 "PR diff size": the scrape's git cache measured the final head's
         # numstat totals. Both counts travel together; an absent block means the
         # size is unknown (analysis reads that as "pending", never as zero).

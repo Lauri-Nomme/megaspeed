@@ -183,6 +183,24 @@ def _print_jira_scrape(r: dict) -> None:
             else ""
         )
     )
+    if r.get("issues_failed"):
+        print(
+            f"issues failed  {r['issues_failed']} skipped after a fetch error"
+            " (not marked done; a later run inside the overlap window retries them)"
+        )
+        for failure in r.get("failures") or []:
+            print(f"  {failure.get('key')}: {failure.get('error')}")
+    if r.get("truncated"):
+        print(
+            f"truncated      --limit reached: the watermark was NOT advanced, so the"
+            f" issues not read ({r['issues_seen']} seen) stay queued for the next run"
+        )
+    if r.get("resumed"):
+        print(
+            f"resumed        from {r.get('resumed_from') or '—'}"
+            f" · {r.get('events_carried', 0)} event(s) carried"
+            f" · {r.get('issues_skipped_resumed', 0)} issue(s) already checkpointed"
+        )
     counts = r["counts"]
     print(
         f"objects        {r['objects']}  (epics={counts['epics']}, stories={counts['stories']},"
@@ -458,6 +476,7 @@ def main(argv: list[str] | None = None) -> int:
                 identity_path=args.identity,
                 progress=progress,
                 projects=projects,
+                checkpoint_every=args.checkpoint_every,
             )
         except (JiraError, BitbucketError) as exc:
             print(f"jira error: {exc}", file=sys.stderr)

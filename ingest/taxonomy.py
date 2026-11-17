@@ -108,13 +108,19 @@ OBJECT_TYPES = frozenset(
 
 # A commit hash: DC uses full 40-hex, abbreviated forms are still hashes.
 HASH = re.compile(r"^[0-9a-f]{7,40}$")
-# A one-way digest of a branch ref (prd/22). The branch *name* never crosses the
-# boundary -- a DC branch is ``DEL-101-add-login-form-validation``, i.e. the
-# ticket summary in slug form, which prd/02 forbids (schema.sql has no branch
-# column, and a summary is not a classification). What the stack DAG needs is
-# only equality (``A.toRef == B.fromRef``), and a digest gives that without the
-# name. 16 hex chars, the same shape as ``content_hash``.
-REF_DIGEST = re.compile(r"^[0-9a-f]{16}$")
+# A keyed one-way digest of a branch ref (prd/22). The branch *name* never
+# crosses the boundary -- a DC branch is ``DEL-101-add-login-form-validation``,
+# i.e. the ticket summary in slug form, which prd/02 forbids (schema.sql has no
+# branch column, and a summary is not a classification). What the stack DAG needs
+# is only equality (``A.toRef == B.fromRef``), and a digest gives that without
+# the name.
+#
+# 32 hex chars = 128 bits, and it is an HMAC over a per-tenant pepper held in the
+# raw zone (``ingest.pepper``): a plain 64-bit hash of ``repo|branch`` is
+# dictionary-recoverable from the store alone, because both inputs are in the
+# clear there and a branch name is a slug of the ticket summary. The width alone
+# is not the protection -- the key is.
+REF_DIGEST = re.compile(r"^[0-9a-f]{32}$")
 # A ticket key used as an *attribute* value (the epic link on a Story object).
 # Ticket keys are explicitly allowed to cross (prd/02); this shape is the same
 # default ``key_shape`` the store validates, and it can never hold prose.
@@ -214,8 +220,8 @@ OBJECT_ATTRIBUTE_SPEC: dict[str, Any] = {
     "thread_outcome": THREAD_OUTCOME,
     "classifier_version": CLASSIFIER_TOKEN,
     "merge_commit": HASH,
-    # prd/22 "stacked-PR cascade": the PR's source and target refs as one-way
-    # digests. Equal digests mean "same branch", so ``A.target_ref ==
+    # prd/22 "stacked-PR cascade": the PR's source and target refs as keyed
+    # one-way digests. Equal digests mean "same branch", so ``A.target_ref ==
     # B.source_ref`` is the stack edge -- the branch name itself is never stored
     # (prd/02; it is the ticket summary in slug form). Absent when the source
     # payload carried no ``fromRef``/``toRef`` display id, which the analysis
