@@ -357,7 +357,7 @@ class TenantApiTests(unittest.TestCase):
             self.fix_summary["events"],
         )
 
-        for path in ("/api/blocking", "/api/queues", "/api/delivery"):
+        for path in ("/api/blocking", "/api/queues", "/api/delivery", "/api/sprints"):
             with self.subTest(path=path):
                 self.assertEqual(get(path, tenant="fix").status, 200)
 
@@ -390,7 +390,8 @@ class TenantApiTests(unittest.TestCase):
 
     # -- errors are clean and never a fallback ------------------------------ #
     def test_unknown_tenant_is_a_404_that_lists_the_real_ones(self):
-        for path in ("/api/events", "/api/health", "/api/objects", "/api/blocking"):
+        for path in ("/api/events", "/api/health", "/api/objects", "/api/blocking",
+                     "/api/sprints"):
             with self.subTest(path=path):
                 reply = get(path, tenant="nope")
                 self.assertEqual(reply.status, 404, reply.text)

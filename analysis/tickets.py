@@ -270,18 +270,8 @@ def _segments(court: ballcourt.BallCourt, cycle: jira.Cycle | None) -> dict:
 # sprints, worklogs and events
 # --------------------------------------------------------------------------- #
 def _sprint_id(event: dict) -> int | None:
-    attrs = jira.attributes(event)
-    sid = attrs.get("sprint_id")
-    if sid is not None:
-        try:
-            return int(sid)
-        except (TypeError, ValueError):
-            return None
-    for linked in event.get("sprints") or ():
-        found = jira.sprint_id(linked)
-        if found is not None:
-            return found
-    return None
+    """The sprint an event is about (the shared reader in ``analysis.jira``)."""
+    return jira.event_sprint_id(event)
 
 
 def _sprint_rows(data: jira.JiraData, story: jira.Story | None) -> dict:

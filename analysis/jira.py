@@ -28,6 +28,7 @@ Everything else in this module follows from those rows:
 ``point_churn``         ``pointed`` events after the story started
 ``worklog_cross_check`` ``log_delay_bucket`` distribution + logged vs active hours
 ``jira_conformance``    started before refined, re-pointed after start, carry-over
+``sprints``             the sprint lens (prd/26 P6): bands, scope, carry-over
 ======================  ==========================================================
 
 Honesty rules this module follows, in the same spirit as ``ballcourt``:
@@ -260,6 +261,26 @@ def _sprint_id(object_id: str) -> int | None:
     """``SPRINT:PROJ#3`` -> ``3`` (the id the events carry as an attribute)."""
     text = str(object_id).partition("#")[2]
     return int(text) if text.isdigit() else None
+
+
+def event_sprint_id(event: dict) -> int | None:
+    """The sprint an event is about: its ``sprint_id`` attribute, else its link.
+
+    The attribute is what the reducer writes; the ``SPRINT:`` object link is the
+    store's own answer when a row was written by an older reducer. One helper,
+    so the sprint lens and the ticket view cannot read membership differently.
+    """
+    sid = _attrs(event).get("sprint_id")
+    if sid is not None:
+        try:
+            return int(sid)
+        except (TypeError, ValueError):
+            return None
+    for linked in event.get("sprints") or ():
+        found = _sprint_id(linked)
+        if found is not None:
+            return found
+    return None
 
 
 def load(con, court: ballcourt.BallCourt | None = None) -> JiraData:
@@ -668,6 +689,10 @@ def waiting_time_decomposition(
             "bounds": list(SEGMENT_BOUNDS[key]),
         }
     largest = max(SEGMENT_KEYS, key=lambda key: (out_segments[key]["hours"], key))
+    for row in rows:
+        # prd/26 P5: which stories fed the largest segment, and by how much
+        row["largest_hours"] = row["segments"].get(largest)
+        row["affected"] = bool(row["largest_hours"])
     largest_examples = [
         key for key, hours in sorted(
             (
@@ -771,13 +796,18 @@ def carry_over(
             if end > first_added else 0.0
         )
         rows.append({
+            "kind": "story",
+            "object_id": story.object_id,
             "key": story.key,
+            "tickets": [story.key],
             "sprints": distinct,
             "added_events": len(added),
             "first_added": iso(first_added),
             "started": iso(started) if started else None,
             "wait_hours": wait,
             "points": story.points,
+            # prd/26 P5: every row in this metric is a carried-over story
+            "affected": True,
         })
     rows.sort(key=lambda row: (-row["wait_hours"], row["key"]))
     carried = len(rows)
@@ -806,6 +836,311 @@ def carry_over(
             "membership to check for carry-over",
             with_sprints > 0,
         ),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 2b. the sprint lens (prd/26 P6)
+# --------------------------------------------------------------------------- #
+def _membership(story: Story) -> dict:
+    """One story's sprint membership: the sprints, the current one, the marks.
+
+    ``sprint_added`` is the commitment; ``sprint_removed`` takes it back. The
+    **current** sprint is the last add whose sprint was not removed after it, so
+    a story pulled from a sprint back to the backlog reads as out of scope
+    rather than as still committed.
+
+    ``carried_over`` follows :func:`carry_over`: more than one *distinct* sprint
+    in the adds. A move out and back into the same sprint is not carry-over.
+    """
+    adds: list[tuple[datetime, int, bool]] = []
+    removes: dict[int, datetime] = {}
+    for event in story.of("sprint_added"):
+        sid = event_sprint_id(event)
+        if sid is not None:
+            adds.append((event["_ts"], sid, bool(_attrs(event).get("at_start"))))
+    for event in story.of("sprint_removed"):
+        sid = event_sprint_id(event)
+        if sid is not None:
+            removes[sid] = max(removes.get(sid, event["_ts"]), event["_ts"])
+    sprints: list[int] = []
+    for _, sid, _ in adds:
+        if sid not in sprints:
+            sprints.append(sid)
+    current: int | None = None
+    for ts, sid, _ in adds:
+        if removes.get(sid) is not None and removes[sid] > ts:
+            continue
+        current = sid
+    return {
+        "sprints": sprints,
+        "first_sprint": sprints[0] if sprints else None,
+        "last_sprint": sprints[-1] if sprints else None,
+        "current_sprint": current,
+        "added": iso(adds[0][0]) if adds else None,
+        "removed": iso(max(removes.values())) if removes else None,
+        "at_start": any(at_start for _, _, at_start in adds),
+        "carried_over": len(sprints) > 1,
+        "adds": len(adds),
+    }
+
+
+def sprints(
+    court: ballcourt.BallCourt,
+    data: JiraData,
+    window: tuple[datetime, datetime],
+) -> dict:
+    """The sprint lens (prd/26 P6): bands, scope and carry-over.
+
+    Three questions, one payload:
+
+    * **bands** — one per SPRINT object over its measured window: ``start`` to
+      its completion (``closed_at``) for a closed sprint, ``start`` to the
+      snapshot for the active one. ``planned_end`` is the plan, never the band:
+      an active sprint's band ends where the data ends, so it cannot pretend to
+      have run to a date the store has not seen.
+    * **scope** — of the stories created in the window, how many were ever
+      committed to a sprint and how many were not (``out_of_sprint`` lists
+      them). Per sprint, the committed stories, their points, and how many are
+      done — the sprint's own scope, not the window's.
+    * **carry-over** — a story whose ``sprint_added`` names more than one
+      distinct sprint. The mark is per story row and per sprint
+      (``carried_in`` / ``carried_out``), so the timeline can draw it on the
+      lane and the strip can count it.
+
+    Sprint membership is computed over **every** story in the store (a sprint's
+    own scope must not shrink to whatever the timeframe happens to include),
+    while ``scope`` and ``rows`` describe the cohort created in the window.
+    """
+    stories = list(data.stories)
+    in_window = cohort(data, window)
+
+    memberships: dict[str, dict] = {}
+    for story in stories:
+        memberships[story.key] = _membership(story)
+
+    # -- per-sprint scope ---------------------------------------------------
+    sprint_rows: dict[int, dict] = {}
+    for sid, sprint in sorted(
+        ((sid, sprint) for sid, sprint in data.sprints.items()
+         if sprint.get("id") is not None),
+        key=lambda item: (
+            item[1].get("start") or datetime.max, item[0]
+        ),
+    ):
+        band_start = sprint.get("start")
+        band_end = sprint.get("end") or court.snapshot
+        sprint_rows[sprint["id"]] = {
+            "sprint_id": sprint["id"],
+            "object_id": sprint.get("object_id"),
+            "state": sprint.get("state"),
+            "start": iso(sprint["start"]) if sprint.get("start") else None,
+            "end": iso(sprint["end"]) if sprint.get("end") else None,
+            "planned_end": sprint.get("planned_end"),
+            "goal_class": sprint.get("goal_class"),
+            "open": sprint.get("end") is None,
+            "band_start": iso(band_start) if band_start else None,
+            # an active sprint's band ends at the data, not at the plan
+            "band_end": iso(band_end) if band_start else None,
+            "days": (
+                round((band_end - band_start).total_seconds() / 86400.0, 1)
+                if band_start and band_end and band_end > band_start else None
+            ),
+            "stories": [],
+            "current_stories": [],
+            "carried_in": [],
+            "carried_out": [],
+            "points": 0,
+            "done_points": 0,
+            "done": 0,
+            "open_stories": 0,
+        }
+
+    by_key = {story.key: story for story in stories}
+    for key, membership in memberships.items():
+        story = by_key.get(key)
+        if story is None:
+            continue
+        done = story.state == "done" or _first_status(story, "done") is not None
+        for index, sid in enumerate(membership["sprints"]):
+            row = sprint_rows.get(sid)
+            if row is None:
+                # a membership for a sprint object the store did not keep:
+                # still a fact, reported without a band rather than dropped
+                row = sprint_rows[sid] = {
+                    "sprint_id": sid,
+                    "object_id": None,
+                    "state": None,
+                    "start": None,
+                    "end": None,
+                    "planned_end": None,
+                    "goal_class": None,
+                    "open": False,
+                    "band_start": None,
+                    "band_end": None,
+                    "days": None,
+                    "stories": [],
+                    "current_stories": [],
+                    "carried_in": [],
+                    "carried_out": [],
+                    "points": 0,
+                    "done_points": 0,
+                    "done": 0,
+                    "open_stories": 0,
+                    "note": "no SPRINT object carries this id; the membership event does",
+                }
+            row["stories"].append(key)
+            if membership["current_sprint"] == sid:
+                row["current_stories"].append(key)
+            if membership["carried_over"]:
+                if index > 0:
+                    row["carried_in"].append(key)
+                if index < len(membership["sprints"]) - 1:
+                    row["carried_out"].append(key)
+            points = story.points or 0
+            row["points"] += points
+            if done:
+                row["done"] += 1
+                row["done_points"] += points
+            else:
+                row["open_stories"] += 1
+
+    bands: list[dict] = []
+    for sid in sorted(
+        sprint_rows,
+        key=lambda sid: (
+            sprint_rows[sid]["start"] or "9999", sid
+        ),
+    ):
+        row = sprint_rows[sid]
+        row["stories"].sort()
+        row["current_stories"].sort()
+        row["carried_in"].sort()
+        row["carried_out"].sort()
+        row["story_count"] = len(row["stories"])
+        row["current_count"] = len(row["current_stories"])
+        bands.append(row)
+
+    # -- scope over the window's cohort -------------------------------------
+    # "in a sprint" is the *current* commitment: a story pulled back to the
+    # backlog is out of scope again, and is reported separately rather than
+    # counted as planned because it was planned once.
+    ever = [story for story in in_window if memberships[story.key]["sprints"]]
+    planned = [
+        story for story in in_window
+        if memberships[story.key]["current_sprint"] is not None
+    ]
+    unplanned = [
+        story for story in in_window
+        if memberships[story.key]["current_sprint"] is None
+    ]
+    never_added = [story for story in unplanned if not memberships[story.key]["sprints"]]
+    removed = [story for story in unplanned if memberships[story.key]["sprints"]]
+    carried = [story for story in in_window if memberships[story.key]["carried_over"]]
+
+    rows: list[dict] = []
+    for story in in_window:
+        membership = memberships[story.key]
+        rows.append({
+            "kind": "story",
+            "object_id": story.object_id,
+            "key": story.key,
+            "tickets": [story.key],
+            "state": story.state,
+            "points": story.points,
+            "created": iso(story.start) if story.start else None,
+            **membership,
+            "in_sprint": membership["current_sprint"] is not None,
+            "affected": membership["carried_over"],
+        })
+    rows.sort(key=lambda row: (
+        not row["carried_over"],
+        row["first_sprint"] if row["first_sprint"] is not None else 10 ** 9,
+        row["key"],
+    ))
+
+    carry_rows = [
+        {
+            "kind": "story",
+            "object_id": row["object_id"],
+            "key": row["key"],
+            "tickets": [row["key"]],
+            "sprints": row["sprints"],
+            "first_sprint": row["first_sprint"],
+            "last_sprint": row["last_sprint"],
+            "points": row["points"],
+            "added": row["added"],
+            "affected": True,
+        }
+        for row in rows if row["carried_over"]
+    ]
+
+    available = bool(data.sprints) or any(
+        membership["sprints"] for membership in memberships.values()
+    )
+    if not data.sprints and not available:
+        note = (
+            "no SPRINT object and no 'sprint_added' event in this store: the "
+            "sprint lens needs the Jira ingest (prd/04)"
+        )
+    elif not data.sprints:
+        note = (
+            "the store holds sprint memberships but no SPRINT objects: "
+            "membership is shown without bands"
+        )
+    elif not planned:
+        note = (
+            "no story created in this window was committed to a sprint: the "
+            "bands are the store's sprints, the scope is the window's cohort"
+        )
+    else:
+        note = None
+    return {
+        "available": available,
+        "sprints": bands,
+        "count": len(bands),
+        # "active" is the store's own state, not merely a missing completion:
+        # a closed sprint whose completion timestamp was lost still has a band
+        # that must stop at the snapshot, but it is not the current sprint.
+        "active": next(
+            (
+                row["sprint_id"] for row in bands
+                if row["state"] == "active" or (row["open"] and not row["state"])
+            ),
+            None,
+        ),
+        "scope": {
+            "stories": len(in_window),
+            "in_sprint": len(planned),
+            "out_of_sprint": len(unplanned),
+            "in_share": _share(len(planned), len(in_window)),
+            "out_share": _share(len(unplanned), len(in_window)),
+            # the two reasons a story is out of scope, never folded together
+            "never_in_sprint": len(never_added),
+            "removed_to_backlog": len(removed),
+            # the drill-down list: every story not currently in a sprint
+            "unplanned": sorted(story.key for story in unplanned),
+        },
+        "carry_over": {
+            "count": len(carried),
+            # the same denominator as metrics.carry_over: stories ever committed
+            "share": _share(len(carried), len(ever)),
+            "stories": sorted(story.key for story in carried),
+            "sprints_involved": len({
+                sid for story in carried for sid in memberships[story.key]["sprints"]
+            }),
+            "rows": carry_rows,
+            "target_share": CARRY_OVER_SHARE_TARGET,
+        },
+        "rows": rows,
+        "membership_basis": "all stories in the store",
+        "heuristic": (
+            "a story is in a sprint when a 'sprint_added' names it; the current "
+            "sprint is the last add not removed afterwards; carried over = more "
+            "than one distinct sprint id in its adds; a band spans a SPRINT "
+            "object's start to its completion, or to the snapshot while active"
+        ),
+        "note": note,
     }
 
 
@@ -841,12 +1176,16 @@ def point_churn(
         churned_events += len(after)
         last = after[-1]
         rows.append({
+            "kind": "story",
+            "object_id": story.object_id,
             "key": story.key,
+            "tickets": [story.key],
             "events": len(after),
             "started": iso(started),
             "last_pointed": iso(last["_ts"]),
             "points": _attrs(last).get("points", story.points),
             "object_points": story.points,
+            "affected": True,
         })
     churned = len(rows)
     return {
@@ -904,21 +1243,47 @@ def worklog_cross_check(
     stories_with_worklogs = 0
     active_hours = 0.0
     stories_with_prs = 0
+    rows: list[dict] = []
     for story in stories:
         entries = story.of("worklogged")
         if entries:
             stories_with_worklogs += 1
+        story_hours = 0.0
+        story_delays: list[float] = []
+        story_late = 0
         for event in entries:
             attributes = _attrs(event)
             seconds = attributes.get("time_spent_seconds") or 0
+            story_hours += float(seconds) / 3600.0
             logged_hours += float(seconds) / 3600.0
             worklogs += 1
             bucket = attributes.get("log_delay_bucket")
             if bucket in buckets:
                 buckets[bucket] += 1
+                if bucket in ("within_week", "late"):
+                    story_late += 1
             delay = attributes.get("log_delay_seconds")
             if delay is not None:
                 delays_days.append(float(delay) / 86400.0)
+                story_delays.append(float(delay) / 86400.0)
+        if entries:
+            # prd/26 P5: the stories behind "logging is N days late", so the
+            # rule opens into the worklogs that make the number.
+            rows.append({
+                "kind": "story",
+                "object_id": story.object_id,
+                "key": story.key,
+                "tickets": [story.key],
+                "state": story.state,
+                "worklogs": len(entries),
+                "logged_hours": round(story_hours, 2),
+                "late_worklogs": story_late,
+                "mean_delay_days": (
+                    round(sum(story_delays) / len(story_delays), 2)
+                    if story_delays else None
+                ),
+                "affected": story_late > 0,
+            })
         if story.prs:
             stories_with_prs += 1
             for state in story.prs:
@@ -965,6 +1330,11 @@ def worklog_cross_check(
         "late_share_target": WORKLOG_LATE_SHARE_TARGET,
         "ratio_low": WORKLOG_RATIO_LOW,
         "ratio_high": WORKLOG_RATIO_HIGH,
+        "rows": sorted(
+            rows,
+            key=lambda row: (not row["affected"], -row["late_worklogs"],
+                             -(row["mean_delay_days"] or 0.0), row["key"]),
+        ),
         "heuristic": (
             "delay = worklog.created − worklog.started, bucketed by the ingest "
             "(same_day / next_day / within_week / late); active_hours is PR "
@@ -1005,23 +1375,57 @@ def conformance(
     started_before: list[str] = []
     started_unrefined: list[str] = []
     pr_before_start: list[str] = []
+    rows: list[dict] = []
     for story in stories:
         cycle = _cycle(story)
         started = cycle.boundaries["started"]
         if started is None:
             continue
         refined = cycle.boundaries["refined"]
+        violations: list[str] = []
         if refined is None:
             started_unrefined.append(story.key)
         elif started < refined:
             started_before.append(story.key)
+            violations.append("started_before_refined")
         pr_open = cycle.boundaries["pr_open"]
         if pr_open is not None and pr_open < started:
             pr_before_start.append(story.key)
+        if violations:
+            # prd/26 P5: the story behind each violation, so the rule can be
+            # opened into the tickets that broke the order.
+            rows.append({
+                "kind": "story",
+                "object_id": story.object_id,
+                "key": story.key,
+                "tickets": [story.key],
+                "state": story.state,
+                "points": story.points,
+                "started": iso(started),
+                "refined": iso(refined) if refined else None,
+                "violations": violations,
+                "affected": True,
+            })
     carry = carry_metric if carry_metric is not None else carry_over(court, data, window)
     churn = churn_metric if churn_metric is not None else point_churn(court, data, window)
     started = sum(1 for story in stories if _first_status(story, "in_progress"))
     violations = len(started_before) + churn["churned"] + carry["carried_over"]
+    # the churn and carry-over rows already carry the story key; merge them in
+    # so one drill-down answers "which tickets" for every Jira conformance rule
+    for row in churn["rows"]:
+        rows.append({
+            "kind": "story", "key": row["key"], "tickets": [row["key"]],
+            "object_id": f"STORY:{row['key']}", "points": row.get("points"),
+            "started": row.get("started"), "refined": row.get("last_pointed"),
+            "violations": ["re_pointed_after_start"], "affected": True,
+        })
+    for row in carry["rows"]:
+        rows.append({
+            "kind": "story", "key": row["key"], "tickets": [row["key"]],
+            "object_id": f"STORY:{row['key']}", "points": row.get("points"),
+            "sprints": row.get("sprints"),
+            "violations": ["carried_over"], "affected": True,
+        })
     return {
         "available": bool(stories),
         "stories": len(stories),
@@ -1035,6 +1439,7 @@ def conformance(
         "violations": violations,
         "examples": sorted(started_before)[:5],
         "unrefined_examples": sorted(started_unrefined)[:5],
+        "rows": rows,
         "heuristic": (
             "refined = first 'pointed'; started = first status_changed to "
             "in_progress; a story with no pointed event is reported as "
