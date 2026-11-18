@@ -636,5 +636,56 @@ class JiraProbeCliTests(unittest.TestCase):
         self.assertEqual(built, {"dc": 0, "cloud": 1})
 
 
+class JiraDevShortcutTests(unittest.TestCase):
+    """The non-probe ``python3 -m ingest --jira --live`` path unpacks the whole
+    ``_jira_transport`` tuple.
+
+    ``_run_jira``'s probe branch was fixed to unpack ``(transport, source,
+    limit, client)``, but the scrape branch still unpacked three values, so
+    ``python3 -m ingest --jira --live`` died with ``ValueError: too many values
+    to unpack`` before reaching the scrape. Drive the real CLI with a stubbed
+    transport/client and a stubbed ``run_jira``: no network, no store.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        config = self.root / "empty.toml"
+        config.write_text("")
+        self.env = mock.patch.dict(os.environ, {
+            "MEGASPEED_CONFIG": str(config),
+            "MEGASPEED_TICKET_PROJECTS": "PROJ",
+            "MEGASPEED_QUIET": "1",
+            "MEGASPEED_JIRA_BASE_URL": "http://jira.invalid",
+            "MEGASPEED_JIRA_TOKEN": "test-token",
+            "MEGASPEED_JIRA_CLOUD_BASE_URL": "",
+            "MEGASPEED_JIRA_CLOUD_TOKEN": "",
+        })
+        self.env.start()
+
+    def tearDown(self):
+        self.env.stop()
+        self.tmp.cleanup()
+
+    def test_live_run_reaches_the_scrape(self):
+        calls = []
+
+        def fake_run_jira(cfg, transport, source, limit, **kwargs):
+            calls.append((source, limit))
+            return {"ok": True, "verified": True, "objects": 0, "events": 0}
+
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch("ingest.scrape_cli.HttpTransport", lambda *a, **k: object()), \
+                mock.patch("ingest.jira.JiraClient", _ProbeClientStub), \
+                mock.patch("ingest.live.run_jira", fake_run_jira), \
+                contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = ingest_main(["--jira", "--live", "--json"])
+        self.assertEqual(code, 0, err)
+        # the 4-tuple was unpacked: run_jira got the source name, and the run
+        # completed instead of raising ValueError mid-unpack.
+        self.assertEqual(calls, [("jira-dc", None)])
+        self.assertIn('"ok": true', out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

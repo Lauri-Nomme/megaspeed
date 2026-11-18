@@ -314,7 +314,7 @@ def _run_jira(cfg: Config, args) -> int:
     if args.project:
         projects = tuple(str(p).strip().upper() for p in args.project if str(p).strip())
     try:
-        transport, source, limit = _jira_transport(cfg, args)
+        transport, source, limit, _client = _jira_transport(cfg, args)
         report = run_jira(
             cfg,
             transport,
