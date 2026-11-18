@@ -465,6 +465,33 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .blocking-stage { height: clamp(420px, 62vh, 720px); }
 .queue-stage { min-height: 200px; }
 
+/* prd/33 §3: the timeline is a virtual list. The stage is one viewport tall,
+ * `#timeline-scroll` scrolls a spacer of the lane list's full height, and the
+ * canvas is pinned at the top of that scrollport — so the bitmap never grows
+ * with the store (a 5,240-PR store would ask for 78,930 px, past Chrome's
+ * 65,535 px canvas limit, where it paints nothing at all). */
+.timeline-stage { height: clamp(360px, 72vh, 1100px); }
+.timeline-scroll {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(140, 152, 212, .35) transparent;
+  overscroll-behavior-y: auto;
+}
+.timeline-scroll::-webkit-scrollbar { width: 10px; }
+.timeline-scroll::-webkit-scrollbar-thumb {
+  background: rgba(140, 152, 212, .30);
+  border-radius: 5px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+#timeline { position: sticky; top: 0; z-index: 1; }
+.lane-spacer { width: 1px; }
+/* the empty state and the tooltip float over the pinned canvas */
+.timeline-stage .empty { z-index: 8; }
+
 .tip {
   position: absolute;
   z-index: 8;
@@ -1300,6 +1327,9 @@ a.child.ticket-link { color: var(--link); }
 
   /* -- timeline / blocking toolbars ----------------------------------- */
   .zoom button { min-width: 44px; }
+  /* prd/33 §3: on a phone the lane viewport is what is left under the top bar
+     and the toolbars; the lane list scrolls inside it, one finger at a time. */
+  .timeline-stage { height: clamp(300px, 58dvh, 640px); }
   #blocking-lens { display: flex; flex-wrap: wrap; gap: 4px; }
   #blocking-lens button {
     border-left-width: 1px;

@@ -118,6 +118,10 @@ const state = {
 
 const timeline = new Timeline({
   canvas: $('timeline'),
+  // prd/33 §3: the lane list is virtualised — the canvas is one viewport tall
+  // and this container scrolls a spacer of the full lane height.
+  scroller: $('timeline-scroll'),
+  spacer: $('lane-spacer'),
   tip: $('tip'),
   onStats: (stats) => {
     // B6: the top bar follows the timeline's real window, and says "custom"

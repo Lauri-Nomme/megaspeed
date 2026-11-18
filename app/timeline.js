@@ -66,6 +66,16 @@ const METRICS = {
   L: { lane: 30, bar: 21, label: 12, marker: 3.8 },
 };
 
+/* prd/33 §3: the canvas is a *window* on the lane list, not the list itself.
+ * `#timeline-scroll` scrolls a spacer of the full lane height and the canvas is
+ * pinned at its top, so the bitmap is never taller than the viewport — which is
+ * what keeps a 5,240-PR store (78,930 px of lanes) under Chrome's 65,535 px
+ * canvas limit instead of silently painting nothing. */
+const DEFAULT_VIEW_H = 600;
+const MIN_VIEW_H = 240;
+/** Extra rows drawn above/below the viewport so a lane never pops in mid-edge. */
+const OVERSCAN = 1;
+
 const GUTTER = 176;
 // prd/28: on a 412px phone the 176px gutter would leave ~226px of plot; the
 // labels shrink to the ticket key (and its PR number) so the time axis keeps
@@ -205,10 +215,16 @@ function phaseFor(state, pr, next, commits) {
 }
 
 export class Timeline {
-  constructor({ canvas, tip, onStats, onSelect, onTicket, onSelection, onSprint }) {
+  constructor({ canvas, tip, scroller = null, spacer = null, onStats, onSelect, onTicket, onSelection, onSprint }) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.tip = tip;
+    // prd/33 §3: the scroll container and the spacer that gives it the lane
+    // list's full height. Both are optional so a headless test can drive the
+    // layout with a stub; without them the canvas falls back to one viewport.
+    this.scroller = scroller;
+    this.spacer = spacer;
+    this._spacerH = -1;
     this.onStats = onStats;
     this.onSelect = onSelect;
     this.onTicket = onTicket;
@@ -320,6 +336,9 @@ export class Timeline {
       if (key) this.storyEpic.set(key, epic);
     }
     this._storyCache = null;
+    this._rowCache = null;
+    this._statsCache = null;
+    this._epicPrs = null;
     for (const obj of objects) {
       if (obj.object_type === 'PR') {
         prs.set(obj.object_id, {
@@ -570,6 +589,8 @@ export class Timeline {
   }
 
   phaseStats() {
+    // Cached per setData: a scroll frame must not re-walk every PR's life.
+    if (this._statsCache) return this._statsCache;
     const stats = new Map();
     for (const pr of this.prs) {
       for (const seg of this.lifecycle(pr)) {
@@ -581,6 +602,7 @@ export class Timeline {
         stats.set(seg.phase, entry);
       }
     }
+    this._statsCache = stats;
     return stats;
   }
 
@@ -588,13 +610,18 @@ export class Timeline {
   laneRows() {
     if (this.dim === 'story') return this.storyRows();
     if (this.dim === 'object') {
-      return this.prs.map((pr) => ({
+      // The row list is a function of the loaded data only, and `layout()` runs
+      // on every scroll frame now — build it once per setData, not per frame.
+      if (this._objectRows && this._objectRows.prs === this.prs) return this._objectRows.rows;
+      const rows = this.prs.map((pr) => ({
         key: `${pr.repo}#${pr.number}`,
         pr,
         ticket: pr.ticket,
         count: pr.events.length,
         label: `${pr.ticket ? `${pr.ticket} ` : ''}#${pr.number} ${pr.repo}`,
       }));
+      this._objectRows = { prs: this.prs, rows };
+      return rows;
     }
     if (this.dim === 'queue') {
       return QUEUE_ORDER.map((key) => {
@@ -604,10 +631,13 @@ export class Timeline {
     }
     // B4: rows come from ALL events, so toggling a legend key never re-sorts
     // the lanes. Counts are totals, not "visible" counts.
+    if (this._actorRows && this._actorRows.events === this.events) return this._actorRows.rows;
     const counts = this.activityCounts();
     const keys = [...new Set(this.events.map((e) => e.actor))];
     keys.sort((a, b) => (counts.get(b) - counts.get(a)) || a.localeCompare(b));
-    return keys.map((key) => ({ key, count: counts.get(key) }));
+    const rows = keys.map((key) => ({ key, count: counts.get(key) }));
+    this._actorRows = { events: this.events, rows };
+    return rows;
   }
 
   /** Stories as lanes with their PRs nested beneath (prd/25, epic → story → PR).
@@ -673,6 +703,17 @@ export class Timeline {
     // hiding it when PRs nest made a story row look parentless.
     const hasEpics = [...groups.values()].some((group) => group.epic);
     const showEpics = hasEpics && (this.isPhone() || (!nested && span > STORY_EPIC_SPAN));
+    // The row list is a function of the data and of the two zoom thresholds, and
+    // `layout()` runs on every scroll frame — so build it once per (data, zoom)
+    // instead of re-allocating 7,920 rows per frame at 4,000 stories.
+    const cache = this._rowCache;
+    if (cache && cache.groups === groups && cache.nested === nested
+        && cache.showEpics === showEpics && cache.prs === this.prs) {
+      this._storyNested = nested;
+      this._storyEpics = showEpics;
+      this._epicPrs = cache.epicPrs;
+      return cache.rows;
+    }
     const stories = [...groups.values()].sort((a, b) => {
       const start = (group) => Math.min(
         ...group.prs.map((pr) => pr.created),
@@ -681,12 +722,27 @@ export class Timeline {
       );
       return start(a) - start(b) || a.story.localeCompare(b.story);
     });
+    // prd/33 §5.3: the epic header needs its members, and the epic bracket and
+    // tooltip need its PRs. Both used to be a `stories.filter(...)` *inside*
+    // the loop over stories — O(stories²) at 4,000 stories (88 ms). One pass
+    // builds both indexes, so the rows stay linear.
+    const epicMembers = new Map();
+    for (const group of stories) {
+      if (!group.epic) continue;
+      const list = epicMembers.get(group.epic) || [];
+      list.push(group);
+      epicMembers.set(group.epic, list);
+    }
+    const epicPrs = new Map();
+    for (const [key, list] of epicMembers) epicPrs.set(key, list.flatMap((group) => group.prs));
+    this._epicPrs = epicPrs;
+
     const rows = [];
     let epic = null;
     for (const group of stories) {
       if (showEpics && group.epic && group.epic !== epic) {
         epic = group.epic;
-        const members = stories.filter((entry) => entry.epic === epic);
+        const members = epicMembers.get(epic) || [];
         rows.push({
           key: `epic:${epic}`,
           kind: 'epic',
@@ -728,6 +784,7 @@ export class Timeline {
     }
     this._storyNested = nested;
     this._storyEpics = showEpics;
+    this._rowCache = { groups, nested, showEpics, prs: this.prs, rows, epicPrs };
     return rows;
   }
 
@@ -750,30 +807,107 @@ export class Timeline {
   }
 
   // ---------------------------------------------------------------- layout
+  /** The height of the lane viewport: the scroll container, never the content.
+   *  A hidden page reports 0, so fall back to a sane viewport rather than a
+   *  1px canvas that the first visible frame would have to fix up. */
+  viewportHeight() {
+    const box = this.scroller || this.canvas.parentElement;
+    const h = box && box.clientHeight;
+    if (h) return Math.max(MIN_VIEW_H, Math.round(h));
+    return DEFAULT_VIEW_H;
+  }
+
+  /** How far the lane list is scrolled (0 when there is no container). */
+  scrollPos() {
+    const top = this.scroller && this.scroller.scrollTop;
+    return Number.isFinite(top) && top > 0 ? top : 0;
+  }
+
+  /** Give the scroll container the lane list's height, so the scrollbar is
+   *  proportional to the store instead of to the canvas. */
+  setSpacer(height) {
+    if (!this.spacer || !this.spacer.style) return;
+    const h = Math.max(0, Math.round(height));
+    if (h === this._spacerH) return;
+    this._spacerH = h;
+    this.spacer.style.height = `${h}px`;
+  }
+
+  /** Scroll the lane list by one screenful (PageUp / PageDown). */
+  scrollLanes(direction) {
+    const g = this.geom;
+    if (!g || !this.scroller) return;
+    const step = Math.max(g.laneH * 3, g.height - g.laneTop - g.laneH);
+    this.scroller.scrollTop = Math.max(
+      0,
+      Math.min(g.maxScroll, this.scrollPos() + direction * step),
+    );
+    this.schedule();
+  }
+
+  /** The slice of rows a viewport can show, in content space.
+   *
+   * Rows are laid out at `top + i * rowH`; the content is translated up by
+   * `scrollTop`, and the canvas is only `height` tall. One row of overscan on
+   * each side keeps a partly visible lane drawn instead of popping in. */
+  rowWindow(top, rowH, count, scrollTop, height, overscan = OVERSCAN) {
+    if (!(rowH > 0) || !(count > 0)) return { first: 0, last: 0 };
+    const first = Math.max(0, Math.floor((scrollTop - top) / rowH) - overscan);
+    const last = Math.min(count, Math.ceil((scrollTop + height - top) / rowH) + overscan);
+    return { first: Math.min(first, last), last };
+  }
+
   layout() {
     const m = METRICS[this.density];
     const lanes = this.laneRows();
     const objectMode = this.dim === 'object' || this.dim === 'story';
     const laneH = objectMode ? Math.max(m.bar + 6, m.lane) : m.lane;
     const barRows = objectMode ? [] : this.prs;
-    const height = AXIS_H + HIST_H + HEADER_H + lanes.length * laneH +
-      (objectMode ? 0 : SECTION_GAP + HEADER_H + barRows.length * m.bar) + BOTTOM;
+    const laneTop = AXIS_H + HIST_H + HEADER_H;
+    const laneBottom = laneTop + lanes.length * laneH;
+    const barTop = laneBottom + SECTION_GAP + HEADER_H;
+    // The lane list in content pixels. This is what the scroll container
+    // scrolls through; the canvas itself is only ever one viewport tall
+    // (prd/33 §3: 5,240 PRs = 78,930 px of lanes, past Chrome's 65,535 px
+    // canvas limit, where it silently paints nothing).
+    const contentHeight = objectMode ? laneBottom + BOTTOM
+      : barTop + barRows.length * m.bar + BOTTOM;
     const width = this.canvas.parentElement.clientWidth || 1200;
     const gutter = this.isPhone() ? GUTTER_PHONE : GUTTER;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const viewport = this.viewportHeight();
+    // The canvas is the window on the list, so it can never outgrow the
+    // window — that is what removes the 65,535 px cliff entirely.
+    const height = Math.max(1, Math.min(contentHeight, viewport));
+    const maxScroll = Math.max(0, contentHeight - height);
+    const scrollTop = Math.min(this.scrollPos(), maxScroll);
+    this.setSpacer(maxScroll);
     this.canvas.width = Math.round(width * dpr);
     this.canvas.height = Math.round(height * dpr);
     this.canvas.style.height = `${height}px`;
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.geom = {
-      width, height, gutter, plotW: Math.max(80, width - gutter - 10),
+      width, height, contentHeight, scrollTop, maxScroll,
+      gutter, plotW: Math.max(80, width - gutter - 10),
       axisH: AXIS_H, histH: HIST_H, headerH: HEADER_H, laneH, barH: m.bar,
       label: m.label, marker: m.marker, objectMode,
-      laneTop: AXIS_H + HIST_H + HEADER_H,
-      barTop: AXIS_H + HIST_H + HEADER_H + lanes.length * laneH + SECTION_GAP + HEADER_H,
-      lanes, barRows,
+      laneTop, laneBottom, barTop, lanes, barRows,
+      window: {
+        lanes: this.rowWindow(laneTop, laneH, lanes.length, scrollTop, height),
+        bars: this.rowWindow(barTop, m.bar, barRows.length, scrollTop, height),
+      },
     };
     return this.geom;
+  }
+
+  /** Draw inside the lane viewport only, so a row scrolled under the pinned
+   *  axis/histogram is clipped instead of overpainting them. */
+  withLaneClip(ctx, g, draw) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(0, g.laneTop, g.width, Math.max(0, g.height - g.laneTop));
+    ctx.clip();
+    try { draw(); } finally { ctx.restore(); }
   }
 
   // ---------------------------------------------------------------- draw
@@ -833,6 +967,10 @@ export class Timeline {
     ctx.lineTo(g.gutter + 0.5, g.height);
     ctx.stroke();
 
+    // A lane scrolled under the pinned axis/histogram must not answer hits
+    // there: the strip stays brushable and the header stays click-through.
+    this.clipRowHits(g);
+
     // B6: a tooltip may not survive the state that produced it.
     if (this.hover) {
       const ttl = this.hover.event ? this.hits.some((h) => h.kind === 'event' && h.event === this.hover.event)
@@ -887,6 +1025,21 @@ export class Timeline {
       n += 1;
     }
     return n;
+  }
+
+  /** Drop or clamp the row hits that fall outside the visible lane window. */
+  clipRowHits(g) {
+    for (const hit of this.hits) {
+      // the strip and the sprint bands own the header rows on purpose
+      if (hit.kind === 'histogram' || hit.kind === 'sprint') continue;
+      if (hit.y0 === undefined || hit.y1 === undefined) {
+        if (hit.kind === 'event' && hit.y < g.laneTop) hit.dead = true;
+        continue;
+      }
+      hit.y0 = Math.max(hit.y0, g.laneTop);
+      hit.y1 = Math.min(hit.y1, g.height);
+      if (hit.y1 <= hit.y0) hit.dead = true;
+    }
   }
 
   drawTimeBands(ctx, g) {
@@ -1101,65 +1254,85 @@ export class Timeline {
     ctx.textAlign = 'right';
     ctx.fillStyle = '#8A8D93';
     const narrow = g.gutter < 140;
-    ctx.fillText(laneHeader(this.dim, rows, { narrow }), g.gutter - 10, AXIS_H + HIST_H + 11);
+    // The section header is fitted to the gutter: `STORIES · 4,000 stories ·
+    // 0 PRs` is wider than 176px, and a clipped "ES · 4000 stories" reads like
+    // a different word.
+    ctx.fillText(
+      fit(ctx, laneHeader(this.dim, rows, { narrow }), g.gutter - 12),
+      g.gutter - 10,
+      AXIS_H + HIST_H + 11,
+    );
 
-    rows.forEach((row, i) => {
-      const y = g.laneTop + i * g.laneH;
-      if (i % 2 === 0) {
-        ctx.fillStyle = 'rgba(255,255,255,.012)';
-        ctx.fillRect(g.gutter, y, g.plotW, g.laneH);
-      }
-      ctx.strokeStyle = 'rgba(255,255,255,.035)';
-      ctx.beginPath();
-      ctx.moveTo(g.gutter, Math.round(y + g.laneH) - 0.5);
-      ctx.lineTo(g.width, Math.round(y + g.laneH) - 0.5);
-      ctx.stroke();
+    // prd/33 §3: only the rows inside the viewport (plus overscan) are drawn,
+    // so the cost of a frame is O(visible lanes), not O(store).
+    const { first, last } = g.window.lanes;
+    this.withLaneClip(ctx, g, () => {
+      for (let i = first; i < last; i += 1) {
+        const row = rows[i];
+        const y = g.laneTop + i * g.laneH - g.scrollTop;
+        if (i % 2 === 0) {
+          ctx.fillStyle = 'rgba(255,255,255,.012)';
+          ctx.fillRect(g.gutter, y, g.plotW, g.laneH);
+        }
+        ctx.strokeStyle = 'rgba(255,255,255,.035)';
+        ctx.beginPath();
+        ctx.moveTo(g.gutter, Math.round(y + g.laneH) - 0.5);
+        ctx.lineTo(g.width, Math.round(y + g.laneH) - 0.5);
+        ctx.stroke();
 
-      const hovered = this.hover && this.hover.laneKey === row.key;
-      ctx.font = `500 ${g.label}px "JetBrains Mono", ui-monospace, monospace`;
-      // A ticket key is a doorway (prd/25): the label is drawn in the link hue
-      // and the gutter is a hit target that opens the ticket detail page.
-      const linked = Boolean(row.ticket);
-      ctx.fillStyle = hovered ? '#E8E9EB' : linked ? '#94B4D4' : '#B9BBC0';
-      const text = laneLabel(row, { narrow, dim: this.dim });
-      if (narrow && this.dim === 'story') {
-        // The story hierarchy is drawn in the gutter: epic (◆) → story (▸) →
-        // PR. Left alignment + indent is what makes "under its epic" visible;
-        // right-aligned labels erased the nesting on a phone.
-        const depth = row.depth || 0;
-        const x = 5 + depth * 9;
-        ctx.textAlign = 'left';
-        ctx.fillText(fit(ctx, text, g.gutter - x - 5), x, y + g.laneH / 2);
-      } else {
-        ctx.textAlign = 'right';
-        const label = fit(ctx, text, narrow ? g.gutter - 12 : g.gutter - 22);
-        ctx.fillText(label, g.gutter - 10, y + g.laneH / 2);
-      }
-      if (linked) {
-        this.hits.push({
-          kind: 'label', x0: 0, x1: g.gutter, y0: y, y1: y + g.laneH,
-          ticket: row.ticket, laneKey: row.key,
-        });
+        const hovered = this.hover && this.hover.laneKey === row.key;
+        ctx.font = `500 ${g.label}px "JetBrains Mono", ui-monospace, monospace`;
+        // A ticket key is a doorway (prd/25): the label is drawn in the link hue
+        // and the gutter is a hit target that opens the ticket detail page.
+        const linked = Boolean(row.ticket);
+        ctx.fillStyle = hovered ? '#E8E9EB' : linked ? '#94B4D4' : '#B9BBC0';
+        const text = laneLabel(row, { narrow, dim: this.dim });
+        if (narrow && this.dim === 'story') {
+          // The story hierarchy is drawn in the gutter: epic (◆) → story (▸) →
+          // PR. Left alignment + indent is what makes "under its epic" visible;
+          // right-aligned labels erased the nesting on a phone.
+          const depth = row.depth || 0;
+          const x = 5 + depth * 9;
+          ctx.textAlign = 'left';
+          ctx.fillText(fit(ctx, text, g.gutter - x - 5), x, y + g.laneH / 2);
+        } else {
+          ctx.textAlign = 'right';
+          const label = fit(ctx, text, narrow ? g.gutter - 12 : g.gutter - 22);
+          ctx.fillText(label, g.gutter - 10, y + g.laneH / 2);
+        }
+        if (linked) {
+          this.hits.push({
+            kind: 'label', x0: 0, x1: g.gutter, y0: y, y1: y + g.laneH,
+            ticket: row.ticket, laneKey: row.key,
+          });
+        }
       }
     });
 
     if (this.dim === 'queue') {
-      this.drawQueueLanes(ctx, g, rows);
+      this.withLaneClip(ctx, g, () => this.drawQueueLanes(ctx, g, rows));
       return;
     }
     if (this.dim === 'story') {
-      this.drawStoryLanes(ctx, g, rows);
+      this.withLaneClip(ctx, g, () => this.drawStoryLanes(ctx, g, rows));
       return;
     }
     if (this.dim === 'object') {
-      this.drawObjectLanes(ctx, g, rows);
+      this.withLaneClip(ctx, g, () => this.drawObjectLanes(ctx, g, rows));
       return;
     }
-    this.drawActorLanes(ctx, g, rows);
+    this.withLaneClip(ctx, g, () => this.drawActorLanes(ctx, g, rows));
   }
 
   drawActorLanes(ctx, g, rows) {
-    const index = new Map(rows.map((r, i) => [r.key, i]));
+    const { first, last } = g.window.lanes;
+    // Scrolled past the lanes into the PR-lifecycle section: nothing to bucket.
+    if (first >= last) { this.aggregated = 0; return; }
+    // Only the actors inside the viewport can be hit, so only they are indexed
+    // and only their buckets are built — the event scan stays O(events) but the
+    // per-pixel map is O(visible lanes).
+    const index = new Map();
+    for (let i = first; i < last; i += 1) index.set(rows[i].key, i);
     const perPixel = new Map();
     for (const event of this.events) {
       if (event.t < this.view.start || event.t > this.view.end) continue;
@@ -1175,7 +1348,7 @@ export class Timeline {
     }
     let aggregated = 0;
     for (const bucket of perPixel.values()) {
-      const y = g.laneTop + bucket.lane * g.laneH + g.laneH / 2;
+      const y = g.laneTop + bucket.lane * g.laneH - g.scrollTop + g.laneH / 2;
       if (bucket.items.length > 1) {
         aggregated += bucket.items.length;
         const fromX = this.px(Math.min(...bucket.items.map((e) => e.t)));
@@ -1207,10 +1380,12 @@ export class Timeline {
   }
 
   drawObjectLanes(ctx, g, rows) {
-    rows.forEach((row, i) => {
+    const { first, last } = g.window.lanes;
+    for (let i = first; i < last; i += 1) {
+      const row = rows[i];
       const pr = row.pr;
-      if (!pr) return;
-      const y = g.laneTop + i * g.laneH;
+      if (!pr) continue;
+      const y = g.laneTop + i * g.laneH - g.scrollTop;
       const barY = y + 3;
       const barH = g.laneH - 6;
       this.paintLifecycle(ctx, g, pr, barY, barH);
@@ -1229,25 +1404,27 @@ export class Timeline {
         kind: 'bar', x0: this.px(pr.created), x1: Math.max(this.px(end), this.px(pr.created) + 2),
         y0: y, y1: y + g.laneH, pr, laneKey: row.key,
       });
-    });
+    }
   }
 
   drawStoryLanes(ctx, g, rows) {
     this.aggregated = 0;
-    rows.forEach((row, i) => {
-      const y = g.laneTop + i * g.laneH;
+    const { first, last } = g.window.lanes;
+    for (let i = first; i < last; i += 1) {
+      const row = rows[i];
+      const y = g.laneTop + i * g.laneH - g.scrollTop;
       const barY = y + 3;
       const barH = g.laneH - 6;
       if (row.kind === 'epic') {
-        const prs = rows
-          .filter((entry) => entry.kind === 'story' && entry.epic === row.epic)
-          .flatMap((entry) => entry.prs || []);
-        if (!prs.length) return;
+        // prd/33 §5.3: the members were a scan of every row per epic row; the
+        // index is built once per row build (see storyRows).
+        const prs = (this._epicPrs && this._epicPrs.get(row.epic)) || [];
+        if (!prs.length) continue;
         const from = Math.min(...prs.map((pr) => pr.created));
         const to = Math.max(...prs.map((pr) => pr.closed || this.now));
         const x0 = Math.max(g.gutter, this.px(from));
         const x1 = Math.min(g.gutter + g.plotW, this.px(to));
-        if (x1 <= x0) return;
+        if (x1 <= x0) continue;
         // A bracket, not a lifecycle: the epic has no phases of its own.
         ctx.fillStyle = 'rgba(140,152,212,.16)';
         ctx.fillRect(x0, barY, x1 - x0, barH);
@@ -1258,7 +1435,7 @@ export class Timeline {
           kind: 'epic', x0, x1, y0: y, y1: y + g.laneH,
           epic: row.epic, ticket: row.ticket, laneKey: row.key,
         });
-        return;
+        continue;
       }
       if (row.kind === 'story') {
         const prs = row.prs || [];
@@ -1298,7 +1475,7 @@ export class Timeline {
         const times = prs.length
           ? prs.flatMap((pr) => [pr.created, pr.closed || this.now])
           : storyEvents.map((event) => event.t);
-        if (!times.length) return;
+        if (!times.length) continue;
         const membership = this.sprintStory.get(row.story);
         if (membership && membership.carried_over) {
           // prd/26 P6: a story re-added across sprints is marked at its end —
@@ -1318,10 +1495,10 @@ export class Timeline {
           y0: y, y1: y + g.laneH, story: row.story, ticket: row.ticket,
           prs, events: storyEvents, membership, laneKey: row.key,
         });
-        return;
+        continue;
       }
       const pr = row.pr;
-      if (!pr) return;
+      if (!pr) continue;
       this.paintLifecycle(ctx, g, pr, barY, barH);
       if (barH >= 9) {
         for (const event of pr.events) {
@@ -1339,7 +1516,7 @@ export class Timeline {
         x1: Math.max(this.px(end), this.px(pr.created) + 2),
         y0: y, y1: y + g.laneH, pr, laneKey: row.key,
       });
-    });
+    }
   }
 
   drawQueueLanes(ctx, g, rows) {
@@ -1351,7 +1528,7 @@ export class Timeline {
         const lane = index.get(queue);
         if (lane == null) continue;
         if (seg.to < this.view.start || seg.from > this.view.end) continue;
-        const y = g.laneTop + lane * g.laneH;
+        const y = g.laneTop + lane * g.laneH - g.scrollTop;
         const x0 = Math.max(g.gutter, this.px(seg.from));
         const x1 = Math.min(g.gutter + g.plotW, this.px(seg.to));
         if (x1 <= x0) continue;
@@ -1411,56 +1588,62 @@ export class Timeline {
   }
 
   drawBars(ctx, g, m) {
-    ctx.font = `600 ${Math.max(10, g.label - 1)}px Inter, system-ui, sans-serif`;
-    ctx.textAlign = 'right';
-    ctx.fillStyle = '#8A8D93';
-    ctx.fillText(
-      g.gutter < 120 ? `PRs ${g.barRows.length}` : `PR LIFECYCLE · ${g.barRows.length}`,
-      g.gutter - 10,
-      g.barTop - 11,
-    );
-
-    g.barRows.forEach((pr, i) => {
-      const y = g.barTop + i * g.barH;
-      const isHover = this.hover && this.hover.pr === pr;
-      if (i % 2 === 0 || isHover) {
-        ctx.fillStyle = isHover ? 'rgba(99,177,255,.07)' : 'rgba(255,255,255,.012)';
-        ctx.fillRect(g.gutter, y, g.plotW, g.barH);
-      }
-
-      ctx.font = `500 ${g.label}px "JetBrains Mono", ui-monospace, monospace`;
+    // The PR lifecycle section is a virtual list too: it sits below the lanes
+    // in the same scroll, and at 5,240 PRs it is another 78k px of rows.
+    const { first, last } = g.window.bars;
+    this.withLaneClip(ctx, g, () => {
+      ctx.font = `600 ${Math.max(10, g.label - 1)}px Inter, system-ui, sans-serif`;
       ctx.textAlign = 'right';
-      ctx.fillStyle = isHover ? '#E8E9EB' : '#B9BBC0';
-      const key = pr.ticket ? `${pr.ticket} ` : '';
-      const label = g.gutter < 140
-        ? (pr.ticket ? `${pr.ticket} #${pr.number}` : `#${pr.number}`)
-        : `${key}#${pr.number} ${pr.repo}`;
-      ctx.fillText(fit(ctx, label, g.gutter < 140 ? g.gutter - 12 : g.gutter - 22), g.gutter - 10, y + g.barH / 2);
+      ctx.fillStyle = '#8A8D93';
+      ctx.fillText(
+        g.gutter < 120 ? `PRs ${g.barRows.length}` : `PR LIFECYCLE · ${g.barRows.length}`,
+        g.gutter - 10,
+        g.barTop - g.scrollTop - 11,
+      );
 
-      const barY = y + 2;
-      const barH = g.barH - 4;
-      this.paintLifecycle(ctx, g, pr, barY, barH);
-
-      if (barH >= 9) {
-        for (const event of pr.events) {
-          if (event.t < this.view.start || event.t > this.view.end) continue;
-          const state = this.stateOf(event.activity);
-          if (state === 'hide') continue;
-          const x = this.px(event.t);
-          ctx.fillStyle = rgba(ACTIVITY_COLOR[event.activity] || '#8A8D93', state === 'faint' ? 0.2 : 0.85);
-          ctx.fillRect(x, barY, 1.5, barH);
+      for (let i = first; i < last; i += 1) {
+        const pr = g.barRows[i];
+        const y = g.barTop + i * g.barH - g.scrollTop;
+        const isHover = this.hover && this.hover.pr === pr;
+        if (i % 2 === 0 || isHover) {
+          ctx.fillStyle = isHover ? 'rgba(99,177,255,.07)' : 'rgba(255,255,255,.012)';
+          ctx.fillRect(g.gutter, y, g.plotW, g.barH);
         }
-      }
-      const end = pr.closed || this.now;
-      this.hits.push({
-        kind: 'bar', x0: this.px(pr.created), x1: Math.max(this.px(end), this.px(pr.created) + 2),
-        y0: y, y1: y + g.barH, pr,
-      });
-      if (pr.ticket) {
+
+        ctx.font = `500 ${g.label}px "JetBrains Mono", ui-monospace, monospace`;
+        ctx.textAlign = 'right';
+        ctx.fillStyle = isHover ? '#E8E9EB' : '#B9BBC0';
+        const key = pr.ticket ? `${pr.ticket} ` : '';
+        const label = g.gutter < 140
+          ? (pr.ticket ? `${pr.ticket} #${pr.number}` : `#${pr.number}`)
+          : `${key}#${pr.number} ${pr.repo}`;
+        ctx.fillText(fit(ctx, label, g.gutter < 140 ? g.gutter - 12 : g.gutter - 22), g.gutter - 10, y + g.barH / 2);
+
+        const barY = y + 2;
+        const barH = g.barH - 4;
+        this.paintLifecycle(ctx, g, pr, barY, barH);
+
+        if (barH >= 9) {
+          for (const event of pr.events) {
+            if (event.t < this.view.start || event.t > this.view.end) continue;
+            const state = this.stateOf(event.activity);
+            if (state === 'hide') continue;
+            const x = this.px(event.t);
+            ctx.fillStyle = rgba(ACTIVITY_COLOR[event.activity] || '#8A8D93', state === 'faint' ? 0.2 : 0.85);
+            ctx.fillRect(x, barY, 1.5, barH);
+          }
+        }
+        const end = pr.closed || this.now;
         this.hits.push({
-          kind: 'label', x0: 0, x1: g.gutter, y0: y, y1: y + g.barH,
-          ticket: pr.ticket, laneKey: `bar:${pr.id}`,
+          kind: 'bar', x0: this.px(pr.created), x1: Math.max(this.px(end), this.px(pr.created) + 2),
+          y0: y, y1: y + g.barH, pr,
         });
+        if (pr.ticket) {
+          this.hits.push({
+            kind: 'label', x0: 0, x1: g.gutter, y0: y, y1: y + g.barH,
+            ticket: pr.ticket, laneKey: `bar:${pr.id}`,
+          });
+        }
       }
     });
   }
@@ -1469,6 +1652,7 @@ export class Timeline {
   hitTest(cx, cy) {
     for (let i = this.hits.length - 1; i >= 0; i -= 1) {
       const hit = this.hits[i];
+      if (hit.dead) continue;
       if (hit.kind === 'event') {
         if (Math.hypot(cx - hit.x, cy - hit.y) <= hit.r) return hit;
       } else if (cx >= hit.x0 - 1 && cx <= hit.x1 + 1 && cy >= hit.y0 && cy <= hit.y1) {
@@ -1541,8 +1725,7 @@ export class Timeline {
     } else if (hit.kind === 'story' || hit.kind === 'epic') {
       const prs = hit.kind === 'story'
         ? (hit.prs || [])
-        : this.laneRows().filter((row) => row.kind === 'story' && row.epic === hit.epic)
-          .flatMap((row) => row.prs || []);
+        : ((this._epicPrs && this._epicPrs.get(hit.epic)) || []);
       const totals = new Map();
       for (const pr of prs) {
         for (const [phase, ms] of this.phases(pr)) totals.set(phase, (totals.get(phase) || 0) + ms);
@@ -1707,8 +1890,13 @@ export class Timeline {
 
     canvas.addEventListener('wheel', (ev) => {
       if (ev.ctrlKey || ev.metaKey) return; // leave browser zoom alone
-      ev.preventDefault();
       const rect = canvas.getBoundingClientRect();
+      const x = ev.clientX - rect.left;
+      // prd/33 §3: the lane list is a virtual scroller now. Over the labels the
+      // wheel keeps its native meaning (scroll the lanes) — otherwise a wheel
+      // could never reach lane 200 of 5,240. Over the plot it still zooms.
+      if (!ev.shiftKey && this.geom && x < this.geom.gutter) return;
+      ev.preventDefault();
       if (ev.shiftKey) {
         this.panPixels(-ev.deltaY / 2);
         return;
@@ -1722,6 +1910,8 @@ export class Timeline {
       const key = ev.key;
       if (key === 'ArrowLeft') { this.panFraction(-0.12); ev.preventDefault(); }
       else if (key === 'ArrowRight') { this.panFraction(0.12); ev.preventDefault(); }
+      else if (key === 'PageDown') { this.scrollLanes(1); ev.preventDefault(); }
+      else if (key === 'PageUp') { this.scrollLanes(-1); ev.preventDefault(); }
       else if (key === '+' || key === '=') { this.zoom(0.75); ev.preventDefault(); }
       else if (key === '-' || key === '_') { this.zoom(1.32); ev.preventDefault(); }
       else if (key === 'Home' || key === '0' || key === 'f' || key === 'F') { this.fit(); ev.preventDefault(); }
@@ -1857,6 +2047,15 @@ export class Timeline {
     canvas.addEventListener('pointercancel', endPointer);
 
     new ResizeObserver(() => this.schedule()).observe(canvas.parentElement);
+
+    // prd/33 §3: scrolling the lane list repaints the window (the canvas itself
+    // is pinned and never moves).
+    if (this.scroller && this.scroller.addEventListener) {
+      this.scroller.addEventListener('scroll', () => {
+        this.clearHover();
+        this.schedule();
+      }, { passive: true });
+    }
   }
 }
 
