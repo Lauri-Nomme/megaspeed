@@ -13,9 +13,10 @@ Tests: **706** (`tests/`) + **73** (`scrape/tests`) + **101** (node `app/test`) 
   (one pseudonym per human), worklog-noise (`log_delay_bucket`).
 - **Workflow stages (prd/29)**: configurable status→stage projection — `backlog`/`ready`/`in_progress`/
   `in_review`/`in_verification`/`done`/`other` — via `[jira.stages]` (TOML) or `MEGASPEED_JIRA_STAGES`.
-  Precedence: config name map → Jira category → name rules. The install's real workflow (Story:
-  OPEN→READY FOR REFINEMENT→REFINED→IN PROGRESS→IN REVIEW→IN VERIFICATION→CLOSED; Bug: NEW→TRIAGED→…
-  →RESOLVED) measures QA time separately.
+  Precedence: config name map → Jira category → name rules. The demo store (`del-combined`) is now
+  generated through the install's real workflow (Story: OPEN→READY FOR REFINEMENT→REFINED→IN PROGRESS→
+  IN REVIEW→IN VERIFICATION→CLOSED; Bug: NEW→TRIAGED→…→RESOLVED), so `in_review`/`in_verification`
+  boundaries and the QA segment are measured on live data (e.g. DEL-167 `verification→done` = 8.0 h).
 - **Scope**: `MEGASPEED_TICKET_KEYS` > `MEGASPEED_JIRA_EPICS` (resolves epics → children, one extra search)
   > `MEGASPEED_JIRA_PROJECTS`. Scope rides the manifest → `--verify` enforces it with only the epic env set.
 - **Cloud Jira** (`--jira-cloud`): `proxy/cloud_jira_proxy.py` emulates Cloud v3 over the DC lab
@@ -42,9 +43,7 @@ Tests: **706** (`tests/`) + **73** (`scrape/tests`) + **101** (node `app/test`) 
 
 ## Deferred / not urgent
 
-1. **Re-seed jira-lab with the install's workflow** (Story + Bug statuses above) and re-scrape
-   `del-combined` to show real review/QA numbers (currently demonstrated on a synthetic store).
-2. **Tempo** install in jira-lab (cloud add-on absent, currently stubbed over native worklogs).
+1. **Tempo** install in jira-lab (cloud add-on absent, currently stubbed over native worklogs).
 3. **Production creds**: `MEGASPEED_BB_*` / `MEGASPEED_JIRA_*` / `MEGASPEED_JIRA_CLOUD_*` (DC labs only now).
 4. **Keepalive cron** for jira-lab (licence = 3 h rolling window per restart; re-arm via
    `sudo nerdctl restart jira-lab`).
