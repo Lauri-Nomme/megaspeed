@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **715** (`tests/`) + **73** (`scrape/tests`) + **114** (node `app/test`) green.
+Tests: **786** (`tests/`) + **75** (`scrape/tests`) + **120** (node `app/test`) green.
 
 ## Scrape (airgapped) — full value, reliable
 
@@ -21,6 +21,12 @@ Tests: **715** (`tests/`) + **73** (`scrape/tests`) + **114** (node `app/test`) 
   > `MEGASPEED_JIRA_PROJECTS`. Scope rides the manifest → `--verify` enforces it with only the epic env set.
 - **Cloud Jira** (`--jira-cloud`): `proxy/cloud_jira_proxy.py` emulates Cloud v3 over the DC lab
   (Bearer PAT, cursor pagination, name-discovered custom fields, Tempo stub); verified byte-equivalent.
+- **Tempo worklogs (prd/30)**: DC + Cloud read Tempo timesheets (`/rest/tempo-timesheets/4/worklogs/{key}`)
+  via `--tempo` / `MEGASPEED_JIRA_TEMPO` / `[jira] tempo`; reduced `worklogged` events byte-identical to
+  native; Tempo Cloud `createdAt`/`startDate` mapped to the native shape. (Real Tempo install = licence.)
+- **Hans import (prd/31)**: `--hans-scrape <dir>` ingests Bitbucket from a hans scrape dir (REST dumps +
+  git mirror), deriving commits/diff/push_class from the mirror and comments from activities; source
+  label `hans` (the only source allowed to import a keyless PR).
 
 ## Analysis → suggested rules (answers prd/15 Q1–Q4)
 
@@ -43,14 +49,16 @@ Tests: **715** (`tests/`) + **73** (`scrape/tests`) + **114** (node `app/test`) 
 - **Phone UX (post-review)**: ticket keys visible on the timeline (epic→story→PR hierarchy at every zoom,
   `DEL-100 #1` PR rows), one-finger vertical scroll over charts with horizontal-pan + pinch preserved, no
   right-edge clipping or vertical word-wrap (`scrollWidth` 412 on every view; `docs/QA-ux-phone.md`).
+- **Versioning (prd/32)**: `v0.9.0` tagged on main; `/api/meta` + the meta strip show `v0.9.0 · <sha>`
+  (git describe → `VERSION` file → hardcoded fallback, `scraper-*` tags excluded).
 
 ## Deferred / not urgent
 
-1. **Tempo** install in jira-lab (cloud add-on absent, currently stubbed over native worklogs).
-3. **Production creds**: `MEGASPEED_BB_*` / `MEGASPEED_JIRA_*` / `MEGASPEED_JIRA_CLOUD_*` (DC labs only now).
-4. **Keepalive cron** for jira-lab (licence = 3 h rolling window per restart; re-arm via
-   `sudo nerdctl restart jira-lab`).
-5. Light theme / theme toggle / refresh cadence / rebuild-read-time provenance (prd/26 deferred).
+1. **Tempo install** in jira-lab (code path done; real install blocked on the org's Tempo licence —
+   the Marketplace JAR download is empty without one).
+2. **Production creds**: `MEGASPEED_BB_*` / `MEGASPEED_JIRA_*` / `MEGASPEED_JIRA_CLOUD_*` (DC labs only now).
+3. **Light theme** / theme toggle / refresh cadence / rebuild-read-time provenance (prd/26 deferred).
+4. **Papercuts** (`docs/papercuts.md`): P-1 titlebar tenant+view, P-2 shareable deep-link URL — in flight.
 
 ## Important
 
