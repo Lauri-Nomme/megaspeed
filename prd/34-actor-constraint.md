@@ -29,6 +29,10 @@ named as the owner, and the same actor reads differently across views. Conform t
 3. **Scope semantics** — one meaning per view, stated: the Queue/Delivery person scope means "waiting on
    X", and `role:sentinel`/`role:review` work identically there (a PR waiting only on the sentinel shows
    up under `person:FrMo` *and* `role:sentinel`).
+   Also: `reviewer_changed` (added) currently sets ball = review **unconditionally**, so adding a
+   reviewer while the ball is with the author (mid needs-work) flips the ball back to review and starts
+   charging the pending set prematurely. Fix: an `added` reviewer joins the pending set but does **not**
+   move the ball — the ball stays with the author until the author pushes again (see concepts.md §2).
 4. **Distinct, labelled load metrics** — "overloaded" (queue wait) and "busy/utilisation" (calendar
    share) get different names and are never both called "load"; a tile that counts people counts only
    people.

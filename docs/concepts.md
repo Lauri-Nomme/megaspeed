@@ -110,10 +110,28 @@ Each entry: **Definition** (what it is) · **Derivation** (how it's computed fro
 ### "Ball in court" / waiting on / pending set
 - **Definition**: the *ball* is with the set of people an item currently waits on. An interval's ball is
   `author` (working), a *pending reviewer set*, `CI`, or the *sentinel*.
-- **Derivation**: `analysis/ballcourt.py` — each open interval is attributed to who holds the ball.
+- **Derivation**: `analysis/ballcourt.py` replays the event stream with a small state machine. The
+  **pending set** = reviewers on the roster who still owe a response in the current review cycle.
+- **State machine** (one definition, used everywhere):
+  - `pr_opened` / `pr_pushed` / `rebased` → ball = **review**, pending = **the whole roster** (a new code
+    state means everyone owes a fresh response);
+  - a reviewer **acts** (`pr_approved` / `pr_needs_work` / `pr_unapproved` / `reviewed`) → that reviewer
+    **leaves** pending; an approval leaves the ball in review;
+  - `reviewer_changed` **added** → joins the roster **and** pending; **removed** → leaves both;
+  - `pr_needs_work` / `pr_unapproved` → ball = **author** (bounced back to fix);
+  - `comment_added` by the author → ball = **review**, pending = the whole roster (a new response round);
+    a **mandatory** comment → ball = **author** (blocker); a suggestion leaves the ball where it was;
+  - `build_status` → ball = **CI**.
+- **Attribution**: when ball = review, the wait is attributed to **every pending reviewer** as
+  *person-hours* (a 10 h wait on two reviewers is 10 h for *each*, so the person-level total exceeds the
+  wall-clock wait; role/queue level counts it once under `review`). When ball = author, only the author
+  is charged — pending reviewers are **not** charged while the author works. A reviewer added later is
+  charged **from their `added` event**, never retroactively.
 - **Purpose**: every "waiting on …" / "where waits accumulate" / constraint answer. The owner must be
   **named** (a specific person or role), never the generic "review queue" when the ball is with one
-  person.
+  person. *Open subtlety: `reviewer_changed` (added) sets ball = review unconditionally, so adding a
+  reviewer while the ball is with the author (mid needs-work) flips the ball back to review — likely
+  wrong, to be verified/fixed (see prd/34).*
 
 ### Blocked vs needs-work
 - **Definition**: a PR is *blocked* when a mandatory review comment is unanswered; *needs work* when a
