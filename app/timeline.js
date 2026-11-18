@@ -20,45 +20,64 @@ import {
 } from './format.js';
 import { epicKeySet, epicTicket, ownTicket, ticketKey } from './tickets.js';
 import { touchAxis } from './mobile.js';
+import { color, onPalette } from './theme.js';
 
 export const ACTIVITY_ORDER = [
   'pr_opened', 'pr_pushed', 'comment_added', 'pr_approved', 'pr_unapproved',
   'pr_needs_work', 'pr_merged', 'pr_declined', 'reviewer_changed', 'build_status',
 ];
 
-// Category hues only (prd/10 §3.3.5: teal = waits on and amber = waited on by
-// are a reserved pair, never reused for a category or a phase).
-export const ACTIVITY_COLOR = {
-  pr_opened: '#53C9DF',
-  pr_pushed: '#B565E8',
-  comment_added: '#8A8D93',
-  pr_approved: '#73CF55',
-  pr_unapproved: '#F05C70',
-  pr_needs_work: '#FBCD58',
-  pr_merged: '#238FF9',
-  pr_declined: '#C04B56',
-  reviewer_changed: '#E25AB5',
-  build_status: '#53C9DF',
+/* Category hues only (prd/10 §3.3.5: teal = waits on and amber = waited on by
+ * are a reserved pair, never reused for a category or a phase).
+ *
+ * The hue itself is a design token: `style.css` owns the value, so the light
+ * theme recolours every marker by re-pointing `--cat-2` — the renderer never
+ * knows which theme is on. */
+export const ACTIVITY_TOKEN = {
+  pr_opened: '--cat-2',
+  pr_pushed: '--cat-3',
+  comment_added: '--cat-7',
+  pr_approved: '--cat-1',
+  pr_unapproved: '--critical',
+  pr_needs_work: '--warning',
+  pr_merged: '--series-default',
+  pr_declined: '--cat-6',
+  reviewer_changed: '--cat-4',
+  build_status: '--cat-2',
 };
 
+/** Resolved activity hues; `applyPalette()` fills them from the tokens. */
+export const ACTIVITY_COLOR = {};
+
 export const PHASE = {
-  waiting: { color: '#E8B84A', label: 'waiting on author', hint: 'ball with the author, no commits in the log' },
-  active: { color: '#B565E8', label: 'in progress', hint: 'author held the ball and committed' },
-  review: { color: '#63B1FF', label: 'in review', hint: 'ball with reviewers' },
-  ci: { color: '#53C9DF', label: 'CI', hint: 'ball with CI (needs a build event in the store)' },
-  rebasing: { color: '#E25AB5', label: 'rebasing', hint: 'interval ended in a rebase push' },
-  closed: { color: '#8A8D93', label: 'closed', hint: 'closed after the last event' },
-  unobserved: { color: '#70747B', label: 'no events since', hint: 'not measured — no events in the store' },
+  waiting: { token: '--phase-waiting', color: '', label: 'waiting on author', hint: 'ball with the author, no commits in the log' },
+  active: { token: '--phase-active', color: '', label: 'in progress', hint: 'author held the ball and committed' },
+  review: { token: '--phase-review', color: '', label: 'in review', hint: 'ball with reviewers' },
+  ci: { token: '--phase-ci', color: '', label: 'CI', hint: 'ball with CI (needs a build event in the store)' },
+  rebasing: { token: '--phase-rebasing', color: '', label: 'rebasing', hint: 'interval ended in a rebase push' },
+  closed: { token: '--phase-closed', color: '', label: 'closed', hint: 'closed after the last event' },
+  unobserved: { token: '--phase-unobserved', color: '', label: 'no events since', hint: 'not measured — no events in the store' },
   // prd/29: the two Jira workflow stages that are not PR phases. A ticket can
   // sit in review (no PR yet, or a PR the store cannot see) and in verification
   // (merged, waiting for QA) — different waits, so different hues. They are not
   // in PHASE_ORDER: that legend describes PR intervals, and these phases only
   // colour the ticket-detail segments (ticket.js reuses the hues).
-  in_review: { color: '#4C8DFF', label: 'ticket in review', hint: 'Jira status → in review (workflow stage)' },
-  in_verification: { color: '#2FBFA0', label: 'in verification', hint: 'Jira status → in verification (QA)' },
+  in_review: { token: '--phase-in-review', color: '', label: 'ticket in review', hint: 'Jira status → in review (workflow stage)' },
+  in_verification: { token: '--phase-in-verification', color: '', label: 'in verification', hint: 'Jira status → in verification (QA)' },
 };
 
 export const PHASE_ORDER = ['waiting', 'active', 'review', 'ci', 'rebasing', 'closed', 'unobserved'];
+
+/** Resolve every canvas hue from the theme tokens. Registered with theme.js,
+ *  so it runs once for the dark fallbacks and again on each theme switch —
+ *  which is what lets a toggle recolour the canvas without a data reload. */
+export function applyPalette() {
+  for (const [activity, token] of Object.entries(ACTIVITY_TOKEN)) {
+    ACTIVITY_COLOR[activity] = color(token);
+  }
+  for (const phase of Object.values(PHASE)) phase.color = color(phase.token);
+}
+onPalette(applyPalette);
 
 const METRICS = {
   S: { lane: 15, bar: 11, label: 10, marker: 2.2 },
@@ -950,7 +969,7 @@ export class Timeline {
     this.hits = [];
 
     ctx.clearRect(0, 0, g.width, g.height);
-    ctx.fillStyle = '#151924';
+    ctx.fillStyle = color('--canvas-bg');
     ctx.fillRect(0, 0, g.width, g.height);
 
     this.drawTimeBands(ctx, g);
@@ -960,7 +979,7 @@ export class Timeline {
     this.drawLanes(ctx, g, m);
     if (!g.objectMode) this.drawBars(ctx, g, m);
 
-    ctx.strokeStyle = 'rgba(255,255,255,.06)';
+    ctx.strokeStyle = color('--canvas-hairline');
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.moveTo(g.gutter + 0.5, 0);
@@ -1053,20 +1072,20 @@ export class Timeline {
       const x1 = Math.min(g.gutter + g.plotW, this.px(t + DAY));
       if (x1 <= x0) continue;
       if (weekend) {
-        ctx.fillStyle = 'rgba(255,255,255,.022)';
+        ctx.fillStyle = color('--canvas-weekend');
         ctx.fillRect(x0, AXIS_H, x1 - x0, g.height - AXIS_H);
       }
       if (dayWidth >= 90) {
         const night0 = this.px(t + 18 * HOUR);
         const night1 = this.px(t + DAY);
         if (night1 > night0) {
-          ctx.fillStyle = 'rgba(0,0,0,.18)';
+          ctx.fillStyle = color('--canvas-night');
           ctx.fillRect(night0, AXIS_H, night1 - night0, g.height - AXIS_H);
         }
         const night2 = this.px(t);
         const night3 = this.px(t + 8 * HOUR);
         if (night3 > night2) {
-          ctx.fillStyle = 'rgba(0,0,0,.18)';
+          ctx.fillStyle = color('--canvas-night');
           ctx.fillRect(night2, AXIS_H, night3 - night2, g.height - AXIS_H);
         }
       }
@@ -1086,9 +1105,9 @@ export class Timeline {
       const right = Math.min(g.gutter + g.plotW, this.px(sprint.end));
       if (right <= left) return;
       ctx.fillStyle = index % 2 === 0
-        ? 'rgba(140,152,212,.055)' : 'rgba(140,152,212,.022)';
+        ? color('--canvas-band') : color('--canvas-band-alt');
       ctx.fillRect(left, top, right - left, bottom - top);
-      ctx.fillStyle = 'rgba(140,152,212,.30)';
+      ctx.fillStyle = color('--canvas-spine');
       ctx.fillRect(left, top, 1, bottom - top);
       if (right < g.gutter + g.plotW) ctx.fillRect(right - 1, top, 1, bottom - top);
       // the plan of an active sprint: a dashed boundary, not a measured edge
@@ -1097,7 +1116,7 @@ export class Timeline {
         const planX = Math.round(this.px(sprint.plannedEnd)) + 0.5;
         ctx.save();
         ctx.setLineDash([3, 3]);
-        ctx.strokeStyle = 'rgba(251,205,88,.45)';
+        ctx.strokeStyle = color('--canvas-plan-line');
         ctx.beginPath();
         ctx.moveTo(planX, top);
         ctx.lineTo(planX, bottom);
@@ -1108,7 +1127,7 @@ export class Timeline {
         ctx.font = `600 ${Math.max(10, g.label - 1)}px "JetBrains Mono", ui-monospace, monospace`;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
-        ctx.fillStyle = '#8C98D4';
+        ctx.fillStyle = color('--canvas-region-label');
         ctx.fillText(
           fit(ctx, `S${sprint.id}${sprint.active ? ' · active' : ''}`, right - left - 12),
           left + 6,
@@ -1141,7 +1160,7 @@ export class Timeline {
     let lastRight = -Infinity;
     let lastDay = null;
 
-    ctx.fillStyle = '#8A8D93';
+    ctx.fillStyle = color('--canvas-muted');
     ctx.textAlign = 'right';
     ctx.fillText('UTC', g.gutter - 10, clockRow);
 
@@ -1149,7 +1168,7 @@ export class Timeline {
       const x = this.px(t);
       if (x < g.gutter || x > right) continue;
       const major = step >= DAY || new Date(t).getUTCHours() === 0;
-      ctx.strokeStyle = major ? 'rgba(255,255,255,.10)' : 'rgba(255,255,255,.045)';
+      ctx.strokeStyle = major ? color('--canvas-grid-major') : color('--canvas-grid-minor');
       ctx.beginPath();
       ctx.moveTo(Math.round(x) + 0.5, AXIS_H - 7);
       ctx.lineTo(Math.round(x) + 0.5, g.height - BOTTOM);
@@ -1162,7 +1181,7 @@ export class Timeline {
       if (left + width > right - 2) left = x - 4 - width;
       if (left < g.gutter || left < lastRight + 6) continue;
       ctx.textAlign = 'left';
-      ctx.fillStyle = major ? '#B9BBC0' : '#8A8D93';
+      ctx.fillStyle = major ? color('--canvas-label') : color('--canvas-muted');
       ctx.fillText(label, left, clockRow);
       lastRight = left + width;
 
@@ -1174,7 +1193,7 @@ export class Timeline {
           let dayLeft = x + 4;
           if (dayLeft + dayWidth > right - 2) dayLeft = x - 4 - dayWidth;
           if (dayLeft >= g.gutter && dayLeft + dayWidth < right) {
-            ctx.fillStyle = '#B9BBC0';
+            ctx.fillStyle = color('--canvas-label');
             ctx.font = `600 ${Math.max(10, g.label - 1)}px "JetBrains Mono", ui-monospace, monospace`;
             ctx.fillText(day, dayLeft, dayRow);
             ctx.font = `500 ${Math.max(10, g.label - 1)}px "JetBrains Mono", ui-monospace, monospace`;
@@ -1182,7 +1201,7 @@ export class Timeline {
         }
       }
     }
-    ctx.strokeStyle = 'rgba(255,255,255,.08)';
+    ctx.strokeStyle = color('--canvas-axis-line');
     ctx.beginPath();
     ctx.moveTo(g.gutter, AXIS_H - 0.5);
     ctx.lineTo(g.width, AXIS_H - 0.5);
@@ -1206,14 +1225,14 @@ export class Timeline {
     const top = AXIS_H + 5;
     const height = HIST_H - 13;
     ctx.font = `500 ${Math.max(9, g.label - 1)}px "JetBrains Mono", ui-monospace, monospace`;
-    ctx.fillStyle = '#8A8D93';
+    ctx.fillStyle = color('--canvas-muted');
     ctx.textAlign = 'right';
     ctx.textBaseline = 'middle';
     ctx.fillText(`${total} event${total === 1 ? '' : 's'}`, g.gutter - 10, top + height / 2);
 
     for (const [x, n] of buckets) {
       const h = Math.max(2, Math.round((n / Math.max(1, max)) * height));
-      ctx.fillStyle = n > 1 ? 'rgba(99,177,255,.55)' : 'rgba(99,177,255,.30)';
+      ctx.fillStyle = n > 1 ? color('--canvas-hist') : color('--canvas-hist-weak');
       ctx.fillRect(x, top + height - h, 2, h);
     }
     // brushed range: visible in the strip and faintly across the lanes
@@ -1222,11 +1241,11 @@ export class Timeline {
       const x0 = Math.max(g.gutter, this.px(range.start));
       const x1 = Math.min(g.gutter + g.plotW, this.px(range.end));
       if (x1 > x0) {
-        ctx.fillStyle = 'rgba(104,192,252,.14)';
+        ctx.fillStyle = color('--canvas-brush-veil');
         ctx.fillRect(x0, AXIS_H, x1 - x0, g.height - AXIS_H - BOTTOM);
-        ctx.fillStyle = this.brushing ? 'rgba(104,192,252,.35)' : 'rgba(104,192,252,.22)';
+        ctx.fillStyle = this.brushing ? color('--canvas-brush') : color('--canvas-brush-idle');
         ctx.fillRect(x0, top, x1 - x0, height);
-        ctx.strokeStyle = 'rgba(104,192,252,.7)';
+        ctx.strokeStyle = color('--canvas-brush-edge');
         ctx.lineWidth = 1;
         for (const x of [x0, x1]) {
           ctx.beginPath();
@@ -1236,7 +1255,7 @@ export class Timeline {
         }
       }
     }
-    ctx.strokeStyle = 'rgba(255,255,255,.06)';
+    ctx.strokeStyle = color('--canvas-hairline');
     ctx.beginPath();
     ctx.moveTo(g.gutter, AXIS_H + HIST_H - 0.5);
     ctx.lineTo(g.width, AXIS_H + HIST_H - 0.5);
@@ -1252,7 +1271,7 @@ export class Timeline {
     ctx.font = `500 ${g.label}px "JetBrains Mono", ui-monospace, monospace`;
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'right';
-    ctx.fillStyle = '#8A8D93';
+    ctx.fillStyle = color('--canvas-muted');
     const narrow = g.gutter < 140;
     // The section header is fitted to the gutter: `STORIES · 4,000 stories ·
     // 0 PRs` is wider than 176px, and a clipped "ES · 4000 stories" reads like
@@ -1271,10 +1290,10 @@ export class Timeline {
         const row = rows[i];
         const y = g.laneTop + i * g.laneH - g.scrollTop;
         if (i % 2 === 0) {
-          ctx.fillStyle = 'rgba(255,255,255,.012)';
+          ctx.fillStyle = color('--canvas-row');
           ctx.fillRect(g.gutter, y, g.plotW, g.laneH);
         }
-        ctx.strokeStyle = 'rgba(255,255,255,.035)';
+        ctx.strokeStyle = color('--canvas-row-rule');
         ctx.beginPath();
         ctx.moveTo(g.gutter, Math.round(y + g.laneH) - 0.5);
         ctx.lineTo(g.width, Math.round(y + g.laneH) - 0.5);
@@ -1285,7 +1304,7 @@ export class Timeline {
         // A ticket key is a doorway (prd/25): the label is drawn in the link hue
         // and the gutter is a hit target that opens the ticket detail page.
         const linked = Boolean(row.ticket);
-        ctx.fillStyle = hovered ? '#E8E9EB' : linked ? '#94B4D4' : '#B9BBC0';
+        ctx.fillStyle = hovered ? color('--canvas-strong') : linked ? color('--link') : color('--canvas-label');
         const text = laneLabel(row, { narrow, dim: this.dim });
         if (narrow && this.dim === 'story') {
           // The story hierarchy is drawn in the gutter: epic (◆) → story (▸) →
@@ -1353,7 +1372,7 @@ export class Timeline {
         aggregated += bucket.items.length;
         const fromX = this.px(Math.min(...bucket.items.map((e) => e.t)));
         const toX = Math.max(this.px(Math.max(...bucket.items.map((e) => e.t))), fromX + 2);
-        ctx.fillStyle = bucket.faint ? 'rgba(232,233,235,.16)' : 'rgba(232,233,235,.5)';
+        ctx.fillStyle = bucket.faint ? color('--canvas-bucket') : color('--canvas-bucket-strong');
         ctx.fillRect(fromX, y - g.laneH / 2 + 3, Math.max(2, toX - fromX), g.laneH - 6);
         this.hits.push({
           kind: 'bucket', x0: fromX, x1: toX, y0: y - g.laneH / 2, y1: y + g.laneH / 2,
@@ -1363,14 +1382,14 @@ export class Timeline {
         continue;
       }
       const event = bucket.items[0];
-      const color = ACTIVITY_COLOR[event.activity] || '#8A8D93';
+      const hue = ACTIVITY_COLOR[event.activity] || color('--cat-7');
       const r = g.marker;
       ctx.beginPath();
       ctx.arc(bucket.x, y, r, 0, Math.PI * 2);
-      ctx.fillStyle = bucket.faint ? rgba(color, 0.2) : color;
+      ctx.fillStyle = bucket.faint ? rgba(hue, 0.2) : hue;
       ctx.fill();
       if (this.hover && this.hover.event && this.hover.event.key === event.key) {
-        ctx.strokeStyle = '#E8E9EB';
+        ctx.strokeStyle = color('--canvas-strong');
         ctx.lineWidth = 1.5;
         ctx.stroke();
       }
@@ -1395,7 +1414,7 @@ export class Timeline {
           const state = this.stateOf(event.activity);
           if (state === 'hide') continue;
           const x = this.px(event.t);
-          ctx.fillStyle = rgba(ACTIVITY_COLOR[event.activity] || '#8A8D93', state === 'faint' ? 0.2 : 0.85);
+          ctx.fillStyle = rgba(ACTIVITY_COLOR[event.activity] || color('--cat-7'), state === 'faint' ? 0.2 : 0.85);
           ctx.fillRect(x, barY, 1.5, barH);
         }
       }
@@ -1426,9 +1445,9 @@ export class Timeline {
         const x1 = Math.min(g.gutter + g.plotW, this.px(to));
         if (x1 <= x0) continue;
         // A bracket, not a lifecycle: the epic has no phases of its own.
-        ctx.fillStyle = 'rgba(140,152,212,.16)';
+        ctx.fillStyle = color('--canvas-epic');
         ctx.fillRect(x0, barY, x1 - x0, barH);
-        ctx.fillStyle = 'rgba(140,152,212,.65)';
+        ctx.fillStyle = color('--canvas-epic-edge');
         ctx.fillRect(x0, barY, 2, barH);
         ctx.fillRect(x1 - 2, barY, 2, barH);
         this.hits.push({
@@ -1456,7 +1475,7 @@ export class Timeline {
           const x0 = Math.max(g.gutter, this.px(first));
           const x1 = Math.min(g.gutter + g.plotW, this.px(last));
           if (x1 > x0) {
-            ctx.fillStyle = 'rgba(138,141,147,.28)';
+            ctx.fillStyle = color('--canvas-baseline');
             ctx.fillRect(x0, barY + barH / 2 - 1, x1 - x0, 2);
           }
         }
@@ -1467,7 +1486,7 @@ export class Timeline {
           if (state === 'hide') continue;
           const x = this.px(event.t);
           ctx.fillStyle = rgba(
-            ACTIVITY_COLOR[event.activity] || '#8A8D93',
+            ACTIVITY_COLOR[event.activity] || color('--cat-7'),
             state === 'faint' ? 0.25 : 0.9,
           );
           ctx.fillRect(x, barY, 1.5, barH);
@@ -1481,12 +1500,12 @@ export class Timeline {
           // prd/26 P6: a story re-added across sprints is marked at its end —
           // the sprint plan's cost, on the lane the investigator is reading.
           const endX = Math.min(g.gutter + g.plotW - 2, this.px(Math.max(...times)));
-          ctx.fillStyle = 'rgba(251,205,88,.9)';
+          ctx.fillStyle = color('--canvas-carry');
           ctx.fillRect(endX - 1, barY, 2, barH);
           ctx.font = `700 ${Math.max(9, g.label)}px "JetBrains Mono", ui-monospace, monospace`;
           ctx.textAlign = 'right';
           ctx.textBaseline = 'middle';
-          ctx.fillStyle = '#FBCD58';
+          ctx.fillStyle = color('--warning');
           ctx.fillText('↻', endX - 4, y + g.laneH / 2);
         }
         this.hits.push({
@@ -1506,7 +1525,7 @@ export class Timeline {
           const state = this.stateOf(event.activity);
           if (state === 'hide') continue;
           const x = this.px(event.t);
-          ctx.fillStyle = rgba(ACTIVITY_COLOR[event.activity] || '#8A8D93', state === 'faint' ? 0.2 : 0.85);
+          ctx.fillStyle = rgba(ACTIVITY_COLOR[event.activity] || color('--cat-7'), state === 'faint' ? 0.2 : 0.85);
           ctx.fillRect(x, barY, 1.5, barH);
         }
       }
@@ -1532,10 +1551,10 @@ export class Timeline {
         const x0 = Math.max(g.gutter, this.px(seg.from));
         const x1 = Math.min(g.gutter + g.plotW, this.px(seg.to));
         if (x1 <= x0) continue;
-        const color = PHASE[seg.phase].color;
-        ctx.fillStyle = rgba(color, seg.phase === 'unobserved' ? 0.14 : 0.3);
+        const hue = PHASE[seg.phase].color;
+        ctx.fillStyle = rgba(hue, seg.phase === 'unobserved' ? 0.14 : 0.3);
         ctx.fillRect(x0, y + 4, Math.max(1, x1 - x0), g.laneH - 8);
-        ctx.fillStyle = rgba(color, seg.phase === 'unobserved' ? 0.25 : 0.75);
+        ctx.fillStyle = rgba(hue, seg.phase === 'unobserved' ? 0.25 : 0.75);
         ctx.fillRect(x0, y + 4, Math.min(2, x1 - x0), g.laneH - 8);
         this.hits.push({
           kind: 'interval', x0, x1, y0: y, y1: y + g.laneH, interval: seg, pr, queue,
@@ -1555,19 +1574,19 @@ export class Timeline {
       const x0 = Math.max(g.gutter, this.px(seg.from));
       const x1 = Math.min(g.gutter + g.plotW, this.px(seg.to));
       if (x1 <= x0) continue;
-      const color = PHASE[seg.phase].color;
+      const hue = PHASE[seg.phase].color;
       if (seg.phase === 'unobserved') {
         // hatched, because nothing was measured here
-        ctx.fillStyle = rgba(color, 0.10);
+        ctx.fillStyle = rgba(hue, 0.10);
         ctx.fillRect(x0, barY, Math.max(1, x1 - x0), barH);
-        ctx.fillStyle = rgba(color, 0.28);
+        ctx.fillStyle = rgba(hue, 0.28);
         for (let x = x0 + 2; x < x1; x += 6) ctx.fillRect(x, barY, 1, barH);
         continue;
       }
-      ctx.fillStyle = rgba(color, seg.phase === 'closed' ? 0.22 : 0.34);
+      ctx.fillStyle = rgba(hue, seg.phase === 'closed' ? 0.22 : 0.34);
       ctx.fillRect(x0, barY, Math.max(1, x1 - x0), barH);
       // saturated cap keeps phase boundaries legible without a solid block
-      ctx.fillStyle = rgba(color, 0.9);
+      ctx.fillStyle = rgba(hue, 0.9);
       ctx.fillRect(x0, barY, Math.min(2, x1 - x0), barH);
     }
     const end = pr.closed || this.now;
@@ -1577,7 +1596,7 @@ export class Timeline {
       ctx.fillRect(x - 2, barY, 2.5, barH);
     } else {
       const x = Math.min(g.gutter + g.plotW, this.px(end));
-      ctx.fillStyle = rgba('#FBCD58', 0.75);
+      ctx.fillStyle = rgba(color('--warning'), 0.75);
       ctx.beginPath();
       ctx.moveTo(x, barY);
       ctx.lineTo(x + 4, barY + barH / 2);
@@ -1594,7 +1613,7 @@ export class Timeline {
     this.withLaneClip(ctx, g, () => {
       ctx.font = `600 ${Math.max(10, g.label - 1)}px Inter, system-ui, sans-serif`;
       ctx.textAlign = 'right';
-      ctx.fillStyle = '#8A8D93';
+      ctx.fillStyle = color('--canvas-muted');
       ctx.fillText(
         g.gutter < 120 ? `PRs ${g.barRows.length}` : `PR LIFECYCLE · ${g.barRows.length}`,
         g.gutter - 10,
@@ -1606,13 +1625,13 @@ export class Timeline {
         const y = g.barTop + i * g.barH - g.scrollTop;
         const isHover = this.hover && this.hover.pr === pr;
         if (i % 2 === 0 || isHover) {
-          ctx.fillStyle = isHover ? 'rgba(99,177,255,.07)' : 'rgba(255,255,255,.012)';
+          ctx.fillStyle = isHover ? color('--canvas-row-hover') : color('--canvas-row');
           ctx.fillRect(g.gutter, y, g.plotW, g.barH);
         }
 
         ctx.font = `500 ${g.label}px "JetBrains Mono", ui-monospace, monospace`;
         ctx.textAlign = 'right';
-        ctx.fillStyle = isHover ? '#E8E9EB' : '#B9BBC0';
+        ctx.fillStyle = isHover ? color('--canvas-strong') : color('--canvas-label');
         const key = pr.ticket ? `${pr.ticket} ` : '';
         const label = g.gutter < 140
           ? (pr.ticket ? `${pr.ticket} #${pr.number}` : `#${pr.number}`)
@@ -1629,7 +1648,7 @@ export class Timeline {
             const state = this.stateOf(event.activity);
             if (state === 'hide') continue;
             const x = this.px(event.t);
-            ctx.fillStyle = rgba(ACTIVITY_COLOR[event.activity] || '#8A8D93', state === 'faint' ? 0.2 : 0.85);
+            ctx.fillStyle = rgba(ACTIVITY_COLOR[event.activity] || color('--cat-7'), state === 'faint' ? 0.2 : 0.85);
             ctx.fillRect(x, barY, 1.5, barH);
           }
         }
@@ -1678,7 +1697,7 @@ export class Timeline {
       const event = hit.event;
       const attrs = Object.entries(event.attributes || {});
       this.tip.innerHTML = `
-        <div class="row"><span class="act" style="color:${ACTIVITY_COLOR[event.activity] || '#8A8D93'}">${esc(event.activity)}</span>
+        <div class="row"><span class="act" style="color:${ACTIVITY_COLOR[event.activity] || color('--cat-7')}">${esc(event.activity)}</span>
           <span class="muted">${esc(fmtStamp(event.t))}</span></div>
         <div class="row"><span class="k">actor</span><span class="v">${esc(event.actor)}</span></div>
         <div class="row"><span class="k">objects</span><span class="v">${event.objects.map(esc).join('<br>')}</span></div>

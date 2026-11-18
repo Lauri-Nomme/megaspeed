@@ -40,6 +40,10 @@ import {
   bindLongPress, hintText, initMobile, isPhone, phoneEntryLanes, phoneEntryPage,
 } from '/mobile.js';
 import { pageTitle, parseRoute, serializeRoute, ticketFromHash } from '/route.js';
+import {
+  DEFAULT_THEME, applyTheme, color, normalizeTheme, otherTheme, readTheme,
+  refreshPalette, storeTheme, themeGlyph, themeLabel,
+} from '/theme.js';
 
 const $ = (id) => document.getElementById(id);
 const LS_KEY = 'megaspeed.ui.v1';
@@ -80,6 +84,8 @@ const state = {
   objectCapped: false,
   epicKeys: new Set(),
   page: 'timeline',
+  // prd/10 §3.1: dark is the default; light is the stored (or linked) choice.
+  theme: DEFAULT_THEME,
   scope: { kind: 'all', value: null, label: 'everything' },
   timeframe: '1q',
   // B6: the timeline's window is the timeframe only until the user brushes or
@@ -396,6 +402,9 @@ function routeHref() {
     ticket: state.page === 'ticket' ? state.ticketKey : null,
     timeframe: state.timeframe,
     scope: state.scope,
+    // dark is the default, so only a light view puts anything in the URL: an
+    // existing dark link is byte-identical to what it was before themes.
+    theme: state.theme === 'light' ? 'light' : null,
   });
 }
 
@@ -790,7 +799,7 @@ function renderLegend() {
     const pressed = activityState === 'on' ? 'true' : activityState === 'faint' ? 'mixed' : 'false';
     return `<button type="button" data-activity="${esc(activity)}" class="${activityState}"
         aria-pressed="${pressed}" title="click: on → faint → hide. Filtering never deletes data.">
-      <span class="swatch" style="background:${ACTIVITY_COLOR[activity] || '#8A8D93'}"></span>
+      <span class="swatch" style="background:${ACTIVITY_COLOR[activity] || color('--cat-7')}"></span>
       <span>${esc(activity)}</span><span class="count">${counts.get(activity)}</span></button>`;
   }).join('');
 }
@@ -1021,6 +1030,9 @@ async function openTicket(key, { push = true } = {}) {
 async function applyRoute() {
   if (typeof location === 'undefined') return;
   const route = parseRoute(location.search, location.hash);
+  // prd/10 §3.1: a `?theme=` link is a destination like any other; an absent
+  // parameter keeps the stored preference (dark is the default either way).
+  if (route.theme && route.theme !== state.theme) setTheme(route.theme);
   if (route.tenant && route.tenant !== state.tenant) {
     await setTenant(route.tenant, { silent: true });
   }
@@ -1510,6 +1522,42 @@ function applyTimeframeToTimeline() {
   renderTimeframe();
 }
 
+// ------------------------------------------------------------------- theme
+/* prd/10 §3.1: the theme is a first-class alternative, not a skin. The switch
+ * is three steps and no data work:
+ *   1. `data-theme` on <html> — CSS re-points every token;
+ *   2. `refreshPalette()` — the canvas modules re-read the resolved tokens;
+ *   3. repaint the current view — legends and segment bars carry inline
+ *      colours, and the canvases need one frame at the new palette.
+ * Nothing is refetched: the same marks are recoloured. */
+function renderThemeButton() {
+  const button = $('theme-toggle');
+  if (!button) return;
+  const light = state.theme === 'light';
+  const label = themeLabel(state.theme);
+  button.textContent = themeGlyph(state.theme);
+  button.setAttribute('aria-pressed', String(light));
+  button.setAttribute('aria-label', label);
+  button.title = label;
+}
+
+function setTheme(theme, { save = true, repaint = true } = {}) {
+  const next = normalizeTheme(theme) || DEFAULT_THEME;
+  state.theme = applyTheme(next, document.documentElement);
+  refreshPalette(document.documentElement);
+  renderThemeButton();
+  if (save) storeTheme(state.theme);
+  if (repaint) {
+    timeline.schedule();
+    blockingMap.schedule();
+    queueChart.schedule();
+    // the legends, the ticket segment bar and the activity swatches are HTML
+    // with the colour baked into an inline style: re-render them from state
+    renderPage();
+  }
+  return state.theme;
+}
+
 // ----------------------------------------------------------------- density
 function setDensity(density) {
   timeline.setDensity(density);
@@ -1990,7 +2038,7 @@ window.__megaspeedShot = async function megaspeedShot(selector = '.app', options
   out.width = Math.max(1, Math.round(rect.width * scale));
   out.height = Math.max(1, Math.round(rect.height * scale));
   const ctx = out.getContext('2d');
-  ctx.fillStyle = getComputedStyle(document.body).backgroundColor || '#191B1C';
+  ctx.fillStyle = getComputedStyle(document.body).backgroundColor || color('--bg-app');
   ctx.fillRect(0, 0, out.width, out.height);
 
   try {
@@ -2100,10 +2148,15 @@ async function domToImage(element, rect, { viewport = false, elementRect = null 
   const css = await fetch('/style.css', { cache: 'force-cache' }).then((r) => r.text());
   const wrapper = document.createElement('div');
   wrapper.setAttribute('xmlns', 'http://www.w3.org/1999/xhtml');
+  // the capture inherits the live page's ground and ink, so it is a still frame
+  // of the theme the user is looking at, not a hard-coded dark one
+  const liveStyle = getComputedStyle(document.body);
   wrapper.setAttribute(
     'style',
-    `position:relative;width:${rect.width}px;height:${rect.height}px;background:#191B1C;` +
-    'font-family:Inter,"Segoe UI",Roboto,sans-serif;font-size:13px;color:#E8E9EB;' +
+    `position:relative;width:${rect.width}px;height:${rect.height}px;` +
+    `background:${liveStyle.backgroundColor || color('--bg-app')};` +
+    'font-family:Inter,"Segoe UI",Roboto,sans-serif;font-size:13px;' +
+    `color:${liveStyle.color || color('--text-primary')};` +
     (viewport ? 'overflow:hidden;' : ''),
   );
   const style = document.createElement('style');
@@ -2126,7 +2179,7 @@ async function domToImage(element, rect, { viewport = false, elementRect = null 
         display: block !important;
         position: absolute !important;
         inset: 0 !important;
-        background: rgba(0, 0, 0, .55) !important;
+        background: var(--scrim-bg) !important;
         z-index: 20 !important;
       }
       .shot .sidebar { display: none !important; }
@@ -2144,6 +2197,10 @@ async function domToImage(element, rect, { viewport = false, elementRect = null 
   clone.classList.add('shot');
   if (viewport) clone.classList.add('viewport');
   wrapper.className = document.body.className;
+  // prd/10 §3.1: the tokens are keyed off `[data-theme]`, and inside the SVG
+  // foreignObject the clone is the root — <html> is not in scope. Carry the
+  // theme onto the wrapper or every capture is painted with the dark palette.
+  wrapper.setAttribute('data-theme', document.documentElement.dataset.theme || 'dark');
   wrapper.appendChild(style);
   wrapper.appendChild(clone);
 
@@ -2188,6 +2245,10 @@ window.__megaspeed = {
   },
   setLanes: (dim) => { $('lanes').value = dim; timeline.setLanes(dim); renderPhaseLegend(); },
   setDensity,
+  // prd/10 §3.1: the harness flips the theme the same way the pill does, so a
+  // screenshot pair is one call apart.
+  setTheme,
+  get theme() { return state.theme; },
   setRulesLevel,
   stamp: fmtStamp,
 };
@@ -2212,6 +2273,9 @@ $('density').addEventListener('click', (event) => {
   const button = event.target.closest('button');
   if (!button) return;
   setDensity(button.dataset.d);
+});
+$('theme-toggle').addEventListener('click', () => {
+  setTheme(otherTheme(state.theme));
 });
 $('scope').addEventListener('change', (event) => {
   const [kind, value] = event.target.value.split(':');
@@ -2532,6 +2596,19 @@ if (initialRoute.ticket) {
   state.page = 'ticket';
   state.ticketKey = initialRoute.ticket;
 }
+/* prd/10 §3.1: the theme is settled before the first paint. The inline script
+ * in index.html has already set `data-theme` from the URL or localStorage (so
+ * there is no flash); this runs the same path the toggle does, so the canvas
+ * palette is resolved from the tokens before anything draws. A `?theme=` link
+ * is a deliberate destination, so it is remembered — otherwise the next reload
+ * would silently disagree with the screen (the same rule tenant links follow). */
+setTheme(
+  initialRoute.theme
+    || normalizeTheme(document.documentElement.dataset.theme)
+    || readTheme()
+    || DEFAULT_THEME,
+  { save: Boolean(initialRoute.theme), repaint: false },
+);
 // prd/28 §3: phone is list-first. A first visit lands on the Delivery list;
 // a stored choice (the user opened Timeline last time) is respected. An
 // explicit view in the URL is a deliberate destination and always wins.

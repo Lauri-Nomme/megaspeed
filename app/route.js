@@ -18,6 +18,8 @@
  * round-trips in `node --test` without a browser.
  */
 
+import { THEMES, normalizeTheme } from './theme.js';
+
 /** The views the router knows (mirrors PAGES in main.js). */
 export const ROUTE_VIEWS = [
   'overview', 'delivery', 'timeline', 'ticket',
@@ -26,6 +28,12 @@ export const ROUTE_VIEWS = [
 
 /** The closed set of scope kinds (scope.js owns the behaviour). */
 export const SCOPE_KINDS = ['person', 'role'];
+
+/* prd/10 §3.1: dark is the default, so a dark view is the absence of a
+ * parameter. `?theme=light` is a shareable light view; `?theme=dark` is
+ * accepted (it is what the toggle writes when it leaves light) and resolves to
+ * the default. theme.js owns the closed set; this only spells it in the URL. */
+export const ROUTE_THEMES = THEMES;
 
 export const TITLE_SUFFIX = ' — megaspeed';
 export const FALLBACK_TITLE = 'megaspeed';
@@ -68,7 +76,7 @@ function normalizeView(view) {
  * optional, so a caller can encode only what it knows.
  */
 export function serializeRoute({
-  tenant = null, view = null, ticket = null, timeframe = null, scope = null,
+  tenant = null, view = null, ticket = null, timeframe = null, scope = null, theme = null,
 } = {}) {
   const params = new URLSearchParams();
   if (tenant) params.set('tenant', String(tenant));
@@ -77,6 +85,8 @@ export function serializeRoute({
   // `all` is explicit: a link must reproduce "everything", not inherit the
   // recipient's stored person scope.
   if (scope && scope.kind) params.set('scope', scopeParam(scope));
+  // dark is the default, so it costs no characters and old links keep working
+  if (normalizeTheme(theme) === 'light') params.set('theme', 'light');
   const query = params.toString();
   const hash = ticket ? `#ticket/${encodeURIComponent(ticket)}` : '';
   return `${query ? `?${query}` : ''}${hash}`;
@@ -97,6 +107,8 @@ export function parseRoute(search = '', hash = '') {
     ticket,
     timeframe: params.get('tf') || null,
     scope: parseScope(params.get('scope')),
+    // null means "no opinion": keep the stored preference (dark by default).
+    theme: normalizeTheme(params.get('theme')),
   };
 }
 

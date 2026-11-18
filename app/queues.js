@@ -11,6 +11,7 @@
 
 import { fmtStamp, fmtDuration, fmtHours, esc, rgba } from './format.js';
 import { streamRoleLabel } from './scope.js';
+import { color, onPalette } from './theme.js';
 
 const ROW_H = 62;
 const GUTTER = 232;
@@ -20,14 +21,39 @@ const BOTTOM = 22;
 // collide with the data or the gutter's name/diagnosis text.
 const Y_AXIS_W = 34;
 
-const WIP = '#63B1FF';
-const DONE = '#B9BBC0';   // neutral: green is reserved for the 'healthy' state
+/* Every hue is a theme token (app/theme.js): the WIP fill is the info accent,
+ * completions are neutral — green is reserved for the 'healthy' state. */
+const C = {
+  wip: '', done: '', strong: '', label: '', muted: '', faint: '',
+  hairline: '', rule: '', grid: '', mean: '', rowSelected: '', rowHover: '',
+};
 
 export const DIAGNOSIS = {
-  overloaded: { label: 'overloaded', color: '#F05C70', tint: 'rgba(240,92,112,.14)' },
-  slow: { label: 'slow', color: '#FBCD58', tint: 'rgba(251,205,88,.14)' },
-  healthy: { label: 'healthy', color: '#73CF55', tint: 'rgba(115,207,85,.12)' },
+  overloaded: { token: '--critical', tintToken: '--critical-veil', label: 'overloaded', color: '', tint: '' },
+  slow: { token: '--warning', tintToken: '--warning-veil', label: 'slow', color: '', tint: '' },
+  healthy: { token: '--healthy', tintToken: '--healthy-veil', label: 'healthy', color: '', tint: '' },
 };
+
+/** Resolve the chart's colours from the theme tokens (dark fallbacks first). */
+export function applyPalette() {
+  C.wip = color('--info-accent');
+  C.done = color('--canvas-label');
+  C.strong = color('--canvas-strong');
+  C.label = color('--canvas-label');
+  C.muted = color('--canvas-muted');
+  C.faint = color('--canvas-faint');
+  C.hairline = color('--canvas-hairline');
+  C.rule = color('--canvas-row-rule');
+  C.grid = color('--canvas-grid-faint');
+  C.mean = color('--canvas-mean');
+  C.rowSelected = color('--canvas-row-selected');
+  C.rowHover = color('--canvas-row-hover-soft');
+  for (const diagnosis of Object.values(DIAGNOSIS)) {
+    diagnosis.color = color(diagnosis.token);
+    diagnosis.tint = color(diagnosis.tintToken);
+  }
+}
+onPalette(applyPalette);
 
 export class QueueChart {
   constructor({ canvas, tip, onSelect }) {
@@ -87,12 +113,12 @@ export class QueueChart {
     const ctx = this.ctx;
     const g = this.geometry();
     ctx.clearRect(0, 0, g.width, g.height);
-    ctx.fillStyle = '#151924';
+    ctx.fillStyle = color('--canvas-bg');
     ctx.fillRect(0, 0, g.width, g.height);
     this.hits = [];
 
     if (!this.streams.length) {
-      ctx.fillStyle = '#8A8D93';
+      ctx.fillStyle = C.muted;
       ctx.font = '500 12px Inter, system-ui, sans-serif';
       const message = (this.data && this.data.emptyText) || 'No measured waits in this window.';
       ctx.fillText(message, GUTTER, AXIS_H + 24);
@@ -108,7 +134,7 @@ export class QueueChart {
 
     // shared time axis
     ctx.font = '500 10px "JetBrains Mono", ui-monospace, monospace';
-    ctx.fillStyle = '#8A8D93';
+    ctx.fillStyle = C.muted;
     ctx.textAlign = 'left';
     ctx.textBaseline = 'middle';
     // prd/28: a phone's plot is ~136px wide; five 16-character stamps would
@@ -122,7 +148,7 @@ export class QueueChart {
       ctx.textAlign = i === 0 ? 'left' : i === ticks - 1 ? 'right' : 'center';
       ctx.fillText(phone ? fmtStamp(t).slice(0, 10) : fmtStamp(t).slice(0, 16), x, 12);
     }
-    ctx.strokeStyle = 'rgba(255,255,255,.06)';
+    ctx.strokeStyle = C.hairline;
     ctx.beginPath();
     ctx.moveTo(GUTTER, AXIS_H - 2.5);
     ctx.lineTo(GUTTER + g.plotW, AXIS_H - 2.5);
@@ -135,10 +161,10 @@ export class QueueChart {
       const isHover = this.hover && this.hover.stream === stream.id;
       const isSelected = this.selected === stream.id;
       if (isHover || isSelected) {
-        ctx.fillStyle = isSelected ? 'rgba(99,177,255,.08)' : 'rgba(255,255,255,.025)';
+        ctx.fillStyle = isSelected ? C.rowSelected : C.rowHover;
         ctx.fillRect(0, top, g.width, ROW_H);
       }
-      ctx.strokeStyle = 'rgba(255,255,255,.035)';
+      ctx.strokeStyle = C.rule;
       ctx.beginPath();
       ctx.moveTo(0, Math.round(top + ROW_H) - 0.5);
       ctx.lineTo(g.width, Math.round(top + ROW_H) - 0.5);
@@ -151,11 +177,11 @@ export class QueueChart {
       ctx.textAlign = 'left';
       ctx.textBaseline = 'middle';
       ctx.font = '600 12px Inter, system-ui, sans-serif';
-      ctx.fillStyle = '#E8E9EB';
+      ctx.fillStyle = C.strong;
       ctx.fillText(stream.id, 14, top + 16);
       const nameW = ctx.measureText(stream.id).width;
       ctx.font = '500 10px "JetBrains Mono", ui-monospace, monospace';
-      ctx.fillStyle = '#8A8D93';
+      ctx.fillStyle = C.muted;
       const role = stream.people && stream.people.length
         ? `${streamRoleLabel(stream)} · ${stream.people.length} ppl`
         : streamRoleLabel(stream);
@@ -176,12 +202,12 @@ export class QueueChart {
       ctx.fillText(pillText, pillX + 7, top + 17);
 
       ctx.font = '500 10.5px "JetBrains Mono", ui-monospace, monospace';
-      ctx.fillStyle = '#B9BBC0';
+      ctx.fillStyle = C.label;
       ctx.fillText(
         `${summary.mean_wip.toFixed(1)} wip · ≈${summary.mean_wait_hours.toFixed(1)} h mean · ${summary.throughput_per_day.toFixed(2)}/d`,
         14, top + 34,
       );
-      ctx.fillStyle = '#6B6F76';
+      ctx.fillStyle = C.faint;
       ctx.fillText(`${summary.items} PRs · peak ${summary.peak_wip}`, 14, top + 47);
 
       // B15: the y scale. Shared across rows (maxWip), labelled at 0, half and
@@ -191,14 +217,14 @@ export class QueueChart {
       for (const tick of wipTicks(maxWip)) {
         const y = base - (tick / maxWip) * chartH;
         if (tick > 0) {
-          ctx.strokeStyle = 'rgba(255,255,255,.05)';
+          ctx.strokeStyle = C.grid;
           ctx.beginPath();
           ctx.moveTo(GUTTER, Math.round(y) + 0.5);
           ctx.lineTo(GUTTER + g.plotW, Math.round(y) + 0.5);
           ctx.stroke();
         }
         ctx.font = '500 9px "JetBrains Mono", ui-monospace, monospace';
-        ctx.fillStyle = '#6B6F76';
+        ctx.fillStyle = C.faint;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
         ctx.fillText(fmtWipTick(tick), yAxisX, y);
@@ -214,19 +240,19 @@ export class QueueChart {
       });
       ctx.lineTo(xAt(buckets - 1), base);
       ctx.closePath();
-      ctx.fillStyle = rgba(WIP, 0.16);
+      ctx.fillStyle = rgba(C.wip, 0.16);
       ctx.fill();
       ctx.beginPath();
       stream.wip.forEach((value, i) => {
         const y = base - (value / maxWip) * chartH;
         if (i === 0) ctx.moveTo(xAt(i), y); else ctx.lineTo(xAt(i), y);
       });
-      ctx.strokeStyle = rgba(WIP, 0.85);
+      ctx.strokeStyle = rgba(C.wip, 0.85);
       ctx.lineWidth = 1.25;
       ctx.stroke();
 
       // completions: small ticks under the baseline
-      ctx.fillStyle = rgba(DONE, 0.75);
+      ctx.fillStyle = rgba(C.done, 0.75);
       let totalDone = 0;
       stream.completions.forEach((value, i) => {
         if (!value) return;
@@ -239,7 +265,7 @@ export class QueueChart {
       const mean = summary.mean_wip;
       if (mean > 0) {
         const y = base - (mean / maxWip) * chartH;
-        ctx.strokeStyle = 'rgba(232,233,235,.22)';
+        ctx.strokeStyle = C.mean;
         ctx.setLineDash([3, 3]);
         ctx.beginPath();
         ctx.moveTo(GUTTER, y);
@@ -253,7 +279,7 @@ export class QueueChart {
 
     // axis label for the x scale
     ctx.font = '500 10px "JetBrains Mono", ui-monospace, monospace';
-    ctx.fillStyle = '#8A8D93';
+    ctx.fillStyle = C.muted;
     ctx.textAlign = 'left';
     ctx.fillText(
       phone

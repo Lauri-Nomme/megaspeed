@@ -4,6 +4,22 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>megaspeed — process miner</title>
+<!-- prd/10 §3.1: dark is the default; light is a stored choice (or a
+     `?theme=light` deep link). Resolve it before the stylesheet paints, or a
+     light-theme user sees a dark flash on every reload. This is the only
+     script that may run before app/theme.js; it duplicates nothing but the
+     key name and the two accepted values. -->
+<script>
+  (function () {
+    try {
+      var theme = new URLSearchParams(location.search).get('theme');
+      if (theme !== 'light' && theme !== 'dark') theme = localStorage.getItem('megaspeed.theme');
+      if (theme === 'light' || theme === 'dark') {
+        document.documentElement.setAttribute('data-theme', theme);
+      }
+    } catch (e) { /* no storage, no URL: the dark default stands */ }
+  }());
+</script>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -38,6 +54,8 @@
       </div>
     </div>
     <span class="grow"></span>
+    <button type="button" class="theme-toggle" id="theme-toggle" aria-pressed="false"
+            aria-label="switch to the light theme" title="switch to the light theme">☾</button>
     <div class="density" id="density" role="group" aria-label="density">
       <button type="button" data-d="S" aria-pressed="false" title="dense">S</button>
       <button type="button" data-d="M" aria-pressed="true" class="on" title="default">M</button>
