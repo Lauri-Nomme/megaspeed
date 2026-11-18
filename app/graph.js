@@ -12,6 +12,7 @@
  */
 
 import { fmtHours, esc, rgba } from './format.js';
+import { touchAxis } from './mobile.js';
 
 function lensText(lens, value) {
   if (lens.unit === 'h') return fmtHours(value);
@@ -586,9 +587,10 @@ export class BlockingMap {
         this.schedule();
       }
     });
-    // prd/28 §2: pan + tap on the blocking map. One finger moves the camera,
-    // two fingers pinch, a tap selects a node (its queue opens), a hold shows
-    // the same tooltip hover gives the desktop, and a double-tap resets.
+    // prd/28 §2: pan + tap on the blocking map. One finger pans horizontally
+    // (a vertical drag scrolls the page), two fingers pinch, a tap selects a
+    // node (its queue opens), a hold shows the same tooltip hover gives the
+    // desktop, and a double-tap resets.
     const local = (ev) => {
       const rect = canvas.getBoundingClientRect();
       return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
@@ -597,22 +599,27 @@ export class BlockingMap {
       clearTimeout(this._holdTimer);
       this._holdTimer = 0;
     };
+    const capture = (pointerId) => {
+      try { canvas.setPointerCapture(pointerId); } catch { /* not fatal */ }
+    };
 
     canvas.addEventListener('pointerdown', (ev) => {
       if (ev.pointerType === 'mouse') return;
       this._touchAt = Date.now();
-      ev.preventDefault();
-      try { canvas.setPointerCapture(ev.pointerId); } catch { /* not fatal */ }
       const point = local(ev);
       this._pointers.set(ev.pointerId, {
         ...point,
         startX: point.x, startY: point.y,
         lastX: point.x, lastY: point.y,
-        moved: false, held: false, t: Date.now(),
+        moved: false, held: false, axis: null, t: Date.now(),
       });
       if (this._pointers.size > 1) {
         clearHold();
-        for (const pointer of this._pointers.values()) pointer.moved = true;
+        ev.preventDefault();
+        for (const [id, pointer] of this._pointers) {
+          pointer.moved = true;
+          capture(id);
+        }
         this._pinch = this._pinchState();
         this.tip.hidden = true;
         return;
@@ -630,11 +637,11 @@ export class BlockingMap {
       if (ev.pointerType === 'mouse') return;
       const pointer = this._pointers.get(ev.pointerId);
       if (!pointer) return;
-      ev.preventDefault();
       const point = local(ev);
       pointer.x = point.x;
       pointer.y = point.y;
       if (this._pointers.size > 1) {
+        ev.preventDefault();
         const next = this._pinchState();
         if (this._pinch && next && next.dist > 0) {
           const g = this.geometry();
@@ -656,13 +663,22 @@ export class BlockingMap {
         pointer.lastY = pointer.y;
         return;
       }
-      if (!pointer.moved && Math.hypot(point.x - pointer.startX, point.y - pointer.startY) > 8) {
+      if (!pointer.moved) {
+        // Horizontal drag pans the camera; vertical belongs to the page.
+        const axis = touchAxis(point.x - pointer.startX, point.y - pointer.startY);
+        if (!axis) {
+          pointer.lastX = point.x;
+          pointer.lastY = point.y;
+          return;
+        }
         pointer.moved = true;
+        pointer.axis = axis;
         clearHold();
+        if (axis === 'x') capture(ev.pointerId);
       }
-      if (pointer.moved) {
+      if (pointer.axis === 'x') {
+        ev.preventDefault();
         this.pan.x += point.x - pointer.lastX;
-        this.pan.y += point.y - pointer.lastY;
         const g = this.geometry();
         this._clampPan(g);
         this.tip.hidden = true;
@@ -686,6 +702,7 @@ export class BlockingMap {
         rest.lastX = rest.x;
         rest.lastY = rest.y;
         rest.moved = true;
+        rest.axis = 'x';
         return;
       }
       if (this._pointers.size > 0) return;

@@ -979,8 +979,9 @@ a.child.ticket-link { color: var(--link); }
 /* prd/28: the phone groups tenant/scope/timeframe on their own row. On desktop
  * the wrapper is transparent, so the flex order is exactly the pre-phone one. */
 .ctx-row { display: contents; }
-/* a canvas is a gesture surface: the browser must not steal the drag */
-#timeline, #blocking, #queues { touch-action: none; }
+/* a canvas is a gesture surface for horizontal pan/pinch; a vertical drag is
+ * the page's scroll, not the chart's (prd/28 §2) */
+#timeline, #blocking, #queues { touch-action: pan-y; }
 
 @media (max-width: 640px) {
   /* -- shell ---------------------------------------------------------- */
@@ -1027,8 +1028,38 @@ a.child.ticket-link { color: var(--link); }
   .ctx-row .ctx:nth-of-type(2) { order: 3; }
   .topbar .tenant-pill { max-width: 96px; padding: 0 8px; }
   .tenant-key, .tenant-meta { display: none; }
+  /* A 96px pill cannot fit `ux-del-combined` on one line; wrap the name
+   * instead of clipping it with an ellipsis (the phone must not hide which
+   * dataset every number on screen belongs to). */
+  .topbar .tenant-name {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    word-break: break-word;
+    line-height: 1.12;
+  }
   .tenant-name, .tenant-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .ctx { min-width: 0; }
+  .ctx { min-width: 0; position: relative; }
+  /* The `custom` window chip appears the moment a pan/zoom leaves a preset. In
+   * the flow it wrapped the context row and pushed the whole page down 50px
+   * mid-gesture (scroll anchoring then jumped the chart). It is a badge on the
+   * timeframe group instead, so it takes no space and nothing moves. */
+  .ctx .tf-custom {
+    position: absolute;
+    top: -7px;
+    right: -3px;
+    height: 15px;
+    padding: 0 5px;
+    font-size: 9px;
+    line-height: 13px;
+    color: var(--primary-tint-fg);
+    background: var(--primary-tint-bg);
+    border: 1px solid rgba(104, 192, 252, .35);
+    border-radius: var(--radius-control);
+    pointer-events: none;
+    z-index: 1;
+  }
+  .ctx .tf-custom[hidden] { display: none; }
   .ctx-k { display: none; }        /* the value labels the pill on a phone */
   .topbar select { max-width: 100px; }
   #range { display: none; }
@@ -1091,8 +1122,11 @@ a.child.ticket-link { color: var(--link); }
     position: static;
     padding: 6px 12px;
     font-size: 11px;
-    gap: 4px;
+    gap: 2px 12px;
   }
+  /* the facts are separate flex items with their own gap; a `·` between them
+     would sit alone at the start of a wrapped line */
+  .meta .dot, .timebasis::before, .range-meta::before { display: none; }
   .toolbar { padding: 6px 10px; gap: 8px; }
   .toolbar.sub { padding: 4px 10px; }
   .hint { font-size: 10.5px; }
@@ -1209,8 +1243,29 @@ a.child.ticket-link { color: var(--link); }
   .table .c-push, .table .c-bar, .table .c-role,
   .ticket-prs .c-id, .ticket-prs .c-state, .ticket-prs .c-since,
   .ticket-prs .c-dur, .ticket-prs .c-rounds, .ticket-prs .c-push,
-  .ticket-prs .c-bar {
+  .ticket-prs .c-bar,
+  /* the panel/compact variants repeat those widths with a higher specificity;
+     left alone they pin a card value to 90-112px and a `9 h 11 min` wraps
+     into three vertical fragments */
+  .panel .table .c-state, .panel .table .c-id, .panel .table .c-who, .panel .table .c-dur,
+  .table.compact .c-id, .table.compact .c-dur {
     width: auto;
+  }
+  .panel .table td, .panel .table tr:first-child td { padding: 2px 0; }
+  .table.compact td { height: auto; }
+  /* a ticket key is the first thing a card is tapped for: a 44px target, not
+     the 14px glyph box */
+  .table td.c-id a, .drill td.drill-item a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+  /* keys inside running text keep their line height but get a 44px hit area */
+  .sprint-out-keys a, .rule a.ticket-link { position: relative; }
+  .sprint-out-keys a::after, .rule a.ticket-link::after {
+    content: "";
+    position: absolute;
+    inset: -14px -6px;
   }
   .table td::before, .drill td::before {
     content: attr(data-label);
@@ -1262,13 +1317,27 @@ a.child.ticket-link { color: var(--link); }
   .legend::-webkit-scrollbar { display: none; }
   .legend button { max-width: none; flex: 0 0 auto; }
   .sprint-rows {
-    flex-wrap: nowrap;
-    overflow-x: auto;
-    overscroll-behavior-x: contain;
-    scrollbar-width: none;
+    flex-wrap: wrap;
+    overflow-x: visible;
+    gap: 6px;
   }
-  .sprint-rows::-webkit-scrollbar { display: none; }
-  .sprint-row { flex: 0 0 auto; white-space: nowrap; }
+  /* A phone stacks the sprint rows instead of hiding S2/S3 off the right edge:
+     each row wraps its own scope/dates inside the full width. */
+  .sprint-row {
+    flex: 1 1 100%;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    height: auto;
+    min-height: 44px;
+    padding: 6px 9px;
+    white-space: normal;
+  }
+  /* each fact is a unit: the date must not break at its hyphens into three
+     vertical fragments inside a narrow row */
+  .sprint-row .sprint-id, .sprint-row .sprint-state, .sprint-row .sprint-window,
+  .sprint-row .sprint-days, .sprint-row .sprint-scope-count, .sprint-row .sprint-done,
+  .sprint-row .sprint-plan, .sprint-row .sprint-carry { white-space: nowrap; }
   .phase-legend { gap: 4px 10px; }
   .sprint-rows { gap: 6px; }
   .sprint-row { white-space: normal; }

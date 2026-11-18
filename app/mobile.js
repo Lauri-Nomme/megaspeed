@@ -33,6 +33,14 @@ export function phoneEntryPage(savedPage = null) {
   return savedPage || 'delivery';
 }
 
+/* The phone timeline opens on the story hierarchy: its gutter labels are the
+ * Jira keys (epic → story), and zooming in nests each PR with its own key and
+ * number. The actor dimension hides every ticket key below eight lanes, which
+ * is the phone complaint this default fixes. A saved choice still wins. */
+export function phoneEntryLanes(savedLanes = null) {
+  return savedLanes || 'story';
+}
+
 /* Gestures cannot use the desktop hint line: a phone has no wheel, no arrow
  * keys and no right-click. Say what the finger can actually do. */
 export function hintText(which, phone = false) {
@@ -57,6 +65,17 @@ export function shouldDismissSheet({ dy = 0, velocity = 0, distance = SHEET_DISM
   if (!(dy > 0)) return false;
   if (dy >= distance) return true;
   return dy >= SHEET_FLICK_PX && velocity >= SHEET_FLICK_VELOCITY;
+}
+
+/** Which way a one-finger drag is going, once it passes the slop.
+ *
+ * A canvas is a gesture surface, but a phone must still be scrollable: the
+ * first few pixels decide whether the finger owns a horizontal pan/zoom or the
+ * page owns a vertical scroll. `null` means "not a gesture yet"; the caller
+ * keeps the axis it picked for the rest of the drag. */
+export function touchAxis(dx = 0, dy = 0, slop = 8) {
+  if (Math.hypot(Number(dx) || 0, Number(dy) || 0) <= slop) return null;
+  return Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
 }
 
 /** The live drag offset of a sheet: down only, never up past its resting place. */

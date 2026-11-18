@@ -153,19 +153,27 @@ export class QueueChart {
       ctx.font = '600 12px Inter, system-ui, sans-serif';
       ctx.fillStyle = '#E8E9EB';
       ctx.fillText(stream.id, 14, top + 16);
+      const nameW = ctx.measureText(stream.id).width;
       ctx.font = '500 10px "JetBrains Mono", ui-monospace, monospace';
       ctx.fillStyle = '#8A8D93';
       const role = stream.people && stream.people.length
         ? `${streamRoleLabel(stream)} · ${stream.people.length} ppl`
         : streamRoleLabel(stream);
-      ctx.fillText(role, 92, top + 16);
+      // prd/28: on a phone the diagnosis pill moves to the gutter's right edge
+      // so it no longer paints over the first buckets of the sparkline.
+      const pillText = `≈ ${diagnosis.label}`;
+      const pillW = phone ? Math.max(76, Math.ceil(ctx.measureText(pillText).width) + 14) : 76;
+      const pillX = phone ? GUTTER - pillW - 8 : 194;
+      // the role sits right after the name (not at a fixed x) so the pill's
+      // width never truncates it to `senti…`
+      const roleX = phone ? Math.round(14 + nameW + 8) : 92;
+      ctx.fillText(phone ? fitText(ctx, role, pillX - 6 - roleX) : role, roleX, top + 16);
       // diagnosis pill
-      const pillX = 194;
       ctx.fillStyle = diagnosis.tint;
-      roundRect(ctx, pillX, top + 9, 76, 15, 7);
+      roundRect(ctx, pillX, top + 9, pillW, 15, 7);
       ctx.fill();
       ctx.fillStyle = diagnosis.color;
-      ctx.fillText(`≈ ${diagnosis.label}`, pillX + 7, top + 17);
+      ctx.fillText(pillText, pillX + 7, top + 17);
 
       ctx.font = '500 10.5px "JetBrains Mono", ui-monospace, monospace';
       ctx.fillStyle = '#B9BBC0';
@@ -382,6 +390,15 @@ export function wipTicks(max) {
 
 export function fmtWipTick(value) {
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+/** Shorten text with an ellipsis so a canvas label never paints past its box. */
+function fitText(ctx, text, maxWidth) {
+  if (maxWidth <= 0) return '';
+  if (ctx.measureText(text).width <= maxWidth) return text;
+  let value = text;
+  while (value.length > 1 && ctx.measureText(`${value}…`).width > maxWidth) value = value.slice(0, -1);
+  return `${value}…`;
 }
 
 function roundRect(ctx, x, y, w, h, r) {
