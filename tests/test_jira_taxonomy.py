@@ -14,7 +14,7 @@ import re
 import unittest
 
 from ingest import taxonomy
-from ingest.store import EVENT_KEY_RE, SOURCES, object_shape_problems
+from ingest.store import EVENT_KEY_RE, REPO_SCOPED_SOURCES, SOURCES, object_shape_problems
 
 KEY_SHAPE = r"^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$"
 
@@ -175,13 +175,20 @@ class SourceTests(unittest.TestCase):
     def test_both_source_families_are_known(self):
         self.assertEqual(
             set(SOURCES),
-            {"fixture", "bitbucket-dc", "jira-fixture", "jira-dc", "jira-cloud"},
+            # prd/31: ``hans`` is a Bitbucket DC *capture* imported offline --
+            # the same family as ``bitbucket-dc``, a different read path.
+            {"fixture", "bitbucket-dc", "hans", "jira-fixture", "jira-dc", "jira-cloud"},
         )
 
     def test_the_cloud_source_is_the_jira_family(self):
         # prd/24: the same ticket layer, a different API surface.
         self.assertIn("jira-cloud", SOURCES)
         self.assertIn("jira-dc", SOURCES)
+
+    def test_the_capture_source_is_repo_scoped(self):
+        # prd/31: a hans capture holds exactly the PRs it captured, so its PRs
+        # need no ticket key -- and no other source gets that relaxation.
+        self.assertEqual(REPO_SCOPED_SOURCES, frozenset({"hans"}))
 
 
 if __name__ == "__main__":

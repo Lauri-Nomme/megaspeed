@@ -29,6 +29,7 @@ from .store import (
     EVENT_KEY_RE,
     HEAD_COMMIT_RE,
     REPO_RE,
+    REPO_SCOPED_SOURCES,
     RUN_ID_RE,
     SOURCES,
     connect,
@@ -79,6 +80,9 @@ def validate_bundle(
     problems: list[str] = []
     key_set = tuple(sorted({str(k).strip().upper() for k in ticket_keys or () if str(k).strip()}))
     projects = tuple(str(p).upper() for p in ticket_projects or ())
+    # prd/31: a repo-scoped capture (a hans scrape) imports PRs that reference no
+    # ticket key -- the capture is the scope. Every other source keeps the guard.
+    repo_scoped = bundle.source in REPO_SCOPED_SOURCES
 
     def key_ok(value) -> bool:
         key = str(value)
@@ -116,7 +120,7 @@ def validate_bundle(
         for key in obj.get("ticket_keys") or []:
             if not key_ok(key):
                 problems.append(f"objects.ticket_keys {key!r} is outside the configured scope ({oid})")
-        if otype == "PR" and not obj.get("ticket_keys"):
+        if otype == "PR" and not obj.get("ticket_keys") and not repo_scoped:
             problems.append(f"PR object {oid} carries no matched ticket key")
         if otype in ("STORY", "EPIC") and not obj.get("ticket_keys"):
             problems.append(f"{otype} object {oid} carries no ticket key")

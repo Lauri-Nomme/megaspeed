@@ -50,8 +50,13 @@ RUN_ID_RE = r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$"
 # The sources this store may hold. A source name is a closed label, not free
 # text: it is the provenance column of ``ingest_runs``. ``jira-cloud`` is the
 # Cloud shape of the same Jira source (prd/24): a different API surface, the
-# same objects and events.
-SOURCES = ("fixture", "bitbucket-dc", "jira-fixture", "jira-dc", "jira-cloud")
+# same objects and events. ``hans`` is a Bitbucket DC **capture** imported
+# offline (prd/31): the same REST payloads, read from a scrape directory.
+SOURCES = ("fixture", "bitbucket-dc", "hans", "jira-fixture", "jira-dc", "jira-cloud")
+#: Sources whose capture *is* the scope (prd/31). A hans scrape holds exactly the
+#: PRs that were captured, so a PR that references no ticket key is real data,
+#: not a filter bug -- a store built only from these may hold keyless PR objects.
+REPO_SCOPED_SOURCES = frozenset({"hans"})
 OBJECT_ID_PREFIX = {
     "PR": "PR:",
     "COMMIT": "COMMIT:",
@@ -338,6 +343,25 @@ def imported_scope(con) -> tuple[str, ...]:
     if not sets or any(not keys for keys in sets):
         return ()
     return tuple(dict.fromkeys(key for keys in sets for key in keys))
+
+
+def repo_scoped_store(con) -> bool:
+    """Does this store hold a **repo-scoped capture** (prd/31)?
+
+    A hans scrape holds exactly the PRs that were captured, so it imports PRs
+    that reference no ticket key. Once such a capture is in the store, "every PR
+    has a ticket key" is no longer a property the audit can require -- and it
+    does not need to: the import gate (``importer.validate_bundle``) still
+    rejects a keyless PR from *every other* source, so the only way one can be
+    written is through a repo-scoped bundle.
+    """
+    try:
+        rows = {str(row[0]) for row in con.execute(
+            "SELECT DISTINCT source FROM ingest_runs"
+        ).fetchall()}
+    except Exception:  # a store from a build without the table/column
+        return False
+    return bool(rows & REPO_SCOPED_SOURCES)
 
 
 # --------------------------------------------------------------------------- #
@@ -677,7 +701,7 @@ def verify(con, key_shape: str = DEFAULT_KEY_SHAPE,
         "SELECT count(*) FROM objects WHERE object_type = 'PR'"
         " AND (ticket_keys IS NULL OR len(ticket_keys) = 0)"
     ).fetchone()[0]
-    if bad:
+    if bad and not repo_scoped_store(con):
         problems.append(f"objects: {bad} PR(s) without a matched ticket key")
     # A Jira Story/Epic *is* a ticket: its key must travel on the object, which
     # is what joins the ticket layer to the PR layer (prd/03, prd/04 dev-status).
