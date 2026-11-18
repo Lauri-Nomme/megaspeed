@@ -11,8 +11,9 @@
 
 ## Fix (conforms to concepts.md §1)
 
-1. **`d` means 24 business hours everywhere** a duration is rendered. The PR drawer's wall-clock span is
-   re-labelled as calendar time (e.g. "90 calendar days") so the two are never the same letter.
+1. **`d` means 8 business hours — one working day — everywhere** a duration is rendered (`d = h/8`,
+   so 168 business hours = `21 d`, not `7 d`). The PR drawer's wall-clock span is re-labelled as
+   calendar time (e.g. "90 calendar days") so the two are never the same letter.
 2. **State the clock where it matters** — the ticket/PR view says its timestamps are UTC and its
    durations are business hours on the team's (Tallinn) calendar, once, so a 0 h span between two UTC
    timestamps is explained rather than looking wrong.

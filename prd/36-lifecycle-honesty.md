@@ -33,9 +33,9 @@ Conform to `docs/concepts.md` §5.
 4. **Reopens visible** — a story with a `done→ready` move shows "reopened" and reports both created→
    first-done and created→final-done, never silently one.
 5. **Fix the counts** — "N of M segments measured" derives M from the actual segment count (9, not a
-   hard-coded 8); "per story" means a per-story statistic (median/mean), never total ÷ 24; "rounds"
-   uses one definition (the store's `review_rounds`) everywhere; "logged a week late" excludes
-   `within_week`.
+   hard-coded 8); "per story" means a per-story statistic (median/mean), never an aggregate total
+   mislabelled as per-story; "rounds" uses one definition (the store's `review_rounds`) everywhere;
+   "logged a week late" excludes `within_week`.
 
 ## Tests
 

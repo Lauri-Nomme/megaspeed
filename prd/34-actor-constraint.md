@@ -32,9 +32,11 @@ named as the owner, and the same actor reads differently across views. Conform t
 4. **Distinct, labelled load metrics** — "overloaded" (queue wait) and "busy/utilisation" (calendar
    share) get different names and are never both called "load"; a tile that counts people counts only
    people.
-5. **Stale/zombie PR surfaced** — a "stale PR" signal (open > N business days, or "ticket Done but PR
-   open") is shown, and the tail waits the ball-court currently excludes are no longer silently omitted
-   from the blocking view.
+5. **Stale/zombie PR surfaced, and the tails not hidden** — a "stale PR" signal (open > N business
+   days, or "ticket Done but PR open") is shown; the ball-court's `unobserved` tails (a PR with no
+   recent events — e.g. the three 3–5-week-old waits #53/#55/#60 that the blocking graph currently
+   drops) are surfaced in the blocking/delivery view rather than silently excluded, so "what's stuck
+   now" doesn't omit the most actionable waits.
 
 ## Tests
 

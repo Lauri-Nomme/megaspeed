@@ -22,11 +22,16 @@ Each entry: **Definition** (what it is) · **Derivation** (how it's computed fro
   wall-clock time is never the headline.
 
 ### Day (`d`)
-- **Definition**: **24 business hours**. It is *never* a calendar day.
-- **Derivation**: `d = h / 24`; rendered as `Nd Nh` (e.g. `7 d 0 h` = 168 business hours).
-- **Purpose**: a human-scale rendering of business hours. **Any place that means a calendar day must
-  say "calendar day" explicitly** (the PR drawer's wall-clock span is the one legitimate exception —
-  it is labelled as calendar time, not "d").
+- **Definition**: **8 business hours — one working day.** It is *never* a calendar day, and never
+  24 hours.
+- **Derivation**: `d = h / 8` (a team working day is 8 h); `w = d / 5` (a working week = 5 d = 40 h).
+  Rendered as `Nd Nh` (e.g. `21 d 0 h` = 168 business hours = 4 working weeks).
+- **Purpose**: a human-scale rendering of business hours that matches how people read "a day" of work.
+  **Any place that means a calendar day must say "calendar day" explicitly** (the PR drawer's
+  wall-clock span is the one legitimate exception — it is labelled as calendar time, not "d").
+- **Rationale (the correction):** "d = 24 h" is wrong — 24 business hours is 3 working days, not one,
+  so `168 h → "7 d"` read as a week when it is actually 4 working weeks. `d = 8 h` makes `40 h = 5 d =
+  one calendar week`, which is the unit people expect.
 
 ### Person-hour
 - **Definition**: an hour of *one* person's business time (a `business_hours` span priced on that
