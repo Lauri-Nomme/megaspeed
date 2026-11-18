@@ -36,7 +36,7 @@ import {
   ROLE_QUEUES, filteredPages, queueLevelForNode, scopeBanner, scopeForNode, scopeForStream,
 } from '/scope.js';
 import {
-  bindLongPress, hintText, initMobile, isPhone, phoneEntryPage,
+  bindLongPress, hintText, initMobile, isPhone, phoneEntryLanes, phoneEntryPage,
 } from '/mobile.js';
 
 const $ = (id) => document.getElementById(id);
@@ -2403,8 +2403,15 @@ function restoreUI() {
 // -------------------------------------------------------------------- boot
 restoreUI();
 // prd/28 §3: phone is list-first. A first visit lands on the Delivery list;
-// a stored choice (the user opened Timeline last time) is respected.
-if (isPhone() && !uiRestored) state.page = phoneEntryPage(null);
+// a stored choice (the user opened Timeline last time) is respected. The first
+// phone timeline opens on stories, so its Jira keys are on screen immediately
+// instead of below the actor lanes.
+if (isPhone() && !uiRestored) {
+  state.page = phoneEntryPage(null);
+  const lanes = phoneEntryLanes(null);
+  $('lanes').value = lanes;
+  timeline.setLanes(lanes);
+}
 // The phone shell: off-canvas sidebar + bottom sheets. Desktop markup is
 // untouched; every rule that does something lives under the 640px breakpoint.
 const mobile = initMobile({

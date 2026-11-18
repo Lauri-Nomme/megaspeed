@@ -18,7 +18,8 @@
 import {
   MINUTE, HOUR, DAY, fmtDay, fmtClock, fmtStamp, fmtDuration, fmtTick, fmtCompact, esc, rgba,
 } from './format.js';
-import { epicKeySet, epicTicket, ownTicket } from './tickets.js';
+import { epicKeySet, epicTicket, ownTicket, ticketKey } from './tickets.js';
+import { touchAxis } from './mobile.js';
 
 export const ACTIVITY_ORDER = [
   'pr_opened', 'pr_pushed', 'comment_added', 'pr_approved', 'pr_unapproved',
@@ -67,8 +68,10 @@ const METRICS = {
 
 const GUTTER = 176;
 // prd/28: on a 412px phone the 176px gutter would leave ~226px of plot; the
-// labels shrink to the ticket key so the time axis keeps most of the width.
-const GUTTER_PHONE = 88;
+// labels shrink to the ticket key (and its PR number) so the time axis keeps
+// most of the width. 112px is the narrowest gutter that still fits
+// `DEL-105 #131` in the 11px mono label font.
+const GUTTER_PHONE = 112;
 const AXIS_H = 42;
 const HIST_H = 36;
 const HEADER_H = 22;
@@ -83,11 +86,56 @@ const STEPS = [
 const ACTIVITY_STATES = ['on', 'faint', 'hide'];
 const QUEUE_ORDER = ['review', 'author', 'CI', 'calendar'];
 
+/** The gutter label for one lane (pure, so the phone hierarchy is testable).
+ *
+ * On a phone a PR lane keeps both its ticket key and its PR number: repeating
+ * only the story key made the PRs under one story indistinguishable. In the
+ * story dimension the glyph carries the hierarchy (epic ◆ → story ▸ → PR).
+ */
+export function laneLabel(row, { narrow = false, dim = 'actor' } = {}) {
+  if (!row) return '';
+  if (narrow && dim === 'story') {
+    if (row.kind === 'pr') return `${row.ticket ? `${row.ticket} ` : ''}#${row.number}`;
+    const glyph = row.kind === 'epic' ? '◆ ' : row.kind === 'story' ? '▸ ' : '';
+    return `${glyph}${row.label || row.key || ''}`;
+  }
+  if (narrow) {
+    if (row.ticket) return `${row.ticket}${row.pr ? ` #${row.pr.number}` : ''}`;
+    if (row.pr) return `#${row.pr.number}`;
+    return row.label || row.key || '';
+  }
+  const indent = row.depth ? `${'  '.repeat(row.depth)}↳ ` : '';
+  return `${indent}${row.label || row.key || ''}`;
+}
+
+/** The section header over the gutter. A phone gets the short form, because
+ *  `STORIES · 100 stories · 131 PRs` is wider than the canvas itself. */
+export function laneHeader(dim, rows, { narrow = false } = {}) {
+  const list = rows || [];
+  const section = dim === 'actor' ? 'ACTORS'
+    : dim === 'object' ? 'PULL REQUESTS'
+      : dim === 'story' ? 'STORIES' : 'QUEUES';
+  const storyCount = list.filter((row) => row.kind === 'story').length;
+  const prCount = list.filter((row) => row.kind === 'pr').length;
+  if (!narrow) {
+    return dim === 'story'
+      ? `${section} · ${storyCount} stories · ${prCount} PRs`
+      : `${section} · ${list.length}`;
+  }
+  const short = dim === 'actor' ? 'ACTORS'
+    : dim === 'object' ? 'PRs'
+      : dim === 'story' ? 'STORIES' : 'QUEUES';
+  return `${short} ${dim === 'story' ? storyCount : list.length}`;
+}
+
 /* prd/25: semantic zoom for the `stories` dimension. A wide window shows the
  * epic → story hierarchy (PRs would be unreadable), a medium window nests each
  * story's PRs beneath it, and the event markers on those PR bars are the third
- * level. The thresholds are in time, not pixels, so the hierarchy is stable
- * while panning. */
+ * level. The nesting threshold is in time, not pixels, so the hierarchy is
+ * stable while panning. On a phone the epic header stays visible at every zoom:
+ * with an 112px gutter a story is only legible as a child of its epic (DEL-1),
+ * whether its PRs are collapsed or nested beneath it. The desktop keeps the
+ * wide-window-only epic header it always had. */
 const STORY_NEST_SPAN = 45 * DAY;
 const STORY_EPIC_SPAN = 60 * DAY;
 
@@ -182,6 +230,9 @@ export class Timeline {
     // The epic/tracking keys across the whole store, set by the page (B2). When
     // null the census is taken over the PRs handed to setData().
     this.epicKeys = null;
+    // prd/25: STORY objects carry their own `epic_key` attribute; the story lane
+    // must use it even when no PR links the story to that epic.
+    this.storyEpic = new Map();
     this.now = Date.now();
     this.domain = { start: 0, end: 1 };
     this.view = { start: 0, end: 1 };
@@ -258,6 +309,17 @@ export class Timeline {
       .sort((a, b) => a.t - b.t);
     const prs = new Map();
     this.commitsByPr = new Map();
+    // prd/25: a story object names its epic in `attributes.epic_key`. That is
+    // the authoritative parent link for a story lane (a story may have no PR,
+    // or its PRs may carry only the story key).
+    this.storyEpic = new Map();
+    for (const obj of objects) {
+      if (obj.object_type !== 'STORY') continue;
+      const key = ticketKey(obj.object_id) || (obj.ticket_keys || [])[0];
+      const epic = (obj.attributes && obj.attributes.epic_key) || '';
+      if (key) this.storyEpic.set(key, epic);
+    }
+    this._storyCache = null;
     for (const obj of objects) {
       if (obj.object_type === 'PR') {
         prs.set(obj.object_id, {
@@ -555,9 +617,15 @@ export class Timeline {
    * markers on those PR bars are the third semantic level, drawn by the same
    * `paintLifecycle` the object lanes use.
    */
+  isPhone() {
+    const parent = this.canvas && this.canvas.parentElement;
+    return ((parent && parent.clientWidth) || 1200) <= 640;
+  }
+
   storyRows() {
     // The grouping is a function of the loaded data, not of the zoom, so it is
     // built once per setData (a pan/zoom only re-reads it).
+    const storyEpic = this.storyEpic || new Map();
     let groups;
     if (this._storyCache && this._storyCache.prs === this.prs
         && this._storyCache.events === this.events) {
@@ -567,10 +635,15 @@ export class Timeline {
       for (const pr of this.prs) {
         const story = pr.ticket || '(no ticket)';
         if (!groups.has(story)) {
-          groups.set(story, { story, epic: '', prs: [], events: [] });
+          groups.set(story, {
+            story,
+            epic: pr.epic || storyEpic.get(story) || '',
+            prs: [],
+            events: [],
+          });
         }
         const group = groups.get(story);
-        if (!group.epic && pr.epic) group.epic = pr.epic;
+        if (!group.epic) group.epic = pr.epic || storyEpic.get(story) || '';
         group.prs.push(pr);
       }
       // A story with no PR is still a lane (prd/25: story → event): its own
@@ -580,17 +653,26 @@ export class Timeline {
           if (!String(objectId).startsWith('STORY:')) continue;
           const story = String(objectId).slice('STORY:'.length);
           if (!groups.has(story)) {
-            groups.set(story, { story, epic: '', prs: [], events: [] });
+            groups.set(story, {
+              story,
+              epic: storyEpic.get(story) || '',
+              prs: [],
+              events: [],
+            });
           }
-          groups.get(story).events.push(event);
+          const group = groups.get(story);
+          if (!group.epic) group.epic = storyEpic.get(story) || '';
+          group.events.push(event);
         }
       }
       this._storyCache = { prs: this.prs, events: this.events, groups };
     }
     const span = this.span();
     const nested = span <= STORY_NEST_SPAN;
-    const showEpics = !nested && span > STORY_EPIC_SPAN
-      && [...groups.values()].some((group) => group.epic);
+    // On a phone the epic header is the top of the hierarchy at every zoom:
+    // hiding it when PRs nest made a story row look parentless.
+    const hasEpics = [...groups.values()].some((group) => group.epic);
+    const showEpics = hasEpics && (this.isPhone() || (!nested && span > STORY_EPIC_SPAN));
     const stories = [...groups.values()].sort((a, b) => {
       const start = (group) => Math.min(
         ...group.prs.map((pr) => pr.created),
@@ -633,8 +715,11 @@ export class Timeline {
             kind: 'pr',
             pr,
             story: group.story,
-            ticket: group.story,
+            ticket: pr.ticket || group.story,
+            number: pr.number,
             count: pr.events.length,
+            // prd/25: the PR row carries its own ticket key and number (the
+            // phone gutter prints `DEL-100 #1`, see laneLabel).
             label: `#${pr.number} ${pr.repo}`,
             depth: showEpics && group.epic ? 2 : 1,
           });
@@ -674,7 +759,7 @@ export class Timeline {
     const height = AXIS_H + HIST_H + HEADER_H + lanes.length * laneH +
       (objectMode ? 0 : SECTION_GAP + HEADER_H + barRows.length * m.bar) + BOTTOM;
     const width = this.canvas.parentElement.clientWidth || 1200;
-    const gutter = width <= 640 ? GUTTER_PHONE : GUTTER;
+    const gutter = this.isPhone() ? GUTTER_PHONE : GUTTER;
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     this.canvas.width = Math.round(width * dpr);
     this.canvas.height = Math.round(height * dpr);
@@ -1015,19 +1100,8 @@ export class Timeline {
     ctx.textBaseline = 'middle';
     ctx.textAlign = 'right';
     ctx.fillStyle = '#8A8D93';
-    const section = this.dim === 'actor' ? 'ACTORS'
-      : this.dim === 'object' ? 'PULL REQUESTS'
-        : this.dim === 'story' ? 'STORIES' : 'QUEUES';
-    const sectionCount = this.dim === 'story'
-      ? `${rows.filter((row) => row.kind === 'story').length} stories · ` +
-        `${rows.filter((row) => row.kind === 'pr').length} PRs`
-      : String(rows.length);
-    const narrow = g.gutter < 120;
-    ctx.fillText(
-      narrow ? `${section} ${sectionCount}` : `${section} · ${sectionCount}`,
-      g.gutter - 10,
-      AXIS_H + HIST_H + 11,
-    );
+    const narrow = g.gutter < 140;
+    ctx.fillText(laneHeader(this.dim, rows, { narrow }), g.gutter - 10, AXIS_H + HIST_H + 11);
 
     rows.forEach((row, i) => {
       const y = g.laneTop + i * g.laneH;
@@ -1047,13 +1121,20 @@ export class Timeline {
       // and the gutter is a hit target that opens the ticket detail page.
       const linked = Boolean(row.ticket);
       ctx.fillStyle = hovered ? '#E8E9EB' : linked ? '#94B4D4' : '#B9BBC0';
-      ctx.textAlign = 'right';
-      const indent = row.depth ? `${'  '.repeat(row.depth)}↳ ` : '';
-      const text = narrow
-        ? (row.ticket || (row.pr ? `#${row.pr.number}` : (row.label || row.key)))
-        : `${indent}${row.label || row.key}`;
-      const label = fit(ctx, text, narrow ? g.gutter - 12 : g.gutter - 22);
-      ctx.fillText(label, g.gutter - 10, y + g.laneH / 2);
+      const text = laneLabel(row, { narrow, dim: this.dim });
+      if (narrow && this.dim === 'story') {
+        // The story hierarchy is drawn in the gutter: epic (◆) → story (▸) →
+        // PR. Left alignment + indent is what makes "under its epic" visible;
+        // right-aligned labels erased the nesting on a phone.
+        const depth = row.depth || 0;
+        const x = 5 + depth * 9;
+        ctx.textAlign = 'left';
+        ctx.fillText(fit(ctx, text, g.gutter - x - 5), x, y + g.laneH / 2);
+      } else {
+        ctx.textAlign = 'right';
+        const label = fit(ctx, text, narrow ? g.gutter - 12 : g.gutter - 22);
+        ctx.fillText(label, g.gutter - 10, y + g.laneH / 2);
+      }
       if (linked) {
         this.hits.push({
           kind: 'label', x0: 0, x1: g.gutter, y0: y, y1: y + g.laneH,
@@ -1351,10 +1432,10 @@ export class Timeline {
       ctx.textAlign = 'right';
       ctx.fillStyle = isHover ? '#E8E9EB' : '#B9BBC0';
       const key = pr.ticket ? `${pr.ticket} ` : '';
-      const label = g.gutter < 120
-        ? (pr.ticket || `#${pr.number}`)
+      const label = g.gutter < 140
+        ? (pr.ticket ? `${pr.ticket} #${pr.number}` : `#${pr.number}`)
         : `${key}#${pr.number} ${pr.repo}`;
-      ctx.fillText(fit(ctx, label, g.gutter < 120 ? g.gutter - 12 : g.gutter - 22), g.gutter - 10, y + g.barH / 2);
+      ctx.fillText(fit(ctx, label, g.gutter < 140 ? g.gutter - 12 : g.gutter - 22), g.gutter - 10, y + g.barH / 2);
 
       const barY = y + 2;
       const barH = g.barH - 4;
@@ -1647,8 +1728,9 @@ export class Timeline {
       else if (key === 'Escape') { this.clearHover(); this.clearSelection(); ev.preventDefault(); }
     });
 
-    // prd/28 §2: touch. One finger pans, two fingers pinch around their
-    // midpoint, a short tap selects/drills, and a 450 ms hold shows the
+    // prd/28 §2: touch. One finger pans horizontally, a vertical drag scrolls
+    // the page (the canvas is `touch-action: pan-y`), two fingers pinch around
+    // their midpoint, a short tap selects/drills, and a 450 ms hold shows the
     // tooltip the desktop gets from hover (never a hover-only affordance).
     const local = (ev) => {
       const rect = canvas.getBoundingClientRect();
@@ -1658,22 +1740,28 @@ export class Timeline {
       clearTimeout(this._holdTimer);
       this._holdTimer = 0;
     };
+    const capture = (pointerId) => {
+      try { canvas.setPointerCapture(pointerId); } catch { /* not fatal */ }
+    };
 
     canvas.addEventListener('pointerdown', (ev) => {
       if (ev.pointerType === 'mouse') return;
       this._touchAt = Date.now();
-      ev.preventDefault();
-      try { canvas.setPointerCapture(ev.pointerId); } catch { /* not fatal */ }
       const point = local(ev);
       this._pointers.set(ev.pointerId, {
         ...point,
         startX: point.x, startY: point.y,
         lastX: point.x, lastY: point.y,
-        moved: false, held: false, t: Date.now(),
+        moved: false, held: false, axis: null, t: Date.now(),
       });
       if (this._pointers.size > 1) {
+        // Pinch owns the gesture: stop the browser scrolling under two fingers.
         clearHold();
-        for (const pointer of this._pointers.values()) pointer.moved = true;
+        ev.preventDefault();
+        for (const [id, pointer] of this._pointers) {
+          pointer.moved = true;
+          capture(id);
+        }
         this._pinch = this._pinchState();
         this.tip.hidden = true;
         return;
@@ -1693,11 +1781,11 @@ export class Timeline {
       if (ev.pointerType === 'mouse') return;
       const pointer = this._pointers.get(ev.pointerId);
       if (!pointer) return;
-      ev.preventDefault();
       const point = local(ev);
       pointer.x = point.x;
       pointer.y = point.y;
       if (this._pointers.size > 1) {
+        ev.preventDefault();
         const next = this._pinchState();
         if (this._pinch && next) {
           // spreading the fingers (dist grows) zooms in: factor < 1
@@ -1710,11 +1798,24 @@ export class Timeline {
         pointer.lastY = pointer.y;
         return;
       }
-      if (!pointer.moved && Math.hypot(point.x - pointer.startX, point.y - pointer.startY) > 8) {
+      if (!pointer.moved) {
+        // Decide once: horizontal is a pan, vertical belongs to the page.
+        const axis = touchAxis(point.x - pointer.startX, point.y - pointer.startY);
+        if (!axis) {
+          pointer.lastX = point.x;
+          pointer.lastY = point.y;
+          return;
+        }
         pointer.moved = true;
+        pointer.axis = axis;
         clearHold();
+        if (axis === 'x') {
+          capture(ev.pointerId);
+          canvas.classList.add('dragging');
+        }
       }
-      if (pointer.moved) {
+      if (pointer.axis === 'x') {
+        ev.preventDefault();
         this.panPixels(point.x - pointer.lastX);
         this.tip.hidden = true;
       }
@@ -1728,6 +1829,7 @@ export class Timeline {
       if (!pointer) return;
       clearHold();
       this._pointers.delete(ev.pointerId);
+      if (pointer.axis === 'x') canvas.classList.remove('dragging');
       if (this._pointers.size < 2) this._pinch = null;
       if (this._pointers.size === 1) {
         // the remaining finger carries on as a pan from where it is now
@@ -1737,6 +1839,7 @@ export class Timeline {
         rest.lastX = rest.x;
         rest.lastY = rest.y;
         rest.moved = true;
+        rest.axis = 'x';
         return;
       }
       if (this._pointers.size > 0) return;

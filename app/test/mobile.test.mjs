@@ -7,8 +7,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import {
-  PHONE_MAX, isPhoneWidth, phoneEntryPage, hintText,
-  shouldDismissSheet, sheetOffset,
+  PHONE_MAX, isPhoneWidth, phoneEntryPage, phoneEntryLanes, hintText,
+  shouldDismissSheet, sheetOffset, touchAxis,
 } from '../mobile.js';
 import { deliveryTable } from '../tables.js';
 import { prTable, eventsList } from '../ticket.js';
@@ -31,6 +31,9 @@ test('phone is list-first, but a saved page wins', () => {
   assert.equal(phoneEntryPage(undefined), 'delivery');
   assert.equal(phoneEntryPage('timeline'), 'timeline');
   assert.equal(phoneEntryPage('ticket'), 'ticket');
+  // the first phone timeline is the story hierarchy, where the Jira keys live
+  assert.equal(phoneEntryLanes(null), 'story');
+  assert.equal(phoneEntryLanes('actor'), 'actor');
 });
 
 test('the hint line names the gestures the device actually has', () => {
@@ -138,8 +141,8 @@ test('prd/28: the phone shell is gated on one breakpoint', () => {
   // the off-canvas controls do not exist on desktop
   assert.match(css, /\.nav-toggle \{ display: none; \}/);
   assert.match(css, /\.sheet-handle, \.sheet-close \{ display: none; \}/);
-  // canvases own their gestures
-  assert.match(css, /#timeline, #blocking, #queues \{ touch-action: none; \}/);
+  // canvases own their horizontal gestures, but vertical drags scroll the page
+  assert.match(css, /#timeline, #blocking, #queues \{ touch-action: pan-y; \}/);
   // tables stack with data-label cards
   assert.match(css, /content: attr\(data-label\)/);
   // no viewport-wide horizontal scrollbar is hidden to mask overflow
@@ -159,6 +162,7 @@ test('prd/28: the phone wiring exists in the page source', () => {
   assert.match(main, /initMobile\(\{/);
   assert.match(main, /bindLongPress\(/);
   assert.match(main, /phoneEntryPage\(null\)/);
+  assert.match(main, /phoneEntryLanes\(null\)/);
   assert.match(main, /hintText\('timeline', phone\)/);
   assert.match(main, /sheet-close/);
   assert.match(main, /classList\.toggle\('has-selection'/);
