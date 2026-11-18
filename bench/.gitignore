@@ -1,0 +1,14 @@
+# generated artifacts from the perf-review benchmarks — reproduce via make_big_store.py + bench_*.py
+stores/
+bundles/
+tcache/
+tenants/
+tenants-wt/
+shots/
+git/
+__pycache__/
+*.duckdb
+*.tgz
+*.json
+*.log
+token*

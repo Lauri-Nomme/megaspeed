@@ -1,0 +1,14 @@
+store /tmp/opencode/perf/stores/big40.duckdb: 101160 events, 5240 PRs, 4000 stories
+
+ballcourt.load                                    1257.2 ms
+jira.load                                          246.8 ms
+rules.load_threads                                  54.4 ms
+rules.load_bots                                      2.3 ms
+rules.load_pr_sizes                                 12.9 ms
+queue_series person default                       3213.2 ms
+queue_series person 1h                           82674.9 ms
+queue_series queue 1h                            49911.1 ms
+rules.insights (team, whole window)               3886.4 ms
+  -> payload 24396982 bytes
+/api/ticket path (load_jira + ticket)             1959.8 ms
+query.list_events(limit=200000)                   2794.3 ms

@@ -1,9 +1,10 @@
 # Execution-performance review — megaspeed
 
 Adversarial, measurement-first review of every layer. Read-only: no source file was
-modified. All numbers below were produced by the scripts in `/tmp/opencode/perf/`
-(re-runnable; see *Method*), against the real stores and against synthetic stores
-scaled from them.
+modified. All numbers below were produced by the benchmark scripts now committed at
+[`bench/`](../bench/) — see [`bench/README.md`](../bench/README.md) for the re-run recipe
+(*Method* links each finding to its script), against the real stores and against synthetic
+stores scaled from them.
 
 ---
 
