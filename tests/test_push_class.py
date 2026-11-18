@@ -447,6 +447,111 @@ class HelpersTests(unittest.TestCase):
             taxonomy.check_attributes({"push_class": "looks like a rebase to me"})
 
 
+class GitCacheMemoTests(unittest.TestCase):
+    """prd/33 §6: the git cache used to cost 26 subprocesses per PR, warm or not.
+
+    Every ``_present``/``merge-base``/``patch-id``/``numstat``/``update-ref``
+    answer is memoised per (repo, commit), so the second pass over the same PRs
+    costs **no** git process at all, and the first pass pays only what the
+    classification genuinely needs.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.tmp.name)
+        cls.repo = ScenarioRepo(cls.root)
+        cls.repo.build()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def _classifier(self, name: str = "cache") -> PushClassifier:
+        return PushClassifier(
+            self.root / name,
+            f"file://{self.root / 'served'}",
+            url_template="{base}/scm/{project}/{repo}.git",
+        )
+
+    @staticmethod
+    def _pr(target: str, old: str, new: str) -> tuple[dict, list[dict], list[dict]]:
+        pr = {
+            "id": 1,
+            "fromRef": {"latestCommit": new, "displayId": "DEMO-1-thing"},
+            "toRef": {"latestCommit": target, "displayId": "main"},
+        }
+        activities = [{
+            "id": 1, "action": "RESCOPED", "createdDate": 1,
+            "previousFromHash": old, "fromHash": new,
+            "previousToHash": target, "toHash": target,
+        }]
+        commits = [{"id": new}]
+        return pr, activities, commits
+
+    def _annotate(self, classifier, cases: dict, *, labels: dict | None = None) -> dict:
+        """Annotate every scenario case; return the labels it stamped."""
+        stamped: dict[str, dict] = {}
+        for name, (target, old, new) in cases.items():
+            pr, activities, commits = self._pr(target, old, new)
+            classifier.annotate(PROJECT, REPO, pr, activities)
+            classifier.annotate_diff_size(PROJECT, REPO, pr, commits)
+            stamped[name] = {
+                "push_class": activities[0]["megaspeedPatchId"]["push_class"],
+                "size": dict(pr.get("megaspeedDiffSize") or {}),
+            }
+        if labels is not None:
+            labels.update(stamped)
+        return stamped
+
+    def test_the_labels_are_identical_with_and_without_the_memo(self):
+        cold = self._classifier("cache-cold")
+        warm = self._classifier("cache-warm")
+        # Prime the warm classifier's memos with a first pass.
+        first = self._annotate(warm, self.repo.cases)
+        second = self._annotate(warm, self.repo.cases)
+        fresh = self._annotate(cold, self.repo.cases)
+        self.assertEqual(first, second)
+        self.assertEqual(second, fresh)
+        # ... and the scenarios are the ones the repo was built to produce.
+        self.assertEqual(first["pure"]["push_class"], "pure_rebase")
+        self.assertEqual(first["content"]["push_class"], "content")
+        self.assertEqual(first["conflict"]["push_class"], "rebase_conflict")
+
+    def test_a_second_pass_over_the_same_prs_runs_no_git_at_all(self):
+        classifier = self._classifier("cache-repeat")
+        self._annotate(classifier, self.repo.cases)
+        runs_after_first = classifier.runs
+        fetches_after_first = classifier.fetches
+        self.assertGreater(runs_after_first, 0)
+        # The same PRs again (a re-scrape of unchanged history): every answer is
+        # already known, so not one subprocess is spawned and nothing is fetched.
+        self._annotate(classifier, self.repo.cases)
+        self.assertEqual(classifier.runs, runs_after_first)
+        self.assertEqual(classifier.fetches, fetches_after_first)
+
+    def test_the_per_pr_git_process_count_dropped(self):
+        """26.1 runs/PR was the review's number; a memoised pass is far below it."""
+        classifier = self._classifier("cache-count")
+        cases = dict(list(self.repo.cases.items())[:3])
+        self._annotate(classifier, cases)
+        per_pr = classifier.runs / len(cases)
+        self.assertLess(per_pr, 20, f"{classifier.runs} runs for {len(cases)} PRs")
+        # The second and third PRs pay the *steady-state* cost: the first one
+        # also initialises the cache (init/config/first fetch).
+        self.assertLessEqual(classifier.report()["git_runs"], classifier.runs)
+
+    def test_a_presence_answer_is_invalidated_by_a_later_fetch(self):
+        """A memo must never turn a freshly fetched commit into "missing"."""
+        classifier = self._classifier("cache-invalidate")
+        _target, old, _new = self.repo.cases["pure"]
+        path = classifier._repo(PROJECT, REPO)
+        self.assertFalse(classifier._present(path, old))  # nothing fetched yet
+        self.assertFalse(classifier._present(path, old))  # memoised negative
+        classifier._ensure_heads(path, [], [old])         # the fetch fills it in
+        self.assertTrue(classifier._present(path, old))
+
+
 class ForScrapeTests(unittest.TestCase):
     def test_disabled_for_fixture_and_without_a_base_url(self):
         from ingest.config import Config

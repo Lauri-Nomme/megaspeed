@@ -33,7 +33,7 @@ from pathlib import Path
 from unittest import mock
 
 from ingest import scrape as scrape_module
-from ingest.bundle import read_bundle
+from ingest.bundle import read_bundle, read_inflight
 from ingest.config import Config
 from ingest.progress import ProgressReporter
 from ingest.scrape import scrape
@@ -265,8 +265,11 @@ class CheckpointResumeTests(unittest.TestCase):
                 Harness(self.bundle, crash_on_commits=4), checkpoint_every=2
             )
 
-        # The crash left a *readable* bundle and an explicit "unfinished" marker.
-        checkpoint = read_bundle(self.out)
+        # The crash left a *readable* in-flight checkpoint (the incremental
+        # spool: no tgz is written until the run finishes) and an explicit
+        # "unfinished" marker.
+        self.assertFalse(self.out.exists())
+        checkpoint = read_inflight(self.out)
         self.assertEqual(
             {event["pr_id"] for event in checkpoint.events}, {5, 6}
         )
@@ -298,6 +301,8 @@ class CheckpointResumeTests(unittest.TestCase):
         state = json.loads((self.state_dir / "watermark.json").read_text())
         self.assertIs(state["sources"]["fixture"]["complete"], True)
         self.assertEqual(state["sources"]["fixture"]["runs"], 1)  # one run, not N checkpoints
+        # The in-flight spool is gone once the tgz is durable.
+        self.assertFalse(Path(report["checkpoint_spool"]).exists())
 
     def test_checkpointing_can_be_disabled(self):
         report = self.run_scrape(Harness(self.bundle), checkpoint_every=0)

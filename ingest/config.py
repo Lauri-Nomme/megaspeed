@@ -130,6 +130,9 @@ class Config:
     llm_url: str = classify.DEFAULT_URL
     llm_model: str = classify.DEFAULT_MODEL
     llm_timeout: float = classify.DEFAULT_TIMEOUT
+    #: In-flight classification requests for one PR's batch (the local box's
+    #: parallel capacity). 1 restores the old strictly-serial client.
+    llm_workers: int = classify.DEFAULT_WORKERS
     # -- Jira source (prd/04) ---------------------------------------------
     #: Jira DC base URL, e.g. http://127.0.0.1:8090. Credentials never live in
     #: the config file: MEGASPEED_JIRA_TOKEN or _USER/_PASSWORD.
@@ -472,6 +475,7 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         llm_url=str(os.environ.get("MEGASPEED_LLM_URL", classify_cfg.get("llm_url", classify.DEFAULT_URL))),
         llm_model=str(os.environ.get("MEGASPEED_LLM_MODEL", classify_cfg.get("llm_model", classify.DEFAULT_MODEL))),
         llm_timeout=float(os.environ.get("MEGASPEED_LLM_TIMEOUT", classify_cfg.get("llm_timeout", classify.DEFAULT_TIMEOUT))),
+        llm_workers=int(os.environ.get("MEGASPEED_LLM_WORKERS", classify_cfg.get("workers", classify.DEFAULT_WORKERS))),
         jira_base_url=os.environ.get("MEGASPEED_JIRA_BASE_URL", jira.get("base_url", "")).rstrip("/"),
         jira_projects=parse_projects(
             os.environ.get("MEGASPEED_JIRA_PROJECTS", jira.get("projects", [])),

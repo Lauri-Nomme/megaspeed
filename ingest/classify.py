@@ -54,10 +54,13 @@ cache, no anchor path) does the classifier's ``thread_intent`` decide between
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import threading
 import urllib.request
-from typing import Any, Callable
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, Sequence
 from urllib.parse import urlsplit
 
 from . import taxonomy
@@ -94,6 +97,22 @@ DEFAULT_MODEL = "qwen3-30b-a3b:2507"
 #: CPU inference on a 30B MoE is seconds, not milliseconds; a hung call must not
 #: hang the scrape, but a slow one must be allowed to finish.
 DEFAULT_TIMEOUT = 180.0
+#: In-flight requests for the LLM backend. Ollama serves a few generations
+#: concurrently on one box (its ``OLLAMA_NUM_PARALLEL``), and the client used to
+#: be strictly serial -- one in-flight request, so throughput was exactly
+#: 1/latency (the review measured 4.4 h for 8k comments at 2 s). Four keeps the
+#: local box busy without queueing requests behind each other.
+DEFAULT_WORKERS = 4
+
+
+def digest(text: str) -> bytes:
+    """A stable content hash of a raw text (a batch is keyed by it, never by text).
+
+    The reducer matches a classified answer back to the comment it came from by
+    this digest, so the raw prose is not retained past the call that read it
+    (prd/02).
+    """
+    return hashlib.blake2b(str(text).encode("utf-8"), digest_size=16).digest()
 
 
 class ClassifyError(RuntimeError):
@@ -317,20 +336,32 @@ class Classifier:
         #: A wrapper that degrades to its fallback must stamp the fallback's
         #: version, not its own (FR-3: a mock label is never ``ollama-v1``).
         self.last_version = self.version
+        #: Counters are shared with the worker threads of a concurrent batch.
+        self._lock = threading.RLock()
 
     # -- to implement ----------------------------------------------------
     def classify(self, text: str, kind: str) -> dict:
         raise NotImplementedError
 
+    def classify_many(self, items: Sequence[tuple[str, str]]) -> list[tuple[dict, str]]:
+        """Classify ``(text, kind)`` pairs; ``(labels, version)`` in input order.
+
+        The default is the serial loop every backend has always had, so the
+        deterministic mock (and any test double) is unchanged and synchronous.
+        :class:`OllamaClassifier` overrides it with a bounded thread pool.
+        """
+        return [(self.classify(text, kind), self.last_version) for text, kind in items]
+
     # -- shared bookkeeping ----------------------------------------------
     def _count(self, labels: dict) -> dict:
-        self.calls += 1
-        for key in ("comment_type", "thread_intent", "thread_outcome", "phase"):
-            value = labels.get(key)
-            if value is not None:
-                self.labels[f"{key}:{value}"] = self.labels.get(f"{key}:{value}", 0) + 1
-        if labels.get("question"):
-            self.labels["question"] = self.labels.get("question", 0) + 1
+        with self._lock:
+            self.calls += 1
+            for key in ("comment_type", "thread_intent", "thread_outcome", "phase"):
+                value = labels.get(key)
+                if value is not None:
+                    self.labels[f"{key}:{value}"] = self.labels.get(f"{key}:{value}", 0) + 1
+            if labels.get("question"):
+                self.labels["question"] = self.labels.get("question", 0) + 1
         return labels
 
     def report(self) -> dict:
@@ -483,6 +514,7 @@ class OllamaClassifier(Classifier):
         fallback: Classifier | None = None,
         opener: Callable[[urllib.request.Request, float], Any] | None = None,
         max_failures: int = 5,
+        workers: int = DEFAULT_WORKERS,
     ):
         super().__init__()
         self.url = validate_llm_url(url or DEFAULT_URL).rstrip("/")
@@ -495,6 +527,8 @@ class OllamaClassifier(Classifier):
         self.version = "ollama-v1"
         self.last_prompt_tokens: int | None = None
         self.last_duration_ms: float | None = None
+        #: Bounded in-flight requests for one batch (see ``classify_many``).
+        self.workers = max(1, int(workers))
         #: Circuit breaker: a scrape is hours long, so a model box that is down
         #: (or hanging) must stop being asked, not cost a timeout per comment.
         self.max_failures = max(1, int(max_failures))
@@ -518,25 +552,80 @@ class OllamaClassifier(Classifier):
 
     def classify(self, text: str, kind: str) -> dict:
         _check_kind(kind)
+        labels, _version = self._classify_one(text, kind)
+        return self._count(labels)
+
+    def classify_many(self, items: Sequence[tuple[str, str]]) -> list[tuple[dict, str]]:
+        """Classify one PR's texts with a **bounded** thread pool.
+
+        ``workers`` requests are in flight at a time (default
+        :data:`DEFAULT_WORKERS`), which is the local box's parallel capacity; the
+        answers are returned in **input order**, so the labels a batch produces
+        are exactly the ones a serial run produced (the model is called with
+        ``temperature: 0`` and a fixed seed, and each text is independent). The
+        circuit breaker still applies: once the box is down the rest of the
+        batch -- and the run -- uses the deterministic labels.
+
+        A single item, ``workers == 1`` or an already-open breaker runs inline:
+        there is nothing to overlap.
+        """
+        prepared = [(str(text), kind) for text, kind in items]
+        for _text, kind in prepared:
+            _check_kind(kind)
+        if not prepared:
+            return []
+        if self.workers <= 1 or len(prepared) == 1 or self.down:
+            return [(self.classify(text, kind), self.last_version) for text, kind in prepared]
+        answers: list[tuple[dict, str] | None] = [None] * len(prepared)
+        with ThreadPoolExecutor(
+            max_workers=min(self.workers, len(prepared)),
+            thread_name_prefix="megaspeed-classify",
+        ) as pool:
+            futures = {
+                pool.submit(self._classify_one, text, kind): index
+                for index, (text, kind) in enumerate(prepared)
+            }
+            # Iterate in submission order: ``result()`` blocks, so the answers
+            # land in input order regardless of completion order.
+            for future, index in futures.items():
+                answers[index] = future.result()
+        results: list[tuple[dict, str]] = []
+        for answer in answers:
+            assert answer is not None
+            labels, version = answer
+            self._count(labels)
+            results.append((labels, version))
+        return results
+
+    def _classify_one(self, text: str, kind: str) -> tuple[dict, str]:
+        """Ask the box for one text; degrade to the fallback on any failure.
+
+        Never raises and never counts the classification itself (the caller
+        does): it is what a worker thread runs, so the only shared state it
+        touches is guarded by the lock.
+        """
         if self.down:
-            self.fallbacks += 1
-            self.last_version = self.fallback.version
-            return self._count(self.fallback.classify(text, kind))
+            with self._lock:
+                self.fallbacks += 1
+                self.last_version = self.fallback.version
+            return self.fallback.classify(text, kind), self.fallback.version
         try:
             payload = self._chat(self.request_body(text, kind))
             labels = parse_labels(kind, payload)
         except (ClassifyError, OSError, ValueError, KeyError, TimeoutError):
-            self.failures += 1
-            if self.failures >= self.max_failures:
-                # Stop asking: the rest of this scrape uses the deterministic
-                # labels instead of paying a timeout per comment.
-                self.down = True
-            self.fallbacks += 1
-            self.last_version = self.fallback.version
-            return self._count(self.fallback.classify(text, kind))
-        self.failures = 0
-        self.last_version = self.version
-        return self._count(labels)
+            with self._lock:
+                self.failures += 1
+                if self.failures >= self.max_failures:
+                    # Stop asking: the rest of this scrape uses the deterministic
+                    # labels instead of paying a timeout per comment.
+                    self.down = True
+                self.fallbacks += 1
+                self.last_version = self.fallback.version
+            return self.fallback.classify(text, kind), self.fallback.version
+        with self._lock:
+            self.failures = 0
+            self.last_version = self.version
+        return labels, self.version
 
     def _chat(self, body: dict) -> Any:
         request = urllib.request.Request(
@@ -568,6 +657,7 @@ class OllamaClassifier(Classifier):
             **super().report(),
             "model": self.model,
             "url": self.url,
+            "workers": self.workers,
             "down": self.down,
         }
 
@@ -636,6 +726,7 @@ def for_scrape(cfg, source: str, *, backend: str | None = None) -> Classifier | 
         getattr(cfg, "llm_url", DEFAULT_URL),
         getattr(cfg, "llm_model", DEFAULT_MODEL),
         timeout=float(getattr(cfg, "llm_timeout", DEFAULT_TIMEOUT)),
+        workers=int(getattr(cfg, "llm_workers", DEFAULT_WORKERS)),
     )
 
 
@@ -644,11 +735,13 @@ __all__ = [
     "Classifier",
     "DEFAULT_MODEL",
     "DEFAULT_URL",
+    "DEFAULT_WORKERS",
     "KIND_COMMENT",
     "KIND_DESCRIPTION",
     "MockClassifier",
     "OllamaClassifier",
     "PHASES_BY_KIND",
+    "digest",
     "for_scrape",
     "labels_for",
     "parse_labels",

@@ -36,7 +36,11 @@ import gzip
 import hashlib
 import io
 import json
+import os
+import re
+import shutil
 import tarfile
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -55,6 +59,16 @@ EVENTS = "events.jsonl"
 OBJECTS = "objects.jsonl"
 SUMS = "sha256sums"
 MEMBERS = (MANIFEST, EVENTS, OBJECTS, SUMS)
+#: Suffix of the in-flight staging directory a live scrape checkpoints into
+#: (``export/del.tgz.parts/``). Local state, never transferred: the artifact is
+#: still the single tgz written at the end of the run.
+SPOOL_SUFFIX = ".parts"
+#: Part file names inside the spool: ``part-00001.events.jsonl`` and
+#: ``part-00001.objects.jsonl``. Sorted by name = written order.
+SPOOL_EVENTS = "part-{index:05d}.events.jsonl"
+SPOOL_OBJECTS = "part-{index:05d}.objects.jsonl"
+#: Matches either part name, so a resumed spool can continue its numbering.
+_PART_NAME = re.compile(r"part-(?P<index>\d+)\.(?:events|objects)\.jsonl")
 
 
 class BundleError(RuntimeError):
@@ -159,6 +173,28 @@ def _tamperproof_tar(members: list[tuple[str, bytes]]) -> bytes:
     return raw.getvalue()
 
 
+def rows_for_events(
+    events: list[dict], relations: list[tuple[str, str, str]] | None = None
+) -> list[dict]:
+    """In-memory reducer events -> ``events.jsonl`` rows (``objects`` resolved).
+
+    Object ids per event come from ``relations`` unless a row already carries an
+    ``objects`` list (a row read back from a bundle/spool does).
+    """
+    by_event: dict[str, list[str]] = {}
+    for event_key, _object_type, object_id in relations or ():
+        by_event.setdefault(event_key, []).append(object_id)
+    return [
+        serialize_event(event, event.get("objects") or by_event.get(event["event_key"], []))
+        for event in events
+    ]
+
+
+def rows_for_objects(objects: list[dict]) -> list[dict]:
+    """In-memory object records -> ``objects.jsonl`` rows."""
+    return [serialize_object(row) for row in objects]
+
+
 def write_bundle(
     path: str | Path,
     *,
@@ -174,15 +210,8 @@ def write_bundle(
     ``objects`` list.
     """
     path = Path(path)
-    by_event: dict[str, list[str]] = {}
-    for event_key, _object_type, object_id in relations or ():
-        by_event.setdefault(event_key, []).append(object_id)
-
-    event_rows = []
-    for event in events:
-        object_ids = event.get("objects") or by_event.get(event["event_key"], [])
-        event_rows.append(serialize_event(event, object_ids))
-    object_rows = [serialize_object(row) for row in objects]
+    event_rows = rows_for_events(events, relations)
+    object_rows = rows_for_objects(objects)
 
     payload = {
         EVENTS: _jsonl(event_rows),
@@ -213,6 +242,296 @@ def write_bundle(
         "sha256": hashlib.sha256(blob).hexdigest(),
         "counts": manifest["counts"],
     }
+
+
+# --------------------------------------------------------------------------- #
+# in-flight staging (scrape side): incremental checkpoints
+# --------------------------------------------------------------------------- #
+def spool_dir(path: str | Path) -> Path:
+    """``export/del.tgz`` -> ``export/del.tgz.parts/`` (in-flight rows, local)."""
+    path = Path(path)
+    return path.parent / f"{path.name}{SPOOL_SUFFIX}"
+
+
+class BundleSpool:
+    """Append-only staging area for an **in-flight** scrape (crash safety).
+
+    A scrape checkpoints every ``--checkpoint-every`` PRs so a crash costs the
+    PRs since the last checkpoint, not the whole run. Re-serialising the whole
+    tgz at every checkpoint is O(N) *per checkpoint* -- O(N²) per run, 45 s of
+    pure gzip+tar at 4,000 PRs -- so a checkpoint instead stages **only the rows
+    that are new since the last one** into
+    ``<out>.parts/part-NNNNN.{events,objects}.jsonl`` and the tgz is written
+    once, at the end of the run (:func:`write_bundle`).
+
+    The parts hold exactly the rows a bundle would (:func:`serialize_event` /
+    :func:`serialize_object`), so :func:`read_spool` validates them with the
+    same reader the import side uses: a crash mid-run leaves a *readable*
+    in-flight artifact and :func:`read_inflight` hands it to the resume path.
+
+    Row **identity**, not row content, decides what is new: the reducer appends
+    rows and never mutates one in place, so ``is`` is the whole test -- a
+    checkpoint costs one dict lookup per row plus the serialisation of the delta
+    instead of a full re-serialisation. :meth:`append` returns the bytes it
+    wrote, which is what the "a checkpoint is O(delta)" regression test pins.
+    """
+
+    def __init__(self, directory: str | Path):
+        self.directory = Path(directory)
+        # A resumed run continues *after* the parts a dead run left behind: a
+        # fresh part index would overwrite them (and lose their rows).
+        self.parts = self._existing_parts()
+        self.bytes_written = 0
+        self.events_written = 0
+        self.objects_written = 0
+        self._events: dict[str, dict] = {}
+        self._objects: dict[str, dict] = {}
+        self._manifest: dict = {}
+
+    # -- lifecycle -------------------------------------------------------
+    def reset(self) -> None:
+        """Start a run from nothing (discard a stale spool from a dead run)."""
+        shutil.rmtree(self.directory, ignore_errors=True)
+        self.parts = 0
+        self.bytes_written = 0
+        self.events_written = 0
+        self.objects_written = 0
+        self._events = {}
+        self._objects = {}
+        self._manifest = {}
+
+    def resume(self, carried: "Bundle") -> None:
+        """Adopt the rows of the interrupted run this one is resuming.
+
+        The carried rows are the *same dict objects* the caller then passes back
+        into :meth:`append` (the resume merge keeps references), so indexing them
+        here is enough to stop them being staged a second time. If the spool is
+        a different (or empty) directory -- a resume into another ``--out`` --
+        they are staged once, because this spool does not hold them yet.
+        """
+        self._events = {str(row["event_key"]): row for row in carried.events}
+        self._objects = {str(row["object_id"]): row for row in carried.objects}
+        self._manifest = dict(carried.manifest)
+        if not self._has_parts():
+            self._write(
+                list(self._events.values()),
+                list(self._objects.values()),
+                [],
+                manifest=self._manifest,
+            )
+
+    def finish(self) -> None:
+        """The final tgz landed: the in-flight rows are redundant, drop them."""
+        shutil.rmtree(self.directory, ignore_errors=True)
+
+    @property
+    def exists(self) -> bool:
+        return self._has_parts() or (self.directory / MANIFEST).is_file()
+
+    def _existing_parts(self) -> int:
+        """The highest part index already on disk (0 when the spool is new)."""
+        if not self.directory.is_dir():
+            return 0
+        highest = 0
+        for part in self.directory.iterdir():
+            match = _PART_NAME.fullmatch(part.name)
+            if match:
+                highest = max(highest, int(match["index"]))
+        return highest
+
+    def _has_parts(self) -> bool:
+        return self.directory.is_dir() and any(
+            self.directory.glob(f"part-*.{EVENTS}")
+        )
+
+    # -- staging ---------------------------------------------------------
+    def append(
+        self,
+        *,
+        manifest: dict,
+        events: list[dict],
+        objects: list[dict],
+        relations: list[tuple[str, str, str]] | None = None,
+    ) -> dict:
+        """Stage the rows that are new since the last checkpoint.
+
+        Returns ``{bytes, manifest_bytes, events, objects, parts, total_bytes}``
+        for that one checkpoint (``bytes`` is the rows of the delta, never the
+        whole prefix).
+        """
+        fresh_events = [
+            row for row in events if self._events.get(str(row["event_key"])) is not row
+        ]
+        # Objects are deduped by identity *or* equality: the PERSON rows are
+        # re-derived from the actor set on every refresh (a fresh dict with the
+        # same content), and re-staging them at every checkpoint would put the
+        # O(prefix) back into the object half.
+        fresh_objects = [
+            row
+            for row in objects
+            if (known := self._objects.get(str(row["object_id"]))) is not row
+            and known != row
+        ]
+        manifest = dict(manifest)
+        manifest.setdefault("schema_version", SCHEMA_VERSION)
+        manifest.setdefault("counts", {})
+        manifest["counts"] = {
+            **manifest["counts"],
+            "events": len(events),
+            "objects": len(objects),
+        }
+        if not fresh_events and not fresh_objects and manifest == self._manifest:
+            return {
+                "bytes": 0,
+                "manifest_bytes": 0,
+                "events": 0,
+                "objects": 0,
+                "parts": self.parts,
+                "total_bytes": self.bytes_written,
+            }
+        written = self._write(fresh_events, fresh_objects, relations, manifest=manifest)
+        for row in fresh_events:
+            self._events[str(row["event_key"])] = row
+        for row in fresh_objects:
+            self._objects[str(row["object_id"])] = row
+        return written
+
+    def _write(
+        self,
+        events: list[dict],
+        objects: list[dict],
+        relations: list[tuple[str, str, str]] | None,
+        *,
+        manifest: dict,
+    ) -> dict:
+        self.parts += 1
+        index = self.parts
+        row_bytes = 0
+        event_rows = rows_for_events(events, relations)
+        object_rows = rows_for_objects(objects)
+        if event_rows:
+            row_bytes += self._part(SPOOL_EVENTS.format(index=index), event_rows)
+        if object_rows:
+            row_bytes += self._part(SPOOL_OBJECTS.format(index=index), object_rows)
+        # The manifest goes last: the parts it describes are already durable, so
+        # a crash between the two leaves a readable (if slightly older) spool.
+        manifest_bytes = self._manifest_file(manifest)
+        self.bytes_written += row_bytes + manifest_bytes
+        self.events_written += len(event_rows)
+        self.objects_written += len(object_rows)
+        return {
+            # ``bytes`` is the *rows* of this checkpoint (the O(delta) figure the
+            # regression test pins); the manifest is a small fixed cost.
+            "bytes": row_bytes,
+            "manifest_bytes": manifest_bytes,
+            "events": len(event_rows),
+            "objects": len(object_rows),
+            "parts": self.parts,
+            "total_bytes": self.bytes_written,
+        }
+
+    def _part(self, name: str, rows: list[dict]) -> int:
+        payload = _jsonl(rows)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        (self.directory / name).write_bytes(payload)
+        return len(payload)
+
+    def _manifest_file(self, manifest: dict) -> int:
+        """Write ``manifest.json`` through a temp file + rename (never torn)."""
+        payload = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode()
+        self.directory.mkdir(parents=True, exist_ok=True)
+        handle, temp_name = tempfile.mkstemp(
+            dir=self.directory, prefix=".manifest.", suffix=".part"
+        )
+        os.close(handle)
+        temp = Path(temp_name)
+        try:
+            temp.write_bytes(payload)
+            os.replace(temp, self.directory / MANIFEST)
+        finally:
+            temp.unlink(missing_ok=True)
+        self._manifest = manifest
+        return len(payload)
+
+
+def read_spool(directory: str | Path) -> Bundle:
+    """Read + validate an in-flight spool as if it were a bundle.
+
+    Every row goes through the same validators :func:`read_bundle` uses, so a
+    resumed run cannot be handed junk. The manifest's ``counts`` are *not*
+    enforced: the manifest is written after the parts it describes, so a crash
+    in that window legitimately leaves more rows on disk than the last manifest
+    counted.
+    """
+    directory = Path(directory)
+    manifest_path = directory / MANIFEST
+    if not manifest_path.is_file():
+        raise BundleError(f"no spool at {directory}")
+    try:
+        manifest: dict[str, Any] = json.loads(manifest_path.read_text())
+    except (json.JSONDecodeError, OSError) as exc:
+        raise BundleError(f"{directory}: manifest.json is not JSON ({exc})") from exc
+    if not isinstance(manifest, dict):
+        raise BundleError(f"{directory}: manifest.json is not a JSON object")
+    _check_manifest(directory, manifest)
+
+    events: dict[str, dict] = {}
+    objects: dict[str, dict] = {}
+    for part in sorted(directory.glob(f"part-*.{EVENTS}")):
+        try:
+            payload = part.read_bytes()
+        except OSError as exc:
+            raise BundleError(f"{part}: unreadable spool part ({exc})") from exc
+        for row in _jsonl_rows(part, EVENTS, payload):
+            parsed = _event_row(part, row)
+            events[str(parsed["event_key"])] = parsed
+    for part in sorted(directory.glob(f"part-*.{OBJECTS}")):
+        try:
+            payload = part.read_bytes()
+        except OSError as exc:
+            raise BundleError(f"{part}: unreadable spool part ({exc})") from exc
+        for row in _jsonl_rows(part, OBJECTS, payload):
+            parsed = _object_row(part, row)
+            objects[str(parsed["object_id"])] = parsed
+
+    event_list = list(events.values())
+    object_list = list(objects.values())
+    relations = [
+        (event["event_key"], object_id.split(":", 1)[0], object_id)
+        for event in event_list
+        for object_id in event["objects"]
+    ]
+    return Bundle(
+        path=directory,
+        manifest=manifest,
+        events=event_list,
+        objects=object_list,
+        relations=relations,
+    )
+
+
+def inflight_path(path: str | Path) -> Path | None:
+    """Where the readable artifact of an interrupted run at ``path`` lives.
+
+    The incremental spool (this build's crash-safety mechanism) wins over a
+    partial tgz written by an older build, so a state directory from a previous
+    version still resumes.
+    """
+    spool = spool_dir(path)
+    if (spool / MANIFEST).is_file():
+        return spool
+    candidate = Path(path)
+    return candidate if candidate.is_file() else None
+
+
+def read_inflight(path: str | Path) -> Bundle:
+    """Read the in-flight artifact of an interrupted run at ``path``."""
+    found = inflight_path(path)
+    if found is None:
+        raise BundleError(f"no in-flight checkpoint at {path}")
+    if found.is_dir():
+        return read_spool(found)
+    return read_bundle(found)
 
 
 # --------------------------------------------------------------------------- #
@@ -333,21 +652,8 @@ def _object_row(path: Path, row: dict) -> dict:
     }
 
 
-def read_bundle(path: str | Path) -> Bundle:
-    """Read + validate a tgz. Raises :class:`BundleError`; never returns junk."""
-    path = Path(path)
-    if not path.is_file():
-        raise BundleError(f"no bundle at {path}")
-    members = _read_members(path)
-    _verify_sums(path, members)
-
-    try:
-        manifest: dict[str, Any] = json.loads(members[MANIFEST].decode())
-    except json.JSONDecodeError as exc:
-        raise BundleError(f"{path}: manifest.json is not JSON ({exc})") from exc
-    if not isinstance(manifest, dict):
-        raise BundleError(f"{path}: manifest.json is not a JSON object")
-
+def _check_manifest(path: Path, manifest: dict) -> None:
+    """The schema/classifier/source gates every readable artifact must pass."""
     version = manifest.get("schema_version")
     if version not in SUPPORTED_SCHEMA_VERSIONS:
         raise BundleError(
@@ -362,6 +668,23 @@ def read_bundle(path: str | Path) -> Bundle:
         )
     if not manifest.get("source"):
         raise BundleError(f"{path}: manifest has no source")
+
+
+def read_bundle(path: str | Path) -> Bundle:
+    """Read + validate a tgz. Raises :class:`BundleError`; never returns junk."""
+    path = Path(path)
+    if not path.is_file():
+        raise BundleError(f"no bundle at {path}")
+    members = _read_members(path)
+    _verify_sums(path, members)
+
+    try:
+        manifest: dict[str, Any] = json.loads(members[MANIFEST].decode())
+    except json.JSONDecodeError as exc:
+        raise BundleError(f"{path}: manifest.json is not JSON ({exc})") from exc
+    if not isinstance(manifest, dict):
+        raise BundleError(f"{path}: manifest.json is not a JSON object")
+    _check_manifest(path, manifest)
 
     events = [_event_row(path, row) for row in _jsonl_rows(path, EVENTS, members[EVENTS])]
     objects = [_object_row(path, row) for row in _jsonl_rows(path, OBJECTS, members[OBJECTS])]

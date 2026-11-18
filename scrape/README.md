@@ -159,6 +159,11 @@ keys; an issue this scraper has never seen is always read in full.
   report, so a dead model never fails a scrape). `--no-text-classify` /
   `MEGASPEED_TEXT_CLASSIFY=0` turns it off; `--text-backend mock` forces the
   mock on a live run. Bot-authored comments are never sent to the model.
+  A PR's texts are classified as **one bounded batch**: `--llm-workers N` /
+  `MEGASPEED_LLM_WORKERS` (default 4) requests are in flight at a time against
+  the local box, so throughput is no longer 1/latency (the serial client cost
+  4.4 h per 8k comments at 2 s); `1` restores the strictly serial client, and
+  the deterministic mock always runs inline.
   `thread_outcome` is decided by the git cache first (did the diff move at the
   comment anchor?) and by the model's read of the text only when the diff is
   unknown. The classifier version is in the manifest (`text_classifier`) and on
@@ -187,21 +192,31 @@ from scratch. Now the run **checkpoints** every `--checkpoint-every N` kept PRs
 (default 50; `0` disables) and at every repo boundary:
 
 ```
-identity.json  -> bundle tgz -> prs.json -> watermark.json   (write order)
+identity.json -> <out>.parts/ (the new rows) -> prs.json -> watermark.json
 ```
+
+A checkpoint is **incremental**: it stages only the rows added since the last
+one in an append-only spool (`<out>.parts/part-NNNNN.{events,objects}.jsonl`,
+`ingest/bundle.py:BundleSpool`) and the tgz is written **once**, at the end of
+the run. Re-serialising the whole bundle at every checkpoint was O(N) per
+checkpoint — 4,000 PRs took 45 s with checkpoints vs 2.96 s without — so the
+cost now grows with the new work, not with the bundle so far.
 
 `watermark.json` is the commit marker: `complete: false` while the run is in
 flight, `true` once the final bundle lands. A run that dies leaves a *readable*
-partial tgz plus that marker, and the next run with the same `--state-dir`
-resumes from it:
+spool plus that marker, and the next run with the same `--state-dir` resumes
+from it:
 
-* it loads the checkpointed tgz and **carries its events/objects** into the new
-  bundle (that tgz was never imported, so nothing may be dropped);
+* it loads the checkpointed rows (`read_inflight`: the spool, or a partial tgz
+  written by an older build) and **carries its events/objects** into the new
+  bundle (that checkpoint was never imported, so nothing may be dropped);
 * it **skips the PRs the interrupted run already read** (matched by `run_id` +
   `updatedDate` in `prs.json`), so a 2 h scrape that died at 90 % does not pay
   for the first 90 % again;
 * a repo whose walk was cut short keeps its *previous* cursor, so a resume never
-  skips a PR that was never read.
+  skips a PR that was never read;
+* a resumed spool continues its part numbering instead of overwriting the
+  checkpoint it is resuming, and the spool is removed once the tgz is durable.
 
 The report says `resumed: true`, how many events were carried, and how many PRs
 were skipped as already-checkpointed. Use `--full` to ignore the checkpoint and

@@ -421,6 +421,250 @@ class OllamaOfflineTests(unittest.TestCase):
         self.assertEqual(report["calls"], 1)
 
 
+class ClassificationConcurrencyTests(unittest.TestCase):
+    """prd/33 §7: classification used to be strictly serial (one in flight).
+
+    The Ollama client is the measured bottleneck (4.4 h for 8k comments at 2 s),
+    so a PR's texts are classified by a **bounded** pool. These tests pin the
+    three properties that make that safe: the bound is the configured worker
+    count, the labels are identical to a serial run (order included), and the
+    deterministic mock path is untouched (synchronous, in the caller's thread).
+    """
+
+    def _server(self, *, answer=None):
+        """A local stub /api/chat that records concurrency and honours a delay."""
+        import threading
+        import time
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        payload = json.dumps({"message": {"content": json.dumps(answer or {
+            "comment_type": "suggestion", "thread_intent": "acted",
+            "question": False, "answered": False, "phase": "review",
+        })}}).encode()
+        state = {"open": 0, "max": 0, "requests": 0}
+        lock = threading.Lock()
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_POST(self):
+                with lock:
+                    state["open"] += 1
+                    state["max"] = max(state["max"], state["open"])
+                    state["requests"] += 1
+                self.rfile.read(int(self.headers.get("content-length") or 0))
+                time.sleep(0.02)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                with lock:
+                    state["open"] -= 1
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}", state
+
+    @staticmethod
+    def _items(count: int) -> list[tuple[str, str]]:
+        return [(f"comment {index}: could you rename this?", classify.KIND_COMMENT)
+                for index in range(count)]
+
+    def test_the_in_flight_requests_are_bounded_by_the_worker_count(self):
+        url, state = self._server()
+        classifier = classify.OllamaClassifier(url, "stub", timeout=10, workers=3)
+        classifier.classify_many(self._items(12))
+        self.assertGreater(state["max"], 1, "the batch was serial")
+        self.assertLessEqual(state["max"], 3, state)
+        self.assertEqual(state["requests"], 12)
+
+    def test_a_single_worker_restores_the_serial_client(self):
+        url, state = self._server()
+        classifier = classify.OllamaClassifier(url, "stub", timeout=10, workers=1)
+        classifier.classify_many(self._items(6))
+        self.assertEqual(state["max"], 1)
+        self.assertEqual(state["requests"], 6)
+
+    def test_the_batch_output_is_identical_to_a_serial_run(self):
+        url, _state = self._server()
+        items = self._items(9) + [
+            ("PROJ-1: does this change the retry budget?", classify.KIND_DESCRIPTION),
+        ]
+        serial = classify.OllamaClassifier(url, "stub", timeout=10, workers=1)
+        pooled = classify.OllamaClassifier(url, "stub", timeout=10, workers=4)
+        self.assertEqual(serial.classify_many(items), pooled.classify_many(items))
+        # ... and the per-item answers are the ones a plain ``classify`` gives.
+        self.assertEqual(
+            [labels for labels, _version in pooled.classify_many(items)],
+            [serial.classify(text, kind) for text, kind in items],
+        )
+        self.assertEqual(pooled.calls, len(items) * 2)
+
+    def test_a_failing_backend_still_degrades_to_the_mock(self):
+        def opener(request, timeout):
+            raise OSError("connection refused")
+
+        classifier = classify.OllamaClassifier(
+            "http://llm.invalid:11434", opener=opener, workers=4, max_failures=3
+        )
+        answers = classifier.classify_many(self._items(6))
+        self.assertEqual(len(answers), 6)
+        for labels, version in answers:
+            self.assertEqual(version, "mock-v1")
+            self.assertEqual(labels["phase"], "review")
+        self.assertTrue(classifier.down)
+        self.assertEqual(classifier.fallbacks, 6)
+
+    def test_the_mock_backend_stays_synchronous_in_the_calling_thread(self):
+        import threading
+
+        mock_classifier = classify.MockClassifier()
+        threads: list[int] = []
+        original = mock_classifier.classify
+
+        def recording(text, kind):
+            threads.append(threading.get_ident())
+            return original(text, kind)
+
+        mock_classifier.classify = recording
+        items = self._items(8)
+        answers = mock_classifier.classify_many(items)
+        self.assertEqual(len(answers), len(items))
+        self.assertEqual(set(threads), {threading.get_ident()})
+        self.assertEqual(
+            [labels for labels, _version in answers],
+            [classify.MockClassifier().classify(text, kind) for text, kind in items],
+        )
+
+    def test_the_worker_count_is_configurable(self):
+        with mock.patch.dict(os.environ, {"MEGASPEED_LLM_WORKERS": "2"}):
+            cfg = load_config(None)
+        self.assertEqual(cfg.llm_workers, 2)
+        self.assertEqual(
+            classify.for_scrape(cfg, "bitbucket-dc").workers, 2
+        )
+        cfg.llm_workers = 1
+        self.assertEqual(classify.for_scrape(cfg, "bitbucket-dc").workers, 1)
+        # The deterministic backends have no pool at all.
+        self.assertIsInstance(classify.for_scrape(cfg, "fixture"), classify.MockClassifier)
+        # The operator can set it per run as well.
+        from ingest.scrape_cli import build_parser
+        self.assertEqual(build_parser().parse_args(["--llm-workers", "3"]).llm_workers, 3)
+
+
+class ReducerBatchTests(unittest.TestCase):
+    """The reducer asks for one PR's texts in **one** batch, in source order."""
+
+    class Recording(classify.MockClassifier):
+        backend = "recording-mock"
+
+        def __init__(self):
+            super().__init__()
+            self.batches: list[list[tuple[str, str]]] = []
+
+        def classify_many(self, items):
+            self.batches.append(list(items))
+            return super().classify_many(items)
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.cfg = _config(self.root)
+        self.classifier = self.Recording()
+        self.reducer = Reducer(
+            self.cfg,
+            IdentityTable(self.cfg.identity_path),
+            KeyFilter.build(self.cfg.ticket_regex, self.cfg.key_shape, self.cfg.ticket_projects),
+            AS_OF,
+            classifier=self.classifier,
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _reduce(self, pr: PullRequest) -> Stats:
+        stats = Stats()
+        self.reducer.reduce(pr, ["PROJ-1"], pr.activities, stats)
+        return stats
+
+    def test_one_pr_is_one_batch_holding_the_description_and_its_comments(self):
+        pr = _pr(
+            description="PROJ-1: why two retries?",
+            activities=[
+                _activity(1, "OPENED", 0, ADA),
+                _activity(2, "COMMENTED", 5, GRACE,
+                          comment=_comment(101, "nit: rename this variable"),
+                          commentAction="ADDED"),
+                _activity(3, "COMMENTED", 6, GRACE,
+                          comment=_comment(102, "this crashes on a null payload"),
+                          commentAction="ADDED"),
+            ],
+        )
+        self._reduce(pr)
+        self.assertEqual(len(self.classifier.batches), 1)
+        self.assertEqual(
+            [kind for _text, kind in self.classifier.batches[0]],
+            [classify.KIND_DESCRIPTION, classify.KIND_COMMENT, classify.KIND_COMMENT],
+        )
+        self.assertEqual(
+            [text for text, _kind in self.classifier.batches[0]],
+            ["PROJ-1: why two retries?", "nit: rename this variable",
+             "this crashes on a null payload"],
+        )
+
+    def test_a_batched_label_is_the_one_the_thread_gets(self):
+        pr = _pr(activities=[
+            _activity(1, "OPENED", 0, ADA),
+            _activity(2, "COMMENTED", 5, GRACE,
+                      comment=_comment(101, "nit: rename this variable"),
+                      commentAction="ADDED"),
+        ])
+        stats = self._reduce(pr)
+        thread = next(obj for obj in stats.objects if obj["object_type"] == "THREAD")
+        self.assertEqual(thread["attributes"]["comment_type"], "nit")
+        self.assertEqual(thread["attributes"]["classifier_version"], "mock-v1")
+
+    def test_bot_notices_and_edits_are_never_sent_to_the_model(self):
+        bot = {"name": "ci-bot", "displayName": "CI", "type": "SERVICE"}
+        pr = _pr(description="", activities=[
+            _activity(1, "OPENED", 0, ADA),
+            _activity(2, "COMMENTED", 5, bot,
+                      comment=_comment(101, "build failed"), commentAction="ADDED"),
+            _activity(3, "COMMENTED", 6, GRACE,
+                      comment=_comment(102, "nit: rename this"), commentAction="UPDATED"),
+            _activity(4, "COMMENTED", 7, GRACE,
+                      comment=_comment(103, "typo in the docstring"),
+                      commentAction="ADDED"),
+        ])
+        stats = self._reduce(pr)
+        texts = [text for batch in self.classifier.batches for text, _kind in batch]
+        self.assertEqual(texts, ["typo in the docstring"])
+        self.assertEqual(stats.bot_comments_skipped, 1)
+
+    def test_a_text_repeated_inside_one_pr_costs_one_request(self):
+        pr = _pr(description="", activities=[
+            _activity(1, "OPENED", 0, ADA),
+            _activity(2, "COMMENTED", 5, GRACE,
+                      comment=_comment(101, "nit: rename this"), commentAction="ADDED"),
+            _activity(3, "COMMENTED", 6, ADA,
+                      comment=_comment(102, "nit: rename this"), commentAction="ADDED"),
+        ])
+        self._reduce(pr)
+        self.assertEqual(len(self.classifier.batches[0]), 1)
+
+    def test_the_batch_is_dropped_after_the_pr(self):
+        pr = _pr(activities=[_activity(1, "OPENED", 0, ADA)])
+        self._reduce(pr)
+        self.assertEqual(self.reducer._labels, {})
+
+
 class ConstructionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
