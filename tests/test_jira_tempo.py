@@ -142,6 +142,36 @@ class TempoClientTests(unittest.TestCase):
         self.assertNotIn("comment", row)
 
 
+class CloudTempoFieldMappingTests(unittest.TestCase):
+    """A real Tempo *Cloud* payload uses ``createdAt`` + ``startDate``/``startTime``
+    (not ``created``/``started``). The Cloud adapter must reconcile them, or every
+    worklog collapses to ``created == started`` (all ``same_day``)."""
+
+    def test_cloud_tempo_fields_map_to_the_native_shape(self):
+        from ingest.jira_cloud import CloudJiraClient
+
+        rows = [{
+            "worklogId": 42,
+            "timeSpentSeconds": 3600,
+            "startDate": "2026-10-14",
+            "startTime": "09:00:00",
+            "createdAt": "2026-10-16T12:00:00.000+0000",
+            "description": "zzcanary tempo comment",
+            "author": {"accountId": "lauri", "displayName": "Lauri Nomme"},
+        }]
+        transport = _Recorder(rows)
+        client = CloudJiraClient(transport, tempo=True)
+
+        out = client.tempo_worklogs("DEL-100")
+
+        self.assertEqual(out[0]["id"], "42")
+        self.assertEqual(out[0]["created"], "2026-10-16T12:00:00.000+0000")
+        self.assertEqual(out[0]["started"], "2026-10-14T09:00:00")
+        # the raw comment/description text is not mapped into the reducer's shape.
+        self.assertNotIn("comment", out[0])
+        self.assertNotIn("description", out[0])
+
+
 # --------------------------------------------------------------------------- #
 # 2. the reducer: Tempo == native, event for event
 # --------------------------------------------------------------------------- #

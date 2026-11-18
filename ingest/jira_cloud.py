@@ -125,8 +125,13 @@ class CloudJiraClient(JiraClient):
     def tempo_worklogs(self, key: str) -> list[dict]:
         """Tempo Cloud worklogs for one issue, in the native worklog shape.
 
-        Tempo returns a bare JSON list keyed by ``worklogId``; the reducer reads
-        ``id``, so the two are reconciled here rather than in the pipeline.
+        Tempo Cloud keys a worklog by ``worklogId`` and carries its dates as
+        ``createdAt`` + ``startDate``/``startTime``, where the reducer reads
+        ``id`` / ``created`` / ``started``. Reconcile them here so the
+        ``log_delay_bucket`` (created - started gap) is real, not every row
+        collapsing to ``same_day``. The mappings are defensive (only fill a field
+        that is absent), so the emulation proxy — which already emits native-shaped
+        fields — is unaffected.
         """
         rows = self._get(f"{CLOUD_TEMPO}/worklogs/{key}", kind="worklog") or []
         out: list[dict] = []
@@ -134,6 +139,17 @@ class CloudJiraClient(JiraClient):
             worklog = dict(row)
             if not worklog.get("id") and worklog.get("worklogId") is not None:
                 worklog["id"] = str(worklog["worklogId"])
+            if not worklog.get("created") and worklog.get("createdAt"):
+                worklog["created"] = worklog["createdAt"]
+            if not worklog.get("started"):
+                start_date = worklog.get("startDate")
+                if start_date:
+                    start_time = worklog.get("startTime") or "00:00:00"
+                    worklog["started"] = f"{start_date}T{start_time}"
+            # prd/02: raw worklog text never crosses into the ingest (parity with
+            # the DC adapter, which drops ``comment``).
+            worklog.pop("description", None)
+            worklog.pop("comment", None)
             out.append(worklog)
         return out
 
