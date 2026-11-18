@@ -32,6 +32,7 @@ import {
   PRESETS, readScenario, scenarioQuery,
 } from '/policy.js';
 import { annotateRow, epicKeySet, keyListsOf, rowTicket, ticketKey } from '/tickets.js';
+import { versionLabel, versionTitle } from '/version.js';
 import {
   ROLE_QUEUES, filteredPages, queueLevelForNode, scopeBanner, scopeForNode, scopeForStream,
 } from '/scope.js';
@@ -63,6 +64,8 @@ const TIMEFRAMES = {
 
 const state = {
   meta: null,
+  // prd/32: the server's build identity (`/api/meta`), fetched once at boot.
+  build: null,
   stamp: '',
   tenants: [],
   tenant: null,
@@ -1178,6 +1181,7 @@ function renderSourcesPage() {
   const tenant = currentTenant() || {};
   const rows = [
     ['tenant', meta.tenant || state.tenant || '—'],
+    ['build', versionLabel(state.build) || '—'],
     ['store', storeLabel(meta)],
     ['source', meta.source || '—'],
     ['snapshot', meta.as_of ? `${fmtStamp(Date.parse(meta.as_of))} (${ageOf(meta.as_of)})` : '—'],
@@ -1464,6 +1468,32 @@ function renderProvenance() {
         ` (${calendar.overrides || 0} overrides, ${calendar.vacations || 0} vacations)`
       : (calendar.error || 'no working-hours calendar configured');
   }
+}
+
+/* prd/32: the build identity — the tag + short SHA of the server serving this
+ * page. It is code identity, not tenant data, so it is fetched once at boot and
+ * never refetched on a tenant switch. A server older than this page has no
+ * `/api/meta`; the line then stays hidden (the provenance line already reports
+ * an unreachable API). */
+async function loadVersion() {
+  try {
+    state.build = await getJSON('/api/meta');
+    renderVersion();
+  } catch {
+    state.build = null;
+  }
+}
+
+function renderVersion() {
+  const el = $('app-version');
+  if (!el) return;
+  const label = versionLabel(state.build);
+  el.textContent = label;
+  el.hidden = !label;
+  el.title = versionTitle(state.build);
+  // The Sources page lists what the screen is made of; if it is already open,
+  // let it pick the build row up too.
+  if (state.page === 'sources') renderSourcesPage();
 }
 
 function setEmpty(reason, hint) {
@@ -2444,6 +2474,9 @@ syncChromeHeight();
 window.addEventListener('resize', () => { syncChromeHeight(); renderHints(); syncRangeMeta(); });
 buildLensButtons();
 renderPage();
+// prd/32: the build identity is independent of the store, so it loads even
+// when there is no dataset to read.
+loadVersion();
 load().then(async () => {
   if (initialTicket) await openTicket(initialTicket);
   else await showPage(state.page);

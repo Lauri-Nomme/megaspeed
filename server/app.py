@@ -12,6 +12,7 @@ unknown name is a clean 404 that lists the real ones — never a fallback to
 another dataset, because silently answering about the wrong environment is the
 one failure this whole feature exists to prevent.
 
+    GET  /api/meta                      build identity: version / tag / sha (prd/32)
     GET  /api/tenants                   datasets + per-tenant health
     GET  /api/health?tenant=            store status + provenance summary
     GET  /api/events?from=&to=&repo=&actor=&ticket=&activity=&pr_id=
@@ -147,6 +148,7 @@ from ingest import store as pstore  # noqa: E402  (read helpers + schema guard o
 from ingest import taxonomy  # noqa: E402  (closed vocabularies, read-only)
 from server import query as query  # noqa: E402  (filters, paging, aggregation)
 from server import tenants as tenantreg  # noqa: E402  (tenant = data/<name>.duckdb)
+from server import version as build  # noqa: E402  (prd/32: tag + short SHA)
 from server.harness import BrowserBridge  # noqa: E402
 
 bridge = BrowserBridge()
@@ -307,7 +309,7 @@ async def lifespan(_app: FastAPI):
             await task
 
 
-app = FastAPI(title="megaspeed", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="megaspeed", version=build.VERSION_INFO["version"], lifespan=lifespan)
 
 # The UI is served by this same server, and the eval/screenshot bridge is driven
 # with curl (no Origin header), so nothing legitimate needs a wildcard. Only a
@@ -461,6 +463,23 @@ def tenants(request: Request):
         entry.update(_tenant_health(path))
         rows.append(entry)
     return {"ok": True, "default": default, "count": len(rows), "tenants": rows}
+
+
+@app.get("/api/meta")
+def meta(request: Request):
+    """The build identity (prd/32): which tag + commit produced this server.
+
+    ``version`` is the full ``git describe`` answer (``v0.9.0-3-g88f72bb``, or
+    just the SHA before the first release tag), ``tag``/``sha`` are that string
+    split for a UI that wants to render ``v0.9.0 · 88f72bb``, and
+    ``build_time`` is when the build was made (HEAD commit / VERSION file),
+    not when the process started. A store-less server still answers: the
+    version is a code identity, not tenant data.
+    """
+    unknown = _unknown_params(request, ())
+    if unknown is not None:
+        return unknown
+    return {"ok": True, **build.VERSION_INFO}
 
 
 @app.get("/api/health")

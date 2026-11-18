@@ -310,6 +310,10 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 #honesty:empty { display: none; }
 .timebasis { color: var(--text-tertiary); }
 .timebasis::before { content: "· "; color: var(--border-control); }
+/* prd/32: the build identity (tag · short SHA) rides in the meta strip, so it
+ * is on every page without a separate footer; tertiary so it never competes
+ * with the provenance sentence. */
+.build { color: var(--text-tertiary); font-size: 10.5px; }
 
 /* --- toolbar ----------------------------------------------------------- */
 .toolbar {
