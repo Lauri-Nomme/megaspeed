@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import gzip
 import json
 import os
 import tempfile
@@ -483,6 +484,176 @@ class ServerContractTests(unittest.TestCase):
         self.assertTrue(shot.json()["ok"])
         self.assertEqual(shot.json()["mime"], "image/png")
         self.assertEqual(shot.json()["bytes"], len(base64.b64decode(PNG_B64)))
+
+
+# --------------------------------------------------------------------------- #
+# prd/33 #5 (gzip) and #8 (/api/ticket cache): the server-side performance fixes
+# --------------------------------------------------------------------------- #
+def decompressed(reply: Reply) -> bytes:
+    """The body as the client sees it: gunzipped when the server compressed it."""
+    if reply.headers.get("content-encoding") == "gzip":
+        return gzip.decompress(reply.body)
+    return reply.body
+
+
+class ServerPerformanceTests(unittest.TestCase):
+    """Compression and caching, pinned against the real ASGI app."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.dir = Path(cls.tmp.name).resolve()
+        cls.alpha = make_store(cls.dir, "alpha", n=12, seed=101)
+        cls.patches = [
+            mock.patch.object(app_module, "TENANTS_DIR", cls.dir),
+            mock.patch.object(app_module, "DEFAULT_TENANT", ""),
+            mock.patch.object(app_module, "bridge", BrowserBridge()),
+            mock.patch.object(app_module, "LOG", False),
+            mock.patch.dict(os.environ, {
+                app_module.HARNESS_TOKEN_ENV: TOKEN,
+                app_module.HARNESS_TOKEN_FILE_ENV: str(cls.dir / ".harness-token"),
+            }),
+        ]
+        for patch in cls.patches:
+            patch.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        for patch in reversed(cls.patches):
+            patch.stop()
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        app_module._analysis_cache = None
+        with app_module._ticket_lock:
+            app_module._ticket_cache.clear()
+
+    # -- helpers ------------------------------------------------------------ #
+    def ticket_key(self) -> str:
+        con = connect(self.alpha, read_only=True)
+        try:
+            object_id = con.execute(
+                "SELECT object_id FROM event_objects WHERE object_type = 'TICKET'"
+                " ORDER BY object_id LIMIT 1"
+            ).fetchone()[0]
+        finally:
+            con.close()
+        return object_id.split(":", 1)[1]
+
+    @staticmethod
+    def bump(path: Path) -> None:
+        """A new store version: a write/touch changes the (mtime_ns, size) stamp."""
+        info = path.stat()
+        os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+
+    # -- #5 gzip ------------------------------------------------------------ #
+    def test_a_large_json_body_is_gzip_encoded_when_offered(self):
+        plain = get("/api/events", limit=200)
+        self.assertEqual(plain.status, 200, plain.text)
+        self.assertNotIn("content-encoding", plain.headers)
+        self.assertGreater(len(plain.body), 1024)
+
+        zipped = call(
+            "/api/events", query="limit=200",
+            headers=[(b"accept-encoding", b"gzip")],
+        )
+        self.assertEqual(zipped.status, 200)
+        self.assertEqual(zipped.headers.get("content-encoding"), "gzip")
+        self.assertIn("accept-encoding", zipped.headers.get("vary", "").lower())
+        # byte-identical once decoded, and actually smaller on the wire
+        self.assertEqual(decompressed(zipped), plain.body)
+        self.assertLess(len(zipped.body), len(plain.body))
+
+    def test_a_small_reply_is_left_alone(self):
+        plain = get("/api/meta")
+        self.assertLess(len(plain.body), 1024)
+        zipped = call("/api/meta", headers=[(b"accept-encoding", b"gzip")])
+        self.assertNotIn("content-encoding", zipped.headers)
+        self.assertEqual(zipped.body, plain.body)
+
+    def test_the_harness_bridge_still_answers_a_gzip_client(self):
+        payload = {"ok": True, "data": "x" * 4000, "error": None}
+        with mock.patch.object(
+            app_module.bridge, "eval", mock.AsyncMock(return_value=payload)
+        ), mock.patch.object(
+            app_module.bridge, "screenshot",
+            mock.AsyncMock(return_value={"ok": True, "data": PNG_B64}),
+        ):
+            evaluated = post(
+                "/api/eval", {"code": "'x'"},
+                headers=[(TOKEN_HEADER, TOKEN.encode()),
+                         (b"accept-encoding", b"gzip")],
+            )
+            shot = post(
+                "/api/screenshot", {"selector": ".app"},
+                headers=[(TOKEN_HEADER, TOKEN.encode()),
+                         (b"accept-encoding", b"gzip")],
+            )
+        self.assertEqual(evaluated.status, 200, evaluated.text)
+        self.assertEqual(evaluated.headers.get("content-encoding"), "gzip")
+        self.assertEqual(json.loads(decompressed(evaluated))["data"], "x" * 4000)
+        self.assertEqual(shot.status, 200, shot.text)
+        self.assertTrue(json.loads(decompressed(shot))["ok"])
+
+    # -- #8 /api/ticket cache ----------------------------------------------- #
+    def test_a_repeated_ticket_request_is_served_from_cache(self):
+        key = self.ticket_key()
+        real = app_module.ticket_view.ticket
+        with mock.patch.object(
+            app_module.ticket_view, "ticket", side_effect=real
+        ) as ticket:
+            first = call(f"/api/ticket/{key}")
+            second = call(f"/api/ticket/{key}")
+            self.assertEqual(first.status, 200, first.text)
+            self.assertEqual(second.body, first.body)
+            self.assertEqual(ticket.call_count, 1)   # one build, not two
+
+            # a new store version drops the entry (same invalidation as the court)
+            self.bump(self.alpha)
+            third = call(f"/api/ticket/{key}")
+            self.assertEqual(third.body, first.body)
+            self.assertEqual(ticket.call_count, 2)
+
+    def test_an_unknown_ticket_is_cached_too(self):
+        real = app_module.ticket_view.ticket
+        with mock.patch.object(
+            app_module.ticket_view, "ticket", side_effect=real
+        ) as ticket:
+            first = call("/api/ticket/ENG-999999")
+            second = call("/api/ticket/ENG-999999")
+        self.assertEqual(first.status, 404)
+        self.assertEqual(second.status, 404)
+        self.assertEqual(first.body, second.body)
+        self.assertEqual(ticket.call_count, 1)
+
+    def test_the_calendar_edit_invalidates_the_calendar_and_its_memo(self):
+        path = self.dir / "alpha" / app_module.workcal.TENANT_FILE
+        path.parent.mkdir(parents=True, exist_ok=True)
+        monday = datetime(2026, 3, 2, 9)      # a Monday, naive UTC
+        path.write_text(
+            'timezone: UTC\nworking_hours:\n  default: "09:00-17:00"\n',
+            encoding="utf-8",
+        )
+        os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+        first, error = app_module._calendar_for("alpha")
+        self.assertIsNone(error)
+        self.assertEqual(
+            first.business_hours(None, monday, monday + timedelta(hours=8)), 8.0
+        )
+        # the same file version is answered from the cache (and its memo)
+        self.assertIs(app_module._calendar_for("alpha")[0], first)
+
+        path.write_text(
+            'timezone: UTC\nworking_hours:\n  default: "10:00-14:00"\n',
+            encoding="utf-8",
+        )
+        os.utime(path, ns=(2_000_000_000, 2_000_000_000))
+        second, error = app_module._calendar_for("alpha")
+        self.assertIsNone(error)
+        self.assertIsNot(second, first)       # a new version, a new memo
+        self.assertEqual(
+            second.business_hours(None, monday, monday + timedelta(hours=8)), 4.0
+        )
 
 
 if __name__ == "__main__":

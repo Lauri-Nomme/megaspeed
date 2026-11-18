@@ -52,6 +52,11 @@ FULL = "full"
 HALF = "half"
 HOLIDAY_KINDS = (FULL, HALF)
 
+#: Upper bound on the per-calendar ``business_hours`` memo. The real payloads
+#: ask ~1.6k unique questions at 4k stories; the cap only exists so a client
+#: that sweeps arbitrary windows cannot grow one dict without limit.
+HOURS_CACHE_SIZE = 200_000
+
 # "09:00–17:00", "09:00-17:00", "9-17", "12:00 — 20:00" (the PRD writes an en dash)
 _WINDOW_RE = re.compile(
     r"^\s*(\d{1,2})(?::(\d{2}))?\s*[-–—]\s*(\d{1,2})(?::(\d{2}))?\s*$"
@@ -172,6 +177,14 @@ class Calendar:
     sources: tuple[str, ...] = ()
     _tz: ZoneInfo = field(default=None, repr=False, compare=False)  # type: ignore[assignment]
     _cache: dict = field(default_factory=dict, repr=False, compare=False)
+    # ``business_hours`` is asked the same question dozens of times per payload
+    # (93,400 calls for 1,615 unique arguments at 5,240 PRs), and it is a pure
+    # function of (person, t1, t2, ignore_vacations), so one dict memo per
+    # calendar removes the repeat. The calendar itself is cached per calendar
+    # file version by the server (``_calendar_for``), so an edit to a calendar
+    # config drops the memo with it — a store reload does not, and need not:
+    # the answer depends on the config, never on the store.
+    _hours_cache: dict = field(default_factory=dict, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self._tz is None:
@@ -236,9 +249,19 @@ class Calendar:
         ``ignore_vacations`` prices the time the person *would* have worked had
         they not been away — what the vacation-blocking signal needs, since a
         vacation's own business hours are zero by definition.
+
+        The answer is memoised per calendar (see ``_hours_cache``): the metrics
+        ask for the same (person, t1, t2) many times over, and the day walk is
+        the expensive part. The result is a pure function of the arguments and
+        the config, so the memo cannot go stale while this calendar is the one
+        the server cached for the tenant's calendar version.
         """
         if t1 is None or t2 is None or t2 <= t1:
             return 0.0
+        key = (person, t1, t2, ignore_vacations)
+        hit = self._hours_cache.get(key)
+        if hit is not None:
+            return hit
         start = self._local(t1)
         end = self._local(t2)
         seconds = 0.0
@@ -252,7 +275,13 @@ class Calendar:
                 if high > low:
                     seconds += (high - low).total_seconds()
             day += timedelta(days=1)
-        return seconds / 3600.0
+        value = seconds / 3600.0
+        # Bounded like the server's other caches: a pathological client cannot
+        # grow the memo without limit, and a clear only costs one recompute.
+        if len(self._hours_cache) >= HOURS_CACHE_SIZE:
+            self._hours_cache.clear()
+        self._hours_cache[key] = value
+        return value
 
     def describe(self) -> str:
         """One sentence for the API ``assumption`` field."""

@@ -61,6 +61,7 @@ is visible instead of being hidden behind the first responder. Consequences:
 
 from __future__ import annotations
 
+import bisect
 import json
 from collections import defaultdict
 from dataclasses import dataclass
@@ -761,6 +762,16 @@ def queue_series(
         })
 
     measured = [i for i in bc.intervals if i.measured and i.start < end and i.end > start]
+    # WIP is sampled at the bucket midpoints, so the sample points are the same
+    # for every interval: build them once and use a *difference array* (add at
+    # the first covered bucket, subtract after the last) instead of testing every
+    # interval against every bucket. The prefix sum after the loop is the same
+    # series the naive O(intervals × buckets) loop produced.
+    midpoints = (
+        [start + timedelta(hours=(b + 0.5) * bucket_hours) for b in range(buckets)]
+        if measured else []
+    )
+    wip_diff: dict[str, list[int]] = {}
     for interval in measured:
         pr = prs.get(interval.object_id) or {}
         # Person level charges every concurrent holder (product review #7);
@@ -787,11 +798,24 @@ def queue_series(
                 b = int((stamp - start).total_seconds() // (bucket_hours * 3600))
                 if 0 <= b < buckets:
                     series[b] += 1
-            # WIP is sampled at bucket midpoints: each item in the queue counts once
-            for b in range(buckets):
-                at = start + timedelta(hours=(b + 0.5) * bucket_hours)
-                if interval.start <= at < interval.end:
-                    entry["wip"][b] += 1
+            # WIP counts one item per bucket whose midpoint falls in [start, end)
+            diff = wip_diff.get(name)
+            if diff is None:
+                diff = wip_diff[name] = [0] * (buckets + 1)
+            lo = bisect.bisect_left(midpoints, interval.start)
+            hi = bisect.bisect_left(midpoints, interval.end)
+            if lo < hi:
+                diff[lo] += 1
+                diff[hi] -= 1
+
+    # prefix-sum the per-stream difference arrays into the WIP series
+    for name, diff in wip_diff.items():
+        entry = streams[name]
+        running = 0
+        wip = entry["wip"]
+        for b in range(buckets):
+            running += diff[b]
+            wip[b] = running
 
     days = span_hours / 24.0
     # global mean wait, for a relative diagnosis that works on any data size

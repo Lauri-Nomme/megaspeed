@@ -215,6 +215,13 @@ class Story:
     summary_class: str | None
     events: list[dict] = field(default_factory=list)
     prs: list = field(default_factory=list)
+    # Filled by ``_cycle`` on first use. The derivation is a pure function of
+    # the story's own events/PRs, and one payload asks the same story for its
+    # cycle four times, so the slot is the memo. Excluded from ``repr``/``eq``
+    # so the cached value neither changes what a Story compares equal to nor
+    # recurses through ``Cycle.story``. A store reload builds new Story objects,
+    # which is exactly the invalidation the other caches use.
+    _cycle_cache: Cycle | None = field(default=None, repr=False, compare=False)
 
     @property
     def first_event(self) -> datetime | None:
@@ -516,7 +523,7 @@ class Cycle:
 
 
 def _cycle(story: Story) -> Cycle:
-    """Derive the segment boundaries for one story.
+    """Derive the segment boundaries for one story (memoised on the story).
 
     The refinement signal is the first ``pointed`` event: Jira's changelog
     records the estimate when it is *set*, which is what refinement produces.
@@ -531,7 +538,16 @@ def _cycle(story: Story) -> Cycle:
       They only exist when the store was projected with a stage map, so an
       unconfigured store reports them missing (which is the honest answer: its
       workflow was collapsed into three categories).
+
+    Every metric that needs a boundary asks for the cycle, so one payload
+    derived the same four cycles per story. The result depends only on the
+    story's immutable-at-load events and PRs, so it is kept on the story
+    (``Story._cycle_cache``): a store reload creates new stories and therefore
+    a new cache, the same invalidation the server's other caches use.
     """
+    cached = story._cycle_cache
+    if cached is not None:
+        return cached
     created = story.start
     pointed = _first_event_at(story, "pointed")
     ready_status = _first_status(story, "ready")
@@ -606,7 +622,7 @@ def _cycle(story: Story) -> Cycle:
     )
 
     person = story.actor or (prs[0].pr["actor"] if prs else None)
-    return Cycle(
+    cycle = Cycle(
         story=story,
         person=person,
         boundaries=boundaries,
@@ -615,6 +631,8 @@ def _cycle(story: Story) -> Cycle:
         review_rounds=rounds,
         missing=missing,
     )
+    story._cycle_cache = cycle
+    return cycle
 
 
 def _active_hours(

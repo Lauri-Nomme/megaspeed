@@ -67,6 +67,7 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 APP_DIR = Path(os.environ.get("MEGASPEED_APP_DIR", REPO_ROOT / "app")).resolve()
@@ -321,6 +322,15 @@ app.add_middleware(
     allow_headers=["content-type"],
     max_age=600,
 )
+
+# Responses are JSON (insights is 22.4 MB at 5,240 PRs, a full event page
+# 35.2 MB), so gzip is the cheapest win in the product: 22.4 MB → 1.1 MB (5%)
+# and 35.2 MB → 2.0 MB, with no API change. Level 6 is the measured setting
+# (level 9 buys ~1% for several times the CPU on this payload). ``minimum_size``
+# keeps the small replies (health, calendar, a 1 KB ticket row) uncompressed,
+# and Starlette's middleware leaves non-HTTP scopes (``/ws``) untouched.
+# Added after CORS so it wraps it and compresses the error/preflight bodies too.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=6)
 
 
 @app.exception_handler(Exception)
@@ -702,6 +712,10 @@ def ticket_detail(key: str, request: Request):
     boundary the store is missing. A key the store has never seen is a 404; a
     story without PRs (or a PR without a story) is a real, partially measured
     ticket and says which half is missing.
+
+    The answer is cached per ``(tenant, store + calendar version, key)`` — the
+    same invalidation as the ballcourt cache — because rendering 11.7 KB used to
+    rebuild the whole Jira layer (300–418 ms at 4,000 stories).
     """
     unknown = _unknown_params(request, _params(()))
     if unknown is not None:
@@ -718,9 +732,7 @@ def ticket_detail(key: str, request: Request):
         return _tenant_error(exc.args[0])
     try:
         with store_conn(path) as con:
-            court = _ballcourt(con, tenant, path)
-            data = insights_rules.load_jira(con, court)
-            payload = ticket_view.ticket(court, data, wanted)
+            payload = _ticket_payload(con, tenant, path, wanted)
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
     if payload is None:
@@ -734,8 +746,34 @@ def ticket_detail(key: str, request: Request):
                         "this key appears in neither in this dataset",
             },
         )
-    payload["tenant"] = tenant
     return JSONResponse(payload, headers={"X-Tenant": tenant})
+
+
+# One ticket payload is a pure read of (store version, calendar version, key):
+# ``tickets.ticket`` is 0.8–4.4 ms, but the Jira layer it needs is ~410 ms to
+# rebuild at 4,000 stories. Bounded like the simulation cache; a store or
+# calendar change makes the old entries unreachable, so they age out by size.
+_ticket_lock = threading.Lock()
+_ticket_cache: dict[tuple, dict | None] = {}
+TICKET_CACHE_SIZE = 256
+
+
+def _ticket_payload(con, tenant: str, path: Path, key: str) -> dict | None:
+    """One ticket's payload (``None`` when the key is unknown), cached by version."""
+    cache_key = (tenant, _file_stamp(path), _calendar_key(tenant), key)
+    with _ticket_lock:
+        if cache_key in _ticket_cache:
+            return _ticket_cache[cache_key]
+    court = _ballcourt(con, tenant, path)
+    data = insights_rules.load_jira(con, court)
+    payload = ticket_view.ticket(court, data, key)
+    if payload is not None:
+        payload["tenant"] = tenant
+    with _ticket_lock:
+        if len(_ticket_cache) >= TICKET_CACHE_SIZE:
+            _ticket_cache.clear()
+        _ticket_cache[cache_key] = payload
+    return payload
 
 
 # --------------------------------------------------------------------------- #
