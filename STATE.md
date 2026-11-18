@@ -74,6 +74,18 @@ Tests: **835** (`tests/`) + **96** (`scrape/tests`) + **150** (node `app/test`) 
 3. **Perf long-tail** (deliberately deferred): classification content-hash run-level memo, per-list-page
    fetch batching, `/api/queues` bucket cap for huge windows — see `docs/review-performance.md`.
 
+## Open fix backlog (from the exploratory test, `docs/QA-exploratory.md`)
+
+Terminology is pinned in **`docs/concepts.md`** (units, actors, lifecycle, metrics). The 25 findings
+are classified into five PRDs, ready to implement:
+
+- **prd/34** actor & constraint — bots out of person aggregates, sentinel named, scope semantics.
+- **prd/35** one time unit — "d" = 24 business hours everywhere; calendar days labelled as such.
+- **prd/36** lifecycle honesty — `created→ready` label, idle-gap honesty, reopens, "9/9", per-story.
+- **prd/37** sprint/rules/policy — done-by-end, additive at-stake, impact-sorted drill-downs, new
+  stale-PR / sentinel-tail / sprint-on-time rules.
+- **prd/38** navigation & papercuts — clickable PR rows, ticket search, landing view, drawer, sources.
+
 ## Important
 
 - `jira-lab` container's application data is bind-mounted from
