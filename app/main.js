@@ -22,7 +22,7 @@ import {
 } from '/format.js';
 import {
   TABS, tabCounts, tabRows, deliveryTable, overviewMarkup, detailMarkup,
-  impactSentence, entityMarkdown, deliveryMarkdown,
+  impactSentence, entityMarkdown, deliveryMarkdown, reviewStateLine,
 } from '/tables.js';
 import { rulesMarkup, rulesStats, rulesMarkdown } from '/rules.js';
 import { sprintStrip } from '/sprints.js';
@@ -900,8 +900,10 @@ function matchesScopeRow(row) {
     return row.author === scope.value || row.waiting_for === scope.value || row.ball === scope.value;
   }
   if (scope.kind === 'role') {
-    if (scope.value === 'author') return row.author === row.waiting_for;
-    if (scope.value === 'review') return row.phase === 'review' && row.author !== row.waiting_for;
+    // prd/40: a ready PR is the author's merge click, not a review wait
+    if (scope.value === 'author') return row.author === row.waiting_for || row.ball === 'ready';
+    if (scope.value === 'review') return row.ball === 'review';
+    if (scope.value === 'ready') return row.ball === 'ready';
   }
   return true;
 }
@@ -931,6 +933,8 @@ function renderDeliveryDetail() {
     facts: [
       ['ticket', rowTicket(row)],
       ...(row.epic ? [['epic', row.epic]] : []),
+      // prd/40: the three facts the old single ball label could not say
+      ['state', reviewStateLine(row)],
       ['waiting on', whoLabel(row.ball_label || row.ball)],
       ['waiting since', `${fmtStamp(Date.parse(row.waiting_since))} (${fmtHours(row.waiting_hours)})`],
       ['phase', row.phase],

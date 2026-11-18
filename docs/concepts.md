@@ -103,35 +103,56 @@ Each entry: **Definition** (what it is) · **Derivation** (how it's computed fro
 - **Definition**: *author* = the PR's owner (holds the ball while working). *Reviewer* = anyone asked to
   review (the roster in `reviewer_changed`). *Approver* = a reviewer who has approved. *Sentinel* is a
   distinct mandatory approver (§2 Sentinel).
-- **Purpose**: attribution. A PR in review waits on **every** reviewer asked who has not yet answered,
-  not whichever one acts first; a reviewer who acts (approve / needs-work / unapprove / reviewed) leaves
-  the pending set, an added reviewer joins it, a removed one leaves it.
+- **Purpose**: attribution. A PR in review waits on **every** reviewer asked who has not yet answered
+  (`status[r] = none`), not whichever one acts first; a reviewer who answers (approve / needs-work /
+  reviewed) leaves the pending set, an added reviewer joins it, a removed one leaves it. A push does
+  **not** re-pend a standing approval (only `approvals_lost` does), and a push-induced unapproval
+  returns the reviewer to pending, never the author (§2 "status vector").
 
-### "Ball in court" / waiting on / pending set
-- **Definition**: the *ball* is with the set of people an item currently waits on. An interval's ball is
-  `author` (working), a *pending reviewer set*, `CI`, or the *sentinel*.
-- **Derivation**: `analysis/ballcourt.py` replays the event stream with a small state machine. The
-  **pending set** = reviewers on the roster who still owe a response in the current review cycle.
-- **State machine** (one definition, used everywhere):
-  - `pr_opened` / `pr_pushed` / `rebased` → ball = **review**, pending = **the whole roster** (a new code
-    state means everyone owes a fresh response);
-  - a reviewer **acts** (`pr_approved` / `pr_needs_work` / `pr_unapproved` / `reviewed`) → that reviewer
-    **leaves** pending; an approval leaves the ball in review;
-  - `reviewer_changed` **added** → joins the roster **and** pending; **removed** → leaves both;
-  - `pr_needs_work` / `pr_unapproved` → ball = **author** (bounced back to fix);
-  - `comment_added` by the author → ball = **review**, pending = the whole roster (a new response round);
-    a **mandatory** comment → ball = **author** (blocker); a suggestion leaves the ball where it was;
-  - `build_status` → ball = **CI**.
-- **Attribution**: when ball = review, the wait is attributed to **every pending reviewer** as
-  *person-hours* (a 10 h wait on two reviewers is 10 h for *each*, so the person-level total exceeds the
-  wall-clock wait; role/queue level counts it once under `review`). When ball = author, only the author
-  is charged — pending reviewers are **not** charged while the author works. A reviewer added later is
-  charged **from their `added` event**, never retroactively.
+### "Ball in court" / waiting on / status vector
+- **Definition**: every PR has a **participant-status vector** — one status per roster member,
+  `status[r] ∈ {none, approved, needs_work, reviewed}` (Bitbucket's own participant status, which is
+  what the events record) — plus a **debt set** `debt ⊆ R` (the reviewers whose objection still stands)
+  and a `ci` flag. *Everything else is derived, never stored*:
+  - `author_open = debt ≠ ∅` — the author owes a fix;
+  - `P = {r : status[r] = none}` — the pending reviewers;
+  - `ready = ¬author_open ∧ P = ∅ ∧ R ≠ ∅` — every reviewer answered, not merged;
+  - `doubly_blocked = author_open ∧ P ≠ ∅` — fixing one side does not unblock the PR;
+  - `ball ∈ {author, review, ready}` — a **priority-ordered label** over those two dimensions;
+  - `holders = {author if author_open} ∪ P` — **the truth**. `ball` is only a label; when both
+    dimensions are non-empty both sets are reported (`holders`), and the label picks `author`.
+- **Derivation**: `analysis/ballcourt.py` replays the event stream with the transitions in the table
+  below. No event flips a ball: it changes one participant's status, or the debt set, or the CI flag.
+- **Transitions** (prd/40):
+
+  | event | effect |
+  |---|---|
+  | `pr_approved` (r) | `status[r]=approved`; `debt −= r`; touches no one else — an approval does **not** cancel another reviewer's objection |
+  | `pr_needs_work` / manual `pr_unapproved` / mandatory comment (r) | `status[r]=needs_work`; `debt += r` — an objection is an answer, so r is not also pending |
+  | `pr_unapproved` `cause=push` (r) | `status[r]=none` (r owes); the author's debt is **untouched** |
+  | `pr_pushed` / `rebased` | `debt := ∅`; `status[r]=none` for `needs_work`/`reviewed` reviewers; for **all** reviewers iff `approvals_lost`; a `pure_rebase` with no loss is a head move → **no change** |
+  | `comment_added` by the author | `debt := ∅`; `needs_work`/`reviewed` → `none` |
+  | `reviewer_changed` added (r) | `status[r]=none` (pending); moves nothing else — a reviewer added mid-debt does not move the ball |
+  | `reviewer_changed` removed (r) | drop r |
+  | `build_status` | set the `ci` flag, cleared by the build result; **never exclusive** — a reviewer can still be pending while CI runs |
+
+- **Sentinel gate** (`sentinel_after_peers`, default on): the sentinel is a *precedence* constraint,
+  not a peer. A sentinel's pending clock opens only after every peer reviewer has answered; until then
+  the sentinel is neither charged nor blocking. Configurable off for teams whose sentinel reviews in
+  parallel with peers.
+- **Attribution**: a person-level wait is attributed to **every holder** — the author while their debt
+  stands, plus every pending reviewer — as *person-hours*, priced on **that person's own calendar**
+  (a reviewer on vacation is not charged the hours someone else worked). A 10 h wait on two reviewers
+  is 10 h for *each*, so the person-level total exceeds the wall-clock wait; role/queue level counts it
+  once under `review` (or `ready`). `solo_hours` is the part of a person's total where they were the
+  *only* open ball. `ready` is its own state: the merge click is the author's, but nobody's review
+  wait.
+- **Ex-post honesty**: a reviewer still pending when a PR merged was, provably, not required; those
+  episodes are tagged `unrequired` (listed, not blamed) and excluded from the responsiveness median.
 - **Purpose**: every "waiting on …" / "where waits accumulate" / constraint answer. The owner must be
   **named** (a specific person or role), never the generic "review queue" when the ball is with one
-  person. *Open subtlety: `reviewer_changed` (added) sets ball = review unconditionally, so adding a
-  reviewer while the ball is with the author (mid needs-work) flips the ball back to review — likely
-  wrong, to be verified/fixed (see prd/34).*
+  person.
+
 
 ### Blocked vs needs-work
 - **Definition**: a PR is *blocked* when a mandatory review comment is unanswered; *needs work* when a
@@ -245,9 +266,12 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
 
 ### PR phase (the ball-court model)
 - **Definition**: at any moment a PR is in exactly one phase — `waiting` (ball not with the author),
-  `active` (author working, evidenced by commits), `review` (ball with reviewers), `ci`, `rebasing`
-  (an interval ended in a rebase push), `closed` (merged/declined), or `unobserved` (no events since
-  the snapshot).
+  `active` (author working, evidenced by commits), `review` (ball with reviewers), `ci` (a build is
+  running and nobody holds the ball), `rebasing` (an interval ended in a rebase push), `closed`
+  (merged/declined), or `unobserved` (no events since the snapshot). The phase stays a *derived
+  priority label*: `ready` (§2) is a state, not a phase, so "all approved, not merged" still reads
+  `review` here — read the interval's `ready`/`ball` fields to separate merge latency from review wait.
+  CI is a flag too, never exclusive: a reviewer pending during a build keeps the `review` phase.
 - **Derivation**: `analysis/ballcourt.py` `PHASE_ORDER`, from commits/events per interval.
 - **Purpose**: the timeline's coloured bars and the ball-in-court attribution. `unobserved` is *not* a
   real phase and is excluded from the blocking graph — but its tails (a PR with no recent events, e.g.
@@ -261,8 +285,9 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
   re-review (§Review round).
 
 ### Review cycle
-- **Definition**: one trip of the ball from "open/review" through "reviews answered" back to review.
-  A new cycle starts when the ball returns to review (opened, pushed, or unapproved).
+- **Definition**: one trip of the status vector from "open/review" through "reviews answered" back to
+  pending. A new cycle starts when a verdict is staled (a push, an `approvals_lost` reset, an author
+  reply) — not when a reviewer answers.
 - **Purpose**: the unit behind "review rounds" — see §6 Review round.
 
 ---
@@ -279,7 +304,10 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
   are lost and must be re-earned.
 - **Derivation**: `rounds = # pr_pushed (after first review) + # pr_unapproved with cause ≠ "push"
   (after first review)`. A push-induced `pr_unapproved` (`cause="push"`) is the *same* round as the
-  push that caused it, not a second one.
+  push that caused it, not a second one; a `pure_rebase` push that lost no approval is not a round;
+  a push before anyone has reviewed is setup, not rework. `analysis/ballcourt.review_round_events`
+  is the single implementation both the rules page and the ticket view read, and the excluded events
+  are reported (`excluded_*`) so the correction is visible.
 - **Purpose**: the `rework_loops`/`conformance` rules and the ticket view's round count. **One
   definition everywhere** — the store's `review_rounds` and the analysis must agree. A rebase that
   loses approvals is **one** round (not two); a target-shift/manual approval-loss with no new push is

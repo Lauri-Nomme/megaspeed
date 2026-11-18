@@ -388,37 +388,67 @@ class ResponsivenessTests(StoreCase):
 # 4. rework_loops
 # --------------------------------------------------------------------------- #
 class ReworkLoopTests(StoreCase):
+    """prd/40 + concepts.md §6: one definition of a review round.
+
+    Every PR has a first review first, because a push before anyone has looked
+    is setup, not rework. The three old over-counts are pinned here: the
+    pre-first-review push, the pure rebase that lost nothing, and the
+    push-induced unapproval (the same round as its push).
+    """
+
     def fixture(self) -> Fixture:
         fx = Fixture()
         fx.pr(1, "AaAa", state="merged", closed=T0 + timedelta(hours=100))
+        fx.event(1, "comment_added", "RrRr", 5, severity="suggestion")  # first review
         fx.event(1, "pr_pushed", "AaAa", 10, push_class="content")
         fx.event(1, "pr_pushed", "AaAa", 20, push_class="content")
-        fx.event(1, "pr_unapproved", "RrRr", 30, cause="push")
+        fx.event(1, "pr_unapproved", "RrRr", 30, cause="push")   # not a second round
         fx.event(1, "pr_approved", "RrRr", 50)
         fx.event(1, "pr_merged", "RrRr", 100)
         fx.pr(2, "AaAa")
-        fx.event(2, "pr_pushed", "AaAa", 10, push_class="pure_rebase")
+        fx.event(2, "comment_added", "RrRr", 5, severity="suggestion")
+        fx.event(2, "pr_pushed", "AaAa", 10, push_class="pure_rebase")  # head move
         fx.event(2, "pr_pushed", "AaAa", 20, push_class="rebase_conflict")
         fx.pr(3, "AaAa")
+        fx.pr(4, "AaAa")
+        fx.event(4, "comment_added", "RrRr", 5, severity="suggestion")
+        for hours in (10, 20, 30):
+            fx.event(4, "pr_pushed", "AaAa", hours, push_class="content")
         return fx
 
     def test_rounds_are_split_by_push_class(self):
         metric = self.metric(self.fixture(), "rework_loops")
-        self.assertEqual(metric["n"], 3)
-        self.assertEqual(metric["total_rounds"], 5)
-        self.assertEqual(metric["median_rounds"], 2.0)
+        self.assertEqual(metric["n"], 4)
+        # PR1: 2 content pushes (the cause=push unapproval is the same round)
+        # PR2: 1 rebase_conflict (the pure rebase lost no approval)
+        # PR3: 0, PR4: 3 content pushes
+        self.assertEqual(metric["total_rounds"], 6)
+        self.assertEqual(metric["median_rounds"], 1.5)
         self.assertEqual(metric["p90_rounds"], 3.0)
         self.assertEqual(metric["prs_over_2"], 1)
         self.assertEqual(metric["excess_rounds"], 1)
-        self.assertEqual(metric["by_push_class"]["content"], {"pushes": 2, "prs": 1})
-        self.assertEqual(metric["by_push_class"]["pure_rebase"], {"pushes": 1, "prs": 1})
+        self.assertEqual(metric["by_push_class"]["content"], {"pushes": 5, "prs": 2})
         self.assertEqual(metric["by_push_class"]["rebase_conflict"], {"pushes": 1, "prs": 1})
+        # the exclusions are reported, not silently dropped
+        self.assertNotIn("pure_rebase", metric["by_push_class"])
+        self.assertEqual(metric["excluded_pure_rebase"], 1)
+        self.assertEqual(metric["excluded_push_unapprovals"], 1)
+        self.assertEqual(metric["excluded_pre_first_review"], 0)
+
+    def test_a_push_before_the_first_review_is_not_a_round(self):
+        fx = Fixture()
+        fx.pr(1, "AaAa")
+        fx.event(1, "pr_pushed", "AaAa", 10, push_class="content")
+        fx.event(1, "pr_approved", "RrRr", 20)
+        metric = self.metric(fx, "rework_loops")
+        self.assertEqual(metric["total_rounds"], 0)
+        self.assertEqual(metric["excluded_pre_first_review"], 1)
 
     def test_emits_a_round_cap_rule(self):
         suggestion = by_id(self.insights(self.fixture()), "rework-loops")
         self.assertIsNotNone(suggestion)
-        # one closed PR: 100 h cycle ÷ 3 rounds = 33.33 h per round
-        self.assertAlmostEqual(suggestion["impact_hours"], 33.3, places=1)
+        # one closed PR: 100 h cycle ÷ 2 rounds = 50 h per round
+        self.assertAlmostEqual(suggestion["impact_hours"], 50.0, places=1)
         self.assertEqual(suggestion["evidence"]["excess_rounds"], 1)
         self.assertEqual(suggestion["evidence"]["prs_over_2"], 1)
 
@@ -466,6 +496,7 @@ class CommentTaxTests(StoreCase):
     def fixture(self) -> Fixture:
         fx = Fixture()
         fx.pr(1, "AaAa", state="merged", closed=T0 + timedelta(hours=60))
+        fx.event(1, "comment_added", "RrRr", 10, severity="suggestion")
         fx.event(1, "pr_pushed", "AaAa", 30, push_class="content")
         fx.event(1, "pr_approved", "RrRr", 50)
         fx.event(1, "pr_merged", "RrRr", 60)
@@ -521,8 +552,9 @@ class ConformanceTests(StoreCase):
         # merged with no approval at all
         fx.pr(1, "AaAa", state="merged", closed=T0 + timedelta(hours=48))
         fx.event(1, "pr_merged", "AaAa", 48)
-        # four rounds, then approved
+        # four rounds, then approved (a round needs a first review)
         fx.pr(2, "AaAa", state="merged", closed=T0 + timedelta(hours=200))
+        fx.event(2, "comment_added", "RrRr", 5, severity="suggestion")
         for hours in (10, 20, 30, 40):
             fx.event(2, "pr_pushed", "AaAa", hours, push_class="content")
         fx.event(2, "pr_approved", "RrRr", 50)
@@ -569,17 +601,19 @@ class SentinelQueueTests(StoreCase):
         return fx
 
     def test_median_wait_on_the_mandatory_approval(self):
+        """prd/40 (S12): one continuous wait is one episode, not two samples."""
         metric = self.metric(self.fixture(), "sentinel_queue")
         self.assertTrue(metric["available"])
         self.assertEqual(metric["sentinels"], ["RrRr"])
-        self.assertEqual(metric["n"], 2)                 # 100 h + 1 h review ball
-        self.assertEqual(metric["median_hours"], 50.5)
+        self.assertEqual(metric["n"], 1)                 # one 101 h episode
+        self.assertEqual(metric["median_hours"], 101.0)
+        self.assertTrue(metric["sentinel_after_peers"])
 
     def test_emits_a_rotation_rule(self):
         suggestion = by_id(self.insights(self.fixture()), "sentinel-queue")
         self.assertIsNotNone(suggestion)
-        self.assertEqual(suggestion["severity"], "warning")
-        self.assertEqual(suggestion["impact_hours"], 53.0)   # (50.5 − 24) × 2
+        self.assertEqual(suggestion["severity"], "critical")
+        self.assertEqual(suggestion["impact_hours"], 77.0)   # (101 − 24) × 1
         self.assertEqual(suggestion["evidence"]["sentinels"], 1)
 
     def test_no_role_data_means_no_rule(self):
@@ -777,9 +811,11 @@ class DrillDownTests(StoreCase):
     def test_rework_rows_carry_the_round_count_per_pr(self):
         fx = Fixture()
         fx.pr(1, "AaAa")
+        fx.event(1, "comment_added", "RrRr", 5, severity="suggestion")
         for index in range(4):
             fx.event(1, "pr_pushed", "AaAa", 10 + index, push_class="content")
         fx.pr(2, "AaAa")
+        fx.event(2, "comment_added", "RrRr", 5, severity="suggestion")
         fx.event(2, "pr_pushed", "AaAa", 10, push_class="content")
         rows = self.metric(fx, "rework_loops")["rows"]
         by_number = {row["number"]: row for row in rows}

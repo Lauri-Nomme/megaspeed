@@ -603,11 +603,11 @@ def _cycle(story: Story) -> Cycle:
         for event in state.events:
             if event["activity"] in TOUCH_ACTIVITIES:
                 touches.append(event["_ts"])
-            if (
-                event["activity"] in ("pr_pushed", "pr_unapproved")
-                and first_review is not None and event["_ts"] >= first_review
-            ):
-                rounds += 1
+        # prd/40 + concepts.md §6: one definition of a review round, shared
+        # with rules._rounds — after the first review, no pure rebase that lost
+        # no approval, no push-induced unapproval counted twice.
+        pushes, unapprovals = ballcourt.review_round_events(state)
+        rounds += len(pushes) + len(unapprovals)
     # -- measured work: worklog durations (ticket side) ---------------------
     for event in story.of("worklogged"):
         attributes = _attrs(event)

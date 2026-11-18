@@ -284,9 +284,14 @@ def cohort(court: ballcourt.BallCourt, window: tuple[datetime, datetime]) -> lis
 
 
 def _rounds(state) -> tuple[list[dict], list[dict]]:
-    pushes = [e for e in state.events if e["activity"] == "pr_pushed"]
-    unapprovals = [e for e in state.events if e["activity"] == "pr_unapproved"]
-    return pushes, unapprovals
+    """The events that count as review rounds (``concepts.md`` §6, prd/40).
+
+    One definition for the whole product: after the first review, excluding a
+    ``pure_rebase`` that lost no approval and excluding a push-induced
+    ``pr_unapproved`` (the same round as its push). ``ballcourt`` owns it so the
+    ticket view (``analysis/jira``) cannot drift from the rules page.
+    """
+    return ballcourt.review_round_events(state)
 
 
 def _pr_row(pr: dict, **extra) -> dict:
@@ -910,52 +915,113 @@ def time_to_merge(court: ballcourt.BallCourt, window) -> dict:
     }
 
 
+def _episodes(court: ballcourt.BallCourt, window, kind: str = "review") -> list[dict]:
+    """Per-``(person, PR)`` wait *episodes*, not per interval (prd/40, S12).
+
+    One sample per consecutive run of intervals in which the person is a
+    holder. Every event by anyone splits an interval, so a 30 h wait on one
+    reviewer used to become six samples of 0–18 h (≈10× understated median);
+    the drill-down in this module already aggregated per ``(person, PR)``, the
+    headline median did not.
+
+    ``kind="review"`` uses the pending set (every holder who is not the
+    author); ``kind="author"`` uses the author's own open debt. The hours are
+    priced on the holder's calendar.
+    """
+    start, end = window
+    by_pr: dict[str, list] = defaultdict(list)
+    for interval in court.intervals:
+        if _overlap(interval, start, end):
+            by_pr[interval.object_id].append(interval)
+    out: list[dict] = []
+    for object_id, intervals in by_pr.items():
+        intervals.sort(key=lambda i: i.start)
+        open_episodes: dict[str, dict] = {}
+        for interval in intervals:
+            if kind == "author":
+                people = [interval.author] if interval.author_open else []
+            else:
+                people = [p for p in interval.person_holders if p != interval.author]
+            current = set(people)
+            for person in list(open_episodes):
+                if person not in current:
+                    out.append(open_episodes.pop(person))
+            for person in current:
+                entry = open_episodes.get(person)
+                if entry is None:
+                    entry = open_episodes[person] = {
+                        "person": person,
+                        "object_id": object_id,
+                        "hours": 0.0,
+                        "intervals": 0,
+                        "longest_hours": 0.0,
+                        "first_ts": interval.start,
+                        "last_ts": interval.end,
+                    }
+                hours = interval.hours_for(person)
+                entry["hours"] += hours
+                entry["intervals"] += 1
+                entry["longest_hours"] = max(entry["longest_hours"], hours)
+                entry["last_ts"] = interval.end
+        out.extend(open_episodes.values())
+    return out
+
+
+def _empty_wait() -> dict:
+    return {"hours": 0.0, "required_hours": 0.0, "unrequired_hours": 0.0,
+            "waits": 0, "required_waits": 0, "longest_hours": 0.0}
+
+
 def reviewer_responsiveness(court: ballcourt.BallCourt, window) -> dict:
     """Per person: hours the ball sat in *their* review queue vs on their PRs.
 
     Review-ball hours are attributed to **every reviewer the ball was
-    concurrently with** — the pending roster from ``ballcourt`` (product review
-    #7) — not only to whoever happened to answer first. A reviewer who never
-    responds therefore accumulates the waits they held instead of disappearing
-    behind the first responder; the responder is included even when the store
-    has no roster for them. Author-ball hours are the intervals where the person
-    held the ball on their own PR. "Prefers own work" is the contrast: review
-    latency high while their own cycle is low.
+    concurrently with** — the pending roster from ``ballcourt`` (prd/40) — not
+    only to whoever happened to answer first, and priced on that reviewer's own
+    calendar. Samples are **episodes**, not intervals (S12), so one long wait is
+    one sample however many events split it.
+
+    A reviewer still pending when the PR merged was, ex post, not required
+    (S7): their episodes are tagged ``unrequired`` and left out of the median
+    and the flag, but still listed.
     """
     start, end = window
+    unrequired = ballcourt.pending_at_close(court)
     review: dict[str, list[float]] = defaultdict(list)
     author: dict[str, list[float]] = defaultdict(list)
+    unrequired_by_person: dict[str, dict] = defaultdict(_empty_wait)
     pr_meta = {state.pr["object_id"]: state.pr for state in court.prs}
     # prd/26 P5: the waits behind a reviewer rule, aggregated per (person, PR)
     # — the PR is the item an investigator opens, not each interval.
     waits: dict[tuple[str, str], dict] = {}
-    for interval in court.intervals:
-        if not _overlap(interval, start, end):
-            continue
-        if interval.ball == ballcourt.REVIEW:
-            for person in interval.holders:
-                if person in (ballcourt.REVIEW, ballcourt.CI, ballcourt.CALENDAR):
-                    continue  # an unattributed queue wait is not a person's
-                review[person].append(interval.hours)
-                entry = waits.get((person, interval.object_id))
-                if entry is None:
-                    waits[(person, interval.object_id)] = {
-                        "person": person,
-                        "object_id": interval.object_id,
-                        "hours": interval.hours,
-                        "waits": 1,
-                        "longest_hours": interval.hours,
-                        "first_ts": interval.start,
-                        "last_ts": interval.end,
-                    }
-                else:
-                    entry["hours"] += interval.hours
-                    entry["waits"] += 1
-                    entry["longest_hours"] = max(entry["longest_hours"], interval.hours)
-                    entry["first_ts"] = min(entry["first_ts"], interval.start)
-                    entry["last_ts"] = max(entry["last_ts"], interval.end)
-        elif interval.ball == "author":
-            author[interval.author].append(interval.hours)
+    for episode in _episodes(court, window, "review"):
+        person = episode["person"]
+        object_id = episode["object_id"]
+        entry = waits.get((person, object_id))
+        if entry is None:
+            entry = waits[(person, object_id)] = {
+                "person": person,
+                "object_id": object_id,
+                **_empty_wait(),
+                "first_ts": episode["first_ts"],
+                "last_ts": episode["last_ts"],
+            }
+        entry["hours"] += episode["hours"]
+        entry["waits"] += 1
+        entry["first_ts"] = min(entry["first_ts"], episode["first_ts"])
+        entry["last_ts"] = max(entry["last_ts"], episode["last_ts"])
+        if person in unrequired.get(object_id, ()):
+            entry["unrequired_hours"] += episode["hours"]
+            unrequired_by_person[person]["hours"] += episode["hours"]
+            unrequired_by_person[person]["waits"] += 1
+        else:
+            entry["required_hours"] += episode["hours"]
+            entry["required_waits"] += 1
+            entry["longest_hours"] = max(entry["longest_hours"], episode["hours"])
+            review[person].append(episode["hours"])
+    for episode in _episodes(court, window, "author"):
+        author[episode["person"]].append(episode["hours"])
+
     rows: list[dict] = []
     for entry in waits.values():
         pr = pr_meta.get(entry["object_id"])
@@ -964,13 +1030,16 @@ def reviewer_responsiveness(court: ballcourt.BallCourt, window) -> dict:
         rows.append(_pr_row(
             pr, person=entry["person"], ball=ballcourt.REVIEW,
             hours=round(entry["hours"], 2), waits=entry["waits"],
+            required_hours=round(entry["required_hours"], 2),
+            unrequired_hours=round(entry["unrequired_hours"], 2),
+            unrequired=entry["required_waits"] == 0,
             longest_hours=round(entry["longest_hours"], 2),
             from_ts=iso(entry["first_ts"]), to_ts=iso(entry["last_ts"]),
             affected=entry["longest_hours"] >= TARGET_FIRST_REVIEW_HOURS,
         ))
 
     people = []
-    for person in sorted(set(review) | set(author)):
+    for person in sorted(set(review) | set(author) | set(unrequired_by_person)):
         review_hours = review.get(person, [])
         author_hours = author.get(person, [])
         review_median = _median(review_hours)
@@ -989,12 +1058,16 @@ def reviewer_responsiveness(court: ballcourt.BallCourt, window) -> dict:
             "review_median_hours": review_median,
             "author_n": len(author_hours),
             "author_median_hours": author_median,
+            "unrequired_n": unrequired_by_person[person]["waits"],
+            "unrequired_hours": round(unrequired_by_person[person]["hours"], 2),
             "flagged": flagged,
         })
 
     review_medians = [p["review_median_hours"] for p in people if p["review_median_hours"] is not None]
     all_review = [h for values in review.values() for h in values]
     all_author = [h for values in author.values() for h in values]
+    unrequired_episodes = sum(v["waits"] for v in unrequired_by_person.values())
+    unrequired_hours = sum(v["hours"] for v in unrequired_by_person.values())
     return {
         "people": people,
         "flagged": [p["person"] for p in people if p["flagged"]],
@@ -1003,6 +1076,12 @@ def reviewer_responsiveness(court: ballcourt.BallCourt, window) -> dict:
         "review_median_hours": _median(all_review),
         "author_n": len(all_author),
         "author_median_hours": _median(all_author),
+        "unrequired_n": unrequired_episodes,
+        "unrequired_hours": round(unrequired_hours, 2),
+        "unrequired_note": (
+            "reviewers still pending when the PR merged were not required "
+            "(listed, not blamed); their episodes are excluded from the median"
+        ),
         "spread_hours": (
             round(max(review_medians) - min(review_medians), 2)
             if len(review_medians) >= 2 else None
@@ -1011,15 +1090,35 @@ def reviewer_responsiveness(court: ballcourt.BallCourt, window) -> dict:
     }
 
 
+
 def rework_loops(court: ballcourt.BallCourt, window) -> dict:
-    """Review rounds per PR (``pr_pushed`` + ``pr_unapproved``), by push class."""
+    """Review rounds per PR, by push class (``concepts.md`` §6, prd/40)."""
     rounds: list[int] = []
     by_class: dict[str, dict] = defaultdict(lambda: {"pushes": 0, "prs": set()})
     rows: list[dict] = []
+    excluded_pure_rebase = 0
+    excluded_push_unapprovals = 0
+    excluded_pre_first_review = 0
     for state in cohort(court, window):
         pushes, unapprovals = _rounds(state)
         count = len(pushes) + len(unapprovals)
         rounds.append(count)
+        # what the old #pr_pushed + #pr_unapproved would have counted, so the
+        # correction is visible instead of looking like missing data
+        first = ballcourt.first_review(state)
+        for event in state.events:
+            activity = event["activity"]
+            if activity not in ("pr_pushed", "pr_unapproved"):
+                continue
+            if first is None or event["_ts"] < first["_ts"]:
+                excluded_pre_first_review += 1
+                continue
+            attrs = event.get("attributes") or {}
+            if activity == "pr_pushed":
+                if attrs.get("push_class") == "pure_rebase" and not attrs.get("approvals_lost"):
+                    excluded_pure_rebase += 1
+            elif attrs.get("cause") == "push":
+                excluded_push_unapprovals += 1
         classes = set()
         for event in pushes:
             push_class = _push_class(event)
@@ -1043,6 +1142,14 @@ def rework_loops(court: ballcourt.BallCourt, window) -> dict:
         "prs_over_max": sum(1 for r in rounds if r > MAX_REVIEW_ROUNDS),
         "excess_rounds": sum(max(0, r - 2) for r in rounds),
         "max_rounds": MAX_REVIEW_ROUNDS,
+        "excluded_pure_rebase": excluded_pure_rebase,
+        "excluded_push_unapprovals": excluded_push_unapprovals,
+        "excluded_pre_first_review": excluded_pre_first_review,
+        "round_note": (
+            "rounds = #pr_pushed (after first review, excluding a pure rebase "
+            "that lost no approval) + #pr_unapproved with cause != push "
+            "(after first review); the excluded events are counted above"
+        ),
         "rows": _drill_order(rows),
         "by_push_class": {
             push_class: {"pushes": entry["pushes"], "prs": len(entry["prs"])}
@@ -1307,7 +1414,14 @@ def pr_size(court: ballcourt.BallCourt, window, sizes: dict[str, dict] | None = 
 
 
 def sentinel_queue(court: ballcourt.BallCourt, window) -> dict:
-    """Median wait on the mandatory approval, when sentinel roles exist."""
+    """Median wait on the mandatory approval, when sentinel roles exist.
+
+    Episodes, not intervals (S12), and the same ``unrequired`` rule as the
+    reviewer metric: a PR that merged without the sentinel did not need them
+    (S7). With ``sentinel_after_peers`` (the default) the clock only starts
+    once every peer has answered, so the median prices the time the sentinel was
+    actually expected to act.
+    """
     start, end = window
     sentinels = set(court.sentinels)
     if not sentinels:
@@ -1321,34 +1435,38 @@ def sentinel_queue(court: ballcourt.BallCourt, window) -> dict:
             "by_person": {},
             "rows": [],
         }
+    unrequired = ballcourt.pending_at_close(court)
     waits: dict[str, list[float]] = defaultdict(list)
+    unrequired_waits: dict[str, dict] = defaultdict(_empty_wait)
     pr_meta = {state.pr["object_id"]: state.pr for state in court.prs}
     # per (sentinel, PR): the item a reader opens, not each interval
     by_pr: dict[tuple[str, str], dict] = {}
-    for interval in court.intervals:
-        if not _overlap(interval, start, end):
+    for episode in _episodes(court, window, "review"):
+        person = episode["person"]
+        if person not in sentinels:
             continue
-        if interval.ball == ballcourt.REVIEW:
-            for person in interval.holders:
-                if person in sentinels:
-                    waits[person].append(interval.hours)
-                    entry = by_pr.get((person, interval.object_id))
-                    if entry is None:
-                        by_pr[(person, interval.object_id)] = {
-                            "person": person,
-                            "object_id": interval.object_id,
-                            "hours": interval.hours,
-                            "waits": 1,
-                            "longest_hours": interval.hours,
-                            "first_ts": interval.start,
-                            "last_ts": interval.end,
-                        }
-                    else:
-                        entry["hours"] += interval.hours
-                        entry["waits"] += 1
-                        entry["longest_hours"] = max(entry["longest_hours"], interval.hours)
-                        entry["first_ts"] = min(entry["first_ts"], interval.start)
-                        entry["last_ts"] = max(entry["last_ts"], interval.end)
+        entry = by_pr.get((person, episode["object_id"]))
+        if entry is None:
+            entry = by_pr[(person, episode["object_id"])] = {
+                "person": person,
+                "object_id": episode["object_id"],
+                **_empty_wait(),
+                "first_ts": episode["first_ts"],
+                "last_ts": episode["last_ts"],
+            }
+        entry["hours"] += episode["hours"]
+        entry["waits"] += 1
+        entry["first_ts"] = min(entry["first_ts"], episode["first_ts"])
+        entry["last_ts"] = max(entry["last_ts"], episode["last_ts"])
+        if person in unrequired.get(episode["object_id"], ()):
+            entry["unrequired_hours"] += episode["hours"]
+            unrequired_waits[person]["hours"] += episode["hours"]
+            unrequired_waits[person]["waits"] += 1
+        else:
+            entry["required_hours"] += episode["hours"]
+            entry["required_waits"] += 1
+            entry["longest_hours"] = max(entry["longest_hours"], episode["hours"])
+            waits[person].append(episode["hours"])
     all_waits = [hours for values in waits.values() for hours in values]
     rows: list[dict] = []
     for entry in by_pr.values():
@@ -1358,6 +1476,9 @@ def sentinel_queue(court: ballcourt.BallCourt, window) -> dict:
         rows.append(_pr_row(
             pr, person=entry["person"], hours=round(entry["hours"], 2),
             waits=entry["waits"],
+            required_hours=round(entry["required_hours"], 2),
+            unrequired_hours=round(entry["unrequired_hours"], 2),
+            unrequired=entry["required_waits"] == 0,
             longest_hours=round(entry["longest_hours"], 2),
             from_ts=iso(entry["first_ts"]), to_ts=iso(entry["last_ts"]),
             affected=entry["longest_hours"] > TARGET_FIRST_REVIEW_HOURS,
@@ -1369,12 +1490,16 @@ def sentinel_queue(court: ballcourt.BallCourt, window) -> dict:
         "median_hours": _median(all_waits),
         "p90_hours": _p90(all_waits),
         "target_hours": TARGET_FIRST_REVIEW_HOURS,
+        "sentinel_after_peers": court.sentinel_after_peers,
+        "unrequired_n": sum(v["waits"] for v in unrequired_waits.values()),
+        "unrequired_hours": round(sum(v["hours"] for v in unrequired_waits.values()), 2),
         "by_person": {
             person: {"n": len(values), "median_hours": _median(values)}
             for person, values in sorted(waits.items())
         },
         "rows": _drill_order(rows),
     }
+
 
 
 def vacation_blocking(court: ballcourt.BallCourt, window) -> dict:

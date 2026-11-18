@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **835** (`tests/`) + **96** (`scrape/tests`) + **150** (node `app/test`) green.
+Tests: **860** (`tests/`) + **96** (`scrape/tests`) + **157** (node `app/test`) green.
 
 ## Scrape (airgapped) — full value, reliable
 
@@ -51,6 +51,20 @@ Tests: **835** (`tests/`) + **96** (`scrape/tests`) + **150** (node `app/test`) 
   right-edge clipping or vertical word-wrap (`scrollWidth` 412 on every view; `docs/QA-ux-phone.md`).
 - **Versioning (prd/32)**: `v0.9.0` tagged on main; `/api/meta` + the meta strip show `v0.9.0 · <sha>`
   (git describe → `VERSION` file → hardcoded fallback, `scraper-*` tags excluded).
+
+## Review model (prd/40, the middle ground)
+
+- **Participant-status vector + debt + ready** in `analysis/ballcourt.py`: `status[r]` per roster
+  member, `debt` (whose objection stands), a `ci` flag; `pending`/`author_open`/`ready`/`ball` are
+  derived. `holders` = author-while-in-debt ∪ pending is the truth; `ball` is a priority label.
+- Measured on the corpora (merged PRs, wall-clock): standing-approval person-hours **1380 → 0**
+  (del-combined) and **411 → 0** (megaspeed); push-unapproval author hours **48 → 0** / **146 → 0**;
+  `ready` carved out of review wait **1340 h** / **1689 h**; sentinel pending hours **8620 → 4063** /
+  **823 → 562** with `sentinel_after_peers` (default on, `MEGASPEED_SENTINEL_AFTER_PEERS=0` off).
+- Per-holder calendar pricing (`holder_hours`), episode-level responsiveness/sentinel medians,
+  `solo_hours`, pending-at-merge `unrequired`, `ready`/`doubly_blocked`/`ready_since` in the delivery
+  rows, and the one-line PR drawer state. `_rounds` follows `concepts.md` §6 (del-combined 250 → 188,
+  megaspeed 87 → 48) in both `rules` and `jira`.
 
 ## Performance (prd/33, from the adversarial review)
 

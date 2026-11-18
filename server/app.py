@@ -853,6 +853,12 @@ def _analysis_bundle(con, tenant: str, path: Path) -> _AnalysisBundle:
     a tenant never do. The stamp is per file, so another tenant's ingest run
     cannot invalidate this one — and the calendar files are part of the key, so
     editing ``data/<tenant>/calendar.yaml`` takes effect without a restart.
+
+    ``MEGASPEED_SENTINEL_AFTER_PEERS`` (prd/40) is process-level configuration,
+    read once per build: ``0``/``false``/``off``/``no`` turns the sentinel gate
+    off (the sentinel reviews in parallel with peers). It is deliberately not
+    part of the cache key — it is not a per-request value, and a restart is the
+    honest way to change it.
     """
     global _analysis_cache
     key = (tenant, _file_stamp(path), _calendar_key(tenant))
@@ -860,7 +866,13 @@ def _analysis_bundle(con, tenant: str, path: Path) -> _AnalysisBundle:
         if _analysis_cache is not None and _analysis_cache[0] == key:
             return _analysis_cache[1]
     calendar, error = _calendar_for(tenant)
-    bundle = _AnalysisBundle(analyse.load(con, calendar=calendar, calendar_error=error))
+    sentinel_after_peers = os.environ.get(
+        "MEGASPEED_SENTINEL_AFTER_PEERS", ""
+    ).strip().lower() not in {"0", "false", "off", "no"}
+    bundle = _AnalysisBundle(analyse.load(
+        con, calendar=calendar, calendar_error=error,
+        sentinel_after_peers=sentinel_after_peers,
+    ))
     with _analysis_lock:
         _analysis_cache = (key, bundle)
     return bundle
@@ -1023,7 +1035,14 @@ def queues(request: Request):
 
 @app.get("/api/delivery")
 def delivery(request: Request):
-    """Triage list: open PRs, what they wait on, and for how long."""
+    """Triage list: open PRs, what they wait on, and for how long.
+
+    prd/40: a row's ``ball`` is the derived label (``author`` | ``review`` |
+    ``ready``), ``waiting_on`` is the truth (the pending reviewers and, while a
+    reviewer's objection stands, the author), ``doubly_blocked`` says both
+    dimensions are open, and ``ready_since`` is set when every reviewer has
+    answered and only the merge click remains.
+    """
     unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["delivery"]))
     if unknown is not None:
         return unknown

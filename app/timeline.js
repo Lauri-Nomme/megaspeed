@@ -193,30 +193,138 @@ function fit(ctx, text, maxWidth) {
   return `${value}…`;
 }
 
-/** Ball-in-court state machine — mirrors analysis/ballcourt.py on the client. */
-function advanceState(pr, state, event) {
+/**
+ * The participant-status model of prd/40, mirrored on the client.
+ *
+ * This is a *port of the server's transitions*, not a second state machine: the
+ * old copy here had no roster at all and flipped the ball on every approval, so
+ * it already disagreed with `analysis/ballcourt.py`. When the payload carries
+ * `pr.intervals` (the ticket view does), `lifecycle()` reads those instead of
+ * deriving anything; this path exists only for the events-only timeline.
+ *
+ * State: `reviewers` (roster), `status` (Bitbucket participant status), `debt`
+ * (whose objection still stands), `ci` (a flag, never a ball). `pending`,
+ * `author_open`, `ready` and `ball` are derived.
+ */
+function deriveState(reviewers, status, debt, sentinels = new Set()) {
+  let pending = [...reviewers].filter((person) => (status.get(person) || 'none') === 'none');
+  // the sentinel is a precedence constraint: not charged while a peer is pending
+  if (sentinels.size) {
+    const peers = pending.filter((person) => !sentinels.has(person));
+    if (peers.length) pending = peers;
+  }
+  const authorOpen = debt.size > 0;
+  const ready = !authorOpen && pending.length === 0 && reviewers.size > 0;
+  const ball = authorOpen ? 'author' : (pending.length || reviewers.size === 0 ? 'review' : 'ready');
+  return { pending: new Set(pending), author_open: authorOpen, ready, ball };
+}
+
+function eventPeople(event) {
+  return (event.objects || [])
+    .filter((objectId) => String(objectId).startsWith('PERSON:'))
+    .map((objectId) => String(objectId).slice('PERSON:'.length))
+    .filter(Boolean);
+}
+
+function advanceState(pr, state, event, sentinels = new Set()) {
   const activity = event.activity;
   const attrs = event.attributes || {};
+  const author = pr.actor;
+  const reviewers = new Set(state?.reviewers || []);
+  const status = new Map(state?.status || []);
+  const debt = new Set(state?.debt || []);
+  let ci = Boolean(state?.ci);
+  const enlist = (person) => {
+    if (!person || person === author) return;
+    reviewers.add(person);
+    if (!status.has(person)) status.set(person, 'none');
+  };
+  const people = eventPeople(event);
+  if (activity === 'reviewer_changed') {
+    const change = attrs.change;
+    if (change === 'added') {
+      people.forEach(enlist);
+    } else if (change === 'removed') {
+      people.forEach((person) => {
+        reviewers.delete(person);
+        status.delete(person);
+        debt.delete(person);
+      });
+    } else if (change === 'reviewed' && event.actor !== author) {
+      enlist(event.actor);
+      status.set(event.actor, 'reviewed');
+    }
+  } else if (activity === 'pr_approved' && event.actor !== author) {
+    enlist(event.actor);
+    status.set(event.actor, 'approved');
+    debt.delete(event.actor);
+  } else if (activity === 'pr_needs_work' && event.actor !== author) {
+    enlist(event.actor);
+    status.set(event.actor, 'needs_work');
+    debt.add(event.actor);
+  } else if (activity === 'pr_unapproved' && event.actor !== author) {
+    enlist(event.actor);
+    if (attrs.cause === 'push') {
+      status.set(event.actor, 'none');   // owes a new verdict, not author debt
+    } else {
+      status.set(event.actor, 'needs_work');
+      debt.add(event.actor);
+    }
+  }
   if (activity === 'pr_merged' || activity === 'pr_declined') return null;
-  if (activity === 'pr_opened' || activity === 'pr_pushed' || activity === 'pr_approved' || activity === 'reviewer_changed') {
-    const kind = activity === 'pr_pushed' ? `push:${attrs.push_class || 'other'}` : activity;
-    return { ball: 'review', by: event.actor, kind, since: event.t };
+  let kind = activity;
+  if (activity === 'pr_opened') {
+    reviewers.forEach((person) => status.set(person, 'none'));
+    debt.clear();
+    ci = false;
+  } else if (activity === 'pr_pushed' || activity === 'rebased') {
+    const pushClass = attrs.push_class || (activity === 'rebased' ? 'pure_rebase' : 'other');
+    const lost = Boolean(attrs.approvals_lost);
+    if (!(pushClass === 'pure_rebase' && !lost)) {
+      debt.clear();
+      reviewers.forEach((person) => {
+        if (lost || status.get(person) === 'needs_work' || status.get(person) === 'reviewed') {
+          status.set(person, 'none');
+        }
+      });
+    }
+    kind = activity === 'pr_pushed' ? `push:${attrs.push_class || 'other'}` : 'rebase';
+  } else if (activity === 'comment_added') {
+    if (event.actor === author) {
+      debt.clear();
+      reviewers.forEach((person) => {
+        if (status.get(person) === 'needs_work' || status.get(person) === 'reviewed') {
+          status.set(person, 'none');
+        }
+      });
+      kind = 'author_reply';
+    } else if (attrs.severity === 'mandatory') {
+      enlist(event.actor);
+      status.set(event.actor, 'needs_work');
+      debt.add(event.actor);
+      kind = 'blocker_comment';
+    } else {
+      kind = 'comment';
+    }
+  } else if (activity === 'build_status') {
+    const result = String(attrs.result || attrs.state || '').toLowerCase();
+    ci = !['success', 'failed', 'passed', 'green', 'red'].includes(result);
+    kind = 'ci';
+  } else if (['pr_approved', 'pr_needs_work', 'pr_unapproved', 'reviewer_changed',
+    'question_raised', 'question_answered'].includes(activity)) {
+    kind = activity;
+  } else {
+    return state;
   }
-  if (activity === 'pr_unapproved' || activity === 'pr_needs_work') {
-    return { ball: 'author', by: event.actor, kind: activity, since: event.t };
-  }
-  if (activity === 'comment_added') {
-    if (event.actor === pr.author) return { ball: 'review', by: event.actor, kind: 'author_reply', since: event.t };
-    if (attrs.severity === 'mandatory') return { ball: 'author', by: event.actor, kind: 'blocker_comment', since: event.t };
-    return { ball: state?.ball || 'review', by: event.actor, kind: 'comment', since: event.t };
-  }
-  if (activity === 'rebased') return { ball: 'review', by: event.actor, kind: 'rebase', since: event.t };
-  if (activity === 'build_status') return { ball: 'CI', by: event.actor, kind: 'ci', since: event.t };
-  return state;
+  return {
+    reviewers, status, debt, ci,
+    ...deriveState(reviewers, status, debt, sentinels),
+    by: event.actor, kind, since: event.t,
+  };
 }
 
 function phaseFor(state, pr, next, commits) {
-  if (state.ball === 'CI') return 'ci';
+  if (state.ci && !state.author_open && state.pending.size === 0) return 'ci';
   const activity = next.activity;
   const attrs = next.attributes || {};
   if (activity === 'pr_pushed') {
@@ -225,7 +333,7 @@ function phaseFor(state, pr, next, commits) {
   }
   if (activity === 'rebased') return 'rebasing';
   if (activity === 'pr_merged' || activity === 'pr_declined') return 'review';
-  if (state.ball === 'author') {
+  if (state.author_open) {
     // evidence of author work: their own push/comment, or commits in the interval
     if (activity === 'pr_pushed' || next.actor === pr.actor) return 'active';
     return commits > 0 ? 'active' : 'waiting';
@@ -254,6 +362,9 @@ export class Timeline {
     this.density = 'M';
     this.dim = 'actor';
     this.activityState = new Map();
+    // prd/40: the sentinel role, when the payload carries it, so the client's
+    // port applies the same precedence gate as the server.
+    this.sentinels = new Set();
     this.events = [];
     this.prs = [];
     this.commitsByPr = new Map();
@@ -392,6 +503,7 @@ export class Timeline {
       pr.epic = epicTicket(pr.keys, epics);
     }
     this.epics = epics;
+    this.sentinels = new Set(meta.sentinels || []);
     this.now = meta.as_of ? Date.parse(meta.as_of) : (meta.last_ts ? Date.parse(meta.last_ts) : Date.now());
 
     const times = this.events.map((e) => e.t).concat(this.prs.map((p) => p.created));
@@ -562,6 +674,25 @@ export class Timeline {
   lifecycle(pr) {
     const cached = this._life.get(pr.id);
     if (cached) return cached;
+    // prd/40: when the payload carries the server's intervals, draw those.
+    // The server is the one state machine; the local port below is only for
+    // the events-only timeline.
+    if (Array.isArray(pr.intervals) && pr.intervals.length) {
+      const segments = pr.intervals.map((interval) => ({
+        from: Date.parse(interval.from || interval.start),
+        to: Date.parse(interval.to || interval.end),
+        phase: interval.phase,
+        commits: interval.commits || 0,
+        ball: interval.ball,
+        by: interval.by || null,
+        kind: interval.kind,
+        ready: Boolean(interval.ready),
+        holders: interval.holders || [],
+        endedBy: null,
+      })).filter((seg) => Number.isFinite(seg.from) && Number.isFinite(seg.to));
+      this._life.set(pr.id, segments);
+      return segments;
+    }
     const segments = [];
     let state = null;
     let since = pr.created;
@@ -572,10 +703,12 @@ export class Timeline {
         segments.push({
           from: since, to: event.t, phase, commits,
           ball: state.ball, by: state.by, kind: state.kind,
+          ready: Boolean(state.ready),
+          holders: [...state.pending],
           endedBy: event.activity,
         });
       }
-      const next = advanceState(pr, state, event);
+      const next = advanceState(pr, state, event, this.sentinels);
       if (!next) {
         state = null;
         segments.push({ from: event.t, to: event.t, phase: 'closed', commits: 0, ball: 'closed', by: event.actor, kind: event.activity, endedBy: event.activity });
@@ -589,7 +722,10 @@ export class Timeline {
       if (end > since) {
         segments.push({
           from: since, to: end, phase: pr.closed ? 'closed' : 'unobserved', commits: 0,
-          ball: state.ball, by: state.by, kind: state.kind, endedBy: null,
+          ball: state.ball, by: state.by, kind: state.kind,
+          ready: Boolean(state.ready),
+          holders: [...state.pending],
+          endedBy: null,
         });
       }
     }

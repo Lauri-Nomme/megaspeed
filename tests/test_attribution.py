@@ -199,7 +199,13 @@ class MultiReviewerAttributionTests(Case):
         self.assertEqual(people["SsSs"]["review_median_hours"], 30.0)
         self.assertEqual(people["SsSs"]["review_n"], 1)
 
-    def test_a_responder_off_the_roster_is_still_a_holder(self):
+    def test_a_responder_off_the_roster_is_not_retro_charged(self):
+        """prd/40: with a roster, the status vector is the truth.
+
+        The old responder retrofit charged RrRr for the 20 h *before* they
+        answered, even though SsSs was the reviewer the PR actually waited on.
+        The retrofit now only fills a store with no roster at all (next test).
+        """
         store = Store()
         store.pr(1, "AaAa")
         store.review_request(1, "AaAa", "SsSs", 1)
@@ -207,7 +213,7 @@ class MultiReviewerAttributionTests(Case):
         court = self.load(store)
         edges = self.edges(ballcourt.blocking_graph(court, level="person"))
         self.assertEqual(edges[("AaAa", "SsSs")]["hours"], 20.0)
-        self.assertEqual(edges[("AaAa", "RrRr")]["hours"], 20.0)
+        self.assertNotIn(("AaAa", "RrRr"), edges)
 
     def test_without_a_roster_the_responder_is_the_only_holder(self):
         store = Store()
@@ -244,20 +250,26 @@ class MultiReviewerAttributionTests(Case):
         self.assertEqual(edges[("AaAa", "SsSs")]["hours"], 1.0)
         self.assertEqual(edges[("AaAa", "RrRr")]["hours"], 21.0)
 
-    def test_a_push_starts_a_new_round_for_the_whole_roster(self):
+    def test_a_content_push_does_not_repend_a_standing_approval(self):
+        """prd/40 (S1/S2b): a push stales needs_work/reviewed, not an approval.
+
+        The old machine re-pended the whole roster on every push, so RrRr — who
+        approved at t11 and whose approval still stood — was charged the rest of
+        the PR's life. Only ``approvals_lost`` re-pends an approval.
+        """
         store = Store()
         store.pr(1, "AaAa")
         store.review_request(1, "AaAa", "RrRr", 1)
         store.review_request(1, "AaAa", "SsSs", 1)
         store.event(1, "pr_approved", "RrRr", 11)                 # 10 h: both
         store.event(1, "pr_pushed", "AaAa", 20, push_class="content")  # 9 h: SsSs
-        store.event(1, "pr_approved", "SsSs", 40)                 # 20 h: both again
+        store.event(1, "pr_approved", "SsSs", 40)                 # 20 h: SsSs
         court = self.load(store)
         edges = self.edges(ballcourt.blocking_graph(court, level="person"))
-        # the push re-opened the round: RrRr owed a fresh approval, so it is
-        # charged 10 h before its first approval + 20 h after the push
-        self.assertEqual(edges[("AaAa", "RrRr")]["hours"], 30.0)
-        self.assertEqual(edges[("AaAa", "SsSs")]["hours"], 30.0)
+        # RrRr is charged only the wait before its approval: the push did not
+        # remove the approval, so the reviewer is not re-required.
+        self.assertEqual(edges[("AaAa", "RrRr")]["hours"], 10.0)
+        self.assertEqual(edges[("AaAa", "SsSs")]["hours"], 30.0)   # 10 + 20
         # between the two approvals the ball was only with SsSs, and RrRr is the
         # party that handed it over: the wait is RrRr -> SsSs
         self.assertEqual(edges[("RrRr", "SsSs")]["hours"], 9.0)

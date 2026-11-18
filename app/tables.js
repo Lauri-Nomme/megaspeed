@@ -23,6 +23,29 @@ export function tabRows(data, tab) {
   return rows;
 }
 
+/**
+ * prd/40: the one-line state of a PR, from the server's status vector.
+ *
+ * "needs rework by X · 2/3 reviewers pending · ready to merge since T" — the
+ * three facts the old single `ball` label could not state together. Each part
+ * is optional; a ready PR says so, and a doubly blocked one names both sides.
+ */
+export function reviewStateLine(row) {
+  if (!row) return '';
+  const parts = [];
+  if (row.author_open) {
+    parts.push(`needs rework by ${whoLabel(row.author)}`);
+  }
+  const pending = Number(row.reviewers_pending || 0);
+  const total = Number(row.reviewers_total || 0);
+  if (pending > 0) parts.push(`${pending}/${total} reviewers pending`);
+  else if (row.ball === 'ready' && total > 0) parts.push('all reviewers answered');
+  if (row.ball === 'ready' && row.ready_since) {
+    parts.push(`ready to merge since ${fmtAbsolute(Date.parse(row.ready_since))}`);
+  }
+  return parts.join(' · ');
+}
+
 export function tabCounts(data) {
   if (!data) return { blocked: 0, oldest: 0, all: 0 };
   return {
@@ -38,6 +61,7 @@ export function pill(kind, text, title = '') {
 
 /** The status column: what the item is waiting on, in words. */
 export function rowStateText(row) {
+  if (row.ball === 'ready') return 'ready to merge';
   if (row.blocked) return 'blocked';
   if (row.waiting_hours >= 7 * 24) return 'waiting 1w+';
   if (row.phase === 'review') return 'in review';
@@ -46,6 +70,7 @@ export function rowStateText(row) {
 }
 
 export function rowState(row) {
+  if (row.ball === 'ready') return pill('healthy', 'ready to merge', 'all reviewers answered; the merge click is the author\'s');
   if (row.blocked) return pill('blocked', 'blocked', blockedReason(row));
   if (row.waiting_hours >= 7 * 24) return pill('waiting', 'waiting 1w+', 'waiting more than a week');
   if (row.phase === 'review') return pill('neutral', 'in review');
@@ -107,8 +132,11 @@ export function matchesScope(row, scope) {
     return row.author === person || row.waiting_for === person || row.ball === person;
   }
   if (scope.kind === 'role') {
-    if (scope.value === 'author') return row.author === row.waiting_for;
-    if (scope.value === 'review') return row.phase === 'review' && row.author !== row.waiting_for;
+    // prd/40: `ball` is the label; a ready PR is the author's merge click but
+    // is nobody's review wait, so the two role scopes stay disjoint.
+    if (scope.value === 'author') return row.author === row.waiting_for || row.ball === 'ready';
+    if (scope.value === 'review') return row.ball === 'review';
+    if (scope.value === 'ready') return row.ball === 'ready';
     return true;
   }
   return true;

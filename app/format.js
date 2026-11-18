@@ -106,6 +106,7 @@ export function whoLabel(id) {
   if (id === 'review') return 'review queue';
   if (id === 'author') return 'author';
   if (id === 'CI') return 'CI';
+  if (id === 'ready') return 'ready to merge';
   if (id === 'calendar') return 'calendar';
   return id;
 }

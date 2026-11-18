@@ -897,5 +897,36 @@ class CombinedFixtureTests(unittest.TestCase):
         self.assertEqual(self.payload["hours_mode"], "business")
 
 
+# --------------------------------------------------------------------------- #
+# prd/40: the ticket view's review_rounds is the documented definition
+# --------------------------------------------------------------------------- #
+class ReviewRoundDefinitionTests(StoreCase):
+    def test_the_ticket_cycle_uses_the_same_round_definition_as_rules(self):
+        fx = Fixture()
+        fx.sprint(1, T0, end=T0 + timedelta(days=14))
+        fx.story("ENG-1", T0, state="done", closed=T0 + timedelta(hours=100))
+        fx.pr(1, "AaAa", T0, closed=T0 + timedelta(hours=100))
+        fx.pr_event(1, "pr_pushed", "AaAa", 1, push_class="content")   # setup
+        fx.pr_event(1, "comment_added", "RrRr", 5, severity="suggestion")
+        fx.pr_event(1, "pr_pushed", "AaAa", 10, push_class="content")
+        fx.pr_event(1, "pr_pushed", "AaAa", 20, push_class="pure_rebase")
+        fx.pr_event(1, "pr_unapproved", "RrRr", 30, cause="push")
+        fx.pr_event(1, "pr_unapproved", "RrRr", 40, cause="manual")
+        fx.pr_event(1, "pr_approved", "RrRr", 50)
+        fx.pr_event(1, "pr_merged", "RrRr", 100)
+        court, data, window, *_ = self.load(fx)
+        story = jira.story_for(data, "ENG-1")
+        self.assertIsNotNone(story)
+        cycle = jira._cycle(story)
+        # content push + manual unapproval = 2; the pure rebase lost nothing and
+        # the cause=push unapproval is the push's own round.
+        self.assertEqual(cycle.review_rounds, 2)
+        metric = rules.rework_loops(court, window)
+        self.assertEqual(metric["total_rounds"], cycle.review_rounds)
+        self.assertEqual(metric["excluded_pre_first_review"], 1)
+        self.assertEqual(metric["excluded_pure_rebase"], 1)
+        self.assertEqual(metric["excluded_push_unapprovals"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()

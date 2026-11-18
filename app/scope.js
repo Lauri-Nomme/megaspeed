@@ -14,7 +14,7 @@
  * Pure functions only, so they are unit-testable without a browser.
  */
 
-export const ROLE_QUEUES = ['author', 'review', 'sentinel', 'CI', 'calendar'];
+export const ROLE_QUEUES = ['author', 'review', 'ready', 'sentinel', 'CI', 'calendar'];
 
 /** Pages that narrow their rows/series when a scope is active. */
 const PERSON_PAGES = ['timeline', 'delivery', 'queue'];
