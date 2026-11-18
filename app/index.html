@@ -126,8 +126,14 @@
         <!-- prd/26 P6: the sprint lens — bands are on the canvas, this strip is
              the sprint view (scope + carry-over) and a click sets the window -->
         <div class="sprint-strip" id="sprint-strip" hidden></div>
-        <div class="stage" id="stage">
-          <canvas id="timeline" tabindex="0" role="application" aria-label="event timeline"></canvas>
+        <div class="stage timeline-stage" id="stage">
+          <!-- prd/33 §3: the canvas is a fixed-height window on the lane list;
+               this container scrolls a spacer of the list's full height and the
+               canvas stays pinned at its top. -->
+          <div class="timeline-scroll" id="timeline-scroll">
+            <canvas id="timeline" tabindex="0" role="application" aria-label="event timeline"></canvas>
+            <div class="lane-spacer" id="lane-spacer" aria-hidden="true"></div>
+          </div>
           <div class="tip" id="tip" hidden></div>
           <div class="empty" id="empty" hidden>
             <p>No events in this window.</p>
