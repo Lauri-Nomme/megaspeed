@@ -159,6 +159,12 @@ Each entry: **Definition** (what it is) · **Derivation** (how it's computed fro
 - **Definition**: a git commit object, `COMMIT:<sha>`, classified by `message_class` (feature/fix/…).
 - **Purpose**: the author's evidence of work (a PR interval is `active` when it contains commits).
 
+### Tenant
+- **Definition**: one pseudonymised store (`data/<name>.duckdb`) — a self-contained dataset scoped by
+  the scrape's ticket/epic/project filter. The UI's tenant switcher selects it; every API read is
+  tenant-scoped (`?tenant=`).
+- **Purpose**: the unit of isolation — one team/environment per tenant, so analyses never mix.
+
 ---
 
 ## 4. Workflow stages
@@ -213,6 +219,11 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
 - **Definition**: a ticket/PR whose cycle is cut off by the snapshot is *right-censored* (open PR,
   open story), and the view says so; a segment it can't measure is *missing* and named.
 - **Purpose**: never present an incomplete cycle as complete.
+
+### Snapshot / as-of
+- **Definition**: the store is a point-in-time capture; `as_of` is when it was taken. Any open item is
+  measured up to the snapshot, and the provenance line names the snapshot time.
+- **Purpose**: the honesty clock — a number is always "as of the snapshot", never "live".
 
 ### PR phase (the ball-court model)
 - **Definition**: at any moment a PR is in exactly one phase — `waiting` (ball not with the author),
