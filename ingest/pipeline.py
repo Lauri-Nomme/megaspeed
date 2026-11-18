@@ -254,6 +254,10 @@ class Reducer:
         self.sentinels = set(cfg.sentinel_slugs)
         self.bot_slugs = {str(s).strip().lower() for s in cfg.bot_slugs if str(s).strip()}
         self.actor_kinds: dict[str, str] = {}
+        #: prd/16: the labels for *this PR's* texts, classified in one bounded
+        #: batch by :meth:`_classify_batch` and keyed by content digest. Cleared
+        #: at the end of every ``reduce`` so no raw prose is retained.
+        self._labels: dict[tuple[str, bytes], tuple[dict, str]] = {}
 
     # -- helpers ---------------------------------------------------------
     def _actor_kind(self, user: dict | None) -> str:
@@ -357,6 +361,14 @@ class Reducer:
         for key in keys:
             stats.objects.append(_object("TICKET", f"TICKET:{key}", ticket_keys=[key]))
 
+        # prd/16 + the review: classify this PR's texts in **one bounded batch**
+        # before the loop that consumes them. A serial client was the measured
+        # bottleneck (one in-flight request, 4.4 h per 8k comments at 2 s); the
+        # batch returns the same labels in the same order, so nothing below
+        # changes -- it just no longer waits for one comment at a time.
+        ordered = sorted(activities, key=lambda a: (a.get("createdDate") or 0, a.get("id") or 0))
+        self._labels = self._classify_batch(pr, ordered)
+
         # prd/16: the PR description is read *here*, classified, and dropped.
         # A description that raises a question is the cheapest place to catch
         # one (it costs a refinement round, not a review round).
@@ -385,7 +397,6 @@ class Reducer:
         pushed_since = False
         rounds = 0
         threads: dict[str, dict] = {}
-        ordered = sorted(activities, key=lambda a: (a.get("createdDate") or 0, a.get("id") or 0))
         for index, activity in enumerate(ordered):
             action = str(activity.get("action") or "")
             stats.activities_by_action[action] = stats.activities_by_action.get(action, 0) + 1
@@ -612,8 +623,63 @@ class Reducer:
                 pr, thread_id, entry, resolver_actor, resolver_is_commenter,
                 pr_object_id, ticket_objects, stats,
             )
+        # The batch held raw prose as its keys only long enough to label this
+        # PR: drop it now (prd/02 -- nothing raw is retained past its use).
+        self._labels = {}
 
     # -- prd/16 text classification --------------------------------------
+    def _classify_batch(self, pr: PullRequest, ordered: list[dict]) -> dict:
+        """Classify this PR's description + comment bodies in one bounded batch.
+
+        The texts are exactly the ones :meth:`_comment_labels` /
+        :meth:`_description_questions` are about to ask for (same gating: a bot
+        notice and an edited body are never sent, and an empty body is decided
+        deterministically), so the batch changes *when* the model is asked, never
+        *what* it is asked or which label ends up on an event. The answers are
+        keyed by content digest (:func:`ingest.classify.digest`), so no raw prose
+        outlives the call.
+
+        A backend without a pool -- the deterministic mock -- runs
+        :meth:`ingest.classify.Classifier.classify_many` inline and
+        synchronously, so fixture scrapes are byte-for-byte unchanged.
+        """
+        classifier = self.classifier
+        if classifier is None:
+            return {}
+        items: list[tuple[str, str]] = []
+        description = str(pr.pr.get("description") or "").strip()
+        if description:
+            items.append((description, classify.KIND_DESCRIPTION))
+        for activity in ordered:
+            if str(activity.get("action") or "") != "COMMENTED":
+                continue
+            if activity.get("commentAction") not in (None, "ADDED"):
+                continue  # a deleted comment, or an edit we never label
+            comment = activity.get("comment") or {}
+            if comment.get("id") is None:
+                continue
+            # Bot-vs-human is deterministic (prd/02) and decided *before* the
+            # model is asked. ``_actor_kind`` reads the user record only, so the
+            # batch does not assign a pseudonym ahead of the walk.
+            if self._actor_kind(activity.get("user") or {}) == "bot":
+                continue
+            body = str(comment.get("text") or "").strip()
+            if body:
+                items.append((body, classify.KIND_COMMENT))
+        if not items:
+            return {}
+        # A text repeated inside one PR costs one request, not two.
+        unique = list(dict.fromkeys(items))
+        answers = classifier.classify_many(unique)
+        return {
+            (kind, classify.digest(text)): answer
+            for (text, kind), answer in zip(unique, answers)
+        }
+
+    def _batched(self, text: str, kind: str) -> tuple[dict, str] | None:
+        """The batch's answer for ``text``, or ``None`` when it was not batched."""
+        return self._labels.get((kind, classify.digest(text)))
+
     def _comment_labels(
         self, actor: str, text: Any, severity: str, stats: Stats
     ) -> tuple[dict | None, str | None]:
@@ -646,8 +712,12 @@ class Reducer:
                 "answered": False,
                 "phase": classify.PHASES_BY_KIND[classify.KIND_COMMENT][0],
             }, self.classifier.version
-        labels = self.classifier.classify(body, classify.KIND_COMMENT)
-        version = getattr(self.classifier, "last_version", "") or self.classifier.version
+        answer = self._batched(body, classify.KIND_COMMENT)
+        if answer is None:
+            labels = self.classifier.classify(body, classify.KIND_COMMENT)
+            version = getattr(self.classifier, "last_version", "") or self.classifier.version
+        else:
+            labels, version = answer
         if severity == "mandatory" and labels["comment_type"] != "blocker":
             # DC's own BLOCKER marker is deterministic evidence (prd/02:
             # "comment severity -- or Bitbucket task-type where available") and
@@ -686,7 +756,11 @@ class Reducer:
         body = str(pr.pr.get("description") or "").strip()
         if not body:
             return
-        labels = self.classifier.classify(body, classify.KIND_DESCRIPTION)
+        answer = self._batched(body, classify.KIND_DESCRIPTION)
+        if answer is None:
+            labels = self.classifier.classify(body, classify.KIND_DESCRIPTION)
+        else:
+            labels = answer[0]
         if not labels["question"]:
             return
         stats.questions_raised += 1

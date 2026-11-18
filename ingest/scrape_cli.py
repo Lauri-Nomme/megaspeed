@@ -424,8 +424,8 @@ def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
     ap.add_argument("--overlap-hours", type=int, default=DEFAULT_OVERLAP_HOURS, metavar="N",
                     help=f"re-emit this far before the watermark (default {DEFAULT_OVERLAP_HOURS})")
     ap.add_argument("--checkpoint-every", type=int, default=DEFAULT_CHECKPOINT_EVERY, metavar="N",
-                    help="checkpoint the bundle + cursors every N kept PRs, and at every repo"
-                         f" boundary (default {DEFAULT_CHECKPOINT_EVERY}; 0 disables)")
+                    help="checkpoint the new rows + cursors every N kept PRs, and at every"
+                         f" repo boundary (default {DEFAULT_CHECKPOINT_EVERY}; 0 disables)")
     ap.add_argument("--allow-partial", "--force", dest="allow_partial", action="store_true",
                     help="write the bundle even when the run looks implausibly partial"
                          " (few PRs vs the previous run); without it a suspicious run exits 3")
@@ -446,6 +446,10 @@ def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
                          f"{classify.DEFAULT_URL})")
     ap.add_argument("--llm-model", default=None, metavar="MODEL",
                     help=f"local Ollama model (default MEGASPEED_LLM_MODEL, {classify.DEFAULT_MODEL})")
+    ap.add_argument("--llm-workers", type=int, default=None, metavar="N",
+                    help="in-flight classification requests per PR (default"
+                         f" MEGASPEED_LLM_WORKERS, {classify.DEFAULT_WORKERS});"
+                         " 1 restores the strictly serial client")
     ap.add_argument("--progress-interval", type=float, default=None, metavar="SECONDS",
                     help="progress line on stderr every N seconds; 0 disables"
                          f" (default {DEFAULT_PROGRESS_INTERVAL:g})")
@@ -525,6 +529,8 @@ def main(argv: list[str] | None = None) -> int:
         cfg.llm_url = args.llm_url
     if args.llm_model:
         cfg.llm_model = args.llm_model
+    if args.llm_workers is not None:
+        cfg.llm_workers = max(1, int(args.llm_workers))
 
     # prd/31: the hans scrape names its own project/repo, and needs no
     # credentials and no server -- the transport reads the capture on disk.
