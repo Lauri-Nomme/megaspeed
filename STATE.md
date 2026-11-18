@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **786** (`tests/`) + **75** (`scrape/tests`) + **120** (node `app/test`) green.
+Tests: **826** (`tests/`) + **96** (`scrape/tests`) + **136** (node `app/test`) green.
 
 ## Scrape (airgapped) — full value, reliable
 
@@ -52,13 +52,25 @@ Tests: **786** (`tests/`) + **75** (`scrape/tests`) + **120** (node `app/test`) 
 - **Versioning (prd/32)**: `v0.9.0` tagged on main; `/api/meta` + the meta strip show `v0.9.0 · <sha>`
   (git describe → `VERSION` file → hardcoded fallback, `scraper-*` tags excluded).
 
+## Performance (prd/33, from the adversarial review)
+
+- **queue_series** difference-array (82.7 s → 419 ms @1 h buckets, byte-identical) · **business_hours/`_cycle`
+  memoization** (1.94× on `/api/insights`) · **gzip middleware** (22.4 MB → 1.14 MB) · **`/api/ticket` cache**
+  (warm 0.33 s → 15 ms) · **relations JOIN** (2.79 s → 1.34 s).
+- **Scrape**: incremental checkpoints (4,000 PRs 44.6 s → 5.7 s) · git-cache memoization (26 → 11 git
+  runs/PR, warm 0 fetches) · bounded LLM concurrency (`--llm-workers`, 3.5×).
+- **Timeline canvas virtualisation**: canvas is a window on the lane list (bounded height, only visible
+  rows drawn) — 5,240 PRs render in ~4 ms instead of blanking past the 65,535 px limit; desktop + phone.
+
 ## Deferred / not urgent
 
 1. **Tempo install** in jira-lab (code path done; real install blocked on the org's Tempo licence —
    the Marketplace JAR download is empty without one).
 2. **Production creds**: `MEGASPEED_BB_*` / `MEGASPEED_JIRA_*` / `MEGASPEED_JIRA_CLOUD_*` (DC labs only now).
 3. **Light theme** / theme toggle / refresh cadence / rebuild-read-time provenance (prd/26 deferred).
-4. **Papercuts** (`docs/papercuts.md`): P-1 titlebar tenant+view, P-2 shareable deep-link URL — in flight.
+4. **Perf long-tail** (deliberately deferred): classification content-hash run-level memo, per-list-page
+   fetch batching, `/api/ticket` cold-path `load_jira` tenant cache, `/api/queues` bucket cap for huge
+   windows — see `docs/review-performance.md`.
 
 ## Important
 
