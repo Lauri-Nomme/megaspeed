@@ -131,6 +131,30 @@ story_points_field = ""
 # Production: cloud_base_url = "https://acme.atlassian.net" + a real PAT.
 cloud_base_url = ""    # e.g. https://acme.atlassian.net (or the local proxy)
 
+# prd/29: the installation's *actual* workflows, projected onto the closed stage
+# set. Jira's three status categories fold review and QA into "in progress"; the
+# map below keeps them apart so the review wait and the QA segment are measured.
+#
+#   Story: OPEN -> READY FOR REFINEMENT -> REFINED -> IN PROGRESS -> IN REVIEW
+#          -> IN VERIFICATION -> CLOSED
+#   Bug:   NEW -> TRIAGED -> IN PROGRESS -> IN REVIEW -> IN VERIFICATION -> RESOLVED
+#
+# Env wins per status name (a one-off run can widen the map without editing
+# this file):
+#   MEGASPEED_JIRA_STAGES="in review=in_review,in verification=in_verification"
+# An unknown stage is an operator error, never a silent "other".
+[jira.stages]
+open = "backlog"
+"ready for refinement" = "backlog"
+new = "backlog"
+refined = "ready"
+triaged = "ready"
+"in progress" = "in_progress"
+"in review" = "in_review"
+"in verification" = "in_verification"
+closed = "done"
+resolved = "done"
+
 [classify]
 # Scrape-side text classification (prd/16): comment bodies + PR descriptions are
 # read locally, projected onto the closed vocabulary (comment_type,

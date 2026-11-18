@@ -183,6 +183,37 @@ MEGASPEED_TICKET_PROJECTS=DEL \
   .venv/bin/python -m ingest import /tmp/jira.tgz --db data/del-combined.duckdb
 ```
 
+## Rebuilding the combined store on the real workflow
+
+`jira-lab` runs Atlassian's default workflow (To Do / In Progress / Done), so a
+live scrape of it cannot carry `in_review` / `in_verification`: both statuses are
+category *indeterminate* and fold into `in progress`. Installing the
+installation's seven-status Story / six-status Bug workflow into Jira DC 9.17 is
+fragile (no public REST, a finicky XML import, a healthy lab at risk), so
+`rebuild_combined.py` takes the deterministic path:
+
+1. read each ticket's first PR open / last merge from the **Bitbucket** store
+   (`data/del3.duckdb`, the unchanged 131-PR corpus);
+2. generate the DEL Jira bundle on the real Story (`OPEN → READY FOR
+   REFINEMENT → REFINED → IN PROGRESS → IN REVIEW → IN VERIFICATION → CLOSED`)
+   and Bug (`NEW → TRIAGED → … → RESOLVED`) workflows, with the rework / reopen
+   back-transitions, backdated onto those PRs (`ingest/jira_fixtures.py`,
+   `python3 -m ingest.jira_fixtures --del --timeline-store …`);
+3. scrape that bundle through the real fixture transport with `[jira.stages]`
+   configured, so the stage labels ride the bundle and its manifest;
+4. import it into a **copy** of the Bitbucket store under `data/identity.json`
+   (one pseudonym per human across both sources), verify the contract and the
+   QA segment, and only then replace `data/del-combined.duckdb`.
+
+```bash
+python3 jira-lab/rebuild_combined.py              # build + verify + replace
+python3 jira-lab/rebuild_combined.py --check-only # re-read the stages/QA segment
+```
+
+The result carries `ready=105`, `in_review=130`, `in_verification=96`,
+`done=92` status transitions, and the Jira layer measures the QA segment
+(`verification → done`) separately from `merge → verification`.
+
 ## REST verification
 
 `verify.py` runs 27 checks; the interesting endpoints are:
