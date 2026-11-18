@@ -341,6 +341,9 @@ def collect(
         min_interval=(
             0.0 if source.startswith(("fixture", "jira-fixture")) else cfg.jira_min_interval
         ),
+        # prd/30: a caller that builds the client from config (the dev shortcut
+        # in ``ingest.live``) still reads Tempo when it is configured.
+        tempo=cfg.jira_tempo,
     )
     # -- scope: ticket keys > epics > projects (prd/18, prd/27) -----------
     # The most specific scope wins. An epic set is resolved here, once, to the
@@ -681,11 +684,18 @@ def _unchanged(
 
 
 def _complete_worklogs(client: JiraClient, issue: dict) -> None:
-    """Replace the inline (capped) worklog page with the complete list if needed."""
+    """Replace the inline (capped) worklog page with the complete list if needed.
+
+    With ``tempo`` the add-on is the source of truth, so its worklog endpoint is
+    read for every issue -- not only when Jira's inline page happens to be
+    truncated (prd/30).
+    """
     block = (issue.get("fields") or {}).get("worklog") or {}
     inline = list(block.get("worklogs") or [])
     total = block.get("total")
-    if total is None or len(inline) >= int(total):
+    if not getattr(client, "tempo", False) and (
+        total is None or len(inline) >= int(total)
+    ):
         return
     complete = client.worklogs(str(issue.get("key")))
     issue["fields"]["worklog"] = {

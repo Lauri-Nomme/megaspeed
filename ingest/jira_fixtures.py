@@ -21,10 +21,13 @@ from __future__ import annotations
 
 import json
 import random
+import re
 from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 
 from .fixtures import PEOPLE
+from .jira import TEMPO
+from .transport import BitbucketError, FixtureJiraTransport
 
 PROJECT = "PROJ"
 EPIC_KEY = "PROJ-1"
@@ -1235,6 +1238,68 @@ def write_bundle(path: Path, n: int | None = None, seed: int = SEED) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(generate(n=n, seed=seed), indent=1) + "\n")
     return path
+
+
+# --------------------------------------------------------------------------- #
+# Tempo (prd/30)
+# --------------------------------------------------------------------------- #
+#: Tempo Server/DC's worklog route. The lab cannot install Tempo (the Marketplace
+#: artifact is empty and the add-on needs the org's licence), so fixture mode
+#: serves Tempo's *shape* over the same worklog records.
+_TEMPO_WORKLOGS = re.compile(r"^" + TEMPO + r"/worklogs/(?P<key>[^/]+)$")
+
+
+def _tempo_id(value):
+    """Tempo ids are integers; the native fixture carries them as strings."""
+    text = "" if value is None else str(value)
+    return int(text) if text.isdigit() else value
+
+
+def tempo_worklog_rows(worklogs: list[dict], key: str) -> list[dict]:
+    """Native DC worklogs -> the Tempo Server/DC worklog payload (prd/30).
+
+    Tempo renames the fields the reducer reads: ``id`` -> ``worklogId`` and
+    ``created``/``updated`` -> ``dateCreated``/``dateUpdated``. It also carries
+    the raw ``comment``, which the ingest must never store (prd/02).
+    """
+    rows: list[dict] = []
+    for worklog in worklogs:
+        rows.append(
+            {
+                "self": f"http://jira.example.invalid{TEMPO}/worklogs/{worklog.get('id')}",
+                "worklogId": _tempo_id(worklog.get("id")),
+                "issueId": _tempo_id(worklog.get("issueId")),
+                "issue": {"key": key, "id": _tempo_id(worklog.get("issueId"))},
+                "author": dict(worklog.get("author") or {}),
+                "started": worklog.get("started"),
+                "dateCreated": worklog.get("created"),
+                "dateUpdated": worklog.get("updated"),
+                "timeSpentSeconds": worklog.get("timeSpentSeconds"),
+                "startedDate": str(worklog.get("started") or "")[:10],
+                "comment": worklog.get("comment"),
+            }
+        )
+    return rows
+
+
+class TempoFixtureTransport(FixtureJiraTransport):
+    """The fixture transport plus Tempo Server/DC's worklog route (prd/30).
+
+    Everything else is inherited unchanged: ``--jira --fixture --tempo`` reads
+    the same issues and serves their worklogs through Tempo's shape, so the
+    reduced events can be compared against the native path record by record.
+    """
+
+    def get(self, path: str, params: dict | None = None) -> dict:
+        match = _TEMPO_WORKLOGS.match(path)
+        if match:
+            key = match["key"]
+            issue = self._issues.get(key)
+            if issue is None:
+                raise BitbucketError(f"fixture has no issue {key}")
+            block = (issue.get("fields") or {}).get("worklog") or {}
+            return tempo_worklog_rows(list(block.get("worklogs") or []), key)
+        return super().get(path, params)
 
 
 if __name__ == "__main__":  # python3 -m ingest.jira_fixtures [--n 12] [--out PATH]

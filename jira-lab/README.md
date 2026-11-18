@@ -285,7 +285,12 @@ any add-on):
 license) is committed so a future attempt has the licensing piece ready:
 `PUT /rest/plugins/1.0/<pluginKey>-key/license` with that key. If Tempo is ever
 installed, its worklogs are the same records (`/rest/tempo-timesheets/4/worklogs`
-reads the native worklog store), so the ingest contract does not change.
+reads the native worklog store), so the ingest contract does not change. The DC
+client reads that route with `--tempo` / `MEGASPEED_JIRA_TEMPO=1` / the
+`[jira]` table's `tempo = true` (prd/30), normalising `worklogId` -> `id` into
+the native worklog shape. Until the licence exists,
+`ingest.jira_fixtures.TempoFixtureTransport` serves Tempo's DC shape over the
+fixture, so `--jira --fixture --tempo` exercises the same path.
 
 ## Notes / known quirks
 

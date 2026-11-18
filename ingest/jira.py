@@ -7,6 +7,7 @@ Written against the real DC 9.17 paths listed in ``prd/04-exports.md``:
     /rest/api/2/search?jql=...                          # issue list (paged)
     /rest/api/2/issue/{key}?expand=changelog            # fields + history
     /rest/api/2/issue/{key}/worklog                     # native worklogs
+    /rest/tempo-timesheets/4/worklogs/{key}             # Tempo worklogs (add-on)
     /rest/agile/1.0/board?projectKeyOrId=PROJ           # scrum board
     /rest/agile/1.0/board/{id}/sprint                   # sprint list
     /rest/agile/1.0/sprint/{id}/issue                   # sprint membership
@@ -39,6 +40,9 @@ from typing import Iterator
 
 API2 = "/rest/api/2"
 AGILE = "/rest/agile/1.0"
+#: Tempo Server/DC's worklog API (an add-on; the lab cannot install Tempo, so
+#: fixture mode serves its shape instead -- prd/30).
+TEMPO = "/rest/tempo-timesheets/4"
 #: Issue list page size. The list is cheap per row (key + updated), so ask for
 #: the largest page DC allows.
 LIST_PAGE_LIMIT = 100
@@ -114,6 +118,30 @@ def user_of(record: dict | None) -> dict:
     }
 
 
+def tempo_worklog(row: dict) -> dict:
+    """One Tempo Server/DC worklog row -> the native Jira worklog shape.
+
+    Tempo keys the record ``worklogId`` (Jira's native shape keys it ``id``) and
+    stamps it ``dateCreated``/``dateUpdated``; the reducer reads ``id`` and
+    ``created``, so the two are reconciled here rather than in the pipeline.
+    This mirrors the Cloud adapter's ``worklogId`` -> ``id`` rename, so a store
+    built from either Tempo flavour has the same event shape as one built from
+    native worklogs.
+
+    ``comment`` is raw human text and the ingest never reads it (prd/02), so it
+    is dropped instead of carried forward: a raw-text path that does not need to
+    exist must not exist.
+    """
+    worklog = {key: value for key, value in row.items() if key != "comment"}
+    if not worklog.get("id") and worklog.get("worklogId") is not None:
+        worklog["id"] = str(worklog["worklogId"])
+    if not worklog.get("created") and worklog.get("dateCreated"):
+        worklog["created"] = worklog["dateCreated"]
+    if not worklog.get("updated") and worklog.get("dateUpdated"):
+        worklog["updated"] = worklog["dateUpdated"]
+    return worklog
+
+
 @dataclass
 class JiraClient:
     transport: object
@@ -123,6 +151,9 @@ class JiraClient:
     requests: int = 0
     requests_by_kind: Counter = field(default_factory=Counter)
     _last_request: float = 0.0
+    #: Read worklogs through the Tempo Server/DC add-on instead of Jira's native
+    #: ``/issue/{key}/worklog`` (prd/30). The reduced events are identical.
+    tempo: bool = False
 
     # -- low level -------------------------------------------------------
     def _get(self, path: str, params: dict | None = None, kind: str | None = None) -> dict:
@@ -243,8 +274,21 @@ class JiraClient:
         return self._get(path, params, kind="issue")
 
     def worklogs(self, key: str) -> list[dict]:
+        if self.tempo:
+            return self.tempo_worklogs(key)
         path = f"{API2}/issue/{key}/worklog"
         return list(self._pages(path, kind="worklog"))
+
+    def tempo_worklogs(self, key: str) -> list[dict]:
+        """Tempo Server/DC worklogs for one issue, in the native worklog shape.
+
+        Tempo returns a bare JSON list (some builds wrap it in ``worklogs``);
+        each row is normalised by :func:`tempo_worklog` so the reducer reads it
+        exactly like a native worklog.
+        """
+        payload = self._get(f"{TEMPO}/worklogs/{key}", kind="worklog")
+        rows = payload.get("worklogs") if isinstance(payload, dict) else payload
+        return [tempo_worklog(row) for row in (rows or []) if isinstance(row, dict)]
 
     def inline_worklogs(self, issue: dict) -> list[dict]:
         """Worklogs already inside an issue's ``fields`` (search projection)."""
@@ -256,8 +300,11 @@ class JiraClient:
 
         ``fields=worklog`` returns at most one page (20) of logs. Only when that
         page is truncated does the scrape pay for the worklog endpoint -- the
-        common case is a single request per issue either way.
+        common case is a single request per issue either way. With ``tempo`` the
+        add-on is the source of truth, so its endpoint is always read.
         """
+        if self.tempo:
+            return self.worklogs(str(issue.get("key")))
         inline = self.inline_worklogs(issue)
         block = (issue.get("fields") or {}).get("worklog") or {}
         total = block.get("total")
@@ -281,8 +328,10 @@ __all__ = [
     "JiraClient",
     "JiraError",
     "LIST_PAGE_LIMIT",
+    "TEMPO",
     "request_kind",
     "sprint_id",
     "sprint_state",
+    "tempo_worklog",
     "user_of",
 ]

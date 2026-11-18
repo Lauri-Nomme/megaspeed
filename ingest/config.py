@@ -61,6 +61,13 @@ DEFAULT_JIRA_EPICS: tuple[str, ...] = ()
 #   MEGASPEED_JIRA_STAGES="in review=in_review,in verification=in_verification"
 DEFAULT_JIRA_STATUS_MAP: dict[str, str] = {}
 
+# prd/30: read worklogs through the Tempo add-on (the org's time tracker) rather
+# than Jira's native worklog endpoint. Works for DC and Cloud; the reduced
+# ``worklogged`` events are identical either way.
+#   [jira]
+#   tempo = true
+#   MEGASPEED_JIRA_TEMPO=1
+
 # Known non-human accounts (prd/02 "Bot vs human": deterministic, known account
 # set). DC's user type SERVICE is always a bot; these slugs catch CI/build
 # accounts that DC reports as NORMAL users.
@@ -160,6 +167,10 @@ class Config:
     jira_cloud_base_url: str = ""
     #: Cloud Personal Access Token -- Bearer auth, never Basic.
     jira_cloud_token: str = ""
+    #: Read worklogs through the Tempo add-on instead of Jira's native worklog
+    #: endpoint (prd/30). Applies to both DC and Cloud; the reduced events are
+    #: the same either way.
+    jira_tempo: bool = False
 
     @property
     def live(self) -> bool:
@@ -346,8 +357,12 @@ _FALSE = frozenset({"0", "false", "no", "off"})
 
 
 def _env_flag(value, default: bool = True) -> bool:
-    """TOML bool / env string -> bool (``MEGASPEED_PREFILTER=0`` turns it off)."""
-    if value is None:
+    """TOML bool / env string -> bool (``MEGASPEED_PREFILTER=0`` turns it off).
+
+    An unset *or empty* variable means "not overridden": a shell that exports
+    ``MEGASPEED_JIRA_TEMPO=`` must not silently turn the flag on.
+    """
+    if value is None or (isinstance(value, str) and not value.strip()):
         return default
     if isinstance(value, bool):
         return value
@@ -486,6 +501,9 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
             "MEGASPEED_JIRA_CLOUD_BASE_URL", jira.get("cloud_base_url", "")
         ).rstrip("/"),
         jira_cloud_token=os.environ.get("MEGASPEED_JIRA_CLOUD_TOKEN", ""),
+        jira_tempo=_env_flag(
+            os.environ.get("MEGASPEED_JIRA_TEMPO"), jira.get("tempo", False)
+        ),
     )
     if config.base_url and not config.has_credentials:
         raise SystemExit(
