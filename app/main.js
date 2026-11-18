@@ -39,6 +39,7 @@ import {
 import {
   bindLongPress, hintText, initMobile, isPhone, phoneEntryLanes, phoneEntryPage,
 } from '/mobile.js';
+import { pageTitle, parseRoute, serializeRoute, ticketFromHash } from '/route.js';
 
 const $ = (id) => document.getElementById(id);
 const LS_KEY = 'megaspeed.ui.v1';
@@ -377,6 +378,47 @@ function flashStatus(text, cls = 'live', ms = 2500) {
   }, ms);
 }
 
+// -------------------------------------------------------------------- route
+/* P-2 (docs/papercuts.md): the address bar is the view state. One helper builds
+ * the href and one writes it, so every navigation path — tenant switch, view
+ * change, ticket, scope, timeframe — updates the same string. `#ticket/KEY`
+ * stays the ticket route; the query carries what used to be session-local. */
+function routeHref() {
+  return serializeRoute({
+    tenant: state.tenant,
+    // A ticket page without its key is a transient boot state, not a place to
+    // link: omit the view rather than encode an empty ticket page.
+    view: state.page === 'ticket' && !state.ticketKey ? null : state.page,
+    ticket: state.page === 'ticket' ? state.ticketKey : null,
+    timeframe: state.timeframe,
+    scope: state.scope,
+  });
+}
+
+/* replaceState, not a reload and not a new entry: the bar follows the view the
+ * user is already looking at. Only opening a ticket pushes, so the back button
+ * still returns from a ticket to the page it was opened from. */
+function syncUrl({ push = false } = {}) {
+  if (typeof history === 'undefined' || typeof location === 'undefined') return;
+  const href = `${location.pathname}${routeHref()}`;
+  const current = `${location.pathname}${location.search}${location.hash}`;
+  if (href === current) return;
+  if (push) history.pushState(null, '', href);
+  else history.replaceState(null, '', href);
+}
+
+/* P-1: the tab title names the tenant and the view, never the static title. */
+function syncTitle() {
+  if (typeof document === 'undefined') return;
+  const page = PAGES[state.page];
+  document.title = pageTitle({
+    tenant: state.tenant,
+    view: state.page,
+    ticket: state.page === 'ticket' ? state.ticketKey : null,
+    title: page ? page.title : null,
+  });
+}
+
 // -------------------------------------------------------------------- views
 /** The one honesty line (B7): each view states its own cohort, or clears it. */
 function setHonesty(text) {
@@ -420,6 +462,11 @@ function renderPage() {
     ? state.ticketKey
     : PAGES[page].title;
   $('page-question').textContent = PAGES[page].question;
+  // P-1/P-2: the tab and the address bar follow every render, so no navigation
+  // path (tenant switch, scope, timeframe, drawer) can leave either one
+  // describing the previous view.
+  syncTitle();
+  syncUrl();
   syncLevelSelects();
   renderScopeBanner();
   setHonesty('');
@@ -441,11 +488,9 @@ async function showPage(page) {
   // prd/28: a phone bottom sheet belongs to the page that opened it; navigating
   // through the drawer must not leave the old PR floating over the new view.
   if (isPhone() && page !== state.page) closeDrawer();
-  if (page !== 'ticket' && typeof location !== 'undefined' && location.hash.startsWith('#ticket/')) {
-    // Leaving the ticket route: drop the hash so a reload lands on the page
-    // the user is actually looking at.
-    history.replaceState(null, '', `${location.pathname}${location.search}`);
-  }
+  // Leaving the ticket route needs no special case: renderPage() re-serialises
+  // the URL from `state.page`, so the ticket hash (and `view=ticket`) drop off
+  // together with the page (P-2).
   state.page = page;
   renderPage();
   try {
@@ -581,6 +626,8 @@ function renderTenantSwitcher() {
   $('tenant-meta').textContent = tenantSummary(tenant);
   $('tenant-button').classList.toggle('empty', !tenant);
   $('tenant-button').title = tenantTitle(tenant);
+  // P-1: the tab names the dataset as soon as the switcher does.
+  syncTitle();
   if (!$('tenant-menu').hidden) renderTenantMenu();
 }
 
@@ -904,11 +951,6 @@ function appBase() {
   return `${location.origin}${location.pathname}`;
 }
 
-function ticketFromHash() {
-  const match = /^#ticket\/(.+)$/.exec((typeof location !== 'undefined' && location.hash) || '');
-  return match ? decodeURIComponent(match[1]) : null;
-}
-
 function renderTicketPage() {
   const body = $('ticket-body');
   if (state.ticketError) {
@@ -942,7 +984,7 @@ function renderTicketPage() {
   }
 }
 
-async function openTicket(key) {
+async function openTicket(key, { push = true } = {}) {
   const wanted = ticketKey(key);
   if (!wanted) return;
   if (state.page !== 'ticket') state.ticketFrom = state.page;
@@ -951,11 +993,10 @@ async function openTicket(key) {
   state.ticketError = null;
   state.page = 'ticket';
   // pushState (not location.hash) so opening a ticket does not fire the
-  // hashchange listener and fetch the same page twice.
-  const hash = `#ticket/${encodeURIComponent(wanted)}`;
-  if (typeof history !== 'undefined' && location.hash !== hash) {
-    history.pushState(null, '', hash);
-  }
+  // hashchange listener and fetch the same page twice. The URL is the whole
+  // route — tenant + view in the query, the key in the hash (P-2) — and a
+  // back/forward restore passes `push: false` so history is not rewritten.
+  syncUrl({ push });
   renderPage();
   try {
     await ensureData('ticket');
@@ -967,6 +1008,36 @@ async function openTicket(key) {
       : `Could not load ticket ${wanted}: ${err.message}`;
   }
   if (state.page === 'ticket' && state.ticketKey === wanted) renderPage();
+}
+
+/* P-2: back/forward, and a `#ticket/KEY` typed or pasted into the bar, land
+ * here. Only state that actually differs is moved, so a popstate followed by
+ * its own hashchange is a no-op the second time and history is never pushed
+ * from inside a restore. */
+async function applyRoute() {
+  if (typeof location === 'undefined') return;
+  const route = parseRoute(location.search, location.hash);
+  if (route.tenant && route.tenant !== state.tenant) {
+    await setTenant(route.tenant, { silent: true });
+  }
+  if (route.scope
+    && (route.scope.kind !== state.scope.kind || route.scope.value !== state.scope.value)) {
+    setScope(route.scope.kind, route.scope.value, { silent: true });
+  }
+  if (route.timeframe && TIMEFRAMES[route.timeframe] && route.timeframe !== state.timeframe) {
+    setTimeframe(route.timeframe);
+  }
+  if (route.ticket) {
+    if (state.page !== 'ticket' || state.ticketKey !== route.ticket) {
+      await openTicket(route.ticket, { push: false });
+    }
+    return;
+  }
+  if (state.page === 'ticket') {
+    await showPage(route.view || state.ticketFrom || 'timeline');
+    return;
+  }
+  if (route.view && route.view !== state.page) await showPage(route.view);
 }
 
 // ----------------------------------------------------------------- blocking
@@ -1702,6 +1773,10 @@ async function load({ force = false } = {}) {
   if (seq !== loadSeq) return;
   if (!state.tenant) {
     resetTenantData();
+    // P-2: with no dataset there is no tenant to name — the bar must not keep
+    // a stale one from the URL or the stored preference.
+    syncTitle();
+    syncUrl();
     $('provenance').textContent = 'No datasets — import one into data/<tenant>.duckdb, then reload.';
     setEmpty('No datasets yet.');
     setStatus('no data', 'stale');
@@ -2096,6 +2171,10 @@ window.__megaspeed = {
   loadFullRange,
   // prd/25: the harness opens a ticket page the way a link does.
   openTicket,
+  // P-2: the shareable URL and the route restore, exposed so the harness can
+  // check a deep link without reloading the page.
+  get url() { return routeHref(); },
+  applyRoute,
   get ticket() { return state.ticket; },
   // Test hook: lower the event cap so the capped path (and its "load the full
   // range" affordance) can be exercised on a small fixture.
@@ -2432,11 +2511,29 @@ function restoreUI() {
 
 // -------------------------------------------------------------------- boot
 restoreUI();
+/* P-2: a pasted URL wins over the stored preference — that is what a deep link
+ * is for. Tenant, view, ticket, timeframe and scope are applied before the
+ * first paint, so boot never flashes a different view first. */
+const initialRoute = parseRoute(
+  typeof location !== 'undefined' ? location.search : '',
+  typeof location !== 'undefined' ? location.hash : '',
+);
+if (initialRoute.tenant) state.tenant = initialRoute.tenant;
+if (initialRoute.timeframe && TIMEFRAMES[initialRoute.timeframe]) {
+  state.timeframe = initialRoute.timeframe;
+}
+if (initialRoute.scope) state.scope = initialRoute.scope;
+if (initialRoute.view && PAGES[initialRoute.view]) state.page = initialRoute.view;
+if (initialRoute.ticket) {
+  state.page = 'ticket';
+  state.ticketKey = initialRoute.ticket;
+}
 // prd/28 §3: phone is list-first. A first visit lands on the Delivery list;
-// a stored choice (the user opened Timeline last time) is respected. The first
-// phone timeline opens on stories, so its Jira keys are on screen immediately
-// instead of below the actor lanes.
-if (isPhone() && !uiRestored) {
+// a stored choice (the user opened Timeline last time) is respected. An
+// explicit view in the URL is a deliberate destination and always wins.
+// The first phone timeline opens on stories, so its Jira keys are on screen
+// immediately instead of below the actor lanes.
+if (isPhone() && !uiRestored && !initialRoute.view) {
   state.page = phoneEntryPage(null);
   const lanes = phoneEntryLanes(null);
   $('lanes').value = lanes;
@@ -2455,21 +2552,11 @@ bindLongPress((target, x, y) => {
   const found = entityForTarget(target, { x, y });
   if (found) openMenu(x, y, found.entity, found.label);
 });
-// prd/25: a direct link (`/#ticket/DEL-167`) opens the ticket page after the
-// dataset has loaded, exactly as a click does.
-const initialTicket = ticketFromHash();
-if (initialTicket) {
-  state.page = 'ticket';
-  state.ticketKey = initialTicket;
-}
-window.addEventListener('hashchange', () => {
-  const key = ticketFromHash();
-  if (key) {
-    if (state.page !== 'ticket' || state.ticketKey !== key) openTicket(key);
-    return;
-  }
-  if (state.page === 'ticket') showPage(state.ticketFrom || 'timeline');
-});
+// prd/25 + P-2: a direct link (`/#ticket/DEL-167`, with or without the query)
+// opens the ticket page after the dataset has loaded, exactly as a click does.
+// Back/forward and a hand-edited hash both re-apply the whole route.
+window.addEventListener('hashchange', () => { applyRoute(); });
+window.addEventListener('popstate', () => { applyRoute(); });
 syncChromeHeight();
 window.addEventListener('resize', () => { syncChromeHeight(); renderHints(); syncRangeMeta(); });
 buildLensButtons();
@@ -2478,8 +2565,11 @@ renderPage();
 // when there is no dataset to read.
 loadVersion();
 load().then(async () => {
-  if (initialTicket) await openTicket(initialTicket);
-  else await showPage(state.page);
+  if (state.page === 'ticket' && state.ticketKey) {
+    await openTicket(state.ticketKey, { push: false });
+  } else {
+    await showPage(state.page);
+  }
   connect();
   applyTimeframeToTimeline();
 });
