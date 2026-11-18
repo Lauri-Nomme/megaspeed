@@ -60,6 +60,13 @@ the THREAD objects and the ``question_raised`` / ``question_answered`` events
 leave the raw zone. The git cache also answers "did the diff move at this
 comment's anchor?" -- the deterministic half of ``thread_outcome``.
 
+The source can also be a **hans scrape directory** (prd/31): a read-only
+capture of the same REST payloads plus a bare git mirror, produced during a
+migration. :class:`ingest.hans.HansTransport` serves those paths, the mirror
+answers the push/diff questions, and everything below is unchanged. Such a
+capture *is* its own scope, so a PR without a ticket key is imported rather than
+dropped (``HansTransport.unscoped``).
+
 Preconditions and crash safety
 ------------------------------
 
@@ -455,8 +462,20 @@ def collect(
         cfg.ticket_regex, cfg.key_shape, cfg.ticket_projects, cfg.ticket_keys
     )
     ident = identity or IdentityTable(cfg.identity_path)
+    # prd/31: a hans scrape ships the instance's user list. Seeding it makes the
+    # pseudonyms independent of PR order -- someone who only ever commented (or
+    # was mentioned) gets the same pseudonym as someone who authored a PR.
+    for user in getattr(transport, "users", None) or ():
+        if isinstance(user, dict) and user:
+            ident.pseudonym(user)
+    # prd/31: a hans scrape *is* the scope: it holds exactly the PRs that were
+    # captured, so a PR with no ticket key is still imported (its PR/commit/
+    # review history is real data). The filter still attaches keys where present.
+    unscoped = bool(getattr(transport, "unscoped", False))
     client = BitbucketClient(
-        transport, page_limit=cfg.page_limit, min_interval=0.0 if source == "fixture" else 0.2
+        transport,
+        page_limit=cfg.page_limit,
+        min_interval=0.0 if source in ("fixture", "hans") else 0.2,
     )
     reducer = Reducer(cfg, ident, key_filter, as_of, classifier=text_classifier, pepper=pepper)
     stats = Stats()
@@ -555,7 +574,7 @@ def collect(
                     # -- layer 1: the cheap ticket-key pre-filter --------------
                     cheap_keys = _list_keys(key_filter, pr.pr) if prefilter else []
                     detail_fetched = False
-                    if prefilter and not cheap_keys:
+                    if prefilter and not cheap_keys and not unscoped:
                         if "description" in pr.pr:
                             stats.prs_dropped += 1
                             continue
@@ -588,7 +607,7 @@ def collect(
                         pr.pr.get("description"),
                         *[c.get("message") for c in pr.commits],
                     )
-                    if not keys:
+                    if not keys and not unscoped:
                         stats.prs_dropped += 1
                         # Nothing to store now or ever: remember it so a
                         # non-prefilter run does not pay for its commits again.
@@ -1132,7 +1151,7 @@ def scrape(
         if text_classifier is not None
         else classify.for_scrape(cfg, source)
     )
-    quiet_check = (source != "fixture") if verify_quiet is None else bool(verify_quiet)
+    quiet_check = (source not in ("fixture", "hans")) if verify_quiet is None else bool(verify_quiet)
     prior_repo_entries = state.repo_entries(source)
 
     # -- resume an interrupted run (module docstring "crash safety") --------

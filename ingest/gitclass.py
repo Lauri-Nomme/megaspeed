@@ -45,6 +45,10 @@ The same cache also answers prd/16's **PR diff size**: ``git diff --numstat
 ``megaspeedDiffSize`` block on the PR record. A diff that cannot be computed
 (head gone, no merge base) leaves the block off entirely -- the analysis layer
 reads an absent size as "pending" and never as zero.
+
+A **hans scrape** (prd/31) already ships the repository as a bare mirror, so the
+classifier can read that in place instead of fetching (``for_mirror``): same
+labels, same diff sizes, no server and no credentials.
 """
 
 from __future__ import annotations
@@ -217,6 +221,7 @@ class PushClassifier:
         conflict_lines: int = DEFAULT_CONFLICT_LINES,
         timeout: float = GIT_TIMEOUT,
         filter_blobs: bool = True,
+        mirror: str | Path | None = None,
     ):
         self.root = Path(root)
         self.base_url = str(base_url or "").rstrip("/")
@@ -226,6 +231,9 @@ class PushClassifier:
         self.conflict_lines = max(0, int(conflict_lines))
         self.timeout = float(timeout)
         self.filter_blobs = bool(filter_blobs)
+        #: A **local bare mirror** to read instead of fetching (prd/31). Nothing
+        #: is ever written to it: it is the hans scrape's ``git/`` directory.
+        self.mirror = Path(mirror) if mirror is not None else None
         self.git = shutil.which("git") or ""
         self.header = _auth_header(token=token, user=user, password=password)
         #: push_class -> count, and reason -> count (both for the scrape report).
@@ -270,6 +278,24 @@ class PushClassifier:
             conflict_lines=cfg.push_conflict_lines,
         )
 
+    @classmethod
+    def for_mirror(cls, mirror: str | Path, **kwargs) -> "PushClassifier":
+        """Classify against a **local bare mirror** instead of a remote (prd/31).
+
+        A hans scrape ships the repository as a bare mirror holding every ref it
+        saw (branches, tags, ``refs/pull-requests/*``, ``refs/stash-refs/*`` and
+        the heads pinned under ``refs/keep/*``). That is exactly the object set
+        the live path's shallow cache would have fetched, so the classifier reads
+        it **in place**: no fetch, no cache, no credentials, and nothing is ever
+        written to the mirror (every command is a read: ``cat-file``, ``diff``,
+        ``patch-id``, ``range-diff``, ``merge-base``).
+
+        ``root``/``base_url`` are unused in this mode; ``report()`` names the
+        mirror so the scrape report still says where the labels came from.
+        """
+        path = Path(mirror)
+        return cls(path, "", mirror=path, **kwargs)
+
     @property
     def available(self) -> bool:
         return bool(self.git)
@@ -283,6 +309,7 @@ class PushClassifier:
             "enabled": self.available,
             "git": self.git,
             "state": str(self.root),
+            "mirror": str(self.mirror) if self.mirror is not None else None,
             "counts": dict(sorted(self.counts.items())),
             "reasons": dict(sorted(self.reasons.items())),
             "thread_changes": dict(sorted(self.thread_counts.items())),
@@ -365,7 +392,10 @@ class PushClassifier:
         """
         if "megaspeedDiffSize" in pr_record:
             return  # a fixture bundle (or a second pass) already has it
-        target = self._pr_target(pr_record)
+        # prd/31: a source that knows the PR's real base (a hans scrape's mirror
+        # does) states it, because ``toRef.latestCommit`` has moved past a merged
+        # branch and would measure an empty diff.
+        target = str(pr_record.get("megaspeedDiffBase") or "") or self._pr_target(pr_record)
         head = self._pr_head(pr_record) or (
             str((commits[-1] or {}).get("id") or "") if commits else ""
         )
@@ -547,6 +577,13 @@ class PushClassifier:
         cached = self._repos.get(key)
         if cached is not None:
             return cached
+        if self.mirror is not None:
+            # prd/31: read the scrape's bare mirror in place. No init, no
+            # remote, no fetch -- the mirror is not ours to write to.
+            if not (self.mirror / "HEAD").exists():
+                raise GitError(f"no git mirror at {self.mirror}")
+            self._repos[key] = self.mirror
+            return self.mirror
         slug = re.sub(r"[^A-Za-z0-9._-]+", "-", key).strip("-")
         path = self.root / f"{slug}.git"
         if not (path / "HEAD").exists():
@@ -583,7 +620,12 @@ class PushClassifier:
         merge, so a failure there is not fatal. The commits are fetched as one
         batch and, if the batch is refused, one by one: a single unreachable
         old head must not cost the others.
+
+        In mirror mode there is nothing to fetch: the scrape's bare mirror
+        already holds every ref hans captured (prd/31).
         """
+        if self.mirror is not None:
+            return
         wants = [sha for sha in dict.fromkeys(wants) if _HASH.fullmatch(sha or "")]
         # Once a cache has its full history (a small repo that deepening
         # completed), asking for ``--depth`` again would re-shallow it and force
@@ -629,6 +671,9 @@ class PushClassifier:
     def _fetch(
         self, path: Path, specs: list[str], *, depth: int | None = None, deepen: int | None = None
     ) -> bool:
+        if self.mirror is not None:
+            # prd/31: a mirror is read-only local state; there is no remote.
+            return False
         args = ["fetch", "--no-tags", "--quiet"]
         if deepen:
             args.append(f"--deepen={int(deepen)}")

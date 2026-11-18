@@ -15,6 +15,10 @@ megaspeed-scrape --jira --live --project DEL \\
 # no source credentials needed: replay/produce a synthetic bundle
 megaspeed-scrape --fixture --n 50 --out /tmp/fixture.tgz
 megaspeed-scrape --jira --fixture --out /tmp/jira-fixture.tgz
+
+# the Bitbucket half from a hans scrape directory (prd/31): no credentials,
+# no server -- the REST dumps + the git mirror the migration capture holds
+megaspeed-scrape --hans-scrape ~/dev/hans/scrape/golden10 --out export/hans.tgz
 ```
 
 Credentials are **never baked into the artifact**: they come from the
@@ -31,12 +35,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections import Counter
 from pathlib import Path
 
-from . import __version__, classify
+from . import __version__, classify, gitclass
 from .config import REPO_ROOT, Config, filter_scope, load_config
+from .hans import HansTransport
 from .progress import DEFAULT_INTERVAL as DEFAULT_PROGRESS_INTERVAL
 from .progress import ProgressReporter
 from .scrape import (
@@ -49,6 +55,8 @@ from .transport import BitbucketError, FixtureTransport, HttpTransport
 
 DEFAULT_OUT = "export/megaspeed-scrape.tgz"
 DEFAULT_JIRA_OUT = "export/megaspeed-jira.tgz"
+#: prd/31: a hans scrape directory, the offline source for the Bitbucket half.
+HANS_ENV = "MEGASPEED_HANS_SCRAPE"
 
 
 def _probe(cfg: Config, as_json: bool, bypass_filter: bool) -> int:
@@ -265,6 +273,13 @@ def _print_jira_scrape(r: dict) -> None:
 
 def _print_scrape(r: dict) -> None:
     print(f"source         {r['source']} (run {r['run_id']})")
+    hans = r.get("hans_scrape") or {}
+    if hans:
+        print(
+            f"hans scrape    {hans['scrape']}  ({hans['project']}/{hans['repo']},"
+            f" {hans['prs']} PR(s), {hans['users']} user(s),"
+            f" mirror {'yes' if hans.get('mirror') else '—'})"
+        )
     print(f"bundle         {r['bundle']}  ({r['bundle_bytes']} bytes)")
     print(f"sha256         {r['bundle_sha256']}")
     print(f"state          {r['state_dir']}  (watermark + prs + identity, raw zone, never transferred)")
@@ -360,6 +375,9 @@ def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
     mode.add_argument("--live", action="store_true", help="call the real Bitbucket DC REST API")
     mode.add_argument("--fixture", action="store_true", help="scrape synthetic data (no credentials)")
     mode.add_argument("--fixture-file", metavar="PATH", help="scrape a committed fixture bundle")
+    mode.add_argument("--hans-scrape", metavar="DIR", default=None,
+                      help="import a hans scrape directory (REST dumps + git mirror) offline;"
+                           f" also MEGASPEED_HANS_SCRAPE ({HANS_ENV})")
     ap.add_argument("--jira", action="store_true",
                     help="scrape Jira (Epic/Story/Sprint + worklogs) instead of Bitbucket")
     ap.add_argument("--jira-cloud", action="store_true",
@@ -407,7 +425,8 @@ def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
     ap.add_argument("--quiet", action="store_true",
                     help="no progress lines on stderr (the final summary still prints)")
     ap.add_argument("--n", type=int, default=None,
-                    help="fixture PRs to generate (default 50); with --fixture-file, cap how many are read")
+                    help="fixture PRs to generate (default 50); with --fixture-file or"
+                         " --hans-scrape, cap how many PRs are read")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--config", default=None, help="runtime config TOML (non-secret)")
     ap.add_argument("--repo", action="append", default=None, metavar="PROJECT/REPO",
@@ -424,10 +443,19 @@ def main(argv: list[str] | None = None) -> int:
     ap = build_parser()
     args = ap.parse_args(argv)
 
-    if not (args.live or args.fixture or args.fixture_file or args.probe):
+    # prd/31: the offline Bitbucket source can come from the environment, the
+    # same way credentials and the repo list do (the airgapped artifact ships
+    # no config file). An explicit source flag always wins over the default.
+    if not (args.hans_scrape or args.live or args.fixture or args.fixture_file or args.probe):
+        args.hans_scrape = os.environ.get(HANS_ENV, "").strip() or None
+
+    if not (args.live or args.fixture or args.fixture_file or args.probe or args.hans_scrape):
         # No default: a scraper that silently generated synthetic data would be
         # a nasty surprise in an airgapped run.
-        ap.error("choose a source: --live, --fixture or --fixture-file PATH")
+        ap.error(
+            "choose a source: --live, --fixture, --fixture-file PATH or"
+            f" --hans-scrape DIR ({HANS_ENV})"
+        )
     if args.n is not None and args.n < 1:
         print(f"--n must be at least 1 (got {args.n})", file=sys.stderr)
         return 2
@@ -470,6 +498,29 @@ def main(argv: list[str] | None = None) -> int:
         cfg.llm_url = args.llm_url
     if args.llm_model:
         cfg.llm_model = args.llm_model
+
+    # prd/31: the hans scrape names its own project/repo, and needs no
+    # credentials and no server -- the transport reads the capture on disk.
+    hans: HansTransport | None = None
+    if args.hans_scrape and not (args.jira or args.jira_cloud):
+        try:
+            hans = HansTransport(args.hans_scrape)
+        except BitbucketError as exc:
+            print(f"hans scrape error: {exc}", file=sys.stderr)
+            return 2
+        if not args.repo:
+            cfg.repos = [(hans.project, hans.repo)]
+        # Offline: there is no local LLM next to an airgapped capture, and the
+        # deterministic mock is the same classifier the fixture path uses.
+        if not cfg.text_backend:
+            cfg.text_backend = "mock"
+        if not hans.mirror_available:
+            why = "git is not installed" if not hans.git else f"no bare repo at {hans.mirror}"
+            print(
+                f"warning: {hans.root}: {why} -- PR commits, push_class and diff"
+                " size cannot be derived",
+                file=sys.stderr,
+            )
 
     if args.jira_cloud:
         # prd/24: one source, two shapes. ``--jira-cloud`` is a Jira scrape with
@@ -559,6 +610,13 @@ def main(argv: list[str] | None = None) -> int:
             )
             transport.check()
             source = "bitbucket-dc"
+        elif hans is not None:
+            # prd/31: the Bitbucket half, read from the capture on disk. The
+            # bundle is the normal one, so the import path does not change; the
+            # source label is ``hans`` because a capture is repo-scoped (a PR
+            # without a ticket key is real data, see store.REPO_SCOPED_SOURCES).
+            transport = hans
+            source = "hans"
         else:
             from . import fixtures as fixtures_mod
 
@@ -587,17 +645,29 @@ def main(argv: list[str] | None = None) -> int:
             source,
             out=out,
             state_dir=state_dir,
-            limit=args.n if (args.fixture_file and args.n is not None) else None,
+            limit=args.n if ((args.fixture_file or hans is not None) and args.n is not None) else None,
             overlap_hours=args.overlap_hours,
             full=args.full,
             identity_path=args.identity,
             progress=progress,
+            # prd/31: the mirror answers push_class/diff size in place; a capture
+            # is a static snapshot, so the quiescence guard has nothing to say.
+            push_classifier=(
+                gitclass.PushClassifier.for_mirror(hans.mirror)
+                if hans is not None and cfg.push_class
+                else None
+            ),
             checkpoint_every=args.checkpoint_every,
-            verify_quiet=False if args.no_source_check else None,
+            verify_quiet=False if (args.no_source_check or hans is not None) else None,
         )
     except BitbucketError as exc:
         print(f"bitbucket error: {exc}", file=sys.stderr)
         return 2
+
+    if hans is not None:
+        # Provenance for the report: which capture produced this bundle. The
+        # bundle's own ``source`` is ``hans`` (repo-scoped: see prd/31).
+        report["hans_scrape"] = hans.report()
 
     if args.json:
         print(json.dumps(report, indent=2, default=str))
