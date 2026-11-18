@@ -17,6 +17,10 @@ Conform to `docs/concepts.md` §5.
 - **#14** "9/8 segments measured" — `app/main.js:987` hard-codes `/8`.
 - **#16** "rounds" definition drift: rules count pushes+unapprovals ("16 PRs past 3 rounds") while the
   store's `review_rounds` says 1.
+- **#16** "rounds" definition drift — rules count pushes+unapprovals ("16 PRs past 3 rounds") while the
+  store's `review_rounds` has 1; *and* a rebase that loses approvals is double-counted (analysis = 2
+  rounds for one rebase: the push **and** its push-induced `pr_unapproved`), while a target-shift
+  approval-loss with no push is counted by the analysis but not the store.
 - **#22** "logged a week late" includes `within_week` (2–7 d late).
 
 ## Fix (conforms to concepts.md §5)
@@ -34,8 +38,11 @@ Conform to `docs/concepts.md` §5.
    first-done and created→final-done, never silently one.
 5. **Fix the counts** — "N of M segments measured" derives M from the actual segment count (9, not a
    hard-coded 8); "per story" means a per-story statistic (median/mean), never an aggregate total
-   mislabelled as per-story; "rounds" uses one definition (the store's `review_rounds`) everywhere;
-   "logged a week late" excludes `within_week`.
+   mislabelled as per-story; **"rounds" uses the concepts.md definition — `# pr_pushed (after first
+   review) + # pr_unapproved with cause ≠ "push" (after first review)` — in one place, so a
+   rebase-with-approval-loss is one round (not two), a target-shift/manual approval-loss is one round,
+   and the store's `review_rounds` and the analysis agree** (use the `cause` attribute the ingest
+   already stores); "logged a week late" excludes `within_week`.
 
 ## Tests
 

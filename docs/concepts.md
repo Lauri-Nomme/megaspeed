@@ -170,6 +170,19 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
   working, not waiting).
 - **Derivation**: union of measured work spans (author PR intervals, worklog durations) ÷ the cycle.
 
+### Review round
+- **Definition**: one discrete re-review pass — the author produces new work for review, *or* approvals
+  are lost and must be re-earned.
+- **Derivation**: `rounds = # pr_pushed (after first review) + # pr_unapproved with cause ≠ "push"
+  (after first review)`. A push-induced `pr_unapproved` (`cause="push"`) is the *same* round as the
+  push that caused it, not a second one.
+- **Purpose**: the `rework_loops`/`conformance` rules and the ticket view's round count. **One
+  definition everywhere** — the store's `review_rounds` and the analysis must agree. A rebase that
+  loses approvals is **one** round (not two); a target-shift/manual approval-loss with no new push is
+  **one** round.
+- **Note**: a `pure_rebase` push (same patch id, no content change, no approval loss) is a *head move*,
+  not a re-review — see `push_class`.
+
 ### Wait hours / queue time
 - **Definition**: business hours an item spends with the ball *not* in the author's court.
 - **Purpose**: the cost of waiting, attributed to the queue/person holding the ball.
