@@ -158,7 +158,9 @@ LOG = os.environ.get("MEGASPEED_QUIET", "") not in ("1", "true")
 
 # Reconstructing the interval timeline is cheap (one pass over the log) but the
 # three analysis views ask for it on every page switch, so keep the last build
-# for the current (tenant, store version). Read-only; a store change or a tenant
+# for the current (tenant, store version). The same entry also carries the Jira
+# layer, threads, bots and PR sizes (``_AnalysisBundle``) so a new ticket key or
+# a second endpoint never rebuilds them. Read-only; a store change or a tenant
 # switch invalidates it.
 _analysis_lock = threading.Lock()
 _analysis_cache: tuple[tuple, object] | None = None
@@ -714,8 +716,10 @@ def ticket_detail(key: str, request: Request):
     ticket and says which half is missing.
 
     The answer is cached per ``(tenant, store + calendar version, key)`` — the
-    same invalidation as the ballcourt cache — because rendering 11.7 KB used to
-    rebuild the whole Jira layer (300–418 ms at 4,000 stories).
+    same invalidation as the ballcourt cache — and the Jira layer it is built
+    from is cached once per store version (``_analysis_bundle``), not rebuilt
+    per key: a new key used to cost 300–418 ms of ``load_jira`` at 4,000
+    stories.
     """
     unknown = _unknown_params(request, _params(()))
     if unknown is not None:
@@ -750,9 +754,12 @@ def ticket_detail(key: str, request: Request):
 
 
 # One ticket payload is a pure read of (store version, calendar version, key):
-# ``tickets.ticket`` is 0.8–4.4 ms, but the Jira layer it needs is ~410 ms to
-# rebuild at 4,000 stories. Bounded like the simulation cache; a store or
-# calendar change makes the old entries unreachable, so they age out by size.
+# ``tickets.ticket`` is 0.3–4.4 ms, but the Jira layer it needs was ~410 ms to
+# rebuild at 4,000 stories — and that layer is per *store*, not per key. The
+# payload cache is now a thin wrapper over the shared analysis bundle; the
+# expensive part is built once per store version and every key reuses it.
+# Bounded like the simulation cache; a store or calendar change makes the old
+# entries unreachable, so they age out by size.
 _ticket_lock = threading.Lock()
 _ticket_cache: dict[tuple, dict | None] = {}
 TICKET_CACHE_SIZE = 256
@@ -764,9 +771,8 @@ def _ticket_payload(con, tenant: str, path: Path, key: str) -> dict | None:
     with _ticket_lock:
         if cache_key in _ticket_cache:
             return _ticket_cache[cache_key]
-    court = _ballcourt(con, tenant, path)
-    data = insights_rules.load_jira(con, court)
-    payload = ticket_view.ticket(court, data, key)
+    bundle = _analysis_bundle(con, tenant, path)
+    payload = ticket_view.ticket(bundle.court, bundle.jira(con), key)
     if payload is not None:
         payload["tenant"] = tenant
     with _ticket_lock:
@@ -779,8 +785,69 @@ def _ticket_payload(con, tenant: str, path: Path, key: str) -> dict | None:
 # --------------------------------------------------------------------------- #
 # analysis views (prd/05): read-only projections of the same event log
 # --------------------------------------------------------------------------- #
-def _ballcourt(con, tenant: str, path: Path):
-    """Reconstruct the interval timeline once per (tenant, store + calendar version).
+class _AnalysisBundle:
+    """One store version's analysis inputs, built once and shared.
+
+    The ballcourt, the Jira layer (``load_jira``), the review threads, the bot
+    set and the PR sizes are all pure reads of *one store version* — none of
+    them depends on the ticket key, the window or the endpoint. They used to be
+    loaded per request (and ``load_jira`` per ticket *key*, so every new ticket
+    paid ~0.3 s at 4,000 stories, and ``/api/insights`` paid it again on every
+    call). Now the first analysis request for a store builds the court and each
+    later request — any key, any endpoint — reuses it; the other slots are
+    filled on first use so a page that never asks for the Jira layer never pays
+    for it.
+
+    The invalidation is the bundle's own key: ``(tenant, store stamp, calendar
+    key)``, exactly the store-stamp + calendar identity the ballcourt cache has
+    always used, so an ingest run or a calendar edit drops the whole bundle.
+
+    Everything downstream treats the bundle as read-only — the one write is
+    ``Story._cycle_cache``, an idempotent per-story memo of a pure function —
+    so sharing it between requests and threads cannot change an answer.
+    """
+
+    __slots__ = ("court", "_lock", "_jira", "_threads", "_bots", "_sizes")
+
+    def __init__(self, court) -> None:
+        self.court = court
+        # One lock for every slot: a slot is filled at most once per store
+        # version, and serialising the first build keeps a burst of concurrent
+        # requests from all paying the same 0.3 s.
+        self._lock = threading.Lock()
+        self._jira = None
+        self._threads = None
+        self._bots = None
+        self._sizes = None
+
+    def jira(self, con) -> jira_analysis.JiraData:
+        """The Jira half of the store, joined to this bundle's court."""
+        with self._lock:
+            if self._jira is None:
+                self._jira = insights_rules.load_jira(con, self.court)
+            return self._jira
+
+    def threads(self, con) -> list[dict]:
+        with self._lock:
+            if self._threads is None:
+                self._threads = insights_rules.load_threads(con)
+            return self._threads
+
+    def bots(self, con) -> set[str]:
+        with self._lock:
+            if self._bots is None:
+                self._bots = insights_rules.load_bots(con)
+            return self._bots
+
+    def sizes(self, con) -> dict[str, dict]:
+        with self._lock:
+            if self._sizes is None:
+                self._sizes = insights_rules.load_pr_sizes(con)
+            return self._sizes
+
+
+def _analysis_bundle(con, tenant: str, path: Path) -> _AnalysisBundle:
+    """The analysis inputs of one (tenant, store + calendar version).
 
     One entry, not a dict: switching tenants rebuilds, but page switches within
     a tenant never do. The stamp is per file, so another tenant's ingest run
@@ -793,10 +860,19 @@ def _ballcourt(con, tenant: str, path: Path):
         if _analysis_cache is not None and _analysis_cache[0] == key:
             return _analysis_cache[1]
     calendar, error = _calendar_for(tenant)
-    court = analyse.load(con, calendar=calendar, calendar_error=error)
+    bundle = _AnalysisBundle(analyse.load(con, calendar=calendar, calendar_error=error))
     with _analysis_lock:
-        _analysis_cache = (key, court)
-    return court
+        _analysis_cache = (key, bundle)
+    return bundle
+
+
+def _ballcourt(con, tenant: str, path: Path):
+    """The interval timeline of one (tenant, store + calendar version).
+
+    A thin reader of :func:`_analysis_bundle`, kept for the views that need the
+    court and nothing else.
+    """
+    return _analysis_bundle(con, tenant, path).court
 
 
 # --------------------------------------------------------------------------- #
@@ -996,14 +1072,15 @@ def insights(request: Request):
         return _tenant_error(exc.args[0])
     try:
         with store_conn(path) as con:
-            court = _ballcourt(con, tenant, path)
+            bundle = _analysis_bundle(con, tenant, path)
+            court = bundle.court
             # prd/21: the ticket layer is loaded before the window, because a
             # Jira-only store's earliest item is a story, not a PR.
-            jira = insights_rules.load_jira(con, court)
+            jira = bundle.jira(con)
             window = insights_rules.window_for(court, _days(days), jira)
-            threads = insights_rules.load_threads(con)
-            bots = insights_rules.load_bots(con)
-            sizes = insights_rules.load_pr_sizes(con)
+            threads = bundle.threads(con)
+            bots = bundle.bots(con)
+            sizes = bundle.sizes(con)
             payload = insights_rules.insights(
                 court, threads, window, level=level, bots=bots, sizes=sizes,
                 jira=jira,
@@ -1039,8 +1116,9 @@ def sprints(request: Request):
         return _tenant_error(exc.args[0])
     try:
         with store_conn(path) as con:
-            court = _ballcourt(con, tenant, path)
-            jira = insights_rules.load_jira(con, court)
+            bundle = _analysis_bundle(con, tenant, path)
+            court = bundle.court
+            jira = bundle.jira(con)
             window = insights_rules.window_for(court, _days(days), jira)
             payload = jira_analysis.sprints(court, jira, window)
     except Exception as exc:  # noqa: BLE001
