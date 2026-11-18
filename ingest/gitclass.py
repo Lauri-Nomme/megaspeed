@@ -247,9 +247,33 @@ class PushClassifier:
         self.sizes = 0
         #: git fetch invocations, so the report can show what the cache cost.
         self.fetches = 0
+        #: git subprocess invocations (every ``_run``), so the report -- and the
+        #: "a warm cache costs nothing" regression test -- can show the per-PR
+        #: cost instead of guessing it.
+        self.runs = 0
         self._repos: dict[str, Path] = {}
         self._complete_cache: dict[Path, bool] = {}
+        # -- memos (the review's 26 subprocesses/PR) ----------------------
+        #: ``(repo, target, old, new) -> Verdict`` (a whole transition).
         self._memo: dict[tuple[str, str, str, str], Verdict] = {}
+        #: ``(repo, sha) -> present?``. ``True`` is permanent (git objects are
+        #: immutable); a ``False`` is only valid until the next fetch of that
+        #: repo, which is what :attr:`_gen` tracks.
+        self._present_cache: dict[tuple[str, str], bool] = {}
+        self._present_gen: dict[tuple[str, str], int] = {}
+        #: ``(repo, a, b) -> (generation, merge base)`` -- a merge base can only
+        #: *appear* after a fetch (deepening), so it is generation-scoped too.
+        self._merge_base_cache: dict[tuple[str, str, str], tuple[int, str]] = {}
+        #: ``(repo, target, head) -> patch id`` (immutable commit graph).
+        self._patch_cache: dict[tuple[str, str, str], str | None] = {}
+        #: ``(repo, target, head) -> (DiffSize, reason)`` (immutable graph).
+        self._size_cache: dict[tuple[str, str, str], tuple[DiffSize | None, str]] = {}
+        #: ``(repo, old, new, path) -> changed?`` (immutable graph).
+        self._changed_cache: dict[tuple[str, str, str, str], bool | None] = {}
+        #: heads already pinned under ``refs/megaspeed/seen/`` by this run.
+        self._kept: set[tuple[str, str]] = set()
+        #: ``repo -> fetch generation``: bumped by every successful fetch.
+        self._gen: dict[str, int] = {}
 
     # -- construction ----------------------------------------------------
     @classmethod
@@ -318,6 +342,7 @@ class PushClassifier:
                 "reasons": dict(sorted(self.size_reasons.items())),
             },
             "fetches": self.fetches,
+            "git_runs": self.runs,
             "repos": sorted(self._repos),
         }
 
@@ -532,6 +557,9 @@ class PushClassifier:
             return None
         if old == new:
             return False
+        key = (str(path), old, new, anchor_path)
+        if key in self._changed_cache:
+            return self._changed_cache[key]
         if not (self._present(path, old) and self._present(path, new)):
             return None
         result = self._run(
@@ -539,7 +567,9 @@ class PushClassifier:
         )
         if result.code != 0:
             return None
-        return bool(result.text.strip())
+        changed = bool(result.text.strip())
+        self._changed_cache[key] = changed
+        return changed
 
     def _diff_size(self, path: Path, target: str, head: str) -> DiffSize | None:
         """``git diff --numstat target...head`` totals, or ``None`` when unknown.
@@ -548,17 +578,30 @@ class PushClassifier:
         after the branch was cut does not inflate the PR's own size. Renames are
         left to git's default detection: a file moved without edits is a 0-line
         change, not a delete plus an add of the whole file.
+
+        Memoised per (repo, target, head): the commit graph is immutable, so a
+        re-scrape of an unchanged PR costs no subprocess. The failure reason is
+        re-counted on a memo hit, so ``report()`` still explains every PR.
         """
+        key = (str(path), target, head)
+        cached = self._size_cache.get(key)
+        if cached is None:
+            cached = self._measure_size(path, target, head)
+            self._size_cache[key] = cached
+        size, reason = cached
+        if reason:
+            self.size_reasons[reason] += 1
+        return size
+
+    def _measure_size(self, path: Path, target: str, head: str) -> tuple[DiffSize | None, str]:
+        """The (size, failure reason) pair :meth:`_diff_size` memoises."""
         if not (target and head):
-            self.size_reasons["no_head"] += 1
-            return None
+            return None, "no_head"
         for label, sha in (("target", target), ("head", head)):
             if not self._present(path, sha):
-                self.size_reasons[f"missing_{label}"] += 1
-                return None
+                return None, f"missing_{label}"
         if not self._ensure_merge_base(path, target, head):
-            self.size_reasons["no_merge_base"] += 1
-            return None
+            return None, "no_merge_base"
         result = self._run(
             path,
             ["diff", "--numstat", "--no-ext-diff", "--no-textconv", "--find-renames",
@@ -566,10 +609,9 @@ class PushClassifier:
             check=False,
         )
         if result.code != 0:
-            self.size_reasons["diff_failed"] += 1
-            return None
+            return None, "diff_failed"
         added, removed = parse_numstat(result.text)
-        return DiffSize(added, removed)
+        return DiffSize(added, removed), ""
 
     # -- cache management ------------------------------------------------
     def _repo(self, project: str, repo: str) -> Path:
@@ -621,27 +663,31 @@ class PushClassifier:
         batch and, if the batch is refused, one by one: a single unreachable
         old head must not cost the others.
 
+        A branch fetch is **skipped when the cache already holds every commit
+        the PR names**: the branch tip cannot add anything the classification
+        reads, so a warm cache costs no network round trip at all (the review
+        measured one ``fetch`` per PR, cold *and* warm).
+
         In mirror mode there is nothing to fetch: the scrape's bare mirror
         already holds every ref hans captured (prd/31).
         """
         if self.mirror is not None:
             return
-        wants = [sha for sha in dict.fromkeys(wants) if _HASH.fullmatch(sha or "")]
+        wanted = [sha for sha in dict.fromkeys(wants) if _HASH.fullmatch(sha or "")]
         # Once a cache has its full history (a small repo that deepening
         # completed), asking for ``--depth`` again would re-shallow it and force
         # the merge base to be re-deepened on every run.
         depth = None if self._complete(path) else self.depth
-        if refspecs:
+        missing = [sha for sha in wanted if not self._present(path, sha)]
+        if refspecs and missing:
             self._fetch(path, refspecs, depth=depth)
-        if wants:
-            missing = [sha for sha in wants if not self._present(path, sha)]
-            if missing and not self._fetch(path, missing, depth=depth):
+            missing = [sha for sha in missing if not self._present(path, sha)]
+        if missing:
+            if not self._fetch(path, missing, depth=depth):
                 for sha in missing:
                     if not self._present(path, sha):
                         self._fetch(path, [sha], depth=depth)
-        for sha in wants:
-            if self._present(path, sha):
-                self._keep(path, sha)
+        self._keep_many(path, [sha for sha in wanted if self._present(path, sha)])
 
     def _complete(self, path: Path) -> bool:
         """True when the cache has the full history (not shallow any more).
@@ -664,9 +710,24 @@ class PushClassifier:
             self._complete_cache[path] = cached
         return cached
 
-    def _keep(self, path: Path, sha: str) -> None:
-        """Pin a head under ``refs/megaspeed/seen/<sha>`` (repack-proof)."""
-        self._run(path, ["update-ref", f"{SEEN_PREFIX}/{sha}", sha], check=False)
+    def _keep_many(self, path: Path, shas: list[str]) -> None:
+        """Pin several heads in **one** ``git update-ref --stdin`` process.
+
+        The review counted three ``update-ref`` runs per PR; the pins are
+        idempotent per (repo, sha), so a re-scrape of the same PRs pays none.
+        """
+        fresh = [
+            sha for sha in dict.fromkeys(shas) if (str(path), sha) not in self._kept
+        ]
+        if not fresh:
+            return
+        stdin = b"".join(f"update {SEEN_PREFIX}/{sha} {sha}\n".encode() for sha in fresh)
+        result = self._run(path, ["update-ref", "--stdin"], stdin=stdin, check=False)
+        if result.code != 0:
+            # An old git without ``--stdin`` support: fall back to one call each.
+            for sha in fresh:
+                self._run(path, ["update-ref", f"{SEEN_PREFIX}/{sha}", sha], check=False)
+        self._kept.update((str(path), sha) for sha in fresh)
 
     def _fetch(
         self, path: Path, specs: list[str], *, depth: int | None = None, deepen: int | None = None
@@ -683,7 +744,19 @@ class PushClassifier:
             # Commit graph only; a diff pulls the few blobs it needs on demand.
             args.append("--filter=blob:none")
         self.fetches += 1
-        return self._run(path, args + ["origin", *specs], check=False).code == 0
+        code = self._run(path, args + ["origin", *specs], check=False).code
+        if code == 0:
+            # The object graph just grew: a cached "not present" or "no merge
+            # base" answer is stale from here on.
+            self._bump(path)
+        return code == 0
+
+    # -- memo plumbing -----------------------------------------------------
+    def _generation(self, path: Path) -> int:
+        return self._gen.get(str(path), 0)
+
+    def _bump(self, path: Path) -> None:
+        self._gen[str(path)] = self._generation(path) + 1
 
     # -- classification ---------------------------------------------------
     def _classify(self, path: Path, target: str, old: str, new: str) -> Verdict:
@@ -748,8 +821,13 @@ class PushClassifier:
         """``git patch-id --stable`` of the PR diff (``target...head``).
 
         ``--no-renames`` keeps the diff content-only: a base that renamed a file
-        must not change the patch id of an unchanged branch.
+        must not change the patch id of an unchanged branch. Memoised per
+        (repo, target, head): two diffs of the same immutable commits cannot
+        differ, so a re-scrape pays nothing.
         """
+        key = (str(path), target, head)
+        if key in self._patch_cache:
+            return self._patch_cache[key]
         diff = self._run(
             path,
             ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--no-renames",
@@ -761,11 +839,14 @@ class PushClassifier:
         ids = self._run(path, ["patch-id", "--stable"], stdin=diff.out, check=False)
         if ids.code != 0:
             return None
+        value = ""
         for line in ids.text.splitlines():
             fields = line.split()
             if fields and _HASH.fullmatch(fields[0]):
-                return fields[0].lower()
-        return ""  # empty diff: still a value, and equal to the other empty one
+                value = fields[0].lower()
+                break
+        self._patch_cache[key] = value
+        return value
 
     def _ensure_merge_base(self, path: Path, target: str, head: str) -> bool:
         """True once the shallow window contains a merge base.
@@ -788,13 +869,41 @@ class PushClassifier:
         return False
 
     def _merge_base(self, path: Path, a: str, b: str) -> str:
+        """``git merge-base a b`` (``""`` = none in the shallow window).
+
+        Memoised per (repo, a, b) **per fetch generation**: deepening is what can
+        create a merge base, so a negative answer is only trusted until the next
+        fetch of this repo.
+        """
+        key = (str(path), a, b)
+        cached = self._merge_base_cache.get(key)
+        if cached is not None and cached[0] == self._generation(path):
+            return cached[1]
         result = self._run(path, ["merge-base", a, b], check=False)
-        return result.text.strip() if result.code == 0 else ""
+        value = result.text.strip() if result.code == 0 else ""
+        self._merge_base_cache[key] = (self._generation(path), value)
+        return value
 
     def _present(self, path: Path, sha: str) -> bool:
+        """Is ``sha`` a commit in the cache? Memoised (the review's 13/PR).
+
+        ``True`` is permanent -- git objects are immutable and a repack cannot
+        remove a commit that a ref (or our own ``seen/`` pin) keeps reachable. A
+        ``False`` is only valid until the next fetch, which is what the fetch
+        generation guards.
+        """
         if not sha or not _HASH.fullmatch(sha):
             return False
-        return self._run(path, ["cat-file", "-e", f"{sha}^{{commit}}"], check=False).code == 0
+        key = (str(path), sha)
+        cached = self._present_cache.get(key)
+        if cached is True:
+            return True
+        if cached is False and self._present_gen.get(key) == self._generation(path):
+            return False
+        value = self._run(path, ["cat-file", "-e", f"{sha}^{{commit}}"], check=False).code == 0
+        self._present_cache[key] = value
+        self._present_gen[key] = self._generation(path)
+        return value
 
     # -- process plumbing -------------------------------------------------
     def _run(
@@ -811,6 +920,7 @@ class PushClassifier:
         if self.header:
             command += ["-c", f"http.extraHeader={self.header}"]
         command += args
+        self.runs += 1
         try:
             proc = subprocess.run(
                 command,
