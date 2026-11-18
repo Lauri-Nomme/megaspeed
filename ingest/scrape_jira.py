@@ -66,12 +66,16 @@ Two rules the Jira side needs because its walk is *not* the Bitbucket walk:
   later run inside the overlap window retries it.
 
 Crash safety is the Bitbucket contract, adapted to a walk that reduces as it
-goes: identity -> partial bundle -> ``jira_issues.json`` -> ``watermark.json``
+goes: identity -> the staged rows -> ``jira_issues.json`` -> ``watermark.json``
 are checkpointed every ``--checkpoint-every`` issues and at every project
-boundary, the next run resumes from that bundle, and the issues the interrupted
-run already checkpointed are skipped by their ``run_id`` (their events ride in
-the carried rows). A checkpoint never advances the global cursor -- the walk is
-per project, so a mid-run cursor would strand a later project's older issues.
+boundary, the next run resumes from that checkpoint, and the issues the
+interrupted run already checkpointed are skipped by their ``run_id`` (their
+events ride in the carried rows). A checkpoint is incremental -- it stages only
+the rows added since the last one in ``<out>.parts/``
+(:class:`ingest.bundle.BundleSpool`) and the tgz is written once at the end, so
+it costs O(new issues) rather than O(bundle so far). A checkpoint never advances
+the global cursor -- the walk is per project, so a mid-run cursor would strand a
+later project's older issues.
 """
 
 from __future__ import annotations
@@ -839,10 +843,12 @@ def scrape(
     **capped** run (``limit``) does not move it at all: the issues it never read
     are not consumed (FR-1).
 
-    Crash safety mirrors :func:`ingest.scrape.scrape`: the identity map, a valid
-    partial bundle, ``jira_issues.json`` and ``watermark.json`` are checkpointed
-    every ``checkpoint_every`` issues and at every project boundary, and the
-    next run resumes from that bundle instead of starting over (FR-2).
+    Crash safety mirrors :func:`ingest.scrape.scrape`: the identity map, the rows
+    added since the last checkpoint, ``jira_issues.json`` and ``watermark.json``
+    are checkpointed every ``checkpoint_every`` issues and at every project
+    boundary, and the next run resumes from that checkpoint instead of starting
+    over (FR-2). A checkpoint is incremental (``<out>.parts/``, the tgz is
+    written once at the end), so its cost does not grow with the bundle.
     """
     out = Path(out).expanduser()
     state_dir = Path(state_dir).expanduser() if state_dir else default_state_dir(out)
@@ -854,19 +860,23 @@ def scrape(
     )
 
     previous = None if full else state.watermark(source)
+    # Crash safety is incremental (see ``checkpoint``): the in-flight rows are
+    # staged in ``<out>.parts/`` and the tgz is written once, at the end.
+    spool = bundle_mod.BundleSpool(bundle_mod.spool_dir(out))
 
     # -- resume an interrupted run (module docstring "crash safety") --------
     resume_run_id: str | None = None
     resume_bundle: Path | None = None
+    carried_bundle: bundle_mod.Bundle | None = None
     carry_events: list[dict] = []
     carry_objects: list[dict] = []
     carry_relations: list[tuple[str, str, str]] = []
     if not full and state.incomplete(source):
         resume_run_id = state.last_run_id(source)
         resume_bundle = state.last_bundle_path(source) or out
-        if resume_bundle.is_file():
+        if bundle_mod.inflight_path(resume_bundle) is not None:
             try:
-                carried = bundle_mod.read_bundle(resume_bundle)
+                carried = bundle_mod.read_inflight(resume_bundle)
             except bundle_mod.BundleError as exc:
                 reporter.emit(f"[scrape] cannot resume from {resume_bundle}: {exc}")
                 resume_run_id, resume_bundle = None, None
@@ -878,19 +888,36 @@ def scrape(
                     )
                     resume_run_id, resume_bundle = None, None
                 else:
-                    # Drop the per-event object lists: the merged relations are
-                    # the authority, so a dangling edge from a partial bundle
-                    # cannot survive the resume.
-                    carry_events = [{**event, "objects": []} for event in carried.events]
+                    carried_bundle = carried
                     carry_objects, carry_relations = carried.objects, carried.relations
+                    carry_events = carried.events
                     reporter.emit(
                         f"[scrape] resuming interrupted run {resume_run_id}"
                         f" from {resume_bundle}: carrying {len(carry_events)} event(s),"
                         f" {len(carry_objects)} object(s)"
                     )
+    if carried_bundle is None:
+        # A fresh run: never let a dead run's staged rows leak into this bundle.
+        spool.reset()
+    else:
+        # Adopt the carried rows *before* they are stripped below (the spool may
+        # have to stage them once, and a row without its objects is invalid).
+        spool.resume(carried_bundle)
+        # Drop the per-event object lists: the merged relations are the
+        # authority, so a dangling edge from a partial bundle cannot survive the
+        # resume. In place, so the spool still recognises these rows.
+        for event in carry_events:
+            event["objects"] = []
 
     def checkpoint(collected_now: JiraCollected, project: str | None) -> None:
-        """Persist identity + a valid partial bundle + both cursors, mid-run."""
+        """Persist identity + the new rows + both cursors, mid-run.
+
+        Incremental on purpose: only the rows added since the last checkpoint are
+        staged (``<out>.parts/``) and the tgz is written once at the end, so the
+        cost is O(new issues) instead of a full re-serialisation of the bundle so
+        far (:class:`ingest.bundle.BundleSpool`). The crash-resume contract is
+        unchanged.
+        """
         # The cursor is **not** advanced here. The Jira watermark is one global
         # value but the walk is per project: after project A, a cursor at A's
         # newest ``updated`` would put project B's older issues outside the next
@@ -913,9 +940,11 @@ def scrape(
         # never lag behind a bundle that mentions them.
         if collected_now.identity is not None:
             collected_now.identity.save()
-        _write_bundle_atomic(
-            out, manifest=manifest, events=collected_now.events,
-            objects=collected_now.objects, relations=collected_now.relations,
+        spool.append(
+            manifest=manifest,
+            events=collected_now.events,
+            objects=collected_now.objects,
+            relations=collected_now.relations,
         )
         issue_state.save()
         state.record(
@@ -972,6 +1001,9 @@ def scrape(
     state.record(source, watermark, collected.run_id, out, repos={},
                  complete=True, resumed=collected.resumed)
     state.save()
+    # The tgz is durable and the state file says the run is complete: the
+    # in-flight rows have done their job.
+    spool.finish()
 
     return {
         "mode": "scrape",
@@ -984,6 +1016,7 @@ def scrape(
         "state_dir": str(state_dir),
         "issue_state": str(state_dir / ISSUE_STATE_FILE),
         "identity_map": str(ident_path),
+        "checkpoint_spool": str(spool.directory),
         "watermark": iso(watermark),
         "previous_watermark": iso(previous),
         "overlap_hours": overlap_hours,

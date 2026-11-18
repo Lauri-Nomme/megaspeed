@@ -27,7 +27,12 @@ from ingest.bundle import (
     OBJECTS,
     SUMS,
     BundleError,
+    BundleSpool,
+    inflight_path,
     read_bundle,
+    read_inflight,
+    read_spool,
+    spool_dir,
     write_bundle,
 )
 from ingest.config import Config
@@ -336,6 +341,172 @@ class FixtureScrapeTests(unittest.TestCase):
         )
         people_second = {o["object_id"] for o in read_bundle(self.out).objects if o["object_type"] == "PERSON"}
         self.assertEqual(people_first, people_second)
+
+
+class SpoolTests(unittest.TestCase):
+    """The in-flight staging area an incremental checkpoint writes (prd/33 §1).
+
+    A scrape stages only the rows added since the last checkpoint here and writes
+    the tgz once at the end, so the spool must be a *complete* and *readable*
+    record of the run so far -- it is what the resume path reads.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.path = self.root / "export" / "del.tgz"
+        self.spool = BundleSpool(spool_dir(self.path))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_the_spool_lives_next_to_the_output_and_is_not_a_bundle(self):
+        self.assertEqual(spool_dir(self.path), self.root / "export" / "del.tgz.parts")
+        self.assertEqual(spool_dir("del.tgz"), Path("del.tgz.parts"))
+
+    def test_a_checkpoint_stages_only_the_rows_that_are_new(self):
+        events, objects, relations = _payload()
+        first = self.spool.append(
+            manifest=_manifest(), events=events[:1], objects=objects[:1],
+            relations=relations[:2],
+        )
+        self.assertEqual(first["events"], 1)
+        self.assertEqual(first["objects"], 1)
+        # The same lists again (a repo-boundary checkpoint with no new work):
+        # nothing is staged, so the write is O(delta), not O(prefix).
+        again = self.spool.append(
+            manifest=_manifest(), events=events[:1], objects=objects[:1],
+            relations=relations[:2],
+        )
+        self.assertEqual(again["bytes"], 0)
+        self.assertEqual(again["events"], 0)
+        # One more row: only that row is written.
+        third = self.spool.append(
+            manifest=_manifest(counts={"events": 2}), events=events, objects=objects,
+            relations=relations,
+        )
+        self.assertEqual(third["events"], 1)
+        self.assertEqual(third["objects"], 1)
+
+    def test_the_spool_reads_back_as_the_union_of_every_part(self):
+        events, objects, relations = _payload()
+        self.spool.append(manifest=_manifest(), events=events[:1], objects=objects,
+                          relations=relations[:2])
+        self.spool.append(manifest=_manifest(), events=events, objects=objects,
+                          relations=relations)
+        carried = read_spool(self.spool.directory)
+        self.assertEqual(
+            [event["event_key"] for event in carried.events],
+            [event["event_key"] for event in events],
+        )
+        self.assertEqual(
+            sorted(obj["object_id"] for obj in carried.objects),
+            sorted(obj["object_id"] for obj in objects),
+        )
+        # Every event keeps its objects: that is what the resume carries.
+        for event in carried.events:
+            self.assertTrue(event["objects"], event["event_key"])
+        self.assertEqual(len(carried.relations), 3)
+        self.assertEqual(carried.source, "fixture")
+
+    def test_a_later_row_for_the_same_key_wins(self):
+        events, objects, _relations = _payload()
+        self.spool.append(manifest=_manifest(), events=events[:1], objects=objects,
+                          relations=[(events[0]["event_key"], "PR", "PR:DEL/delivery-api#7")])
+        changed = {**events[0], "activity": "pr_merged"}
+        self.spool.append(manifest=_manifest(), events=[changed], objects=objects,
+                          relations=[(events[0]["event_key"], "PR", "PR:DEL/delivery-api#7")])
+        carried = read_spool(self.spool.directory)
+        self.assertEqual(len(carried.events), 1)
+        self.assertEqual(carried.events[0]["activity"], "pr_merged")
+
+    def test_read_inflight_prefers_the_spool_over_a_partial_tgz(self):
+        events, objects, relations = _payload()
+        write_bundle(self.path, manifest=_manifest(), events=events, objects=objects,
+                     relations=relations)
+        self.assertIsNotNone(inflight_path(self.path))
+        self.assertFalse(inflight_path(self.path).is_dir())
+        self.spool.append(manifest=_manifest(), events=events[:1], objects=objects,
+                          relations=relations[:2])
+        self.assertEqual(inflight_path(self.path), self.spool.directory)
+        self.assertEqual(len(read_inflight(self.path).events), 1)
+
+    def test_a_corrupt_part_is_refused_rather_than_resumed(self):
+        events, objects, relations = _payload()
+        self.spool.append(manifest=_manifest(), events=events, objects=objects,
+                          relations=relations)
+        part = next(self.spool.directory.glob("part-*.events.jsonl"))
+        part.write_bytes(b"not json\n")
+        with self.assertRaises(BundleError):
+            read_spool(self.spool.directory)
+
+    def test_a_missing_spool_is_an_error_not_an_empty_run(self):
+        with self.assertRaises(BundleError):
+            read_spool(self.spool.directory)
+        with self.assertRaises(BundleError):
+            read_inflight(self.path)
+
+    def test_finish_removes_the_in_flight_rows(self):
+        events, objects, relations = _payload()
+        self.spool.append(manifest=_manifest(), events=events, objects=objects,
+                          relations=relations)
+        self.assertTrue(self.spool.directory.is_dir())
+        self.spool.finish()
+        self.assertFalse(self.spool.directory.exists())
+        self.assertIsNone(inflight_path(self.path))
+
+    def test_reset_discards_a_dead_run_s_rows(self):
+        events, objects, relations = _payload()
+        self.spool.append(manifest=_manifest(), events=events, objects=objects,
+                          relations=relations)
+        self.spool.reset()
+        self.assertFalse(self.spool.exists)
+        self.assertEqual(self.spool.append(
+            manifest=_manifest(), events=events[:1], objects=objects[:1],
+            relations=relations[:2],
+        )["events"], 1)
+
+    def test_resume_adopts_the_carried_rows_instead_of_staging_them_again(self):
+        events, objects, relations = _payload()
+        self.spool.append(manifest=_manifest(), events=events, objects=objects,
+                          relations=relations)
+        carried = read_spool(self.spool.directory)
+        resumed = BundleSpool(self.spool.directory)
+        resumed.resume(carried)
+        self.assertEqual(resumed.parts, self.spool.parts)  # nothing re-staged
+        again = resumed.append(manifest=_manifest(), events=carried.events,
+                               objects=carried.objects, relations=carried.relations)
+        self.assertEqual(again["bytes"], 0)
+
+    def test_resuming_into_a_different_output_stages_the_carried_rows_once(self):
+        events, objects, relations = _payload()
+        self.spool.append(manifest=_manifest(), events=events, objects=objects,
+                          relations=relations)
+        carried = read_spool(self.spool.directory)
+        other = BundleSpool(spool_dir(self.root / "export" / "other.tgz"))
+        other.resume(carried)
+        self.assertEqual(other.parts, 1)
+        self.assertEqual(other.events_written, len(events))
+        self.assertEqual(
+            sorted(e["event_key"] for e in read_spool(other.directory).events),
+            sorted(e["event_key"] for e in events),
+        )
+
+    def test_a_resumed_spool_continues_after_the_parts_a_dead_run_left(self):
+        """A new part index would overwrite the checkpoint that is being resumed."""
+        events, objects, relations = _payload()
+        self.spool.append(manifest=_manifest(), events=events[:1], objects=objects,
+                          relations=relations[:2])
+        first_part = next(self.spool.directory.glob("part-00001.events.jsonl"))
+        before = first_part.read_bytes()
+
+        resumed = BundleSpool(self.spool.directory)
+        self.assertEqual(resumed.parts, 1)
+        resumed.append(manifest=_manifest(), events=events, objects=objects,
+                       relations=relations)
+        self.assertEqual(resumed.parts, 2)
+        self.assertEqual(first_part.read_bytes(), before)  # the checkpoint survives
+        self.assertEqual(len(read_spool(self.spool.directory).events), len(events))
 
 
 if __name__ == "__main__":

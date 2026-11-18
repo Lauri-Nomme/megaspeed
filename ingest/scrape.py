@@ -87,14 +87,18 @@ scrape runs. Two guards help, neither is a substitute for that discipline:
   ``--state-dir`` will still race on ``watermark.json``/``prs.json``. Use one
   state dir per source and one scrape at a time.
 
-**A crash must not cost the whole run.** The bundle and the cursors are
+**A crash must not cost the whole run.** The bundle rows and the cursors are
 checkpointed as the walk progresses (``checkpoint_every`` PRs and at every repo
-boundary, :func:`scrape`), not only at the end. Order is deliberate: identity
-map, then bundle, then ``prs.json``, then ``watermark.json`` -- the last one is
-the commit marker (``complete: false``). A run that dies leaves a readable
-partial bundle plus ``complete: false``; the next run loads that bundle
-(``resumed: true``), skips the PRs the interrupted run already checkpointed, and
-finishes the walk instead of starting over.
+boundary, :func:`scrape`), not only at the end. A checkpoint is **incremental**:
+it stages only the rows added since the last one in ``<out>.parts/`` (an
+append-only spool, :class:`ingest.bundle.BundleSpool`), so its cost is
+proportional to the new work rather than to the bundle so far, and the tgz is
+built once when the run finishes. Order is deliberate: identity map, then the
+staged rows, then ``prs.json``, then ``watermark.json`` -- the last one is the
+commit marker (``complete: false``). A run that dies leaves a readable spool plus
+``complete: false``; the next run loads that checkpoint (``resumed: true``),
+skips the PRs the interrupted run already checkpointed, and finishes the walk
+instead of starting over.
 """
 
 from __future__ import annotations
@@ -746,14 +750,25 @@ def _newest_stamp(client, project: str, repo: str) -> datetime | None:
 def _merge_objects(carried: list[dict], fresh: list[dict]) -> list[dict]:
     """Resume merge: the rows of the interrupted bundle, then this run's rows.
 
-    This run's row wins for a shared ``object_id`` (it is the newer read of the
-    same object), so the merged set is exactly the union the final bundle needs.
+    This run's row wins over a carried one for a shared ``object_id`` (it is the
+    newer read of the same object), so the merged set is exactly the union the
+    final bundle needs.
+
+    The de-duplication runs even without a carry-over: the reducer can emit the
+    same id twice in one run (a stacked PR reports the commit its child branch
+    also reports, so the two rows disagree on ``pr_id``), and the store keeps the
+    **first** row it is handed for a natural key. Keeping one row per id -- first
+    wins inside this run -- therefore leaves the store's contents exactly as they
+    were, and it is what lets an incremental checkpoint stage each object once.
     """
+    merged: dict[str, dict] = {}
+    for row in fresh:
+        merged.setdefault(str(row["object_id"]), row)
     if not carried:
-        return list(fresh)
-    merged = {str(row["object_id"]): row for row in carried}
-    merged.update({str(row["object_id"]): row for row in fresh})
-    return list(merged.values())
+        return list(merged.values())
+    union = {str(row["object_id"]): row for row in carried}
+    union.update(merged)  # this run's row wins over the carried one
+    return list(union.values())
 
 
 def _updated_stamp(row: dict) -> datetime | None:
@@ -1018,10 +1033,9 @@ def _merge_events(carried: list[dict], fresh: list[dict]) -> list[dict]:
 
     This run's row wins for a shared ``event_key`` (identical content in
     practice); the union is what the final bundle must carry, because the
-    checkpointed bundle was never imported.
+    checkpointed bundle was never imported. One row per key -- also the shape an
+    incremental checkpoint needs to stage each event exactly once.
     """
-    if not carried:
-        return list(fresh)
     merged = {str(event["event_key"]): event for event in carried}
     merged.update({str(event["event_key"]): event for event in fresh})
     return list(merged.values())
@@ -1096,14 +1110,17 @@ def scrape(
     local Ollama box for a live run, ``None`` when ``cfg.text_classify`` is off.
     Raw text never crosses into the bundle -- only the labels do.
 
-    **Crash safety.** The bundle, the identity map and both cursors are
-    checkpointed every ``checkpoint_every`` kept PRs and at every repo boundary
-    (``0`` disables, giving the old end-of-run-only behaviour). The write order
-    is identity -> bundle -> ``prs.json`` -> ``watermark.json``, and
+    **Crash safety.** The identity map, the rows added since the last checkpoint
+    and both cursors are checkpointed every ``checkpoint_every`` kept PRs and at
+    every repo boundary (``0`` disables, giving the old end-of-run-only
+    behaviour). A checkpoint stages only the **delta** in ``<out>.parts/`` and
+    the tgz is written once at the end, so checkpoints stay cheap however large
+    the bundle grows (:class:`ingest.bundle.BundleSpool`). The write order is
+    identity -> staged rows -> ``prs.json`` -> ``watermark.json``, and
     ``watermark.json`` is the commit marker (``complete: false`` until the final
     bundle lands). If the run dies, the next call with the same ``--state-dir``
-    resumes: it reads the checkpointed bundle back, carries its rows into the
-    new bundle, and skips the PRs the interrupted run already read (matched by
+    resumes: it reads the checkpointed rows back, carries them into the new
+    bundle, and skips the PRs the interrupted run already read (matched by
     ``run_id`` + ``updatedDate``). The report says so via ``resumed``.
 
     **Quiescence.** ``verify_quiet`` (default: on for a live source, off for a
@@ -1153,18 +1170,22 @@ def scrape(
     )
     quiet_check = (source not in ("fixture", "hans")) if verify_quiet is None else bool(verify_quiet)
     prior_repo_entries = state.repo_entries(source)
+    # Crash safety is incremental (see ``checkpoint``): the in-flight rows are
+    # staged in ``<out>.parts/`` and the tgz is written once, at the end.
+    spool = bundle_mod.BundleSpool(bundle_mod.spool_dir(out))
 
     # -- resume an interrupted run (module docstring "crash safety") --------
     resume_run_id: str | None = None
     resume_bundle: Path | None = None
+    carried_bundle: bundle_mod.Bundle | None = None
     carry_events: list[dict] = []
     carry_objects: list[dict] = []
     if not full and state.incomplete(source):
         resume_run_id = state.last_run_id(source)
         resume_bundle = state.last_bundle_path(source) or out
-        if resume_bundle.is_file():
+        if bundle_mod.inflight_path(resume_bundle) is not None:
             try:
-                carried = bundle_mod.read_bundle(resume_bundle)
+                carried = bundle_mod.read_inflight(resume_bundle)
             except bundle_mod.BundleError as exc:
                 reporter.emit(f"[scrape] cannot resume from {resume_bundle}: {exc}")
                 resume_run_id, resume_bundle = None, None
@@ -1176,12 +1197,18 @@ def scrape(
                     )
                     resume_run_id, resume_bundle = None, None
                 else:
+                    carried_bundle = carried
                     carry_events, carry_objects = carried.events, carried.objects
                     reporter.emit(
                         f"[scrape] resuming interrupted run {resume_run_id}"
                         f" from {resume_bundle}: carrying {len(carry_events)} event(s),"
                         f" {len(carry_objects)} object(s)"
                     )
+    if carried_bundle is None:
+        # A fresh run: never let a dead run's staged rows leak into this bundle.
+        spool.reset()
+    else:
+        spool.resume(carried_bundle)
 
     previous = None if full else state.watermark(source)
     # FR-1: the overlap cutoff is for PRs whose history is already in the store.
@@ -1229,7 +1256,15 @@ def scrape(
         return entries
 
     def checkpoint(collected_now: Collected, completed: list[str], current: str | None) -> None:
-        """Persist identity + a valid partial bundle + both cursors, mid-run."""
+        """Persist identity + the new rows + both cursors, mid-run.
+
+        Incremental on purpose: only the rows added since the last checkpoint are
+        staged (``<out>.parts/``), never the whole bundle re-serialised, and the
+        tgz is written once when the run finishes (see
+        :class:`ingest.bundle.BundleSpool`). The crash-resume contract is
+        unchanged -- a run that dies still leaves a readable checkpoint that the
+        next run resumes from.
+        """
         events_now = _emitted_events(collected_now)
         emitted = max((e["ts"] for e in events_now), default=None)
         watermark_now = max((w for w in (previous, emitted) if w is not None), default=None)
@@ -1247,9 +1282,11 @@ def scrape(
         # never lag behind a bundle that mentions them.
         if collected_now.identity is not None:
             collected_now.identity.save()
-        _write_bundle_atomic(
-            out, manifest=manifest, events=events_now,
-            objects=collected_now.objects, relations=collected_now.relations,
+        spool.append(
+            manifest=manifest,
+            events=events_now,
+            objects=collected_now.objects,
+            relations=collected_now.relations,
         )
         pr_state.save()
         state.record(
@@ -1308,6 +1345,9 @@ def scrape(
         ref_digest_key_id=ref_digest_key_id,
     )
     state.save()
+    # The tgz is durable and the state file says the run is complete: the
+    # in-flight rows have done their job.
+    spool.finish()
     partial = partial_report(collected, prior_repo_entries)
 
     return {
@@ -1321,6 +1361,8 @@ def scrape(
         "state_dir": str(state_dir),
         "pr_state": str(state_dir / PR_STATE_FILE),
         "identity_map": str(ident_path),
+        # Where the incremental checkpoints were staged (removed on success).
+        "checkpoint_spool": str(spool.directory),
         # SEC-1: the raw-zone pepper path + a non-reversible id for it. Neither
         # the pepper nor anything derived from it beyond the id is reported.
         "ref_digest_pepper": str(pepper_path),

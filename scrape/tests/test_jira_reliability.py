@@ -29,7 +29,7 @@ import unittest
 from pathlib import Path
 
 from ingest import jira_fixtures
-from ingest.bundle import read_bundle
+from ingest.bundle import read_bundle, read_inflight
 from ingest.config import Config
 from ingest.progress import ProgressReporter
 from ingest.scrape_jira import ISSUE_STATE_FILE, scrape
@@ -226,9 +226,11 @@ class CheckpointResumeTests(_Base):
     def test_a_crash_mid_scrape_resumes_without_re_reading_checkpointed_issues(self):
         self.crash()
 
-        # The crash left a *readable* partial bundle and an explicit "unfinished"
-        # marker, and every issue it read has its events on disk.
-        checkpoint = read_bundle(self.out)
+        # The crash left a *readable* in-flight checkpoint (the incremental
+        # spool; the tgz is written once, when the run finishes) and an explicit
+        # "unfinished" marker, and every issue it read has its events staged.
+        self.assertFalse(self.out.exists())
+        checkpoint = read_inflight(self.out)
         self.assertTrue(checkpoint.manifest["run"]["checkpoint"])
         checkpointed = _issue_keys(checkpoint)
         self.assertEqual(checkpointed, {"PROJ-111", "PROJ-112", "PROJ-1", "PROJ-103"})
@@ -292,6 +294,8 @@ class CheckpointResumeTests(_Base):
         state = self.state()
         self.assertIs(state["complete"], True)
         self.assertEqual(state["runs"], 1)  # one run, not N checkpoints
+        # The in-flight spool is gone once the tgz is durable.
+        self.assertFalse(Path(report["checkpoint_spool"]).exists())
 
     def test_checkpointing_can_be_disabled(self):
         report = self.ingest(checkpoint_every=0)
