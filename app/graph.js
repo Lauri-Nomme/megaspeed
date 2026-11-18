@@ -4,15 +4,18 @@
  * item over, Y is the party that held the ball). Thickness ∝ hours. Direction is
  * read from colour relative to the hovered/selected node:
  *
- *   teal  #3CB4AA — who this node waits on (outbound)
- *   amber #D9A24E — who is waiting on this node (inbound)
+ *   --dir-waits-on  teal  — who this node waits on (outbound)
+ *   --dir-waited-by amber — who is waiting on this node (inbound)
  *
  * The layout is deterministic and independent of the lens: switching lens
  * recolours the same positions (prd/10 §6 "lenses recolor without relayout").
+ * Every colour is a theme token (app/theme.js), so a theme switch is the same
+ * kind of recolour.
  */
 
 import { fmtHours, esc, rgba } from './format.js';
 import { touchAxis } from './mobile.js';
+import { color, onPalette, rgbOf } from './theme.js';
 
 function lensText(lens, value) {
   if (lens.unit === 'h') return fmtHours(value);
@@ -20,12 +23,49 @@ function lensText(lens, value) {
   return String(Math.round(Number(value) || 0));
 }
 
-const TEAL = '#3CB4AA';
-const AMBER = '#D9A24E';
-const EDGE = 'rgba(70,160,200,.30)';
-const LABEL = '#E8E9EB';
-const MUTED = '#8A8D93';
-const NODE_FILL = '#191C29';
+/* The palette this renderer draws with, resolved from the theme tokens. */
+const C = {
+  teal: '', amber: '', edge: '', label: '', muted: '', nodeFill: '', strong: '',
+  edgeDim: '', edgeLegend: '', dimRing: '', dimArc: '', person: '', queue: '',
+  faint: '', faintest: '',
+};
+
+const ROLE_TOKEN = {
+  author: '--cat-3',
+  review: '--info-accent',
+  sentinel: '--cat-5',
+  CI: '--cat-2',
+  calendar: '--cat-7',
+};
+
+/** Role hues, resolved from tokens by `applyPalette()`. */
+export const ROLE_COLOR = {};
+
+const LENS_STOPS = [
+  '--lens-1', '--lens-2', '--lens-3', '--lens-4', '--lens-5', '--lens-6', '--lens-7',
+];
+
+/** Resolve the map's colours from the theme tokens (dark fallbacks first). */
+export function applyPalette() {
+  C.teal = color('--dir-waits-on');
+  C.amber = color('--dir-waited-by');
+  C.edge = color('--canvas-edge');
+  C.label = color('--canvas-strong');
+  C.muted = color('--canvas-muted');
+  C.nodeFill = color('--canvas-node-fill');
+  C.strong = color('--canvas-label');
+  C.edgeDim = color('--canvas-edge-dim');
+  C.edgeLegend = color('--canvas-edge-legend');
+  C.dimRing = color('--canvas-dim-ring');
+  C.dimArc = color('--canvas-dim-arc');
+  C.person = color('--canvas-label');
+  C.queue = color('--canvas-region-label');
+  C.faint = color('--canvas-faint');
+  C.faintest = color('--canvas-faintest');
+  for (const [role, token] of Object.entries(ROLE_TOKEN)) ROLE_COLOR[role] = color(token);
+}
+onPalette(applyPalette);
+
 // 13 + 15 * sqrt(1); the collision pass uses this constant instead of the
 // per-lens radius so a lens switch recolours without relayout.
 const MAX_RADIUS = 28;
@@ -38,20 +78,9 @@ export const LENSES = {
   mean: { label: 'mean wait', hint: 'mean hours per measured wait', value: (n) => (n.count ? n.hours / n.count : 0), unit: 'h' },
 };
 
-const ROLE_COLOR = {
-  author: '#B565E8',
-  review: '#63B1FF',
-  sentinel: '#E8B84A',
-  CI: '#53C9DF',
-  calendar: '#8A8D93',
-};
-
 function lensColor(t) {
   // blue → teal → green → amber → red, the reserved lens gradient
-  const stops = [
-    [31, 58, 102], [40, 120, 164], [60, 180, 156],
-    [156, 212, 90], [242, 193, 78], [240, 138, 60], [232, 69, 90],
-  ];
+  const stops = LENS_STOPS.map((token) => rgbOf(color(token)) || [138, 141, 147]);
   const clamped = Math.max(0, Math.min(1, t));
   const pos = clamped * (stops.length - 1);
   const i = Math.min(stops.length - 2, Math.floor(pos));
@@ -325,15 +354,15 @@ export class BlockingMap {
     const ctx = this.ctx;
     const g = this.geometry();
     ctx.clearRect(0, 0, g.width, g.height);
-    ctx.fillStyle = '#151924';
+    ctx.fillStyle = color('--canvas-bg');
     ctx.fillRect(0, 0, g.width, g.height);
 
     if (!this.nodes.length) {
-      ctx.fillStyle = '#8A8D93';
+      ctx.fillStyle = C.muted;
       ctx.font = '500 12px Inter, system-ui, sans-serif';
       ctx.textAlign = 'center';
       ctx.fillText('No measured handover in this window.', g.width / 2, g.height / 2 - 8);
-      ctx.fillStyle = '#6B6F76';
+      ctx.fillStyle = C.faint;
       ctx.font = '500 11px "JetBrains Mono", ui-monospace, monospace';
       ctx.fillText('widen the timeframe, or wait for more events', g.width / 2, g.height / 2 + 12);
       this.hits = [];
@@ -357,11 +386,11 @@ export class BlockingMap {
       const a = this.nodePos(edge.a, g);
       const b = this.nodePos(edge.b, g);
       const weight = Math.sqrt(edge.hours / Math.max(1, ...this.edges.map((e) => e.hours)));
-      let color = EDGE;
+      let edgeColor = C.edge;
       if (focus) {
-        if (edge.from === focus) color = rgba(TEAL, 0.85);
-        else if (edge.to === focus) color = rgba(AMBER, 0.85);
-        else color = 'rgba(120,130,150,.12)';
+        if (edge.from === focus) edgeColor = rgba(C.teal, 0.85);
+        else if (edge.to === focus) edgeColor = rgba(C.amber, 0.85);
+        else edgeColor = C.edgeDim;
       }
       // stop the line at the rings so the arrowhead is never hidden by a node
       const ra = (edge.a._r || 14) + 4;
@@ -375,7 +404,7 @@ export class BlockingMap {
       // a slight bow keeps reciprocal edges apart
       const mx = (x0 + x1) / 2 + (y1 - y0) * 0.08;
       const my = (y0 + y1) / 2 - (x1 - x0) * 0.08;
-      ctx.strokeStyle = color;
+      ctx.strokeStyle = edgeColor;
       ctx.lineWidth = 1 + weight * 6;
       ctx.beginPath();
       ctx.moveTo(x0, y0);
@@ -384,7 +413,7 @@ export class BlockingMap {
       // arrowhead at the target end, along the curve's tangent
       const angle = Math.atan2(y1 - my, x1 - mx);
       const size = 8 + weight * 6;
-      ctx.fillStyle = color;
+      ctx.fillStyle = edgeColor;
       ctx.beginPath();
       ctx.moveTo(x1 + ux * 2, y1 + uy * 2);
       ctx.lineTo(x1 - size * Math.cos(angle - 0.42), y1 - size * Math.sin(angle - 0.42));
@@ -403,7 +432,7 @@ export class BlockingMap {
       const p = this.nodePos(node, g);
       const value = values[index] || 0;
       const radius = node._r;
-      const roleColor = ROLE_COLOR[node.id] || (node.kind === 'person' ? '#B9BBC0' : '#8C98D4');
+      const roleColor = ROLE_COLOR[node.id] || (node.kind === 'person' ? C.person : C.queue);
       const isFocus = focus === node.id;
       const dimmed = focus && !isFocus && !this.edges.some(
         (e) => (e.from === focus && e.to === node.id) || (e.to === focus && e.from === node.id),
@@ -411,26 +440,26 @@ export class BlockingMap {
 
       ctx.beginPath();
       ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
-      ctx.fillStyle = NODE_FILL;
+      ctx.fillStyle = C.nodeFill;
       ctx.fill();
       ctx.lineWidth = isFocus ? 2.5 : 1.5;
-      ctx.strokeStyle = dimmed ? 'rgba(255,255,255,.12)' : lensColor(value / maxValue);
+      ctx.strokeStyle = dimmed ? C.dimRing : lensColor(value / maxValue);
       ctx.stroke();
       // role tick: a small arc in the category hue, so state never rides on
       // the lens colour alone
       ctx.beginPath();
       ctx.arc(p.x, p.y, radius + 4, -Math.PI * 0.9, -Math.PI * 0.1);
-      ctx.strokeStyle = dimmed ? 'rgba(255,255,255,.06)' : roleColor;
+      ctx.strokeStyle = dimmed ? C.dimArc : roleColor;
       ctx.lineWidth = 2;
       ctx.stroke();
 
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.font = '600 12px Inter, system-ui, sans-serif';
-      ctx.fillStyle = dimmed ? '#6B6F76' : LABEL;
+      ctx.fillStyle = dimmed ? C.faint : C.label;
       ctx.fillText(node.id, p.x, p.y - 1);
       ctx.font = '500 10px "JetBrains Mono", ui-monospace, monospace';
-      ctx.fillStyle = dimmed ? '#4E5258' : MUTED;
+      ctx.fillStyle = dimmed ? C.faintest : C.muted;
       ctx.fillText(`${lens.value(node).toFixed(lens.unit === 'h/d' ? 1 : 0)}${lens.unit}`, p.x, p.y + radius + 13);
 
       this.hits.push({ kind: 'node', node, x: p.x, y: p.y, r: radius + 6 });
@@ -443,27 +472,27 @@ export class BlockingMap {
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
     ctx.font = '600 11px Inter, system-ui, sans-serif';
-    ctx.fillStyle = '#8A8D93';
+    ctx.fillStyle = C.muted;
     ctx.fillText('LEGEND', 18, g.height - 62);
     ctx.font = '500 10.5px "JetBrains Mono", ui-monospace, monospace';
     const lines = [
-      [TEAL, 'waits on (outbound)'],
-      [AMBER, 'waited on by (inbound)'],
-      ['rgba(120,130,150,.9)', 'thickness ∝ measured wait'],
+      [C.teal, 'waits on (outbound)'],
+      [C.amber, 'waited on by (inbound)'],
+      [C.edgeLegend, 'thickness ∝ measured wait'],
     ];
     lines.forEach(([color, text], i) => {
       const y = g.height - 46 + i * 14;
       ctx.fillStyle = color;
       ctx.fillRect(18, y - 7, 14, 2);
-      ctx.fillStyle = '#B9BBC0';
+      ctx.fillStyle = C.strong;
       ctx.fillText(text, 38, y - 2);
     });
     // lens caption, top-left
     ctx.font = '600 10px Inter, system-ui, sans-serif';
-    ctx.fillStyle = '#8A8D93';
+    ctx.fillStyle = C.muted;
     ctx.fillText(`LENS · ${lens.label.toUpperCase()}`, 18, 20);
     ctx.font = '500 11px "JetBrains Mono", ui-monospace, monospace';
-    ctx.fillStyle = '#B9BBC0';
+    ctx.fillStyle = C.strong;
     ctx.fillText('ring colour = lens value · arc = role', 18, 34);
   }
 

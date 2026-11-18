@@ -16,6 +16,7 @@
 import { fmtAbsolute, esc } from './format.js';
 import { PHASE } from './timeline.js';
 import { ticketHref } from './tickets.js';
+import { color, onPalette } from './theme.js';
 
 /* The PR-gantt vocabulary (PHASE) covers waiting / active / review / closed;
  * the five story-only segments extend it with their own hues, in lifecycle
@@ -23,19 +24,25 @@ import { ticketHref } from './tickets.js';
  * scheduled, amber = committed but not started, purple = work, blues = review,
  * green = approval/merge. */
 export const SEGMENT_PHASE = {
-  ready_refined: { color: '#8A8D93', phase: 'waiting', label: 'backlog' },
-  refined_sprint: { color: '#53C9DF', phase: 'waiting', label: 'unscheduled' },
-  sprint_in_progress: { color: '#E8B84A', phase: 'waiting', label: 'committed' },
-  in_progress_pr_open: { color: '#B565E8', phase: 'active', label: 'in progress' },
-  pr_open_first_review: { color: '#63B1FF', phase: 'review', label: 'in review' },
-  review_rounds: { color: '#238FF9', phase: 'review', label: 'review rounds' },
-  final_approval_merge: { color: '#73CF55', phase: 'review', label: 'merge' },
-  merge_done: { color: '#70747B', phase: 'closed', label: 'done' },
+  ready_refined: { token: '--cat-7', color: '', phase: 'waiting', label: 'backlog' },
+  refined_sprint: { token: '--cat-2', color: '', phase: 'waiting', label: 'unscheduled' },
+  sprint_in_progress: { token: '--cat-5', color: '', phase: 'waiting', label: 'committed' },
+  in_progress_pr_open: { token: '--phase-active', color: '', phase: 'active', label: 'in progress' },
+  pr_open_first_review: { token: '--phase-review', color: '', phase: 'review', label: 'in review' },
+  review_rounds: { token: '--series-default', color: '', phase: 'review', label: 'review rounds' },
+  final_approval_merge: { token: '--cat-1', color: '', phase: 'review', label: 'merge' },
+  merge_done: { token: '--phase-unobserved', color: '', phase: 'closed', label: 'done' },
   // prd/29: the verification split, with the two workflow-stage hues from the
   // shared phase vocabulary (a merged PR waiting for QA, and the QA time).
-  merge_verification: { color: PHASE.in_review.color, phase: 'review', label: 'awaiting verification' },
-  verification_done: { color: PHASE.in_verification.color, phase: 'review', label: 'in verification' },
+  merge_verification: { token: '--phase-in-review', color: '', phase: 'review', label: 'awaiting verification' },
+  verification_done: { token: '--phase-in-verification', color: '', phase: 'review', label: 'in verification' },
 };
+
+/** Resolve the segment hues from the theme tokens (dark fallbacks first). */
+export function applyPalette() {
+  for (const phase of Object.values(SEGMENT_PHASE)) phase.color = color(phase.token);
+}
+onPalette(applyPalette);
 
 export function segmentPhase(key) {
   return SEGMENT_PHASE[key] || SEGMENT_PHASE.ready_refined;
@@ -218,10 +225,10 @@ export function worklogBlock(payload) {
   return `
     <div class="worklog-bars">
       <div class="worklog-row"><span class="k">logged</span>
-        <span class="worklog-track"><i style="width:${(logged / max) * 100}%;background:#53C9DF"></i></span>
+        <span class="worklog-track"><i style="width:${(logged / max) * 100}%;background:${color('--cat-2')}"></i></span>
         <b class="num">${esc(segmentHours(logged))}</b></div>
       <div class="worklog-row"><span class="k">active (PR)</span>
-        <span class="worklog-track"><i style="width:${(active / max) * 100}%;background:#B565E8"></i></span>
+        <span class="worklog-track"><i style="width:${(active / max) * 100}%;background:${color('--cat-3')}"></i></span>
         <b class="num">${esc(segmentHours(active))}</b></div>
     </div>
     <dl class="facts">

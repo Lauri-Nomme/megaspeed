@@ -100,7 +100,7 @@ test('P-2: #ticket/KEY still resolves, alone and inside the new scheme', () => {
 
 test('P-2: unknown or absent parameters are ignored, not trusted', () => {
   assert.deepEqual(parseRoute('', ''), {
-    tenant: null, view: null, ticket: null, timeframe: null, scope: null,
+    tenant: null, view: null, ticket: null, timeframe: null, scope: null, theme: null,
   });
   assert.equal(parseRoute('?view=bogus', '').view, null);
   assert.equal(parseRoute('?tenant=del', '').view, null);

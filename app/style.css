@@ -4,6 +4,12 @@
  * not #606165, because #606165 measures 2.79:1 on the app ground and 2.84:1 on
  * the canvas ground (docs/QA-UI-REPORT.md B8). Section labels and axis ticks are
  * important text; they need 4.5:1.
+ *
+ * THEMES (prd/10 §3.1). `:root` is the dark palette — the default, and the one
+ * the craft is in. `[data-theme="light"]` below re-points the same names, so a
+ * component never knows which theme is on: it asks for a token. Every colour in
+ * this file and every canvas colour in app/*.js goes through a token; the only
+ * literals are in these two blocks (app/test/theme.test.mjs guards both).
  */
 :root {
   --bg-app: #191B1C;
@@ -21,15 +27,58 @@
 
   --canvas-bg: #151924;
   --canvas-overlay: rgba(22, 24, 37, .92);
+  --canvas-veil: rgba(21, 25, 36, .6);
   --canvas-edge: rgba(70, 160, 200, .30);
   --canvas-region-label: #8C98D4;
+  --canvas-hairline: rgba(255, 255, 255, .06);
+  --canvas-axis-line: rgba(255, 255, 255, .08);
+  --canvas-grid-major: rgba(255, 255, 255, .10);
+  --canvas-grid-minor: rgba(255, 255, 255, .045);
+  --canvas-grid-faint: rgba(255, 255, 255, .05);
+  --canvas-weekend: rgba(255, 255, 255, .022);
+  --canvas-night: rgba(0, 0, 0, .18);
+  --canvas-row: rgba(255, 255, 255, .012);
+  --canvas-row-rule: rgba(255, 255, 255, .035);
+  --canvas-row-hover: rgba(99, 177, 255, .07);
+  --canvas-row-hover-soft: rgba(255, 255, 255, .025);
+  --canvas-row-selected: rgba(99, 177, 255, .08);
+  --canvas-strong: #E8E9EB;
+  --canvas-label: #B9BBC0;
+  --canvas-muted: #8A8D93;
+  --canvas-faint: #6B6F76;
+  --canvas-faintest: #4E5258;
+  --canvas-bucket: rgba(232, 233, 235, .16);
+  --canvas-bucket-strong: rgba(232, 233, 235, .5);
+  --canvas-mean: rgba(232, 233, 235, .22);
+  --canvas-band: rgba(140, 152, 212, .055);
+  --canvas-band-alt: rgba(140, 152, 212, .022);
+  --canvas-spine: rgba(140, 152, 212, .30);
+  --canvas-epic: rgba(140, 152, 212, .16);
+  --canvas-epic-edge: rgba(140, 152, 212, .65);
+  --canvas-baseline: rgba(138, 141, 147, .28);
+  --canvas-hist: rgba(99, 177, 255, .55);
+  --canvas-hist-weak: rgba(99, 177, 255, .30);
+  --canvas-brush-veil: rgba(104, 192, 252, .14);
+  --canvas-brush: rgba(104, 192, 252, .35);
+  --canvas-brush-idle: rgba(104, 192, 252, .22);
+  --canvas-brush-edge: rgba(104, 192, 252, .7);
+  --canvas-node-fill: #191C29;
+  --canvas-edge-dim: rgba(120, 130, 150, .12);
+  --canvas-edge-legend: rgba(120, 130, 150, .9);
+  --canvas-dim-ring: rgba(255, 255, 255, .12);
+  --canvas-dim-arc: rgba(255, 255, 255, .06);
+  --canvas-plan-line: rgba(251, 205, 88, .45);
+  --canvas-carry: rgba(251, 205, 88, .9);
 
   --critical: #F05C70;
   --critical-tint: #47282F;
   --critical-border: #A02C4C;
+  --critical-veil: rgba(240, 92, 112, .14);
   --warning: #FBCD58;
   --warning-tint: #3D3524;
+  --warning-veil: rgba(251, 205, 88, .14);
   --healthy: #73CF55;
+  --healthy-veil: rgba(115, 207, 85, .12);
   --info-accent: #63B1FF;
   --info-bg: #252B31;
 
@@ -37,7 +86,35 @@
   --link-strong: #7FB0EA;
   --primary-tint-bg: #1B3046;
   --primary-tint-fg: #68C0FC;
+  --primary-tint-hover: #22384F;
   --focus-ring: #68C0FC;
+
+  /* low-alpha washes and hairlines, so a theme only re-points a name */
+  --accent-line: rgba(104, 192, 252, .35);
+  --accent-line-soft: rgba(104, 192, 252, .18);
+  --accent-line-faint: rgba(104, 192, 252, .28);
+  --accent-line-strong: rgba(104, 192, 252, .45);
+  --accent-key: rgba(104, 192, 252, .72);
+  --accent-veil: rgba(104, 192, 252, .14);
+  --warning-line: rgba(251, 205, 88, .3);
+  --warning-line-strong: rgba(251, 205, 88, .35);
+  --warning-line-dash: rgba(251, 205, 88, .4);
+  --warning-wash: rgba(251, 205, 88, .045);
+  --critical-line: rgba(240, 92, 112, .35);
+  --critical-wash: rgba(240, 92, 112, .06);
+  --healthy-line: rgba(115, 207, 85, .25);
+  --healthy-tint: rgba(115, 207, 85, .1);
+  --healthy-wash: rgba(115, 207, 85, .05);
+  --info-wash: rgba(99, 177, 255, .035);
+  --select-wash: rgba(99, 177, 255, .09);
+  --select-wash-strong: rgba(99, 177, 255, .12);
+  --hatch-line: rgba(255, 255, 255, .14);
+  --hatch-line-strong: rgba(255, 255, 255, .10);
+  --hatch-line-soft: rgba(255, 255, 255, .05);
+  --seg-ink: rgba(0, 0, 0, .62);
+  --scrim-bg: rgba(0, 0, 0, .55);
+  --scroll-thumb: rgba(140, 152, 212, .35);
+  --scroll-thumb-soft: rgba(140, 152, 212, .30);
 
   /* direction pair: reserved, never reused for category or phase */
   --dir-waits-on: #3CB4AA;
@@ -50,6 +127,30 @@
   --cat-5: #E8B84A;
   --cat-6: #C04B56;
   --cat-7: #8A8D93;
+
+  --series-default: #238FF9;
+  --series-warning: #FBCD58;
+  --series-error: #F15D71;
+
+  /* the reserved lens gradient (prd/10 §3.2), as stops a canvas interpolates */
+  --lens-1: #1F3A66;
+  --lens-2: #2878A4;
+  --lens-3: #3CB49C;
+  --lens-4: #9CD45A;
+  --lens-5: #F2C14E;
+  --lens-6: #F08A3C;
+  --lens-7: #E8455A;
+
+  /* phase vocabulary: the timeline gantt and the ticket segment bar */
+  --phase-waiting: #E8B84A;
+  --phase-active: #B565E8;
+  --phase-review: #63B1FF;
+  --phase-ci: #53C9DF;
+  --phase-rebasing: #E25AB5;
+  --phase-closed: #8A8D93;
+  --phase-unobserved: #70747B;
+  --phase-in-review: #4C8DFF;
+  --phase-in-verification: #2FBFA0;
 
   --radius-control: 6px;
   --radius-popover: 8px;
@@ -69,6 +170,153 @@
   --rule-action: 12.5px;
   --stat-n: 17px;
   --topbar-h: 40px;
+}
+
+/* --- light theme (prd/10 §3.1) -----------------------------------------
+ * Not an inversion: the graphite ground becomes paper, the navy canvas becomes
+ * a pale blue-grey, and every hue is re-picked at the darkness that keeps
+ * ≥ 4.5:1 on the new ground. Structure stays neutral; colour still means
+ * state, encoding, interactivity or category — and nothing else.
+ */
+[data-theme="light"] {
+  --bg-app: #F3F5F8;
+  --bg-sidebar: #EAEDF2;
+  --bg-surface: #FFFFFF;
+  --bg-surface-raised: #F7F9FB;
+  --bg-hover: #E2E7ED;
+  --bg-control: #FFFFFF;
+  --bg-control-active: #DCE3EA;
+  --border-hairline: rgba(20, 30, 45, .10);
+  --border-control: #C3CAD3;
+  --text-primary: #1A1E24;
+  --text-secondary: #4B545F;
+  --text-tertiary: #5C6672;
+  --popover-bg: #FFFFFF;
+
+  --canvas-bg: #EFF3F8;
+  --canvas-overlay: rgba(255, 255, 255, .96);
+  --canvas-veil: rgba(239, 243, 248, .72);
+  --canvas-edge: rgba(30, 105, 145, .35);
+  --canvas-region-label: #4A5490;
+  --canvas-hairline: rgba(20, 30, 45, .12);
+  --canvas-axis-line: rgba(20, 30, 45, .16);
+  --canvas-grid-major: rgba(20, 30, 45, .16);
+  --canvas-grid-minor: rgba(20, 30, 45, .08);
+  --canvas-grid-faint: rgba(20, 30, 45, .09);
+  --canvas-weekend: rgba(20, 30, 45, .035);
+  --canvas-night: rgba(20, 30, 45, .055);
+  --canvas-row: rgba(20, 30, 45, .028);
+  --canvas-row-rule: rgba(20, 30, 45, .07);
+  --canvas-row-hover: rgba(20, 96, 168, .08);
+  --canvas-row-hover-soft: rgba(20, 30, 45, .04);
+  --canvas-row-selected: rgba(20, 96, 168, .10);
+  --canvas-strong: #1A1E24;
+  --canvas-label: #3A434E;
+  --canvas-muted: #5C6672;
+  --canvas-faint: #5F6A77;
+  --canvas-faintest: #8A929C;
+  --canvas-bucket: rgba(26, 30, 36, .18);
+  --canvas-bucket-strong: rgba(26, 30, 36, .5);
+  --canvas-mean: rgba(26, 30, 36, .35);
+  --canvas-band: rgba(60, 80, 140, .07);
+  --canvas-band-alt: rgba(60, 80, 140, .035);
+  --canvas-spine: rgba(60, 80, 140, .35);
+  --canvas-epic: rgba(60, 80, 140, .16);
+  --canvas-epic-edge: rgba(60, 80, 140, .65);
+  --canvas-baseline: rgba(70, 80, 95, .35);
+  --canvas-hist: rgba(22, 104, 196, .60);
+  --canvas-hist-weak: rgba(22, 104, 196, .32);
+  --canvas-brush-veil: rgba(22, 104, 196, .10);
+  --canvas-brush: rgba(22, 104, 196, .20);
+  --canvas-brush-idle: rgba(22, 104, 196, .12);
+  --canvas-brush-edge: rgba(22, 104, 196, .65);
+  --canvas-node-fill: #FFFFFF;
+  --canvas-edge-dim: rgba(80, 95, 115, .18);
+  --canvas-edge-legend: rgba(80, 95, 115, .85);
+  --canvas-dim-ring: rgba(20, 30, 45, .18);
+  --canvas-dim-arc: rgba(20, 30, 45, .10);
+  --canvas-plan-line: rgba(150, 100, 0, .50);
+  --canvas-carry: rgba(150, 100, 0, .9);
+
+  --critical: #B3263C;
+  --critical-tint: #FBE7EA;
+  --critical-border: #E0A3AC;
+  --critical-veil: rgba(179, 38, 60, .14);
+  --warning: #8A5F00;
+  --warning-tint: #FBF0D5;
+  --warning-veil: rgba(138, 95, 0, .14);
+  --healthy: #2C7028;
+  --healthy-veil: rgba(44, 112, 40, .14);
+  --info-accent: #1668C4;
+  --info-bg: #E7EFFA;
+
+  --link: #2B5F8E;
+  --link-strong: #1D4A73;
+  --primary-tint-bg: #E3EEFB;
+  --primary-tint-fg: #145C9E;
+  --primary-tint-hover: #D3E4F7;
+  --focus-ring: #1668C4;
+
+  --accent-line: rgba(20, 92, 158, .35);
+  --accent-line-soft: rgba(20, 92, 158, .18);
+  --accent-line-faint: rgba(20, 92, 158, .28);
+  --accent-line-strong: rgba(20, 92, 158, .45);
+  --accent-key: rgba(20, 92, 158, .72);
+  --accent-veil: rgba(20, 92, 158, .12);
+  --warning-line: rgba(138, 95, 0, .35);
+  --warning-line-strong: rgba(138, 95, 0, .40);
+  --warning-line-dash: rgba(138, 95, 0, .45);
+  --warning-wash: rgba(138, 95, 0, .06);
+  --critical-line: rgba(179, 38, 60, .35);
+  --critical-wash: rgba(179, 38, 60, .06);
+  --healthy-line: rgba(44, 112, 40, .30);
+  --healthy-tint: rgba(44, 112, 40, .12);
+  --healthy-wash: rgba(44, 112, 40, .06);
+  --info-wash: rgba(22, 104, 196, .05);
+  --select-wash: rgba(22, 104, 196, .10);
+  --select-wash-strong: rgba(22, 104, 196, .14);
+  --hatch-line: rgba(20, 30, 45, .18);
+  --hatch-line-strong: rgba(20, 30, 45, .14);
+  --hatch-line-soft: rgba(20, 30, 45, .08);
+  --seg-ink: rgba(255, 255, 255, .95);
+  --scrim-bg: rgba(20, 30, 45, .38);
+  --scroll-thumb: rgba(60, 80, 140, .30);
+  --scroll-thumb-soft: rgba(60, 80, 140, .25);
+
+  --dir-waits-on: #0F6F68;
+  --dir-waited-by: #8C5A0C;
+
+  --cat-1: #2C7028;
+  --cat-2: #0F6F7E;
+  --cat-3: #6B2FA0;
+  --cat-4: #A32B7A;
+  --cat-5: #8A5F00;
+  --cat-6: #A33340;
+  --cat-7: #5C6672;
+
+  --series-default: #1668C4;
+  --series-warning: #8A5F00;
+  --series-error: #B3263C;
+
+  --lens-1: #33517F;
+  --lens-2: #2A6C8C;
+  --lens-3: #1F7A68;
+  --lens-4: #4F7A22;
+  --lens-5: #8A6200;
+  --lens-6: #9A4A12;
+  --lens-7: #A3203A;
+
+  --phase-waiting: #8A5F00;
+  --phase-active: #6B2FA0;
+  --phase-review: #1668C4;
+  --phase-ci: #0F6F7E;
+  --phase-rebasing: #A32B7A;
+  --phase-closed: #5C6672;
+  --phase-unobserved: #8A929C;
+  --phase-in-review: #3A4FC0;
+  --phase-in-verification: #187354;
+
+  --shadow-popover: 0 8px 24px rgba(20, 30, 45, .18);
 }
 
 * { box-sizing: border-box; }
@@ -161,7 +409,7 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
   display: inline-flex; align-items: center; height: var(--control-h); padding: 0 8px;
   font-size: 11px; color: var(--primary-tint-fg);
   background: var(--primary-tint-bg);
-  border: 1px solid rgba(104, 192, 252, .35);
+  border: 1px solid var(--accent-line);
   border-radius: var(--radius-control);
 }
 .seg .tf-custom[hidden] { display: none; }
@@ -173,6 +421,29 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .density button:first-child { border-radius: var(--radius-control) 0 0 var(--radius-control); border-left-width: 1px; }
 .density button:last-child { border-radius: 0 var(--radius-control) var(--radius-control) 0; }
 .density button.on { background: var(--bg-control-active); color: var(--text-primary); }
+
+/* --- theme toggle (prd/10 §4.1: theme sits next to density) -------------
+ * One small square, the glyph is the theme in force (moon = dark, sun =
+ * light) and the title says what pressing it does. Non-intrusive: it is the
+ * same height as a density button and only lights up when light is on.
+ */
+.theme-toggle {
+  width: var(--control-h);
+  min-width: var(--control-h);
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-control);
+}
+.theme-toggle:hover { color: var(--text-primary); background: var(--bg-hover); }
+.theme-toggle[aria-pressed="true"] {
+  color: var(--primary-tint-fg);
+  background: var(--primary-tint-bg);
+  border-color: var(--accent-line-faint);
+}
 
 .status { display: inline-flex; align-items: center; gap: 6px; color: var(--text-tertiary); font-size: 11px; }
 .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--text-tertiary); }
@@ -190,15 +461,15 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
   height: 24px; padding: 0 9px 0 9px;
   border-radius: var(--radius-pill);
   background: var(--primary-tint-bg);
-  border: 1px solid rgba(104, 192, 252, .28);
+  border: 1px solid var(--accent-line-faint);
   color: var(--primary-tint-fg);
   font-size: 11.5px;
 }
-.tenant-pill:hover { background: #22384f; border-color: rgba(104, 192, 252, .45); }
+.tenant-pill:hover { background: var(--primary-tint-hover); border-color: var(--accent-line-strong); }
 .tenant-pill.empty { background: var(--bg-control); border-color: var(--border-control); color: var(--text-secondary); }
 .tenant-key {
   font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
-  color: rgba(104, 192, 252, .72);
+  color: var(--accent-key);
 }
 .tenant-pill.empty .tenant-key { color: var(--text-tertiary); }
 .tenant-name { font-weight: 600; letter-spacing: .01em; }
@@ -281,8 +552,8 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
   font-size: 11.5px;
   color: var(--primary-tint-fg);
   background: var(--primary-tint-bg);
-  border-top: 1px solid rgba(104, 192, 252, .18);
-  border-bottom: 1px solid rgba(104, 192, 252, .18);
+  border-top: 1px solid var(--accent-line-soft);
+  border-bottom: 1px solid var(--accent-line-soft);
 }
 .scopebanner[hidden] { display: none; }
 
@@ -364,7 +635,7 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .phase-legend i { width: 12px; height: 7px; border-radius: 2px; display: inline-block; }
 .phase-legend i.hatch {
   background: repeating-linear-gradient(45deg, var(--c) 0 1px, transparent 1px 4px);
-  border: 1px solid rgba(255, 255, 255, .14);
+  border: 1px solid var(--hatch-line);
 }
 .phase-legend .zero { color: var(--text-tertiary); }
 .phase-legend .zero i { opacity: .35; }
@@ -400,7 +671,7 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
   white-space: nowrap;
 }
 .sprint-row:hover { background: var(--bg-hover); color: var(--text-primary); }
-.sprint-row.open { border-color: rgba(251, 205, 88, .35); }
+.sprint-row.open { border-color: var(--warning-line-strong); }
 .sprint-row .sprint-id { color: var(--link); font-weight: 600; }
 .sprint-row.open .sprint-id { color: var(--warning); }
 .sprint-row .sprint-window { color: var(--text-primary); }
@@ -423,14 +694,14 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
   gap: 6px;
   height: calc(var(--control-h) + 2px);
   padding: 0 4px 0 9px;
-  border: 1px solid rgba(104, 192, 252, .35);
+  border: 1px solid var(--accent-line);
   background: var(--primary-tint-bg);
   border-radius: var(--radius-pill);
   font-size: 11px;
   color: var(--primary-tint-fg);
 }
 .selection[hidden] { display: none; }
-.selection .chip { height: 20px; font-size: 11px; background: rgba(104, 192, 252, .14); }
+.selection .chip { height: 20px; font-size: 11px; background: var(--accent-veil); }
 
 .tabs { display: inline-flex; gap: 4px; }
 .tabs button {
@@ -477,12 +748,12 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
   overflow-y: auto;
   overflow-x: hidden;
   scrollbar-width: thin;
-  scrollbar-color: rgba(140, 152, 212, .35) transparent;
+  scrollbar-color: var(--scroll-thumb) transparent;
   overscroll-behavior-y: auto;
 }
 .timeline-scroll::-webkit-scrollbar { width: 10px; }
 .timeline-scroll::-webkit-scrollbar-thumb {
-  background: rgba(140, 152, 212, .30);
+  background: var(--scroll-thumb-soft);
   border-radius: 5px;
   border: 3px solid transparent;
   background-clip: content-box;
@@ -531,7 +802,7 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
   color: var(--text-secondary);
   text-align: center;
   pointer-events: none;
-  background: rgba(21, 25, 36, .6);
+  background: var(--canvas-veil);
 }
 .empty[hidden] { display: none; }
 .empty p { margin: 0; }
@@ -578,7 +849,7 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .table th.num, .table td.num { text-align: right; }
 .table tr.row { cursor: pointer; }
 .table tr.row:hover { background: var(--bg-surface); }
-.table tr.selected { background: rgba(99, 177, 255, .09); }
+.table tr.selected { background: var(--select-wash); }
 .table.compact td { height: calc(var(--row-h) - 4px); }
 .table .c-state { width: 122px; }
 .table .c-id { width: auto; }
@@ -643,14 +914,14 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .pill.blocked, .pill.overloaded {
   background: var(--critical-tint);
   color: var(--critical);
-  border-color: rgba(240, 92, 112, .35);
+  border-color: var(--critical-line);
 }
 .pill.waiting, .pill.slow {
   background: var(--warning-tint);
   color: var(--warning);
-  border-color: rgba(251, 205, 88, .3);
+  border-color: var(--warning-line);
 }
-.pill.healthy { background: rgba(115, 207, 85, .1); color: var(--healthy); border-color: rgba(115, 207, 85, .25); }
+.pill.healthy { background: var(--healthy-tint); color: var(--healthy); border-color: var(--healthy-line); }
 .pill.neutral { color: var(--text-secondary); border-color: var(--border-control); }
 
 /* --- overview ---------------------------------------------------------- */
@@ -755,9 +1026,9 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
   border-bottom: 1px solid var(--border-hairline);
   border-left: 3px solid transparent;
 }
-.rule.sev-critical { border-left-color: var(--critical); background: rgba(240, 92, 112, .06); }
-.rule.sev-warning { border-left-color: var(--warning); background: rgba(251, 205, 88, .045); }
-.rule.sev-info { border-left-color: var(--info-accent); background: rgba(99, 177, 255, .035); }
+.rule.sev-critical { border-left-color: var(--critical); background: var(--critical-wash); }
+.rule.sev-warning { border-left-color: var(--warning); background: var(--warning-wash); }
+.rule.sev-info { border-left-color: var(--info-accent); background: var(--info-wash); }
 .rule-rank { font-size: var(--stat-n); font-weight: 700; line-height: 1.15; color: var(--text-tertiary); }
 .rule.sev-critical .rule-rank { color: var(--critical); }
 .rule.sev-warning .rule-rank { color: var(--warning); }
@@ -842,7 +1113,7 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
   padding: 9px 14px; font-size: var(--body-font);
   border-bottom: 1px solid var(--border-hairline);
 }
-.policy-gate.ok { background: rgba(115, 207, 85, .05); }
+.policy-gate.ok { background: var(--healthy-wash); }
 .policy-gate.blocked { background: var(--critical-tint); color: var(--text-primary); }
 .policy-gate b { font-family: var(--font-mono); font-weight: 600; }
 .policy-grid { display: grid; grid-template-columns: 320px minmax(0, 1fr); align-items: start; }
@@ -921,19 +1192,19 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 }
 .ticket-seg {
   display: flex; align-items: center; justify-content: center;
-  min-width: 3px; font-size: 10px; color: rgba(0, 0, 0, .62);
+  min-width: 3px; font-size: 10px; color: var(--seg-ink);
   overflow: hidden; white-space: nowrap;
 }
 .ticket-seg.absent {
-  background: repeating-linear-gradient(135deg, rgba(255, 255, 255, .05) 0 4px, transparent 4px 8px);
-  border: 1px dashed var(--seg, #8A8D93);
+  background: repeating-linear-gradient(135deg, var(--hatch-line-soft) 0 4px, transparent 4px 8px);
+  border: 1px dashed var(--seg, var(--cat-7));
   color: var(--text-tertiary); min-width: 74px;
 }
 .ticket-seg-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 11px; color: var(--text-secondary); }
 .ticket-seg-key { display: inline-flex; align-items: baseline; gap: 5px; }
 .ticket-seg-key i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
 .ticket-seg-key i.hatch {
-  background: repeating-linear-gradient(135deg, rgba(255, 255, 255, .10) 0 2px, transparent 2px 4px);
+  background: repeating-linear-gradient(135deg, var(--hatch-line-strong) 0 2px, transparent 2px 4px);
   border: 1px dashed var(--c);
 }
 .ticket-seg-key.zero { color: var(--text-tertiary); }
@@ -943,7 +1214,7 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .ticket-boundary .k {
   color: var(--text-tertiary); text-transform: uppercase; font-size: 9.5px; letter-spacing: .06em;
 }
-.ticket-boundary.missing { color: var(--warning); border-bottom: 1px dashed rgba(251, 205, 88, .4); }
+.ticket-boundary.missing { color: var(--warning); border-bottom: 1px dashed var(--warning-line-dash); }
 .ticket-mini-bar {
   display: flex; height: 10px; width: 100%; min-width: 90px; gap: 1px;
   border-radius: 2px; overflow: hidden;
@@ -1042,11 +1313,14 @@ a.child.ticket-link { color: var(--link); }
   .nav-toggle { order: 1; }
   .brand { order: 2; font-size: 0; }
   .brand::before { margin-right: 0; }
-  .density { order: 3; }
-  .topbar .status { order: 4; margin-left: auto; font-size: 10.5px; max-width: 160px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  /* the theme toggle stays on the first row, next to density: it is global
+     context, and a phone must be able to reach it without opening a menu */
+  .theme-toggle { order: 3; width: 44px; min-width: 44px; font-size: 16px; }
+  .density { order: 4; }
+  .topbar .status { order: 5; margin-left: auto; font-size: 10.5px; max-width: 160px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .ctx-row {
     display: flex;
-    order: 5;
+    order: 6;
     flex-basis: 100%;
     flex-wrap: wrap;
     align-items: center;
@@ -1085,7 +1359,7 @@ a.child.ticket-link { color: var(--link); }
     line-height: 13px;
     color: var(--primary-tint-fg);
     background: var(--primary-tint-bg);
-    border: 1px solid rgba(104, 192, 252, .35);
+    border: 1px solid var(--accent-line);
     border-radius: var(--radius-control);
     pointer-events: none;
     z-index: 1;
@@ -1140,7 +1414,7 @@ a.child.ticket-link { color: var(--link); }
     position: fixed;
     inset: 0;
     z-index: 44;
-    background: rgba(0, 0, 0, .55);
+    background: var(--scrim-bg);
   }
   .scrim[hidden] { display: none; }
 
@@ -1252,7 +1526,7 @@ a.child.ticket-link { color: var(--link); }
     height: auto;
   }
   .table tr.row:hover { background: var(--bg-surface); }
-  .table tr.selected { background: rgba(99, 177, 255, .12); }
+  .table tr.selected { background: var(--select-wash-strong); }
   .table td, .drill td {
     display: flex;
     align-items: baseline;
