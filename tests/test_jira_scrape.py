@@ -536,10 +536,11 @@ class CliFixtureLimitTests(unittest.TestCase):
 class _ProbeClientStub:
     """The Jira client surface ``_jira_probe`` drives, without a network."""
 
-    def __init__(self, transport, page_limit=None, min_interval=None):
+    def __init__(self, transport, page_limit=None, min_interval=None, tempo=False):
         self.transport = transport
         self.requests = 0
         self.requests_by_kind = {}
+        self.tempo = tempo
 
     def check(self):
         return {"version": "9.12.0"}

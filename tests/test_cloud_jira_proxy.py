@@ -448,5 +448,123 @@ class CloudScrapeEquivalenceTests(unittest.TestCase):
         self.assertNotIn("ticket:", payload)
 
 
+class CloudTempoScrapeEquivalenceTests(unittest.TestCase):
+    """prd/30: Tempo **Cloud** worklogs reduce exactly like DC native worklogs.
+
+    The proxy stubs Tempo's Cloud route over the same DC worklog records
+    (``worklogId`` instead of ``id``, no raw ``comment``). A ``tempo=True``
+    Cloud scrape must therefore emit the same ``worklogged`` events and the same
+    ``log_delay_bucket`` counts as the DC native scrape of the same data.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.root = Path(cls.tmp.name)
+        cls.bundle = _stub_bundle()
+        cls.cfg = Config(
+            db_path=cls.root / "store.duckdb",
+            identity_path=cls.root / "identity.json",
+            ticket_regex=r"\b[A-Z]+-\d+\b",
+            key_shape=r"^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$",
+            repos=[],
+            ticket_projects=(jira_fixtures.PROJECT,),
+            jira_projects=(jira_fixtures.PROJECT,),
+            jira_min_interval=0.0,
+        )
+
+        cls.dc = scrape(
+            cls.cfg,
+            FixtureJiraTransport(cls.bundle),
+            "jira-fixture",
+            out=cls.root / "dc.tgz",
+            state_dir=cls.root / "dc.state",
+        )
+        cls.dc_bundle = read_bundle(cls.root / "dc.tgz")
+
+        cls.stub = ThreadingHTTPServer(("127.0.0.1", 0), _StubDC)
+        cls.stub.daemon_threads = True
+        cls.stub.transport = FixtureJiraTransport(cls.bundle)
+        cls.stub.calls = []
+        cls.stub_url = _serve(cls.stub)
+        cls.proxy = CloudJiraProxy(cls.stub_url, pat=PAT, user="admin", password="lab-pw")
+        cls.proxy.discover()
+        cls.cloud_paths: list[str] = []
+        handle = cls.proxy.handle
+
+        def recording_handle(path, params, public_base):
+            cls.cloud_paths.append(path)
+            return handle(path, params, public_base)
+
+        cls.proxy.handle = recording_handle
+        cls.server = make_server(cls.proxy)
+        cls.base = _serve(cls.server)
+        cls.transport = HttpTransport(cls.base, token=PAT)
+        cls.client = CloudJiraClient(
+            cls.transport, page_limit=5, list_page_limit=5, min_interval=0.0, tempo=True
+        )
+        cls.cloud = scrape(
+            cls.cfg,
+            cls.transport,
+            "jira-cloud",
+            out=cls.root / "cloud-tempo.tgz",
+            state_dir=cls.root / "cloud-tempo.state",
+            client=cls.client,
+        )
+        cls.cloud_bundle = read_bundle(cls.root / "cloud-tempo.tgz")
+
+    @classmethod
+    def tearDownClass(cls):
+        for server in (cls.server, cls.stub):
+            server.shutdown()
+            server.server_close()
+        cls.tmp.cleanup()
+
+    @staticmethod
+    def _worklogged(bundle) -> list[tuple]:
+        return sorted(
+            (
+                event["event_key"],
+                event["ts"],
+                event["actor"],
+                json.dumps(event["attributes"], sort_keys=True),
+            )
+            for event in bundle.events
+            if event["activity"] == "worklogged"
+        )
+
+    def test_the_tempo_route_was_the_only_worklog_source(self):
+        worklog_paths = [path for path in self.cloud_paths if "/worklog" in path]
+        self.assertTrue(worklog_paths)
+        for path in worklog_paths:
+            self.assertTrue(path.startswith("/rest/tempo-timesheets/4/worklogs/"), path)
+        # With Tempo on, the add-on is read for every kept issue.
+        self.assertEqual(self.client.requests_by_kind["worklog"], self.cloud["issues_kept"])
+
+    def test_the_same_worklogged_events(self):
+        self.assertTrue(self.dc_bundle.events)
+        self.assertEqual(
+            self._worklogged(self.cloud_bundle), self._worklogged(self.dc_bundle)
+        )
+
+    def test_the_same_log_delay_buckets(self):
+        self.assertEqual(self.cloud["worklogs"], self.dc["worklogs"])
+        self.assertEqual(self.cloud["log_delays"], self.dc["log_delays"])
+        self.assertEqual(set(self.dc["log_delays"]), {
+            "same_day", "next_day", "within_week", "late",
+        })
+
+    def test_no_raw_tempo_comment_reaches_the_bundle(self):
+        payload = json.dumps(
+            {
+                "events": self.cloud_bundle.events,
+                "objects": self.cloud_bundle.objects,
+            },
+            default=str,
+        ).lower()
+        self.assertNotIn("zzcanary", payload)
+        self.assertNotIn("pairing on the parser", payload)
+
+
 if __name__ == "__main__":
     unittest.main()

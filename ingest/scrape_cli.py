@@ -72,11 +72,17 @@ def _probe(cfg: Config, as_json: bool, bypass_filter: bool) -> int:
     return 0
 
 
+def _tempo(cfg: Config, args) -> bool:
+    """prd/30: ``--tempo`` overrides, else ``MEGASPEED_JIRA_TEMPO`` / ``[jira] tempo``."""
+    return bool(getattr(args, "tempo", False) or cfg.jira_tempo)
+
+
 def _jira_transport(cfg: Config, args) -> tuple[object, str, int | None, object | None]:
     """Build the Jira transport + source name (+ the Cloud client) for the mode."""
     from .jira_fixtures import generate
     from .transport import FixtureJiraTransport
 
+    tempo = _tempo(cfg, args)
     if args.live or args.probe:
         if args.jira_cloud:
             # prd/24: the Cloud shape -- v3, Bearer PAT, cursor search, Cloud
@@ -90,7 +96,7 @@ def _jira_transport(cfg: Config, args) -> tuple[object, str, int | None, object 
             from .jira_cloud import CloudJiraClient
 
             transport = HttpTransport(cfg.jira_cloud_base_url, token=cfg.jira_cloud_token)
-            client = CloudJiraClient(transport, page_limit=cfg.jira_page_limit)
+            client = CloudJiraClient(transport, page_limit=cfg.jira_page_limit, tempo=tempo)
             client.check()
             return transport, "jira-cloud", args.limit, client
         if not cfg.jira_base_url:
@@ -106,8 +112,15 @@ def _jira_transport(cfg: Config, args) -> tuple[object, str, int | None, object 
             user=cfg.jira_auth_user,
             password=cfg.jira_auth_password,
         )
-        JiraClient(transport, page_limit=cfg.jira_page_limit).check()
-        return transport, "jira-dc", args.limit, None
+        client = JiraClient(
+            transport,
+            page_limit=cfg.jira_page_limit,
+            # a probe is a handful of reads: keep its old 0.05 s cadence.
+            min_interval=0.05 if getattr(args, "probe", False) else cfg.jira_min_interval,
+            tempo=tempo,
+        )
+        client.check()
+        return transport, "jira-dc", args.limit, client
     if args.jira_cloud:
         # Cloud has no local install and no fixture corpus of its own: the
         # emulation proxy (proxy/cloud_jira_proxy.py) *is* the local Cloud, and
@@ -125,6 +138,17 @@ def _jira_transport(cfg: Config, args) -> tuple[object, str, int | None, object 
     )
     # FR-8: --limit means the same thing in every mode. The fixture path used to
     # return None, so `--jira --fixture --limit 3` read all 13 issues.
+    if tempo:
+        # prd/30: the lab cannot run Tempo, so the fixture serves its shape over
+        # the same worklog records; `--jira --fixture --tempo` exercises it.
+        from .jira import JiraClient
+        from .jira_fixtures import TempoFixtureTransport
+
+        transport = TempoFixtureTransport(bundle)
+        client = JiraClient(
+            transport, page_limit=cfg.jira_page_limit, min_interval=0.0, tempo=True
+        )
+        return transport, "jira-fixture", args.limit, client
     return FixtureJiraTransport(bundle), "jira-fixture", args.limit, None
 
 
@@ -366,6 +390,9 @@ def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
                     help="scrape Jira **Cloud** (v3 + Bearer PAT, prd/24) instead of DC;"
                          " implies --jira and reads MEGASPEED_JIRA_CLOUD_BASE_URL"
                          " + MEGASPEED_JIRA_CLOUD_TOKEN")
+    ap.add_argument("--tempo", action="store_true",
+                    help="read worklogs through the Tempo add-on instead of Jira's native"
+                         " worklog (prd/30); implies --jira, and applies to --jira-cloud too")
     ap.add_argument("--project", action="append", default=None, metavar="KEY",
                     help="--jira: override the configured Jira projects (repeatable)")
     ap.add_argument("--limit", type=int, default=None, metavar="N",
@@ -475,6 +502,10 @@ def main(argv: list[str] | None = None) -> int:
         # prd/24: one source, two shapes. ``--jira-cloud`` is a Jira scrape with
         # the Cloud adapter, so every downstream flag (--project, --limit, ...)
         # means the same thing.
+        args.jira = True
+    if args.tempo:
+        # prd/30: Tempo is a Jira add-on, so ``--tempo`` implies a Jira scrape.
+        # With ``--jira-cloud`` it reads Tempo Cloud instead of Tempo DC.
         args.jira = True
 
     seed = args.seed if args.seed is not None else cfg.seed
