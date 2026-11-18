@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **706** (`tests/`) + **73** (`scrape/tests`) + **101** (node `app/test`) green.
+Tests: **715** (`tests/`) + **73** (`scrape/tests`) + **114** (node `app/test`) green.
 
 ## Scrape (airgapped) — full value, reliable
 
@@ -40,6 +40,9 @@ Tests: **706** (`tests/`) + **73** (`scrape/tests`) + **101** (node `app/test`) 
   bands/scope/carry-over) · timeline/blocking/queue/delivery/overview/sources/policy-lab.
 - **Responsive** (≤640px): off-canvas drawer, two-row top bar, bottom-sheet detail, pinch/pan/tap touch,
   list-first entry + card-stacked tables. Desktop (1600px) and medium (900px) verified pixel-identical.
+- **Phone UX (post-review)**: ticket keys visible on the timeline (epic→story→PR hierarchy at every zoom,
+  `DEL-100 #1` PR rows), one-finger vertical scroll over charts with horizontal-pan + pinch preserved, no
+  right-edge clipping or vertical word-wrap (`scrollWidth` 412 on every view; `docs/QA-ux-phone.md`).
 
 ## Deferred / not urgent
 
