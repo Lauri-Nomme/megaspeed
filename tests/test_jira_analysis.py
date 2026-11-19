@@ -589,6 +589,52 @@ class SprintDeliveryTests(StoreCase):
                          ["ENG-2", "ENG-3"])
         self.assertEqual(metric["rows"][0]["status"], "late")
 
+    def test_done_by_end_excludes_a_story_whose_prs_never_merged(self):
+        """prd/43 §5: Jira Done is not delivery.
+
+        ENG-2 is done by the close but its PR is still open, so the sprint
+        delivered 1 of 2 (not 2 of 2); the excluded story is reported as its own
+        `unmerged` count (and drill-down row), never silently dropped.
+        """
+        fx = Fixture()
+        fx.sprint(1, T0, end=T0 + timedelta(days=14),
+                  closed=T0 + timedelta(days=14))
+        fx.story("ENG-1", T0, points=3, state="done",
+                 closed=T0 + timedelta(days=10))
+        fx.add_to_sprint("ENG-1", T0, 1, at_start=True)
+        fx.status("ENG-1", T0 + timedelta(days=1), "in_progress")
+        fx.status("ENG-1", T0 + timedelta(days=10), "done",
+                  from_status="in_progress")
+        fx.pr(1, "AaAa", T0 + timedelta(days=1), tickets=("ENG-1",),
+              state="merged", closed=T0 + timedelta(days=9))
+        fx.story("ENG-2", T0, points=5, state="done",
+                 closed=T0 + timedelta(days=11))
+        fx.add_to_sprint("ENG-2", T0, 1, at_start=True)
+        fx.status("ENG-2", T0 + timedelta(days=1), "in_progress")
+        fx.status("ENG-2", T0 + timedelta(days=11), "done",
+                  from_status="in_progress")
+        fx.pr(2, "AaAa", T0 + timedelta(days=2), tickets=("ENG-2",),
+              state="open", closed=None)
+        # a third committed story so the sprint is a measured sample
+        fx.story("ENG-3", T0, points=2)
+        fx.add_to_sprint("ENG-3", T0, 1, at_start=True)
+
+        metric = self.metric(fx, "sprint_delivery")
+        self.assertEqual(metric["stories"], 3)
+        self.assertEqual(metric["done_by_end"], 1)
+        self.assertEqual(metric["worst"]["done_by_end_jira"], 2)
+        self.assertEqual(metric["worst"]["unmerged"], 1)
+        self.assertEqual(metric["worst"]["done_share"], round(1 / 3, 4))
+        unmerged = [row for row in metric["rows"] if row["status"] == "unmerged"]
+        self.assertEqual([row["key"] for row in unmerged], ["ENG-2"])
+        self.assertEqual(unmerged[0]["unmerged_prs"], [f"PR:{REPO}#2"])
+        # the rules page says which story was finished only on paper
+        suggestion = by_id(self.payload(fx), "sprint-on-time")
+        self.assertEqual(suggestion["evidence"]["done_by_end"], 1)
+        self.assertEqual(suggestion["evidence"]["done_by_end_jira"], 2)
+        self.assertEqual(suggestion["evidence"]["unmerged"], 1)
+        self.assertIn("1 Done in Jira with an unmerged PR", suggestion["title"])
+
     def test_emits_the_on_time_delivery_rule(self):
         payload = self.payload(self.fixture())
         suggestion = by_id(payload, "sprint-on-time")

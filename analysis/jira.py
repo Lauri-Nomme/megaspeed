@@ -1090,6 +1090,23 @@ def _done_at(story: Story) -> datetime | None:
     )
 
 
+def story_unmerged_prs(story: Story) -> list[str]:
+    """The story's PRs that are still open — the code never merged (prd/43 §5).
+
+    Jira "Done" is a workflow label, not delivery: DEL-167 was closed while PR
+    #53 was still open (and DEL-168/183 likewise). A story whose own PR is open
+    is finished *paperwork*, not merged code, so the sprint's "done by end" must
+    not count it. A **declined** PR is not counted here: it is a closed decision,
+    not a delivery still in flight (concepts.md §9 "Done in Jira, PR open"). A
+    story with no PR at all is not affected — there is no code evidence to
+    contradict the ticket.
+    """
+    return [
+        state.pr["object_id"] for state in story.prs
+        if state.pr.get("closed_ts") is None
+    ]
+
+
 def sprint_outcomes(court, data: JiraData) -> tuple[dict[str, dict], dict[str, dict],
                                                     dict[int, dict]]:
     """Membership + per-sprint outcome for every story in the store.
@@ -1119,6 +1136,7 @@ def sprint_outcomes(court, data: JiraData) -> tuple[dict[str, dict], dict[str, d
         membership = _membership(story)
         memberships[story.key] = membership
         done = _done_at(story)
+        unmerged = story_unmerged_prs(story)
         per: dict[int, str] = {}
         for sid in membership["sprints"]:
             boundary = (boundaries.get(sid) or {}).get("end")
@@ -1130,7 +1148,13 @@ def sprint_outcomes(court, data: JiraData) -> tuple[dict[str, dict], dict[str, d
                 per[sid] = "by_end"
             else:
                 per[sid] = "late"
-        outcomes[story.key] = {"done_at": done, "outcomes": per}
+        outcomes[story.key] = {
+            "done_at": done,
+            "outcomes": per,
+            # prd/43 §5: Jira done ≠ delivered; the sprint counts split these.
+            "unmerged_prs": unmerged,
+            "delivered": bool(done is not None and not unmerged),
+        }
     return memberships, outcomes, boundaries
 
 
@@ -1296,12 +1320,33 @@ def sprint_delivery(
         ]
         if not members:
             continue
-        counts = {"by_end": 0, "late": 0, "never": 0}
-        points = {"by_end": 0, "late": 0, "never": 0}
+        counts = {"by_end": 0, "late": 0, "never": 0, "unmerged": 0}
+        points = {"by_end": 0, "late": 0, "never": 0, "unmerged": 0}
         late_hours = 0.0
         for story in members:
             outcome = outcomes[story.key]["outcomes"].get(sid)
             if outcome not in counts:
+                continue
+            # prd/43 §5: Jira "done by end" is not delivery when the story's
+            # PRs never merged. The count moves to `unmerged`, so the committed
+            # total is unchanged but "delivered" is the true one.
+            delivered = story.key in outcomes and outcomes[story.key]["delivered"]
+            if outcome == "by_end" and not delivered:
+                counts["unmerged"] += 1
+                points["unmerged"] += story.points or 0
+                rows.append({
+                    "kind": "story",
+                    "object_id": story.object_id,
+                    "key": story.key,
+                    "tickets": [story.key],
+                    "sprint_id": sid,
+                    "status": "unmerged",
+                    "points": story.points,
+                    "slip_hours": None,
+                    "done_at": iso(outcomes[story.key]["done_at"]),
+                    "unmerged_prs": list(outcomes[story.key]["unmerged_prs"]),
+                    "affected": True,
+                })
                 continue
             counts[outcome] += 1
             points[outcome] += story.points or 0
@@ -1350,6 +1395,10 @@ def sprint_delivery(
             "stories": committed,
             "points": sum(points.values()),
             "done_by_end": delivered,
+            # prd/43 §5: Jira-done by the close but the code never merged
+            "done_by_end_jira": counts["by_end"] + counts["unmerged"],
+            "unmerged": counts["unmerged"],
+            "unmerged_points": points["unmerged"],
             "done_late": counts["late"],
             "never_done": counts["never"],
             "done_by_end_points": points["by_end"],
@@ -1382,6 +1431,7 @@ def sprint_delivery(
         "on_time_sprints": sum(1 for row in sprints if row["on_time"]),
         "stories": sum(row["stories"] for row in sprints),
         "done_by_end": sum(row["done_by_end"] for row in sprints),
+        "unmerged": sum(row["unmerged"] for row in sprints),
         "done_late": len(late_rows),
         "never_done": len(never_rows),
         "late_hours": round(sum(row.get("slip_hours") or 0.0 for row in late_rows), 2),
@@ -1518,10 +1568,12 @@ def sprints(
             "done_points": 0,
             "done": 0,
             "done_by_end": 0,
+            "unmerged": 0,
             "done_late": 0,
             "never_done": 0,
             "late_points": 0,
             "never_points": 0,
+            "unmerged_points": 0,
             "late_hours": 0.0,
             "open_stories": 0,
         }
@@ -1569,8 +1621,13 @@ def sprints(
                     row["added_after_start_stories"].append(key)
             verdict = outcome["outcomes"].get(sid)
             points = story.points or 0
+            delivered = bool(outcome.get("delivered"))
             row["points"] += points
-            if verdict == "by_end":
+            if verdict == "by_end" and not delivered:
+                # prd/43 §5: done in Jira, PR unmerged — not delivered work
+                row["unmerged"] += 1
+                row["unmerged_points"] += points
+            elif verdict == "by_end":
                 row["done"] += 1
                 row["done_by_end"] += 1
                 row["done_points"] += points
@@ -1615,7 +1672,10 @@ def sprints(
         row["added_after_start_share"] = _share(
             row["added_after_start"], row["story_count"]
         )
-        committed = row["done_by_end"] + row["done_late"] + row["never_done"]
+        committed = (
+            row["done_by_end"] + row["done_late"] + row["never_done"]
+            + row["unmerged"]
+        )
         row["done_share"] = _share(row["done_by_end"], committed)
         row["on_time"] = committed > 0 and row["done_by_end"] == committed
         row["late_hours"] = round(row["late_hours"], 2)

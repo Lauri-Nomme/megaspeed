@@ -40,6 +40,8 @@ export function sprintBands(data) {
       doneByEnd: sprint.done_by_end ?? sprint.done ?? 0,
       doneLate: sprint.done_late || 0,
       neverDone: sprint.never_done || 0,
+      // prd/43 §5: Done in Jira, PR unmerged — not delivered work
+      unmerged: sprint.unmerged || 0,
       doneShare: sprint.done_share ?? null,
       lateHours: sprint.late_hours || 0,
       carriedIn: sprint.carried_in || [],
@@ -82,8 +84,10 @@ export function sprintOutcomeLine(sprint) {
   const byEnd = sprint.done_by_end ?? sprint.done ?? 0;
   const late = sprint.done_late || 0;
   const never = sprint.never_done || 0;
+  const unmerged = sprint.unmerged || 0;
   const parts = [`${byEnd} of ${committed} done by end`];
   if (late) parts.push(`${late} late`);
+  if (unmerged) parts.push(`${unmerged} Done in Jira · PR unmerged`);
   if (never) parts.push(`${never} still open`);
   return parts.join(' · ');
 }
@@ -168,6 +172,7 @@ export function sprintStrip(data, { base = '', focus = null } = {}) {
     const selected = focus != null && String(focus) === String(sprint.sprint_id);
     const late = sprint.done_late || 0;
     const never = sprint.never_done || 0;
+    const unmerged = sprint.unmerged || 0;
     const added = sprint.added_after_start || 0;
     return `<button type="button" class="sprint-row${sprint.open ? ' open' : ''}${selected ? ' selected' : ''}"
         data-sprint-id="${esc(sprint.sprint_id)}"
@@ -184,6 +189,7 @@ export function sprintStrip(data, { base = '', focus = null } = {}) {
       <span class="sprint-done num" title="done by this sprint's close — not done by today">${
         sprint.done_by_end ?? sprint.done ?? 0} of ${sprint.story_count || 0} by end</span>
       ${late ? `<span class="sprint-late num" title="reached done after the sprint's close">${late} late</span>` : ''}
+      ${unmerged ? `<span class="sprint-unmerged num" title="Done in Jira while a PR the story names never merged — the code is not delivered">${unmerged} unmerged</span>` : ''}
       ${never ? `<span class="sprint-never num muted" title="not done at the snapshot">${never} open</span>` : ''}
       ${carryCell(sprint)}
       ${plan}

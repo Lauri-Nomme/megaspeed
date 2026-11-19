@@ -172,9 +172,11 @@ test('prd/38 #18: Sources uses the ingest run figures and one snapshot age', () 
   assert.match(main, /\$\{fmtStamp\(Date\.parse\(meta\.as_of\)\)\} \(\$\{snapshotAge\(\)\}\)/);
 });
 
-test('prd/38 #20: the Timeline chip scopes to the ticket and keeps the PR marked', () => {
+test('prd/38 #20 / prd/43 #3: the Timeline chip scopes to the ticket and keeps the PR marked', () => {
   const main = read('main.js');
-  assert.match(main, /setScope\('ticket', ticket/);
+  // prd/43 §3: one helper reads the ticket from the entity, the PR or the row
+  assert.match(main, /drawerTimelineScope\(entity\)/);
+  assert.match(main, /setScope\(scope\.kind, scope\.value/);
   assert.match(main, /timeline\.focusPr\(prId\)/);
   assert.match(read('timeline.js'), /focusPr\(id\)/);
   assert.match(read('timeline.js'), /this\.focusPrId === pr\.id/);

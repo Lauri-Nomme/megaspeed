@@ -202,6 +202,11 @@ class Interval:
     #: PR, not a wait a human owed. It stays on the timeline and is excluded
     #: from every person-level aggregate.
     abandoned: bool = False
+    #: prd/43 §5: the *raw* activity of the event that opened this interval
+    #: (``comment_added``), next to ``kind``'s derived label (``author_reply``).
+    #: The ticket view and the PR drawer quote this one, so they cannot label
+    #: the same last event differently.
+    activity: str = ""
 
     @property
     def seconds(self) -> float:
@@ -636,6 +641,7 @@ def _state_after(
             "ci": ci,
             **derived,
             **previous,
+            "activity": activity,
         }
 
     derived = _derive(
@@ -651,6 +657,9 @@ def _state_after(
         "by": actor,
         "kind": kind,
         "since": since,
+        # prd/43 §5: the raw activity, so every surface names the last event the
+        # same way (``kind`` is the derived label the phase logic reads).
+        "activity": activity,
     }
 
 
@@ -810,6 +819,7 @@ def _timeline(
                     ball_people=_holders(pr, current, event, bots),
                     by=current["by"], kind=current["kind"], evidence=evidence,
                     commits=commits_in, open=open_pr,
+                    activity=current.get("activity", ""),
                     abandoned=bool(
                         declined_ts is not None and event["_ts"] >= declined_ts
                     ),
@@ -837,6 +847,7 @@ def _timeline(
                 ball_people=_holders(pr, current, None, bots),
                 by=current["by"],
                 kind=current["kind"], evidence=evidence, commits=0, open=open_pr,
+                activity=current.get("activity", ""),
                 # prd/41 B1: the tail to ``closed_ts`` of a bot-declined PR is
                 # the abandoned stretch too, so its hours never reach a person.
                 abandoned=bool(declined_ts is not None),
@@ -1518,12 +1529,17 @@ def response_times(bc: BallCourt, window: tuple[datetime, datetime] | None = Non
     bots = set(bc.bots)
     samples: dict[str, list[float]] = defaultdict(list)
     never: dict[str, int] = defaultdict(int)
+    never_since: dict[str, datetime] = {}
     sentinel_lags: dict[str, list[float]] = defaultdict(list)
+    gate_aware_n = 0
     for state in bc.prs:
         author = state.pr["actor"]
         added: dict[str, datetime] = {}
         answered: set[str] = set()
         approvals: list[tuple[datetime, str]] = []
+        # prd/43 §2: the gate opens when every *peer has answered* — a comment
+        # or needs-work counts, not only an approval (concepts.md §2).
+        peer_responses: list[datetime] = []
         for event in state.events:
             activity = event["activity"]
             actor = event["actor"]
@@ -1540,15 +1556,39 @@ def response_times(bc: BallCourt, window: tuple[datetime, datetime] | None = Non
             )
             if responded and actor in added and actor not in answered:
                 answered.add(actor)
-                if start <= added[actor] < end:
+                # prd/43 §2: the sentinel is a *precedence* constraint. With
+                # `sentinel_after_peers` their ball only opens once every peer
+                # has answered, so timing them from "added" prices the peer
+                # phase as the sentinel's latency (QA: 20 h vs a true ~6 h).
+                clock_start = added[actor]
+                if actor in sentinels and bc.sentinel_after_peers:
+                    peers = [
+                        stamp for stamp in peer_responses
+                        if stamp <= event["_ts"]
+                    ]
+                    if peers:
+                        clock_start = max(added[actor], max(peers))
+                        if clock_start > added[actor]:
+                            gate_aware_n += 1
+                if start <= clock_start < end:
                     samples[actor].append(
-                        bc.business_hours(actor, added[actor], event["_ts"])
+                        bc.business_hours(actor, clock_start, event["_ts"])
                     )
+            if responded and actor not in sentinels:
+                peer_responses.append(event["_ts"])
             if activity == "pr_approved":
                 approvals.append((event["_ts"], actor))
         for person in added:
             if person not in answered:
                 never[person] += 1
+                # prd/43 §2: keep the forgotten-item tail quantified — the gate
+                # opened (or the person was asked) and nothing has answered.
+                opened = added[person]
+                if person in sentinels and bc.sentinel_after_peers and peer_responses:
+                    opened = max([added[person], *peer_responses])
+                current = never_since.get(person)
+                if current is None or opened < current:
+                    never_since[person] = opened
         # peer approval -> sentinel approval: the gate's own latency
         for stamp, actor in approvals:
             if actor not in sentinels:
@@ -1568,6 +1608,7 @@ def response_times(bc: BallCourt, window: tuple[datetime, datetime] | None = Non
             continue
         values = samples.get(person, [])
         lags = sentinel_lags.get(person, [])
+        since = never_since.get(person)
         people.append({
             "person": person,
             "role": "sentinel" if person in sentinels else "reviewer",
@@ -1577,6 +1618,12 @@ def response_times(bc: BallCourt, window: tuple[datetime, datetime] | None = Non
             "p90_hours": _p90(values),
             "max_hours": round(max(values), 2) if values else None,
             "never": never.get(person, 0),
+            # prd/43 §2: the orphan tail, quantified: the oldest unanswered
+            # request and how long it has waited (business hours to the snapshot).
+            "never_oldest_hours": (
+                round(bc.business_hours(person, since, bc.snapshot), 2)
+                if since is not None else None
+            ),
             "sentinel_lag_n": len(lags),
             "sentinel_lag_median_hours": _median(lags),
             "sentinel_lag_p90_hours": _p90(lags),
@@ -1593,12 +1640,17 @@ def response_times(bc: BallCourt, window: tuple[datetime, datetime] | None = Non
         "people": people,
         "sentinels": sorted(sentinels),
         "bots_excluded": sorted(bots),
+        "sentinel_after_peers": bc.sentinel_after_peers,
+        "gate_aware_n": gate_aware_n,
         "reviewer_median_hours": _median(reviewer_values),
         "basis": (
             "hours from 'added as reviewer' to that person's first response "
             "(approval, needs-work, unapproval or comment), priced on the "
-            "responder's calendar; a reviewer who never answered is counted "
-            "under 'never', not as a zero"
+            "responder's calendar; the sentinel's clock opens at the last peer "
+            "answer (their ball only arrives after the peers), so the peer "
+            "phase is not charged to them; a reviewer who never answered is "
+            "counted under 'never' with the age of the oldest open request, "
+            "not as a zero"
         ),
         "sentinel_lag_basis": (
             "hours from the last peer approval to the sentinel's approval; "
@@ -1723,16 +1775,35 @@ def delivery_list(
     start, end = window or (bc.snapshot - timedelta(days=90), bc.snapshot)
     done_tickets = done_tickets or set()
     prs = {s.pr["object_id"]: s.pr for s in bc.prs}
+    states = {s.pr["object_id"]: s for s in bc.prs}
     last_event: dict[str, Interval] = {}   # includes the unobserved tail
     last_measured: dict[str, Interval] = {}
-    commit_totals: dict[str, int] = defaultdict(int)
+    # prd/43 §5: one canonical count per PR — its COMMIT objects. Summing the
+    # intervals' commits dropped a commit that landed at the open instant, so
+    # the list said "2" while the ticket drawer (len(state.commits)) said "5".
+    commit_totals: dict[str, int] = {
+        object_id: len(state.commits) for object_id, state in states.items()
+    }
+    # prd/43 §5: the same business-hour phase spans the ticket drawer shows, so
+    # "in review" is one number on every surface (not calendar time here and
+    # business hours there).
+    phase_hours: dict[str, dict[str, float]] = {}
+    for object_id, state in states.items():
+        spans: dict[str, float] = defaultdict(float)
+        for interval in state.intervals:
+            if interval.measured and interval.hours > 0:
+                # sum the same 2-decimal hours the ticket payload reports, so
+                # the two drawers cannot differ by a rounding minute
+                spans[interval.phase] += round(interval.hours, 2)
+        phase_hours[object_id] = {
+            phase: round(hours, 2) for phase, hours in spans.items()
+        }
     for interval in bc.intervals:
         previous = last_event.get(interval.object_id)
         if previous is None or interval.end >= previous.end:
             last_event[interval.object_id] = interval
         if not interval.measured:
             continue
-        commit_totals[interval.object_id] += interval.commits
         previous = last_measured.get(interval.object_id)
         if previous is None or interval.end >= previous.end:
             last_measured[interval.object_id] = interval
@@ -1861,10 +1932,13 @@ def delivery_list(
             "reviewers_approved": len(approved),
             "phase": current.phase if current else "no events",
             "kind": kind,
-            # prd/42 M6: the drawer's "last event" is a fact, not a dash. The
-            # tail's start is the last handover event; its activity is `kind`.
+            # prd/43 §5: the drawer's "last event" names the *raw* activity the
+            # ticket view also quotes (``comment_added``, not ``author_reply``),
+            # so the two drawers cannot label the same event differently.
             "last_event": iso(tail.start) if tail is not None else None,
-            "last_event_activity": kind,
+            "last_event_activity": (
+                (tail.activity or kind) if tail is not None else kind
+            ),
             "last_event_actor": tail.by if tail is not None else None,
             "ci": bool(latest.ci if latest is not None else False),
             "rebasing": bool(current is not None and current.phase == "rebasing"),
@@ -1878,6 +1952,10 @@ def delivery_list(
             "impact_hours": round(dependents * waiting_hours, 1),
             "measured_hours": round(current.hours, 1) if current else 0.0,
             "commits": commit_totals.get(object_id, 0),
+            # prd/43 §5: business-hour spans by phase, the same source the
+            # ticket drawer reads, so "in review" cannot be a calendar span here
+            # and a business span there.
+            "phase_hours": phase_hours.get(object_id) or {},
             "in_window": bool(tail and tail.start < end and tail.end > start),
         })
 

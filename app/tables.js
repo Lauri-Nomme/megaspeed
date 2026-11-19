@@ -306,6 +306,12 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
   const rows = attention.slice(0, 6);
   const hidden = Math.max(0, attention.length - rows.length);
   const overloadedLabel = overloaded.length === 1 ? `overloaded ${one}` : `overloaded ${noun}`;
+  // prd/43 §4: "longest mean wait" is the longest *person's* mean wait, not the
+  // first stream's. The synthetic `review` stream used to head the list and the
+  // tile read 22.6 h while every person below it waited ≤ 1 d 3 h.
+  const longest = counted.reduce(
+    (best, stream) => Math.max(best, Number(stream.summary.mean_wait_hours) || 0), 0,
+  );
   return `
     <div class="stats">
       <div class="stat"><span class="stat-n ${counts.blocked ? 'attention' : ''}">${counts.blocked}</span>
@@ -321,7 +327,7 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
       <div class="stat"><span class="stat-n">${overloaded.length}</span>
         <span class="stat-k">${esc(overloadedLabel)}</span>
         <span class="stat-note">${slow.length} slow · longest mean wait ${
-          streams.length ? `≈${fmtHours(streams[0].summary.mean_wait_hours)}` : '–'}</span></div>
+          counted.length ? `≈${fmtHours(longest)}` : '–'}</span></div>
     </div>
     <div class="overview-grid">
       <section class="panel">

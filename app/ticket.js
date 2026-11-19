@@ -214,6 +214,9 @@ export function sprintStrip(payload) {
     by_end: ['healthy', 'done by end'],
     late: ['warning', 'finished late'],
     never: ['waiting', 'still open'],
+    // prd/43 §5: Jira says done by the close, but a PR the story owns never
+    // merged — the same fact the delivery list calls "Done in Jira, PR open".
+    unmerged: ['warning', 'done in Jira · PR unmerged'],
     unknown: ['neutral', 'no sprint close'],
   };
   const chips = memberships.map((sprint) => {

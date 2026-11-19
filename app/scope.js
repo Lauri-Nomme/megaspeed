@@ -14,6 +14,8 @@
  * Pure functions only, so they are unit-testable without a browser.
  */
 
+import { rowTicket } from './tickets.js';
+
 export const ROLE_QUEUES = ['author', 'review', 'ready', 'sentinel', 'CI', 'calendar'];
 
 /** Pages that narrow their rows/series when a scope is active. */
@@ -84,6 +86,36 @@ export function scopeForNode(node) {
 /** The queue-chart level a blocking node's drill-down lands on (B5). */
 export function queueLevelForNode(node) {
   return node && node.kind === 'person' && !isRoleQueue(node.id) ? 'person' : 'queue';
+}
+
+/**
+ * prd/43 §3: the scope a drawer's Timeline chip opens.
+ *
+ * A PR drawer can be opened from three places (the timeline, the Delivery list,
+ * the ticket page), and the same chip must scope to the *ticket* the drawer
+ * belongs to — never to the author, and never to "everything". The ticket key
+ * lives in different places depending on the opener: `entity.ticket` (the
+ * ticket-page drawer carries the key it was opened from), `pr.ticket` (a
+ * timeline/delivery PR), or the row's own keys. Reading all three in one place
+ * is what makes the ticket-page chip scope like the Delivery-list one.
+ *
+ * Pure, so the fallback chain is unit-testable without a browser.
+ */
+export function drawerTimelineScope(entity) {
+  if (!entity) return null;
+  const pr = entity.pr || null;
+  const row = entity.row || null;
+  const ticket = String(
+    entity.ticket
+    || (pr && pr.ticket)
+    || (row ? rowTicket(row) : '')
+    || '',
+  ).trim();
+  if (ticket) return { kind: 'ticket', value: ticket, label: ticket };
+  const prId = (pr && pr.id) || (row && row.object_id) || null;
+  const author = (pr && pr.actor) || (row && row.author) || null;
+  if (prId && author) return { kind: 'person', value: author, label: author };
+  return null;
 }
 
 /** The pages whose content narrows under this scope. */

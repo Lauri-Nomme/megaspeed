@@ -430,12 +430,19 @@ export function fmtWipTick(value) {
  * against the peers' median, so the 8× gap is one glance rather than a
  * raw-store computation. A reviewer who never answered is counted, not
  * dropped — that is the difference between "slow" and "asleep".
+ *
+ * prd/43 §2: the sentinel is a *precedence* gate, so their median is measured
+ * from the last peer answer (their ball only arrives then), not from "added
+ * as reviewer". The header says which clock each row uses, and the "never"
+ * column carries the age of the oldest unanswered request so the two forgotten
+ * PRs are a quantity, not a count.
  */
 export function responseTable(data) {
   const response = data && data.response;
   const people = (response && response.people) || [];
   if (!people.length) return '';
   const peer = response.reviewer_median_hours;
+  const gateAware = response.sentinel_after_peers !== false;
   const rows = people.map((row) => {
     const ratio = row.role === 'sentinel' && peer && row.median_hours
       ? `×${(row.median_hours / peer).toFixed(1)}`
@@ -443,17 +450,25 @@ export function responseTable(data) {
     const lag = row.sentinel_lag_median_hours != null
       ? `${esc(fmtHours(row.sentinel_lag_median_hours))}`
       : '—';
+    const clock = row.role === 'sentinel' && gateAware
+      ? 'last peer answer → first response (the sentinel cannot act earlier)'
+      : 'added as reviewer → first response';
+    const neverTitle = row.never_oldest_hours != null
+      ? `asked but never answered · oldest open request ${fmtHours(row.never_oldest_hours)}`
+      : 'asked but never answered';
     return `<tr data-response-person="${esc(row.person)}" class="${row.role === 'sentinel' ? 'sentinel' : ''}">
       <td class="c-who" data-label="person"><span class="mono">${esc(row.person)}</span>
         ${row.role === 'sentinel' ? '<span class="pill warning" title="mandatory approver on every PR">sentinel</span>' : ''}</td>
-      <td class="c-dur num" data-label="median response">${
+      <td class="c-dur num" data-label="median response" title="${esc(clock)}">${
         row.median_hours == null ? '—' : esc(fmtHours(row.median_hours))}${
         ratio ? ` <span class="muted">${ratio}</span>` : ''}</td>
       <td class="c-dur num" data-label="mean">${
         row.mean_hours == null ? '—' : `≈${esc(fmtHours(row.mean_hours))}`}</td>
       <td class="c-dur num" data-label="p90">${
         row.p90_hours == null ? '—' : esc(fmtHours(row.p90_hours))}</td>
-      <td class="c-dur num" data-label="never">${row.never || 0}</td>
+      <td class="c-dur num" data-label="never" title="${esc(neverTitle)}">${row.never || 0}${
+        row.never_oldest_hours != null
+          ? ` <span class="muted">(${esc(fmtHours(row.never_oldest_hours))})</span>` : ''}</td>
       <td class="c-dur num" data-label="peer → sentinel">${lag}</td>
     </tr>`;
   }).join('');
@@ -461,6 +476,7 @@ export function responseTable(data) {
     <div class="response-head">
       <h2 class="policy-h" id="response-title">Response time</h2>
       <span class="muted">added as reviewer → first response${
+        gateAware ? ' · sentinel: last peer answer first' : ''}${
         peer != null ? ` · peer median ${esc(fmtHours(peer))}` : ''}</span>
     </div>
     <table class="table compact response-table"><thead><tr>

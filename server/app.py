@@ -142,6 +142,7 @@ STORE_RETRY_DELAY = max(0.0, float(os.environ.get("MEGASPEED_STORE_RETRY_DELAY",
 
 sys.path.insert(0, str(REPO_ROOT))
 from analysis import ballcourt as analyse  # noqa: E402  (read-only projections)
+from analysis import advice as advice_crosscheck  # noqa: E402  (prd/43 §1)
 from analysis import calendar as workcal  # noqa: E402  (prd/19 business hours)
 from analysis import jira as jira_analysis  # noqa: E402  (prd/21 sprints)
 from analysis import rules as insights_rules  # noqa: E402  (prd/17 suggestions)
@@ -1117,6 +1118,58 @@ def delivery(request: Request):
         return _store_error(exc)
 
 
+# prd/43 §1: the Rules ↔ Policy-lab cross-check. It runs the lab's *preset*
+# scenarios (not one per rule — that is the larger follow-up the PRD defers), so
+# five forecast runs per (store, calendar, window) are cached and every Rules
+# request after the first reuses them. A store or calendar change makes the old
+# entries unreachable.
+_advice_lock = threading.Lock()
+_advice_cache: dict[tuple, dict] = {}
+ADVICE_CACHE_SIZE = 32
+
+
+def _advice_payload(con, tenant: str, path: Path, court, jira, window) -> dict:
+    key = (
+        tenant, str(path), _file_stamp(path), _calendar_key(tenant),
+        window[0], window[1],
+    )
+    with _advice_lock:
+        hit = _advice_cache.get(key)
+    if hit is not None:
+        return hit
+    try:
+        refinement = jira_analysis.refinement_cost(court, jira, window)
+        calibration = policy_lab.calibrate(
+            court, window, conn=con, refinement=refinement,
+        )
+        comparisons: dict[str, dict | None] = {}
+        if calibration.get("ok", True):
+            for policy in advice_crosscheck.POLICIES:
+                scenario = policy_lab.Scenario.from_dict(policy["scenario"])
+                result = policy_lab.simulate(calibration, scenario)
+                comparisons[policy["id"]] = result.get("compare")
+        report = (
+            advice_crosscheck.report(comparisons)
+            if comparisons else
+            advice_crosscheck.unavailable(
+                calibration.get("note")
+                or "the policy lab could not calibrate a model from this store"
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - the cross-check must not break Rules
+        # A store the model cannot calibrate (or a SimPy edge case) is a stated
+        # no-result, not a 503: the measured rules still answer, and the page
+        # says why the lab did not.
+        report = advice_crosscheck.unavailable(
+            f"the policy lab could not run on this store: {exc}"
+        )
+    with _advice_lock:
+        if len(_advice_cache) >= ADVICE_CACHE_SIZE:
+            _advice_cache.clear()
+        _advice_cache[key] = report
+    return report
+
+
 @app.get("/api/insights")
 def insights(request: Request):
     """Ranked "change this" rules with evidence and severity (prd/17).
@@ -1134,6 +1187,11 @@ def insights(request: Request):
     prd/37: ``at_stake`` is the additive headline — each cost pool is counted
     once, at its most specific rule — and every suggestion carries its
     ``at_stake`` attribution, so the list cannot be added up twice.
+
+    prd/43: ``policy_lab`` is the Rules ↔ Policy-lab cross-check — the lab's own
+    preset results (cached per store/calendar/window), the note each mapped rule
+    carries, and the lab's best scenario. A store the model cannot validate
+    reports ``available: false`` with the reason; the measured rules still show.
     """
     unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["insights"]))
     if unknown is not None:
@@ -1162,6 +1220,7 @@ def insights(request: Request):
             payload = insights_rules.insights(
                 court, threads, window, level=level, bots=bots, sizes=sizes,
                 jira=jira, caps=caps,
+                policy_lab=_advice_payload(con, tenant, path, court, jira, window),
             )
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
