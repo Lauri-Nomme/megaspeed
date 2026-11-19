@@ -460,7 +460,8 @@ class SurvivalTests(StoreCase):
         self.assertIsNotNone(suggestion)
         self.assertEqual(suggestion["severity"], "warning")
         self.assertEqual(suggestion["impact_hours"], 8.0)      # 80 − 72
-        self.assertIn("meets 3 d", suggestion["title"])
+        # prd/35: a day is 8 business hours, so the 72 h target reads "9 d"
+        self.assertIn("meets 9 d", suggestion["title"])
         self.assertIn("1 open PR", suggestion["title"])
         self.assertEqual(suggestion["evidence"]["open_over_target"], 1)
 

@@ -472,6 +472,51 @@ class ScenarioTests(StoreCase):
         )
         self.assertGreater(limited["predicted"]["backlog_max"], 0)
 
+    def test_a_wip_limit_reports_its_lead_time_blow_up_in_words(self):
+        # prd/37 §5: a cycle win that makes delivery wait is not a win, and the
+        # verdict line must say so — not leave two percentages to compare.
+        calibration = self.loaded()
+        baseline = simulation.run(calibration, simulation.Scenario(), seed=5)
+        limited = simulation.run(calibration, simulation.Scenario(wip_limit=1), seed=5)
+        compare = simulation.compare(baseline, limited)
+        lead = compare["lead_hours"]
+        self.assertGreater(lead["percent"], 25.0)
+        self.assertEqual(lead["verdict_tone"], "critical")
+        self.assertIn("blow-up", lead["verdict"])
+        self.assertIn("not a net win", compare["verdict"])
+        self.assertEqual(compare["verdict_tone"], "critical")
+
+    def test_a_size_cap_compares_delivered_work_not_pr_count(self):
+        # prd/37 §5 (concepts.md §1 "Throughput"): a cap splits a PR into more
+        # PRs carrying the same commits, so PR/day rises while nothing more is
+        # delivered. The A/B must report the work-unit throughput.
+        calibration = copy.deepcopy(self.loaded())
+        # every PR carries 8 commits, so a 3-commit cap splits it into 3 PRs
+        calibration["pr_size"]["commits"]["histogram"] = {"8": 1}
+        calibration["pr_size"]["commits"]["median"] = 8.0
+        baseline = simulation.run(calibration, simulation.Scenario(), seed=5)
+        capped = simulation.run(
+            calibration, simulation.Scenario(size_cap_commits=3), seed=5
+        )
+        self.assertGreater(
+            capped["predicted"]["throughput_per_day"],
+            baseline["predicted"]["throughput_per_day"],
+        )
+        work_delta = abs(
+            capped["predicted"]["throughput_work_per_day"]
+            - baseline["predicted"]["throughput_work_per_day"]
+        ) / max(1e-9, baseline["predicted"]["throughput_work_per_day"])
+        # the packaging changed; the delivered work did not (within the draw)
+        self.assertLess(work_delta, 0.10)
+        self.assertEqual(capped["predicted"]["work_unit"], "commits")
+        compare = simulation.compare(baseline, capped)
+        self.assertIn("throughput_work_per_day", compare)
+        self.assertIn("verdict", compare["throughput_work_per_day"])
+        self.assertIn("delivered work", compare["throughput_work_per_day"]["verdict"])
+        # the PR-count row is labelled packaging, never a win
+        self.assertIn("not necessarily more work",
+                      compare["throughput_per_day"]["verdict"])
+
     def test_a_review_sla_shortens_the_cycle(self):
         calibration = self.loaded()
         baseline = simulation.run(calibration, simulation.Scenario(), seed=5)

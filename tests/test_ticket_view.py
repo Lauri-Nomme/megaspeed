@@ -314,6 +314,32 @@ class TicketCycleTests(StoreCase):
         self.assertEqual(segments["rows"][2]["active_hours"], 4.0)
         self.assertEqual(segments["rows"][2]["efficiency"], 0.4)
 
+    def test_a_sprint_chip_measures_done_by_the_close_not_by_now(self):
+        # prd/37: the ticket's sprint chip and the sprint lens share one
+        # definition — a story done after its sprint closed is late, not done.
+        fx = Fixture()
+        fx.sprint(1, T0, end=T0 + timedelta(days=1), closed=T0 + timedelta(days=1))
+        fx.story("DEL-167", T0, points=8, state="done",
+                 closed=T0 + timedelta(hours=90))
+        fx.add_to_sprint("DEL-167", T0 + timedelta(hours=20), 1)
+        fx.status("DEL-167", T0 + timedelta(hours=30), "in_progress")
+        fx.status("DEL-167", T0 + timedelta(hours=90), "done",
+                  from_status="in_progress")
+        con, court, data = self.load(fx)
+        try:
+            payload = tickets.ticket(court, data, "DEL-167")
+        finally:
+            con.close()
+        sprints = payload["sprints"]
+        self.assertTrue(sprints["carried_over"])
+        self.assertEqual(sprints["late"], 1)
+        self.assertEqual(sprints["never"], 0)
+        membership = sprints["memberships"][0]
+        self.assertEqual(membership["outcome"], "late")
+        self.assertFalse(membership["done_by_end"])
+        self.assertTrue(membership["closed"])
+        self.assertGreater(membership["slip_hours"], 0)
+
     def test_the_prs_are_joined_by_the_story_key(self):
         con, court, data = self.load()
         try:

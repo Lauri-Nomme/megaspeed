@@ -127,6 +127,8 @@ export const TOKEN_FALLBACK = {
   '--canvas-mean': 'rgba(232,233,235,.22)',
   '--canvas-band': 'rgba(140,152,212,.055)',
   '--canvas-band-alt': 'rgba(140,152,212,.022)',
+  '--canvas-band-focus': 'rgba(104,192,252,.14)',
+  '--canvas-band-dim': 'rgba(140,152,212,.015)',
   '--canvas-spine': 'rgba(140,152,212,.30)',
   '--canvas-epic': 'rgba(140,152,212,.16)',
   '--canvas-epic-edge': 'rgba(140,152,212,.65)',

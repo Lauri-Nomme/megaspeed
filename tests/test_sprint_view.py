@@ -7,15 +7,16 @@ number that moved.
 
 The store holds three sprints and six stories:
 
-* ``ENG-1`` — committed to sprint 1, done: the ordinary in-scope story;
-* ``ENG-2`` — committed to sprint 1, then sprint 2: the **carry-over**;
-* ``ENG-3`` — added to sprint 2 and removed again: **out of scope** now, but
-  reported as ``removed_to_backlog`` rather than as never planned;
+* ``ENG-1`` — committed to sprint 1, done before its close: done by end;
+* ``ENG-2`` — committed to sprint 1 (done after its close: **late**) and then
+  sprint 2 (done by its close): the carry-over with a measured slip;
+* ``ENG-3`` — added to sprint 2 and removed again, never done: **out of scope**
+  now, reported as ``removed_to_backlog``, and carried out of sprint 2;
 * ``ENG-4`` — never in a sprint: the story the plan never included;
-* ``ENG-5`` — removed from sprint 1 and re-added to **the same** sprint: not
-  carry-over;
+* ``ENG-5`` — removed from sprint 1 and re-added to **the same** sprint, never
+  done: not an explicit re-add, but still carried (it missed the close);
 * ``ENG-6`` — created later, committed to the active sprint 3: the window
-  filter's cohort.
+  filter's cohort; an active sprint has no late stories yet.
 
 The API half drives the real ASGI app against a temp tenant directory, so the
 endpoint contract (tenant scoping, 400/404, a store without the Jira layer) is
@@ -346,14 +347,40 @@ class SprintScopeTests(StoreCase):
         self.assertEqual(first["stories"], ["ENG-1", "ENG-2", "ENG-5"])
         self.assertEqual(first["current_stories"], ["ENG-1", "ENG-5"])
         self.assertEqual(first["points"], 9)          # 5 + 3 + 1
-        self.assertEqual(first["done"], 2)
-        self.assertEqual(first["done_points"], 8)     # 5 + 3
+        # prd/37: "done" is done by the sprint's close. ENG-1 made it; ENG-2
+        # finished on Feb 1, after sprint 1 closed (Jan 19) → late.
+        self.assertEqual(first["done"], 1)
+        self.assertEqual(first["done_by_end"], 1)
+        self.assertEqual(first["done_late"], 1)
+        self.assertEqual(first["never_done"], 1)      # ENG-5
+        self.assertEqual(first["done_points"], 5)
+        self.assertEqual(first["late_points"], 3)
         self.assertEqual(first["open_stories"], 1)
         second = by_sprint(payload, 2)
         self.assertEqual(second["stories"], ["ENG-2", "ENG-3"])
         self.assertEqual(second["points"], 5)
+        # ENG-2 was done by sprint 2's close; ENG-3 never was
         self.assertEqual(second["done"], 1)
+        self.assertEqual(second["done_by_end"], 1)
+        self.assertEqual(second["never_done"], 1)
         self.assertEqual(by_sprint(payload, 3)["stories"], ["ENG-6"])
+
+    def test_the_done_breakdown_is_measured_at_the_close(self):
+        payload = self.sprint_view()
+        first = by_sprint(payload, 1)
+        # 1 done by end, 1 late, 1 never — never "2 done" because today is later
+        self.assertEqual(
+            (first["done_by_end"], first["done_late"], first["never_done"]),
+            (1, 1, 1),
+        )
+        self.assertEqual(first["done_share"], round(1 / 3, 4))
+        self.assertFalse(first["on_time"])
+        delivery = payload["delivery"]
+        self.assertEqual(delivery["closed_sprints"], 2)
+        self.assertEqual(delivery["done_by_end"], 2)   # ENG-1 + ENG-2 in sprint 2
+        self.assertEqual(delivery["done_late"], 1)     # ENG-2 in sprint 1
+        self.assertEqual(delivery["never_done"], 2)    # ENG-3, ENG-5
+        self.assertEqual(delivery["worst"]["sprint_id"], 1)
 
     def test_the_window_limits_the_cohort_but_not_a_sprints_scope(self):
         # a 30-day window from Feb 20 keeps ENG-6 only (created Feb 10)
@@ -370,36 +397,49 @@ class SprintScopeTests(StoreCase):
 # carry-over
 # --------------------------------------------------------------------------- #
 class SprintCarryOverTests(StoreCase):
-    def test_a_story_added_across_two_sprints_is_marked(self):
+    def test_carry_over_is_committed_but_not_done_by_the_close(self):
         payload = self.sprint_view()
         carry = payload["carry_over"]
-        self.assertEqual(carry["count"], 1)
-        self.assertEqual(carry["stories"], ["ENG-2"])
-        self.assertEqual(carry["share"], 0.2)         # 1 of 5 ever committed
+        # prd/37: ENG-2 finished late, ENG-3 and ENG-5 never finished — all
+        # committed to a closed sprint that ended first. The old count was 0
+        # here (none was explicitly re-added to a second sprint).
+        self.assertEqual(carry["count"], 3)
+        self.assertEqual(carry["stories"], ["ENG-2", "ENG-3", "ENG-5"])
+        self.assertEqual(carry["late"], 1)
+        self.assertEqual(carry["never"], 2)
+        self.assertEqual(carry["share"], 0.6)         # 3 of 5 ever committed
         self.assertEqual(carry["sprints_involved"], 2)
-        row = carry["rows"][0]
-        self.assertEqual(row["key"], "ENG-2")
-        self.assertEqual(row["sprints"], [1, 2])
-        self.assertEqual(row["first_sprint"], 1)
-        self.assertEqual(row["last_sprint"], 2)
+        # worst slip first: the never-done stories have run since their close
+        self.assertEqual([row["key"] for row in carry["rows"]],
+                         ["ENG-5", "ENG-3", "ENG-2"])
+        late = next(row for row in carry["rows"] if row["key"] == "ENG-2")
+        self.assertEqual(late["status"], "late")
+        self.assertEqual(late["missed_sprints"], [1])
+        self.assertEqual(late["sprints"], [1, 2])
         # the per-story rows carry the same mark, so a lane can draw it
         story_rows = {row["key"]: row for row in payload["rows"]}
         self.assertTrue(story_rows["ENG-2"]["carried_over"])
-        self.assertEqual(story_rows["ENG-2"]["sprints"], [1, 2])
+        self.assertEqual(story_rows["ENG-2"]["sprint_outcomes"],
+                         {"1": "late", "2": "by_end"})
         self.assertFalse(story_rows["ENG-1"]["carried_over"])
 
     def test_the_sprints_name_what_came_in_and_went_out(self):
         payload = self.sprint_view()
-        self.assertEqual(by_sprint(payload, 1)["carried_out"], ["ENG-2"])
+        self.assertEqual(by_sprint(payload, 1)["carried_out"], ["ENG-2", "ENG-5"])
         self.assertEqual(by_sprint(payload, 2)["carried_in"], ["ENG-2"])
-        self.assertEqual(by_sprint(payload, 2)["carried_out"], [])
+        self.assertEqual(by_sprint(payload, 2)["carried_out"], ["ENG-3"])
         self.assertEqual(by_sprint(payload, 1)["carried_in"], [])
+        # an active sprint has not closed, so nothing in it is carried out yet
+        self.assertEqual(by_sprint(payload, 3)["carried_out"], [])
 
-    def test_a_re_add_to_the_same_sprint_is_not_carry_over(self):
+    def test_a_re_add_to_the_same_sprint_is_not_an_explicit_readd(self):
         payload = self.sprint_view()
         story_rows = {row["key"]: row for row in payload["rows"]}
         self.assertEqual(story_rows["ENG-5"]["sprints"], [1])
-        self.assertFalse(story_rows["ENG-5"]["carried_over"])
+        # the explicit multi-sprint signal stays separate from carry-over
+        self.assertFalse(story_rows["ENG-5"]["explicit_readd"])
+        # ... but ENG-5 was never done by sprint 1's close, so it *is* carried
+        self.assertTrue(story_rows["ENG-5"]["carried_over"])
         self.assertEqual(story_rows["ENG-5"]["adds"], 2)
 
     def test_a_removed_story_reports_no_current_sprint(self):
@@ -527,10 +567,14 @@ class SprintApiTests(unittest.TestCase):
         self.assertEqual(body["scope"]["in_sprint"], 4)
         self.assertEqual(body["scope"]["out_of_sprint"], 2)
         self.assertEqual(body["scope"]["unplanned"], ["ENG-3", "ENG-4"])
-        self.assertEqual(body["carry_over"]["count"], 1)
-        self.assertEqual(body["carry_over"]["stories"], ["ENG-2"])
-        self.assertEqual(first["carried_out"], ["ENG-2"])
+        self.assertEqual(body["carry_over"]["count"], 3)
+        self.assertEqual(body["carry_over"]["stories"], ["ENG-2", "ENG-3", "ENG-5"])
+        self.assertEqual(first["carried_out"], ["ENG-2", "ENG-5"])
         self.assertEqual(body["sprints"][1]["carried_in"], ["ENG-2"])
+        # prd/37: the chip counts done-by-end, not done-by-now
+        self.assertEqual(first["done_by_end"], 1)
+        self.assertEqual(first["done_late"], 1)
+        self.assertEqual(first["never_done"], 1)
         # the story rows are the drill-down, with the mark on each
         rows = {row["key"]: row for row in body["rows"]}
         self.assertTrue(rows["ENG-2"]["carried_over"])

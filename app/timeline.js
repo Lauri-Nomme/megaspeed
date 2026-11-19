@@ -16,7 +16,8 @@
  */
 
 import {
-  MINUTE, HOUR, DAY, fmtDay, fmtClock, fmtStamp, fmtDuration, fmtTick, fmtCompact, esc, rgba,
+  MINUTE, HOUR, DAY, fmtDay, fmtClock, fmtStamp, fmtCalendarDuration, fmtHours,
+  fmtTick, fmtCompact, esc, rgba,
 } from './format.js';
 import { epicKeySet, epicTicket, ownTicket, ticketKey } from './tickets.js';
 import { touchAxis } from './mobile.js';
@@ -373,6 +374,9 @@ export class Timeline {
     this.sprintStory = new Map();
     this.sprintScope = null;
     this.sprintCarry = null;
+    // prd/37 §4: the selected sprint id — filters the story lanes and marks
+    // the band; null means "every story".
+    this.sprintFocus = null;
     // The epic/tracking keys across the whole store, set by the page (B2). When
     // null the census is taken over the PRs handed to setData().
     this.epicKeys = null;
@@ -435,8 +439,13 @@ export class Timeline {
         plannedEnd: sprint.planned_end
           ? Date.parse(`${sprint.planned_end}T23:59:59Z`) : null,
         stories: sprint.story_count || 0,
+        storyKeys: sprint.stories || [],
         points: sprint.points || 0,
-        done: sprint.done || 0,
+        done: sprint.done_by_end ?? sprint.done ?? 0,
+        doneByEnd: sprint.done_by_end ?? sprint.done ?? 0,
+        doneLate: sprint.done_late || 0,
+        neverDone: sprint.never_done || 0,
+        lateHours: sprint.late_hours || 0,
         carriedIn: sprint.carried_in || [],
         carriedOut: sprint.carried_out || [],
       }))
@@ -445,7 +454,36 @@ export class Timeline {
     for (const row of (data && data.rows) || []) {
       if (row && row.key) this.sprintStory.set(row.key, row);
     }
+    if (this.sprintFocus != null
+        && !this.sprints.some((sprint) => String(sprint.id) === String(this.sprintFocus))) {
+      this.sprintFocus = null;
+    }
+    this._rowCache = null;
+    this._objectRows = null;
     this.schedule();
+  }
+
+  /** Select (or clear) the sprint lens (prd/37 §4).
+   *
+   * The chosen sprint filters the story lanes to its committed stories, marks
+   * its band on the canvas and dims the others. ``null`` restores every lane.
+   */
+  setSprintFocus(id) {
+    const next = id == null ? null : id;
+    if (this.sprintFocus === next) return;
+    this.sprintFocus = next;
+    this._rowCache = null;
+    this._objectRows = null;
+    this.schedule();
+  }
+
+  /** The story keys committed to the focused sprint, or null when none is. */
+  sprintFocusKeys() {
+    if (this.sprintFocus == null) return null;
+    const sprint = this.sprints.find(
+      (row) => String(row.id) === String(this.sprintFocus),
+    );
+    return sprint ? new Set(sprint.storyKeys || []) : null;
   }
 
   setData(events, objects, meta = {}) {
@@ -767,15 +805,20 @@ export class Timeline {
     if (this.dim === 'object') {
       // The row list is a function of the loaded data only, and `layout()` runs
       // on every scroll frame now — build it once per setData, not per frame.
-      if (this._objectRows && this._objectRows.prs === this.prs) return this._objectRows.rows;
-      const rows = this.prs.map((pr) => ({
+      const focus = this.sprintFocusKeys();
+      const cacheKey = this.sprintFocus;
+      if (this._objectRows && this._objectRows.prs === this.prs
+          && this._objectRows.focus === cacheKey) return this._objectRows.rows;
+      const rows = this.prs
+        .filter((pr) => !focus || focus.has(pr.ticket))
+        .map((pr) => ({
         key: `${pr.repo}#${pr.number}`,
         pr,
         ticket: pr.ticket,
         count: pr.events.length,
         label: `${pr.ticket ? `${pr.ticket} ` : ''}#${pr.number} ${pr.repo}`,
       }));
-      this._objectRows = { prs: this.prs, rows };
+      this._objectRows = { prs: this.prs, rows, focus: cacheKey };
       return rows;
     }
     if (this.dim === 'queue') {
@@ -861,15 +904,20 @@ export class Timeline {
     // The row list is a function of the data and of the two zoom thresholds, and
     // `layout()` runs on every scroll frame — so build it once per (data, zoom)
     // instead of re-allocating 7,920 rows per frame at 4,000 stories.
+    const focus = this.sprintFocusKeys();
     const cache = this._rowCache;
     if (cache && cache.groups === groups && cache.nested === nested
-        && cache.showEpics === showEpics && cache.prs === this.prs) {
+        && cache.showEpics === showEpics && cache.prs === this.prs
+        && cache.focus === this.sprintFocus) {
       this._storyNested = nested;
       this._storyEpics = showEpics;
       this._epicPrs = cache.epicPrs;
       return cache.rows;
     }
-    const stories = [...groups.values()].sort((a, b) => {
+    const stories = [...groups.values()]
+      // prd/37 §4: the sprint lens filters the story lanes, not just the window
+      .filter((group) => !focus || focus.has(group.story))
+      .sort((a, b) => {
       const start = (group) => Math.min(
         ...group.prs.map((pr) => pr.created),
         ...group.events.map((event) => event.t),
@@ -939,7 +987,10 @@ export class Timeline {
     }
     this._storyNested = nested;
     this._storyEpics = showEpics;
-    this._rowCache = { groups, nested, showEpics, prs: this.prs, rows, epicPrs };
+    this._rowCache = {
+      groups, nested, showEpics, prs: this.prs, rows, epicPrs,
+      focus: this.sprintFocus,
+    };
     return rows;
   }
 
@@ -1240,8 +1291,15 @@ export class Timeline {
       const left = Math.max(g.gutter, this.px(sprint.start));
       const right = Math.min(g.gutter + g.plotW, this.px(sprint.end));
       if (right <= left) return;
-      ctx.fillStyle = index % 2 === 0
-        ? color('--canvas-band') : color('--canvas-band-alt');
+      const focused = this.sprintFocus != null
+        && String(sprint.id) === String(this.sprintFocus);
+      const dimmed = this.sprintFocus != null && !focused;
+      // prd/37 §4: the selected band is marked, the others recede
+      ctx.fillStyle = focused
+        ? color('--canvas-band-focus')
+        : dimmed
+          ? color('--canvas-band-dim')
+          : (index % 2 === 0 ? color('--canvas-band') : color('--canvas-band-alt'));
       ctx.fillRect(left, top, right - left, bottom - top);
       ctx.fillStyle = color('--canvas-spine');
       ctx.fillRect(left, top, 1, bottom - top);
@@ -1265,7 +1323,7 @@ export class Timeline {
         ctx.textBaseline = 'middle';
         ctx.fillStyle = color('--canvas-region-label');
         ctx.fillText(
-          fit(ctx, `S${sprint.id}${sprint.active ? ' · active' : ''}`, right - left - 12),
+          fit(ctx, `S${sprint.id}${sprint.active ? ' · active' : ''}${focused ? ' · lens' : ''}`, right - left - 12),
           left + 6,
           labelY,
         );
@@ -1844,7 +1902,7 @@ export class Timeline {
       const last = hit.items[hit.items.length - 1];
       this.tip.innerHTML = `
         <div class="row"><span class="act">${hit.items.length} events</span>
-          <span class="muted">≤ ${esc(fmtDuration(hit.step))} apart</span></div>
+          <span class="muted">≤ ${esc(fmtCalendarDuration(hit.step))} apart</span></div>
         <div class="row"><span class="k">lane</span><span class="v">${esc(hit.laneKey || '')}</span></div>
         <div class="row"><span class="k">window</span><span class="v">${esc(fmtStamp(first.t))}<br>${esc(fmtStamp(last.t))}</span></div>
         <div class="row"><span class="k">zoom</span><span class="v">zoom in for individual events</span></div>`;
@@ -1853,7 +1911,7 @@ export class Timeline {
       const pr = hit.pr;
       this.tip.innerHTML = `
         <div class="row"><span class="act" style="color:${PHASE[seg.phase].color}">${esc(PHASE[seg.phase].label)}</span>
-          <span class="muted">${esc(fmtDuration(seg.to - seg.from))}</span></div>
+          <span class="muted">${esc(fmtCalendarDuration(seg.to - seg.from))}</span></div>
         <div class="row"><span class="k">queue</span><span class="v">${esc(hit.queue)}</span></div>
         <div class="row"><span class="k">pr</span><span class="v">${pr.ticket ? `${esc(pr.ticket)} ` : ''}#${esc(pr.number)} ${esc(pr.repo)}</span></div>
         <div class="row"><span class="k">window</span><span class="v">${esc(fmtStamp(seg.from))}<br>${esc(fmtStamp(seg.to))}</span></div>
@@ -1871,12 +1929,14 @@ export class Timeline {
         <div class="row"><span class="k">band</span><span class="v">${esc(fmtStamp(sprint.start))}<br>${esc(fmtStamp(sprint.end))}${sprint.open ? ' · at the snapshot' : ''}</span></div>
         ${sprint.active && Number.isFinite(sprint.plannedEnd)
           ? `<div class="row"><span class="k">plan</span><span class="v">ends ${esc(fmtStamp(sprint.plannedEnd))} — dashed line, not measured</span></div>` : ''}
-        <div class="row"><span class="k">scope</span><span class="v">${sprint.stories} stor${sprint.stories === 1 ? 'y' : 'ies'} · ${sprint.points} points · ${sprint.done} done</span></div>
+        <div class="row"><span class="k">scope</span><span class="v">${sprint.stories} stor${sprint.stories === 1 ? 'y' : 'ies'} · ${sprint.points} points</span></div>
+        <div class="row"><span class="k">by end</span><span class="v">${sprint.doneByEnd} done by end${sprint.doneLate ? ` · ${sprint.doneLate} late` : ''}${sprint.neverDone ? ` · ${sprint.neverDone} still open` : ''}</span></div>
+        ${sprint.doneLate && sprint.lateHours ? `<div class="row"><span class="k">slip</span><span class="v">${esc(fmtHours(sprint.lateHours))} after the close</span></div>` : ''}
         ${sprint.carriedIn.length
           ? `<div class="row"><span class="k">carried in</span><span class="v">${esc(sprint.carriedIn.join(', '))}</span></div>` : ''}
         ${sprint.carriedOut.length
           ? `<div class="row"><span class="k">carried out</span><span class="v">${esc(sprint.carriedOut.join(', '))}</span></div>` : ''}
-        <div class="row"><span class="k">open</span><span class="v">click to set the timeframe to this sprint</span></div>`;
+        <div class="row"><span class="k">open</span><span class="v">click to filter the timeline to this sprint</span></div>`;
     } else if (hit.kind === 'story' || hit.kind === 'epic') {
       const prs = hit.kind === 'story'
         ? (hit.prs || [])
@@ -1890,11 +1950,11 @@ export class Timeline {
       this.tip.innerHTML = `
         <div class="row"><span class="act mono">${esc(hit.ticket)}</span>
           <span class="muted">${hit.kind === 'epic' ? 'epic' : 'story'} · ${prs.length} PR${prs.length === 1 ? '' : 's'}</span></div>
-        ${from != null ? `<div class="row"><span class="k">span</span><span class="v">${esc(fmtDuration(to - from))}</span></div>` : ''}
+        ${from != null ? `<div class="row"><span class="k">span</span><span class="v">${esc(fmtCalendarDuration(to - from))}</span></div>` : ''}
         ${hit.kind === 'story' ? sprintRow(hit.membership) : ''}
         ${[...totals.entries()].filter(([, ms]) => ms > 0).map(([phase, ms]) => `
           <div class="row"><span class="k">${esc(PHASE[phase].label)}</span>
-            <span class="v" style="color:${PHASE[phase].color}">${esc(fmtDuration(ms))}</span></div>`).join('')}
+            <span class="v" style="color:${PHASE[phase].color}">${esc(fmtCalendarDuration(ms))}</span></div>`).join('')}
         <div class="row"><span class="k">open</span><span class="v">click for the ticket detail page</span></div>`;
     } else {
       const pr = hit.pr;
@@ -1909,10 +1969,10 @@ export class Timeline {
         <div class="row"><span class="k">ticket</span><span class="v">${esc(pr.ticket) || '—'}</span></div>
         ${pr.epic ? `<div class="row"><span class="k">epic</span><span class="v">${esc(pr.epic)}</span></div>` : ''}
         <div class="row"><span class="k">author</span><span class="v">${esc(pr.actor)}</span></div>
-        <div class="row"><span class="k">cycle</span><span class="v">${esc(fmtDuration(total))}</span></div>
+        <div class="row"><span class="k">cycle</span><span class="v">${esc(fmtCalendarDuration(total))}</span></div>
         ${measured.map(([phase, ms]) => `<div class="row"><span class="k">${esc(PHASE[phase].label)}</span>
-          <span class="v" style="color:${PHASE[phase].color}">${esc(fmtDuration(ms))}</span></div>`).join('')}
-        ${unobserved ? `<div class="row"><span class="k">no events</span><span class="v" style="color:${PHASE.unobserved.color}">${esc(fmtDuration(unobserved))} · not measured</span></div>` : ''}`;
+          <span class="v" style="color:${PHASE[phase].color}">${esc(fmtCalendarDuration(ms))}</span></div>`).join('')}
+        ${unobserved ? `<div class="row"><span class="k">no events</span><span class="v" style="color:${PHASE.unobserved.color}">${esc(fmtCalendarDuration(unobserved))} · not measured</span></div>` : ''}`;
     }
     this.tip.hidden = false;
     const stage = this.canvas.parentElement;

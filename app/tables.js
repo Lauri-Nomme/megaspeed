@@ -65,7 +65,8 @@ export function rowStateText(row) {
   if (row.ball === 'ready') return 'ready to merge';
   if (row.blocked) return 'blocked';
   if (row.stale) return 'stale';
-  if (row.waiting_hours >= 7 * 24) return 'waiting 1w+';
+  // concepts.md §1: one working week is 5 d = 40 business hours.
+  if (row.waiting_hours >= 40) return 'waiting 1w+';
   if (row.phase === 'review') return 'in review';
   if (row.phase === 'active') return 'in progress';
   return row.phase;
@@ -74,7 +75,7 @@ export function rowStateText(row) {
 export function rowState(row) {
   if (row.ball === 'ready') return pill('healthy', 'ready to merge', 'all reviewers answered; the merge click is the author\'s');
   if (row.blocked) return pill('blocked', 'blocked', blockedReason(row));
-  if (row.waiting_hours >= 7 * 24) return pill('waiting', 'waiting 1w+', 'waiting more than a week');
+  if (row.waiting_hours >= 40) return pill('waiting', 'waiting 1w+', 'waiting more than a working week (40 business hours)');
   if (row.phase === 'review') return pill('neutral', 'in review');
   if (row.phase === 'active') return pill('neutral', 'in progress');
   return pill('neutral', row.phase);
@@ -205,12 +206,12 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
         <span class="stat-k">blocked</span>
         <span class="stat-note">${counts.blocked ? 'waiting on a change, not on a person' : 'nothing blocked'}</span></div>
       <div class="stat"><span class="stat-n">${counts.oldest_waiting}</span>
-        <span class="stat-k">waiting over 3 days</span>
+        <span class="stat-k">waiting over ${fmtHours(72).replace(' 0 h', '')}</span>
         <span class="stat-note">of ${counts.open} open item${counts.open === 1 ? '' : 's'}${
           counts.stale ? ` · ${counts.stale} stale` : ''}</span></div>
       <div class="stat"><span class="stat-n">≈${fmtHours(waitHours).replace(' ', ' ')}</span>
         <span class="stat-k">measured wait</span>
-        <span class="stat-note">wall clock, all handovers in the window</span></div>
+        <span class="stat-note">business hours on the team calendar, all handovers in the window</span></div>
       <div class="stat"><span class="stat-n">${overloaded.length}</span>
         <span class="stat-k">${esc(overloadedLabel)}</span>
         <span class="stat-note">${slow.length} slow · longest mean wait ${
@@ -281,6 +282,7 @@ export function detailMarkup(entity, { base = '' } = {}) {
       <p class="context">${esc(context)}</p>
     </div>
     ${entity.impact ? `<p class="impact">${esc(entity.impact)}</p>` : ''}
+    ${entity.clockNote ? `<p class="clock-note">${esc(entity.clockNote)}</p>` : ''}
     <dl class="facts">${facts.map(([factKey, value]) => `
       <dt>${esc(factKey)}</dt><dd class="mono">${factValue(value)}</dd>`).join('')}
     </dl>

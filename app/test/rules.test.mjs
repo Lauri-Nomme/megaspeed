@@ -10,7 +10,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { DRILL_LIMIT, metricRows, ruleItems, rulesMarkdown, rulesMarkup } from '../rules.js';
+import {
+  DRILL_LIMIT, metricRows, ruleItems, rulesMarkdown, rulesMarkup, rulesStats,
+} from '../rules.js';
 
 const REVIEW_METRIC = {
   rows: [
@@ -48,7 +50,7 @@ test('the whole item list is the evidence, affected first', () => {
   assert.equal(items.length, 3);
   assert.deepEqual(items.map((item) => item.label), ['web#2', 'web#1', 'web#3']);
   assert.equal(items[0].affected, true);
-  assert.equal(items[0].value, '4 d 4 h');       // 100 h
+  assert.equal(items[0].value, '12 d 4 h');      // 100 h, d = 8 business hours
   assert.equal(items[0].detail, 'review by RrRr');
   assert.equal(items[0].href, '#ticket/DEL-167');
   assert.equal(items[2].value, 'no review yet');
@@ -151,4 +153,56 @@ test('the Markdown export carries the items as links', () => {
   const markdown = rulesMarkdown(data, 'http://x/');
   assert.match(markdown, /- items \(3\): \[web#2\]\(http:\/\/x\/#ticket\/DEL-167\), \[web#1\]/);
   assert.match(markdown, /\[web#3\]\(http:\/\/x\/#ticket\/DEL-176\)/);
+});
+
+/* prd/37 §3: the drill-down is sorted by the wait it carries, not by key. */
+test('the drill-down is impact-sorted, worst first', () => {
+  const metric = {
+    rows: [
+      { kind: 'pr', id: 'web#1', tickets: ['DEL-1'], hours: 3, affected: false },
+      { kind: 'pr', id: 'web#2', tickets: ['DEL-2'], hours: 90, affected: true },
+      { kind: 'pr', id: 'web#3', tickets: ['DEL-3'], hours: 30, affected: true },
+    ],
+  };
+  const items = ruleItems(
+    suggestion({ metric: 'cycle_time', evidence: {} }),
+    { cycle_time: metric },
+  );
+  assert.deepEqual(items.map((item) => item.label), ['web#2', 'web#3', 'web#1']);
+  assert.equal(items[0].value, '11 d 2 h');   // 90 h
+});
+
+/* prd/37 §2: the headline counts a cost pool once; an absorbed rule says where. */
+test('an at-stake pool is counted once and says where', () => {
+  const base = suggestion({
+    id: 'flow-efficiency', metric: 'flow_efficiency', impact_hours: 160,
+    at_stake: {
+      pool: 'pr_wait', hours: 160, attributed_hours: 60,
+      attributed_to: null, pool_hours: 160, pool_rules: 2,
+    },
+  });
+  const absorbed = suggestion({
+    id: 'rebase-waste', metric: 'rebase_waste', impact_hours: 40, rank: 2,
+    at_stake: {
+      pool: 'pr_wait', hours: 40, attributed_hours: 0,
+      attributed_to: 'flow-efficiency', attributed_to_rank: 1,
+      pool_hours: 160, pool_rules: 2,
+    },
+  });
+  const data = {
+    level: 'team', sample: { prs: 3, days: 30 }, hours_mode: 'business',
+    as_of: '2026-11-17T00:00:00Z', note: '', metrics: {},
+    at_stake: { hours: 160, overlap_hours: 40, pools: [{ pool: 'pr_wait' }] },
+    suggestions: [base, absorbed],
+  };
+  const html = rulesMarkup(data);
+  // the headline is the additive total, not the sum of the rule estimates
+  const stats = rulesStats(data);
+  assert.match(stats, /≈20 d 0 h<\/b> at stake/);   // 160 h = 20 working days
+  assert.match(stats, /counted once/);
+  assert.match(html, /pool ≈20 d 0 h/);
+  assert.match(html, /counted in #1/);
+  const markdown = rulesMarkdown(data);
+  assert.match(markdown, /at stake — counted once/);
+  assert.match(markdown, /counted in #1/);
 });

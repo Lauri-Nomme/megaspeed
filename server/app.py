@@ -1084,6 +1084,10 @@ def insights(request: Request):
     one, and the decomposition / carry-over / churn / worklog / conformance
     metrics and their rules are added when it does. A store without the Jira
     ingest reports ``available: false`` on each of them instead of zeroes.
+
+    prd/37: ``at_stake`` is the additive headline — each cost pool is counted
+    once, at its most specific rule — and every suggestion carries its
+    ``at_stake`` attribution, so the list cannot be added up twice.
     """
     unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["insights"]))
     if unknown is not None:
@@ -1126,9 +1130,12 @@ def sprints(request: Request):
     completion, or start → snapshot while active; ``planned_end`` is the plan,
     never the band). ``scope`` counts the stories created in the window that
     were committed to a sprint against the ones that were not, and lists the
-    unplanned keys. ``carry_over`` marks a story whose ``sprint_added`` names
-    more than one distinct sprint. A store with no Jira layer answers
-    ``available: false`` with the reason, not zeroes.
+    unplanned keys. Each band carries the prd/37 ``done_by_end`` / ``done_late``
+    / ``never_done`` breakdown measured at its close, and ``delivery`` is the
+    per-sprint on-time verdict. ``carry_over`` is "committed to a closed sprint
+    but not done by its close" (late or still open), not only an explicit
+    re-add. A store with no Jira layer answers ``available: false`` with the
+    reason, not zeroes.
     """
     unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["sprints"]))
     if unknown is not None:

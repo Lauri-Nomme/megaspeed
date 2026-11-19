@@ -1488,6 +1488,12 @@ class _Lab:
             "resources": resources,
             "prs": len(self.prs),
             "merged": len(merged),
+            # prd/37 §5: throughput must count delivered *work*, not PR count.
+            # A PR's work unit is its commits: the size-cap knob splits a PR
+            # into more PRs carrying the same commits, so PR/day would rise
+            # while nothing more is delivered.
+            "work": sum(pr.commits for pr in merged),
+            "work_unit": "commits",
             "declined": sum(1 for pr in self.prs if pr.abandoned),
             "backlog_max": self.max_backlog,
             "backlog_end": self.backlog,
@@ -1557,9 +1563,19 @@ def _summary(calibration: dict, scenario: Scenario, pooled: dict,
                 "elapsed_hours": round(elapsed, 1),
                 "touch_hours": TOUCH_HOURS,
             },
+            # PRs delivered per business day. Kept for context, but never the
+            # headline when a size cap is on: many small PRs are not more work.
             "throughput_per_day": round(
                 len(cycles) / (horizon_days * replications), 3
             ),
+            # prd/37 §5: delivered work per business day (commits), the honest
+            # A/B throughput — the size-cap knob preserves the work and changes
+            # only how it is packaged.
+            "throughput_work_per_day": round(
+                pooled.get("work", 0) / (horizon_days * replications), 3
+            ),
+            "work_units": pooled.get("work", 0),
+            "work_unit": pooled.get("work_unit", "commits"),
             "prs": pooled["prs"],
             "merged": pooled["merged"],
             "declined": pooled["declined"],
@@ -1631,7 +1647,7 @@ def run(calibration: dict, scenario: Scenario | None = None, seed: int = DEFAULT
     horizon_hours = max(1.0, float(days) * bh_per_day)
     pooled = {
         "drain": 0.0, "cycles": [], "leads": [], "active": [], "touches": [],
-        "resources": {}, "prs": 0, "merged": 0, "declined": 0,
+        "resources": {}, "prs": 0, "merged": 0, "declined": 0, "work": 0,
         "backlog_max": 0, "backlog_end": 0, "escalated": 0,
         "stack_wait_timeouts": 0,
     }
@@ -1657,6 +1673,7 @@ def run(calibration: dict, scenario: Scenario | None = None, seed: int = DEFAULT
         pooled["prs"] += part["prs"]
         pooled["merged"] += part["merged"]
         pooled["declined"] += part["declined"]
+        pooled["work"] += part["work"]
         pooled["backlog_max"] = max(pooled["backlog_max"], part["backlog_max"])
         pooled["backlog_end"] += part["backlog_end"]
         pooled["escalated"] += part["escalated"]
@@ -1787,11 +1804,140 @@ def _within_noise(baseline: dict, scenario: dict) -> bool:
     return abs(right - left) <= 2.0 * max(spread(baseline), spread(scenario), 1e-9)
 
 
+#: prd/37 §5: a lead-time rise past this share is a blow-up, not a trade-off.
+LEAD_BLOWUP_PERCENT = 25.0
+
+
+def _verdict(entry: dict, better: str, worse: str,
+             *, blowup: float | None = None) -> dict:
+    """One plain-language verdict for a delta (prd/37 §5).
+
+    Every scenario row gets one, including the bad ones: a cycle-time win with
+    a lead-time blow-up must say so in words, not leave the reader to compare
+    two percentages.
+    """
+    percent = entry.get("percent")
+    if percent is None:
+        return {"text": "not comparable", "tone": "muted"}
+    if entry.get("direction") == "same":
+        return {"text": "unchanged", "tone": "muted"}
+    value = abs(percent)
+    if entry.get("better"):
+        return {"text": better.format(p=value), "tone": "good"}
+    text = worse.format(p=value)
+    if blowup is not None and percent >= blowup:
+        return {
+            "text": f"{text} — a blow-up: work waits longer to start, so "
+                    "delivery is not faster",
+            "tone": "critical",
+        }
+    return {"text": text, "tone": "bad"}
+
+
+def _flow_verdict(entry: dict) -> dict:
+    """Flow efficiency is a share: say the change in points, not a ratio."""
+    percent = entry.get("percent")
+    if percent is None:
+        return {"text": "not comparable", "tone": "muted"}
+    points = abs(float(entry.get("absolute") or 0.0)) * 100.0
+    if points < 0.05:
+        return {"text": "unchanged", "tone": "muted"}
+    better = entry.get("better") is True
+    return {
+        "text": f"flow efficiency {points:.1f} points {'better' if better else 'worse'}",
+        "tone": "good" if better else "bad",
+    }
+
+
+def _annotate(compare: dict) -> None:
+    """Attach a verdict line to every A/B row and one overall verdict."""
+    verdicts = {
+        "cycle_median_hours": _verdict(
+            compare["cycle_median_hours"],
+            "cycle {p:.1f} % shorter", "cycle {p:.1f} % longer",
+        ),
+        "cycle_p90_hours": _verdict(
+            compare["cycle_p90_hours"],
+            "p90 cycle {p:.1f} % shorter", "p90 cycle {p:.1f} % longer",
+        ),
+        "lead_hours": _verdict(
+            compare["lead_hours"],
+            "lead time {p:.1f} % shorter", "lead time {p:.1f} % longer",
+            blowup=LEAD_BLOWUP_PERCENT,
+        ),
+        "throughput_work_per_day": _verdict(
+            compare["throughput_work_per_day"],
+            "delivered work {p:.1f} % more", "delivered work {p:.1f} % less",
+        ),
+        "flow_efficiency": _flow_verdict(compare["flow_efficiency"]),
+        # PR count is packaging: more PRs is not more work (concepts.md §1)
+        "throughput_per_day": {
+            "text": (
+                "PR count {p:.1f} % higher — more PRs, not necessarily more work"
+                .format(p=abs(compare["throughput_per_day"].get("percent") or 0))
+                if compare["throughput_per_day"].get("percent")
+                else "unchanged"
+            ),
+            "tone": "muted",
+        },
+    }
+    for key, verdict in verdicts.items():
+        if key in compare:
+            compare[key]["verdict"] = verdict["text"]
+            compare[key]["verdict_tone"] = verdict["tone"]
+    compare["verdicts"] = verdicts
+    if compare.get("within_noise"):
+        compare["verdict"] = (
+            "no clear effect on cycle time — the change is smaller than the "
+            "model's run-to-run spread"
+        )
+        compare["verdict_tone"] = "muted"
+        return
+    lead = verdicts["lead_hours"]
+    cycle = verdicts["cycle_median_hours"]
+    work = verdicts["throughput_work_per_day"]
+    if lead["tone"] == "critical":
+        if cycle["tone"] == "good":
+            compare["verdict"] = (
+                f"{cycle['text']}, but {lead['text']} — the policy moves waiting "
+                "from the PR to the queue; not a net win for delivery"
+            )
+        else:
+            compare["verdict"] = (
+                f"{cycle['text']} and {lead['text']} — the policy makes delivery "
+                "slower on both clocks; no net win"
+            )
+        compare["verdict_tone"] = "critical"
+        return
+    bad = [verdict for verdict in verdicts.values() if verdict["tone"] in ("bad", "critical")]
+    good = [verdict for verdict in verdicts.values() if verdict["tone"] == "good"]
+    if not bad and good:
+        compare["verdict"] = (
+            f"{cycle['text']}, {work['text']} — the policy helps on both "
+            "cycle time and delivered work"
+        )
+        compare["verdict_tone"] = "good"
+    elif bad and good:
+        compare["verdict"] = (
+            f"mixed: {cycle['text']} and {work['text']}, but "
+            + "; ".join(verdict["text"] for verdict in bad)
+        )
+        compare["verdict_tone"] = "warning"
+    elif bad:
+        compare["verdict"] = (
+            "no win: " + "; ".join(verdict["text"] for verdict in bad)
+        )
+        compare["verdict_tone"] = "bad"
+    else:
+        compare["verdict"] = "no clear effect on cycle time or delivered work"
+        compare["verdict_tone"] = "muted"
+
+
 def compare(baseline: dict, scenario: dict) -> dict:
     """A/B: the two predicted distributions and their deltas, side by side."""
     left = baseline["predicted"]
     right = scenario["predicted"]
-    return {
+    result = {
         "cycle_median_hours": {
             "baseline": left["cycle_hours"]["median"],
             "scenario": right["cycle_hours"]["median"],
@@ -1807,6 +1953,13 @@ def compare(baseline: dict, scenario: dict) -> dict:
             "scenario": right["flow_efficiency"]["aggregate"],
             **_delta(left["flow_efficiency"]["aggregate"],
                      right["flow_efficiency"]["aggregate"], higher_is_better=True),
+        },
+        # prd/37 §5: the throughput that matters is delivered work, not PRs.
+        "throughput_work_per_day": {
+            "baseline": left["throughput_work_per_day"],
+            "scenario": right["throughput_work_per_day"],
+            **_delta(left["throughput_work_per_day"], right["throughput_work_per_day"],
+                     higher_is_better=True),
         },
         "throughput_per_day": {
             "baseline": left["throughput_per_day"],
@@ -1835,6 +1988,8 @@ def compare(baseline: dict, scenario: dict) -> dict:
             "share one seed (common random numbers) so the difference is the policy"
         ),
     }
+    _annotate(result)
+    return result
 
 
 def simulate(calibration: dict, scenario: Scenario | None = None,

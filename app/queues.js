@@ -9,7 +9,7 @@
  * Small multiples share one x scale, so rows are comparable at a glance.
  */
 
-import { fmtStamp, fmtDuration, fmtHours, esc, rgba } from './format.js';
+import { fmtStamp, fmtCalendarDuration, fmtHours, esc, rgba } from './format.js';
 import { streamRoleLabel } from './scope.js';
 import { color, onPalette } from './theme.js';
 
@@ -283,8 +283,8 @@ export class QueueChart {
     ctx.textAlign = 'left';
     ctx.fillText(
       phone
-        ? `WIP every ${fmtDuration(bucketMs)} · scale 0–${fmtWipTick(maxWip)}`
-        : `WIP sampled every ${fmtDuration(bucketMs)} · ` +
+        ? `WIP every ${fmtCalendarDuration(bucketMs)} · scale 0–${fmtWipTick(maxWip)}`
+        : `WIP sampled every ${fmtCalendarDuration(bucketMs)} · ` +
           `${this.data && this.data.hours_mode === 'business' ? 'business hours' : 'wall-clock'} · ` +
           `WIP scale 0–${fmtWipTick(maxWip)} items (shared) · completions in grey`,
       phone ? 14 : GUTTER,

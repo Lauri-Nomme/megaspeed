@@ -18,7 +18,7 @@ test('prd/22: stack evidence labels are words, not column names', () => {
 });
 
 test('prd/22: hours take the impact unit, counts stay counts', () => {
-  assert.equal(evidenceValue('re_review_hours', 14), '≈14 h');
+  assert.equal(evidenceValue('re_review_hours', 14), '≈1 d 6 h');  // d = 8 business hours
   assert.equal(evidenceValue('critical_path_hours', 3.5), '≈3 h 30 min');
   assert.equal(evidenceValue('rebases', 2), '2');
   assert.equal(evidenceValue('depth_max', 3), '3');
@@ -47,6 +47,6 @@ test('prd/22: the rule row renders the stacked-cascade evidence', () => {
   assert.match(html, /re-review/);
   assert.match(html, /critical path/);
   assert.match(html, /median depth/);
-  assert.match(html, /≈14 h at stake/);
+  assert.match(html, /≈1 d 6 h at stake/);
   assert.doesNotMatch(html, /re_review_hours/);
 });

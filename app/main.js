@@ -18,7 +18,8 @@ import { Timeline, ACTIVITY_ORDER, ACTIVITY_COLOR, PHASE, PHASE_ORDER } from '/t
 import { BlockingMap, LENSES } from '/graph.js';
 import { QueueChart } from '/queues.js';
 import {
-  DAY, fmtAge, fmtBucket, fmtCompact, fmtDay, fmtHours, fmtRange, fmtStamp, esc, whoLabel,
+  DAY, fmtAge, fmtBucket, fmtCalendarDuration, fmtCalendarHours, fmtCompact, fmtDay,
+  fmtHours, fmtRange, fmtStamp, esc, whoLabel,
 } from '/format.js';
 import {
   TABS, tabCounts, tabRows, deliveryTable, overviewMarkup, detailMarkup,
@@ -102,6 +103,9 @@ const state = {
   blocking: null,
   // prd/26 P6: the sprint lens (`/api/sprints`): bands, scope, carry-over.
   sprints: null,
+  // prd/37 §4: the selected sprint (id) — filters the story lanes, marks the
+  // band and rides in the URL so the lens is shareable.
+  sprint: null,
   rules: null,
   rulesLevel: 'team',
   policy: null,
@@ -394,6 +398,7 @@ function flashStatus(text, cls = 'live', ms = 2500) {
  * change, ticket, scope, timeframe — updates the same string. `#ticket/KEY`
  * stays the ticket route; the query carries what used to be session-local. */
 function routeHref() {
+  const sprint = sprintRange();
   return serializeRoute({
     tenant: state.tenant,
     // A ticket page without its key is a transient boot state, not a place to
@@ -402,6 +407,11 @@ function routeHref() {
     ticket: state.page === 'ticket' ? state.ticketKey : null,
     timeframe: state.timeframe,
     scope: state.scope,
+    // prd/37 §4: a selected sprint travels with its measured range, so the lens
+    // (filter + band + window) is shareable, not just the window.
+    sprint: state.sprint,
+    from: Number.isFinite(sprint.start) ? sprint.start : null,
+    to: Number.isFinite(sprint.end) ? sprint.end : null,
     // dark is the default, so only a light view puts anything in the URL: an
     // existing dark link is byte-identical to what it was before themes.
     theme: state.theme === 'light' ? 'light' : null,
@@ -684,6 +694,7 @@ function resetTenantData() {
   state.blocking = null;
   state.queues = null;
   state.sprints = null;
+  state.sprint = null;
   state.rules = null;
   state.selection = null;
   state.drawerEntity = null;
@@ -704,6 +715,7 @@ function resetTenantData() {
   timeline.setTicketIndex({ epicKeys: state.epicKeys });
   timeline.setData([], [], {});
   timeline.setSprints(null);
+  timeline.setSprintFocus(null);
   blockingMap.setData({ nodes: [], edges: [] });
   queueChart.setData({ streams: [], buckets: 1, window: { start: '', end: '' } });
   $('selection').hidden = true;
@@ -750,7 +762,7 @@ function renderSelection(range) {
   }
   chip.hidden = false;
   $('selection-range').textContent =
-    `${fmtRange(range.start, range.end)} · ${fmtHours((range.end - range.start) / 3_600_000)}`;
+    `${fmtRange(range.start, range.end)} · ${fmtCalendarDuration(range.end - range.start)}`;
   chip.dataset.start = String(range.start);
   chip.dataset.end = String(range.end);
 }
@@ -759,9 +771,21 @@ function renderTimelinePage() {
   renderLegend();
   renderPhaseLegend();
   renderSprintStrip();
-  // Returning to the timeline with a preset active shows that preset again;
-  // a custom brush/zoom window is the user's window and is left alone (B6).
-  if (!state.timeframeCustom) applyTimeframeToTimeline();
+  const band = state.sprint != null ? sprintById(state.sprint) : null;
+  if (band) {
+    // prd/37 §4: the selected sprint filters the lanes and marks the band; its
+    // measured range is the window *until the user pans/zooms inside it*.
+    timeline.setSprintFocus(state.sprint);
+    if (!state.timeframeCustom) {
+      state.timeframeCustom = true;
+      timeline.setWindow(Date.parse(band.band_start), Date.parse(band.band_end));
+      renderTimeframe();
+    }
+  } else if (!state.timeframeCustom) {
+    // Returning to the timeline with a preset active shows that preset again;
+    // a custom brush/zoom window is the user's window and is left alone (B6).
+    applyTimeframeToTimeline();
+  }
   timeline.schedule();
 }
 
@@ -771,20 +795,71 @@ function renderTimelinePage() {
 function renderSprintStrip() {
   const host = $('sprint-strip');
   if (!host) return;
-  const markup = state.sprints ? sprintStrip(state.sprints, { base: appBase() }) : '';
+  const markup = state.sprints
+    ? sprintStrip(state.sprints, { base: appBase(), focus: state.sprint })
+    : '';
   host.innerHTML = markup;
   host.hidden = !markup;
 }
 
-function scopeToSprint(sprint) {
-  if (!sprint || !Number.isFinite(sprint.start) || !Number.isFinite(sprint.end)) return;
-  timeline.setWindow(sprint.start, sprint.end);
-  // The sprint window is not a preset: leave `tfWindow` pointing at the preset
-  // so the top bar says "custom" (B6) instead of claiming the sprint is "1q".
-  state.timeframeCustom = true;
+/* prd/37 §4: the sprint lens is a filter, not a time window. Selecting S
+ * filters the story lanes to S's stories, marks S's band, sets the window to
+ * its measured range and writes `?sprint=<id>&from=&to=` so the view is
+ * shareable. Clearing restores every story lane. */
+function sprintById(id) {
+  if (id == null || !state.sprints) return null;
+  return (state.sprints.sprints || [])
+    .find((row) => String(row.sprint_id) === String(id)) || null;
+}
+
+/** The selected sprint's measured range, in ms (null when no sprint is chosen). */
+function sprintRange() {
+  const band = sprintById(state.sprint);
+  if (!band) return { start: null, end: null };
+  return { start: Date.parse(band.band_start), end: Date.parse(band.band_end) };
+}
+
+function focusSprint(id, { start = null, end = null, sync = true } = {}) {
+  const sprint = sprintById(id);
+  if (!sprint) return false;
+  state.sprint = sprint.sprint_id;
+  timeline.setSprintFocus(state.sprint);
+  const from = Number.isFinite(start) ? start : Date.parse(sprint.band_start);
+  const to = Number.isFinite(end) ? end : Date.parse(sprint.band_end);
+  if (Number.isFinite(from) && Number.isFinite(to)) {
+    timeline.setWindow(from, to);
+    // The sprint window is not a preset: leave `tfWindow` pointing at the preset
+    // so the top bar says "custom" (B6) instead of claiming the sprint is "1q".
+    state.timeframeCustom = true;
+  }
   renderTimeframe();
-  flashStatus(`timeframe set to sprint ${sprint.id}`, 'live');
+  renderSprintStrip();
+  if (sync) syncUrl();
   saveUI();
+  return true;
+}
+
+function clearSprintFocus({ sync = true } = {}) {
+  if (state.sprint == null) return;
+  state.sprint = null;
+  timeline.setSprintFocus(null);
+  renderSprintStrip();
+  if (sync) syncUrl();
+  saveUI();
+}
+
+function scopeToSprint(sprint) {
+  if (!sprint) return;
+  const id = sprint.id != null ? sprint.id : sprint.sprint_id;
+  if (!focusSprint(id, { start: sprint.start, end: sprint.end })) return;
+  flashStatus(`sprint ${id} lens · ${timelineStatsLine()}`, 'live');
+}
+
+function timelineStatsLine() {
+  const band = sprintById(state.sprint);
+  return band
+    ? `${band.done_by_end ?? band.done ?? 0} of ${band.story_count || 0} stories done by end`
+    : 'filtered';
 }
 
 function renderLegend() {
@@ -813,11 +888,15 @@ function renderPhaseLegend() {
       ? `<i class="hatch" style="--c:${PHASE[phase].color}"></i>`
       : `<i style="background:${PHASE[phase].color}"></i>`;
     // "closed" is an end cap, not usually a duration; say which it is
-    const short = (hours) => (hours >= 48 ? `${Math.round(hours / 24)} d` : `${Math.max(1, Math.round(hours))} h`);
+    // prd/35: the timeline's phases are elapsed wall-clock, so they say
+    // "calendar" and never reuse the business-hour `d`.
+    const short = (hours) => (hours >= 24
+      ? fmtCalendarHours(hours)
+      : `${Math.max(1, Math.round(hours))} h`);
     const value = phase === 'closed'
       ? (zero ? 'end cap' : short(entry.hours))
       : (zero ? '0' : short(entry.hours));
-    const title = `${PHASE[phase].hint}${entry ? ` — ${fmtHours(entry.hours)} measured in this window` : ''}`;
+    const title = `${PHASE[phase].hint}${entry ? ` — ${fmtCalendarHours(entry.hours)} elapsed in this window` : ''}`;
     return `<span class="${zero ? 'zero' : ''}" title="${esc(title)}">
       ${swatch}${esc(PHASE[phase].label)}
       <span class="mono muted">${value}</span></span>`;
@@ -1044,6 +1123,21 @@ async function applyRoute() {
   if (route.timeframe && TIMEFRAMES[route.timeframe] && route.timeframe !== state.timeframe) {
     setTimeframe(route.timeframe);
   }
+  // prd/37 §4: a sprint link restores the filter, the band and the range.
+  if (route.sprint != null) {
+    if (state.sprints) {
+      if (!focusSprint(route.sprint, { start: route.from, end: route.to, sync: false })) {
+        state.sprint = null;
+      }
+    } else {
+      // the payload is not loaded yet; load() applies it once the bands exist
+      state.sprint = route.sprint;
+    }
+  } else if (state.sprint != null) {
+    state.sprint = null;
+    timeline.setSprintFocus(null);
+    renderSprintStrip();
+  }
   if (route.ticket) {
     if (state.page !== 'ticket' || state.ticketKey !== route.ticket) {
       await openTicket(route.ticket, { push: false });
@@ -1070,14 +1164,14 @@ function renderBlockingPage() {
   blockingMap.setData(data || { nodes: [], edges: [] });
   blockingMap.setLens(state.lens);
   $('blocking-assumption').textContent = data
-    ? `${data.assumption} · ${data.window.days} days in view · edge = “X waited on Y” · ${data.attribution}. Direction colour is relative to the selected node.`
+    ? `${data.assumption} · ${data.window.days} calendar days in view · edge = “X waited on Y” · ${data.attribution}. Direction colour is relative to the selected node.`
     : '';
   if (data) {
     const totals = data.totals || {};
     const scoped = state.scope.kind !== 'all';
     setHonesty(
       `${totals.nodes || 0} nodes · ${totals.edges || 0} edges · ` +
-      `${fmtHours(totals.hours || 0)} measured wait in the ${data.window.days} d window · ` +
+      `${fmtHours(totals.hours || 0)} measured wait in the ${data.window.days} calendar-day window · ` +
       (scoped ? 'not filtered by scope — every handover stays visible' : 'whole team'),
     );
   }
@@ -1128,7 +1222,7 @@ function renderQueuePage() {
   }
   queueChart.setData(data ? { ...data, streams, emptyText } : { streams: [], buckets: 1, window: { start: '', end: '' } });
   $('queue-assumption').textContent = data
-    ? `${data.assumption} · ${data.bucket_hours} h buckets over ${data.window.days} days. ` +
+    ? `${data.assumption} · ${data.bucket_hours} h buckets over ${data.window.days} calendar days. ` +
       `Little's law: WIP ≈ throughput × wait. Overloaded = long queue wait with a standing queue; slow = long wait with little WIP. ` +
       `This is queue wait, not calendar utilisation (the policy lab's “busy”). ` +
       `${data.diagnosis_note}.`
@@ -1137,7 +1231,7 @@ function renderQueuePage() {
     const filtered = filteredPages(state.scope).has('queue');
     setHonesty(
       `${streams.length} stream${streams.length === 1 ? '' : 's'} · ` +
-      `WIP sampled every ${data.bucket_hours} h over ${data.window.days} days · ` +
+      `WIP sampled every ${data.bucket_hours} h over ${data.window.days} calendar days · ` +
       (filtered ? `filtered to ${state.scope.label}` : 'whole team'),
     );
   }
@@ -1329,17 +1423,22 @@ function openPrDrawer(pr) {
     ...(pr.epic ? [['epic', pr.epic]] : []),
     ['author', pr.actor],
     ['state', pr.state + (pr.closed ? '' : ' · right-censored')],
-    ['cycled', `${fmtHours(cycle / 3_600_000)} (measured)`],
+    // prd/35: this is a wall-clock span, so it is "calendar days", never `d`
+    // (a `d` is 8 business hours everywhere else).
+    ['cycled', `${fmtCalendarDuration(cycle)} (calendar time)`],
     ['commits', String(pr.commits.length)],
     ...["waiting", "active", "review", "ci", "rebasing", "unobserved"].map((phase) => [
       phase === 'unobserved' ? 'no events since' : PHASE[phase].label,
-      totals.get(phase) ? fmtHours(totals.get(phase) / 3_600_000) : '—',
+      totals.get(phase) ? fmtCalendarDuration(totals.get(phase)) : '—',
     ]),
   ];
   openDrawer({
     overline: 'PULL REQUEST',
     pr,
     facts,
+    // prd/35: state the clock once, where the numbers are.
+    clockNote: 'timestamps are UTC · this drawer’s spans are elapsed calendar time; ' +
+      'the delivery list and ticket page price waits in business hours on the team calendar',
     children: [pr.ticket, pr.epic, `${pr.repo}#${pr.number}`].filter(Boolean),
     impact: pr.closed ? 'Closed: its wait is history, not a live bottleneck.' : undefined,
   });
@@ -1518,11 +1617,20 @@ function applyScopeToTimeline() {
   // prd/26 P6: bands and story membership are store-wide (a sprint's own scope
   // is not the visible event window), so they are set after the data.
   timeline.setSprints(state.sprints);
+  // prd/37 §4: the selected sprint filters the story lanes
+  timeline.setSprintFocus(state.sprint);
 }
 
 // --------------------------------------------------------------- timeframe
 function setTimeframe(id) {
   if (!TIMEFRAMES[id]) return;
+  // a preset timeframe leaves the sprint lens: the lens is a filter with its
+  // own measured range, not a preset (prd/37 §4)
+  if (state.sprint != null) {
+    state.sprint = null;
+    timeline.setSprintFocus(null);
+    renderSprintStrip();
+  }
   state.timeframe = id;
   state.timeframeCustom = false;
   state.tfWindow = null;
@@ -1960,6 +2068,11 @@ async function load({ force = false } = {}) {
   }
   applyScopeToTimeline();
   if (previousView) timeline.restoreView(previousView);
+  // prd/37 §4: a `?sprint=` link waits for the data *and* the bands, then
+  // focuses — after setData, so the measured range is not reset to the domain.
+  if (state.sprint != null) {
+    if (!focusSprint(state.sprint, { sync: false })) state.sprint = null;
+  }
   buildScopeOptions();
   renderTenantSwitcher();
   renderProvenance();
@@ -2379,6 +2492,11 @@ document.addEventListener('click', async (event) => {
   }
   // prd/26 P6: a sprint row (or a band, via the canvas callback) sets the
   // timeframe to that sprint's measured window.
+  if (event.target.closest('[data-sprint-clear]')) {
+    clearSprintFocus();
+    flashStatus('sprint lens cleared — every story lane is back', 'live');
+    return;
+  }
   const sprintRow = event.target.closest('[data-sprint-start]');
   if (sprintRow) {
     const start = Number(sprintRow.dataset.sprintStart);
@@ -2621,6 +2739,7 @@ if (initialRoute.timeframe && TIMEFRAMES[initialRoute.timeframe]) {
   state.timeframe = initialRoute.timeframe;
 }
 if (initialRoute.scope) state.scope = initialRoute.scope;
+if (initialRoute.sprint != null) state.sprint = initialRoute.sprint;
 if (initialRoute.view && PAGES[initialRoute.view]) state.page = initialRoute.view;
 if (initialRoute.ticket) {
   state.page = 'ticket';
@@ -2682,5 +2801,6 @@ load().then(async () => {
     await showPage(state.page);
   }
   connect();
-  applyTimeframeToTimeline();
+  // a sprint lens already set its measured window; a preset must not override it
+  if (state.sprint == null) applyTimeframeToTimeline();
 });

@@ -16,6 +16,7 @@ import {
   abMarkup, calibrationMarkup, defaultScenario, isBaselineScenario, KNOBS,
   policyConfigMarkup, policyMarkdown, policyMarkup, predHours, predPercent,
   predRate, provenanceLine, resourcesMarkup, scenarioQuery, validationMarkup,
+  verdictCell,
 } from '../policy.js';
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
@@ -43,6 +44,8 @@ function result(overrides = {}) {
       cycle_hours: { median: 22.43, p90: 36.04 },
       flow_efficiency: { aggregate: 0.15 },
       throughput_per_day: 1.74,
+      throughput_work_per_day: 12.4,
+      work_unit: 'commits',
       lead_hours: { median: 22.43 },
       spread: { replications: 6, median_min: 20.9, median_max: 23.1 },
     },
@@ -78,7 +81,7 @@ function payload(overrides = {}) {
 
 // ------------------------------------------------------------------ numbers
 test('every predicted number is marked ≈, never a bare value', () => {
-  assert.equal(predHours(22.43), '≈22 h 26 min');
+  assert.equal(predHours(22.43), '≈2 d 6 h');  // d = 8 business hours
   assert.equal(predHours(null), '≈–');
   assert.equal(predPercent(0.15), '≈15%');
   assert.equal(predRate(1.74), '≈1.74 /d');
@@ -114,8 +117,8 @@ test('every knob the model accepts is on the page, and nothing else', () => {
 test('a validated baseline shows the mismatch, pass or fail', () => {
   const markup = validationMarkup(payload());
   assert.match(markup, /baseline validated/);
-  assert.match(markup, /≈22 h 26 min/);
-  assert.match(markup, /1 d 0 h/);
+  assert.match(markup, /≈2 d 6 h/);
+  assert.match(markup, /3 d 0 h/);
   assert.match(markup, /−9\.4 %/);
 });
 
@@ -167,11 +170,67 @@ test('the A/B puts baseline and scenario side by side with deltas last', () => {
   });
   const markup = abMarkup(data);
   assert.match(markup, /cycle time · median/);
-  assert.match(markup, /≈22 h 26 min/);
+  assert.match(markup, /≈2 d 6 h/);
   // a shorter cycle is good, a lower throughput is not — the colour must differ
   assert.match(markup, /c-delta good/);
   assert.match(markup, /c-delta bad/);
   assert.match(markup, /−2\.2 %/);
+});
+
+test('prd/37 §5: throughput is delivered work, and PR count is packaging', () => {
+  const compare = {
+    cycle_median_hours: { baseline: 22.43, scenario: 21.94, absolute: -0.49,
+      percent: -2.2, direction: 'down', better: true,
+      verdict: 'cycle 2.2 % shorter', verdict_tone: 'good' },
+    cycle_p90_hours: {}, flow_efficiency: {},
+    throughput_work_per_day: { baseline: 12.4, scenario: 12.1, absolute: -0.3,
+      percent: -2.4, direction: 'down', better: false,
+      verdict: 'delivered work 2.4 % less', verdict_tone: 'bad' },
+    throughput_per_day: { baseline: 1.74, scenario: 3.4, absolute: 1.66,
+      percent: 95.4, direction: 'up', better: true,
+      verdict: 'PR count 95.4 % higher — more PRs, not necessarily more work',
+      verdict_tone: 'muted' },
+    lead_hours: { baseline: 22.43, scenario: 21.94, absolute: -0.49,
+      percent: -2.2, direction: 'down', better: true,
+      verdict: 'lead time 2.2 % shorter', verdict_tone: 'good' },
+    bottleneck: {}, within_noise: false,
+    verdict: 'mixed: cycle 2.2 % shorter and delivered work 2.4 % less',
+    verdict_tone: 'warning',
+  };
+  const data = payload({
+    scenario: { ...result(), scenario: { name: 'cap PRs', size_cap_commits: 3 } },
+    compare,
+  });
+  const markup = abMarkup(data);
+  assert.match(markup, /delivered work · commits \/ d/);
+  assert.match(markup, /PR count · \/ d/);
+  assert.match(markup, /packaging, not more work/);
+  assert.match(markup, /more PRs, not necessarily more work/);
+  assert.match(markup, /verdict:/);
+});
+
+test('prd/37 §5: a lead-time blow-up gets a verdict, not just a red number', () => {
+  const cell = verdictCell({
+    percent: 257.6, direction: 'up', better: false,
+    verdict: 'lead time 257.6 % longer — a blow-up: work waits longer to start, '
+      + 'so delivery is not faster',
+    verdict_tone: 'critical',
+  });
+  assert.match(cell, /blow-up/);
+  assert.match(cell, /c-verdict critical/);
+  assert.match(cell, /delivery is not faster/);
+});
+
+test('prd/37 §5: every knob control has a real label (a11y)', () => {
+  const markup = policyConfigMarkup(defaultScenario());
+  for (const knob of KNOBS) {
+    assert.match(markup, new RegExp(`<label class="policy-knob-k" for="policy-knob-${knob.key}">`));
+    assert.match(markup, new RegExp(`id="policy-knob-${knob.key}"`));
+    assert.match(markup, new RegExp(`aria-describedby="policy-knob-${knob.key}-note"`));
+  }
+  // the lab says a scenario can compose knobs (sentinel + SLA), not one at a time
+  assert.match(markup, /combine knobs/);
+  assert.match(markup, /sentinel \+ review SLA/);
 });
 
 test('a delta inside the model spread is called "no clear effect"', () => {
@@ -223,7 +282,8 @@ test('calibration facts are shown, and an unmeasurable stack says so', () => {
 test('the markdown export carries the gate verdict and the ≈ marker', () => {
   const text = policyMarkdown(payload());
   assert.match(text, /baseline validated/);
-  assert.match(text, /≈22 h 26 min/);
+  assert.match(text, /≈2 d 6 h/);
+  assert.match(text, /delivered work · commits \/ d/);
   assert.match(text, /Every predicted number is an estimate/);
 });
 

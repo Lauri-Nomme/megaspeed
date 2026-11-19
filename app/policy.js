@@ -47,7 +47,7 @@ export const KNOBS = [
   },
   {
     key: 'review_sla_hours', label: 'review SLA', kind: 'select',
-    options: [['', 'off'], ['2', '2 h'], ['4', '4 h'], ['8', '8 h'], ['24', '1 d']],
+    options: [['', 'off'], ['2', '2 h'], ['4', '4 h'], ['8', '8 h'], ['24', '24 h (3 d)']],
     note: 'an overdue review is escalated to any free reviewer instead of waiting',
   },
   {
@@ -124,21 +124,26 @@ export function policyConfigMarkup(scenario) {
   const current = scenario || defaultScenario();
   const rows = KNOBS.map((knob) => {
     const value = current[knob.key];
+    // prd/37 §5 (a11y): every control has a real <label for>, not just a span
+    // beside it, and its note is wired through aria-describedby.
+    const id = `policy-knob-${knob.key}`;
+    const noteId = `${id}-note`;
     let control = '';
     if (knob.kind === 'toggle') {
-      control = `<input type="checkbox" data-knob="${knob.key}"${value ? ' checked' : ''}>`;
+      control = `<input type="checkbox" id="${id}" data-knob="${knob.key}"` +
+        ` aria-describedby="${noteId}"${value ? ' checked' : ''}>`;
     } else {
       const options = knob.options.map(([optionValue, label]) => {
         const chosen = String(value ?? '') === optionValue ? ' selected' : '';
         return `<option value="${optionValue}"${chosen}>${esc(label)}</option>`;
       }).join('');
-      control = `<select data-knob="${knob.key}">${options}</select>`;
+      control = `<select id="${id}" data-knob="${knob.key}" aria-describedby="${noteId}">${options}</select>`;
     }
-    return `<label class="policy-knob">
-      <span class="policy-knob-k">${esc(knob.label)}</span>
+    return `<div class="policy-knob">
+      <label class="policy-knob-k" for="${id}">${esc(knob.label)}</label>
       ${control}
-      <span class="policy-knob-note">${esc(knob.note)}</span>
-    </label>`;
+      <span class="policy-knob-note" id="${noteId}">${esc(knob.note)}</span>
+    </div>`;
   }).join('');
   const presets = PRESETS.map((preset) =>
     `<button type="button" class="chip" data-preset="${esc(preset.id)}">${esc(preset.label)}</button>`,
@@ -148,7 +153,11 @@ export function policyConfigMarkup(scenario) {
       <button type="button" class="policy-run" id="policy-run">Run scenario</button>
       <button type="button" class="chip" id="policy-reset">Reset to baseline</button>
     </div>
-    <div class="policy-presets"><span class="legend-label">presets</span>${presets}</div>`;
+    <div class="policy-presets"><span class="legend-label">presets</span>${presets}</div>
+    <p class="policy-combine" id="policy-combine">A scenario can combine knobs:
+      sentinel + review SLA is one run, and the model composes them. One knob at
+      a time understates the effect — the queue moves to whichever constraint
+      is left.</p>`;
 }
 
 /** The gate: the one sentence that decides whether anything else is credible. */
@@ -191,12 +200,22 @@ function deltaCell(entry) {
   return `<td class="c-delta ${cls}" data-label="Δ">${arrow} ${signed(entry.percent)}</td>`;
 }
 
+/**
+ * prd/37 §5: every scenario row gets a verdict line, not just a colour — and
+ * the lead-time blow-up is a sentence, not a percentage the reader must decode.
+ */
+export function verdictCell(entry) {
+  if (!entry || !entry.verdict) return '<td class="c-verdict muted" data-label="verdict">–</td>';
+  return `<td class="c-verdict ${entry.verdict_tone || 'muted'}" data-label="verdict">${esc(entry.verdict)}</td>`;
+}
+
 function row(label, baseline, scenario, delta, note = '') {
   return `<tr>
     <td class="c-metric" data-label="">${esc(label)}${note ? `<span class="policy-row-note">${esc(note)}</span>` : ''}</td>
     <td class="c-base" data-label="baseline">${baseline}</td>
     <td class="c-scen" data-label="scenario">${scenario}</td>
     ${deltaCell(delta)}
+    ${verdictCell(delta)}
   </tr>`;
 }
 
@@ -213,6 +232,7 @@ export function abMarkup(data) {
     <th class="c-base">baseline</th>
     <th class="c-scen">${scenario ? esc(scenario.scenario.name || 'scenario') : 'scenario'}</th>
     <th class="c-delta">Δ</th>
+    <th class="c-verdict">verdict</th>
   </tr>`;
   const rows = [
     row('cycle time · median', predHours(left.cycle_hours.median),
@@ -224,9 +244,15 @@ export function abMarkup(data) {
     row('flow efficiency', predPercent(left.flow_efficiency.aggregate),
       right ? predPercent(right.flow_efficiency.aggregate) : '—',
       compare && compare.flow_efficiency, 'active ÷ elapsed'),
-    row('throughput', predRate(left.throughput_per_day),
+    // prd/37 §5: delivered *work* is the throughput that compares policies;
+    // the PR count follows as packaging, never as the headline.
+    row(`delivered work · ${left.work_unit || 'commits'} / d`, predRate(left.throughput_work_per_day),
+      right ? predRate(right.throughput_work_per_day) : '—',
+      compare && compare.throughput_work_per_day,
+      'merged work units ÷ business day'),
+    row('PR count · / d', predRate(left.throughput_per_day),
       right ? predRate(right.throughput_per_day) : '—',
-      compare && compare.throughput_per_day),
+      compare && compare.throughput_per_day, 'packaging, not more work'),
     row('lead time · median', predHours(left.lead_hours.median),
       right ? predHours(right.lead_hours.median) : '—',
       compare && compare.lead_hours, 'arrival → merge'),
@@ -239,7 +265,8 @@ export function abMarkup(data) {
       ? `${esc((scenario.bottleneck && scenario.bottleneck.person) || '–')}
         ${scenario.bottleneck ? `<span class="policy-row-note">${predPercent(scenario.bottleneck.utilisation)} busy</span>` : ''}`
       : '—'}</td>
-    <td class="c-delta muted" data-label="Δ">–</td></tr>`;
+    <td class="c-delta muted" data-label="Δ">–</td>
+    <td class="c-verdict muted" data-label="verdict">–</td></tr>`;
   const noise = compare && compare.within_noise
     ? `<p class="policy-note">The cycle-time change is <b>smaller than the run-to-run spread</b>
         of the model (${predHours(left.spread && left.spread.median_min)} –
@@ -247,8 +274,12 @@ export function abMarkup(data) {
         ${esc(left.spread && left.spread.replications)} replications), so read it as
         “no clear effect”, not as a win.</p>`
     : '';
+  const verdict = compare && compare.verdict
+    ? `<p class="policy-verdict ${esc(compare.verdict_tone || 'muted')}" id="policy-verdict">
+        <b>verdict:</b> ${esc(compare.verdict)}</p>`
+    : '';
   return `<table class="table policy-table policy-ab"><thead>${head}</thead>
-    <tbody>${rows}${bottleneck}</tbody></table>${noise}`;
+    <tbody>${rows}${bottleneck}</tbody></table>${verdict}${noise}`;
 }
 
 /** Per-server utilisation: who is *busy* (calendar share), and where the queue is.
@@ -378,14 +409,17 @@ export function policyMarkdown(data) {
     `_${data.provenance} · ${data.hours_mode === 'business' ? 'business hours' : 'wall-clock hours'} · ` +
       `baseline ${gate.status || 'unknown'} (${signed(gate.percent_off)} vs measured)_`,
     '',
-    '| metric | baseline | scenario | Δ |',
-    '| --- | --- | --- | --- |',
-    `| cycle median | ${predHours(base.cycle_hours.median)} | ${scenario ? predHours(scenario.cycle_hours.median) : '—'} | ${compare ? signed(compare.cycle_median_hours.percent) : '—'} |`,
-    `| cycle p90 | ${predHours(base.cycle_hours.p90)} | ${scenario ? predHours(scenario.cycle_hours.p90) : '—'} | ${compare ? signed(compare.cycle_p90_hours.percent) : '—'} |`,
-    `| flow efficiency | ${predPercent(base.flow_efficiency.aggregate)} | ${scenario ? predPercent(scenario.flow_efficiency.aggregate) : '—'} | ${compare ? signed(compare.flow_efficiency.percent) : '—'} |`,
-    `| throughput | ${predRate(base.throughput_per_day)} | ${scenario ? predRate(scenario.throughput_per_day) : '—'} | ${compare ? signed(compare.throughput_per_day.percent) : '—'} |`,
-    `| bottleneck | ${(data.baseline.bottleneck && data.baseline.bottleneck.person) || '–'} | ${scenario && data.scenario.bottleneck ? data.scenario.bottleneck.person : '—'} | |`,
+    '| metric | baseline | scenario | Δ | verdict |',
+    '| --- | --- | --- | --- | --- |',
+    `| cycle median | ${predHours(base.cycle_hours.median)} | ${scenario ? predHours(scenario.cycle_hours.median) : '—'} | ${compare ? signed(compare.cycle_median_hours.percent) : '—'} | ${(compare && compare.cycle_median_hours.verdict) || '—'} |`,
+    `| cycle p90 | ${predHours(base.cycle_hours.p90)} | ${scenario ? predHours(scenario.cycle_hours.p90) : '—'} | ${compare ? signed(compare.cycle_p90_hours.percent) : '—'} | ${(compare && compare.cycle_p90_hours.verdict) || '—'} |`,
+    `| flow efficiency | ${predPercent(base.flow_efficiency.aggregate)} | ${scenario ? predPercent(scenario.flow_efficiency.aggregate) : '—'} | ${compare ? signed(compare.flow_efficiency.percent) : '—'} | ${(compare && compare.flow_efficiency.verdict) || '—'} |`,
+    `| delivered work · ${base.work_unit || 'commits'} / d | ${predRate(base.throughput_work_per_day)} | ${scenario ? predRate(scenario.throughput_work_per_day) : '—'} | ${compare ? signed(compare.throughput_work_per_day.percent) : '—'} | ${(compare && compare.throughput_work_per_day.verdict) || '—'} |`,
+    `| PR count · / d | ${predRate(base.throughput_per_day)} | ${scenario ? predRate(scenario.throughput_per_day) : '—'} | ${compare ? signed(compare.throughput_per_day.percent) : '—'} | packaging, not more work |`,
+    `| lead time | ${predHours(base.lead_hours.median)} | ${scenario ? predHours(scenario.lead_hours.median) : '—'} | ${compare ? signed(compare.lead_hours.percent) : '—'} | ${(compare && compare.lead_hours.verdict) || '—'} |`,
+    `| bottleneck | ${(data.baseline.bottleneck && data.baseline.bottleneck.person) || '–'} | ${scenario && data.scenario.bottleneck ? data.scenario.bottleneck.person : '—'} | | |`,
     '',
+    compare && compare.verdict ? `**verdict:** ${compare.verdict}` : '',
     `_Every predicted number is an estimate (≈); measured numbers are not. ${compare && compare.within_noise ? 'The delta is within the model\'s run-to-run spread.' : ''}_`,
   ];
   if (data.blocked) lines.splice(2, 0, `> ${data.blocked}`, '');

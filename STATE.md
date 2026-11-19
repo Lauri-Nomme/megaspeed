@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **860** (`tests/`) + **96** (`scrape/tests`) + **157** (node `app/test`) green.
+Tests: **896** (`tests/`) + **96** (`scrape/tests`) + **180** (node `app/test`) green.
 
 ## Scrape (airgapped) — full value, reliable
 
@@ -42,8 +42,10 @@ Tests: **860** (`tests/`) + **96** (`scrape/tests`) + **157** (node `app/test`) 
 
 - **Ticket-centric view** `#ticket/KEY` + `GET /api/ticket/{key}` — "why did DEL-167 take 3 weeks",
   8-segment decomposition, honesty-censored prose.
-- **Rules drill-down** (every suggestion expands to its full item list) · **sprint lens** (`/api/sprints`,
-  bands/scope/carry-over) · timeline/blocking/queue/delivery/overview/sources/policy-lab.
+- **Rules drill-down** (every suggestion expands to its full item list, impact-sorted; the at-stake
+  headline counts each cost pool once) · **sprint lens** (`/api/sprints`, bands + story filter + URL,
+  done-by-end/late/never, carry-over at the close) · timeline/blocking/queue/delivery/overview/sources/
+  policy-lab (work-unit throughput + a verdict per scenario row).
 - **Responsive** (≤640px): off-canvas drawer, two-row top bar, bottom-sheet detail, pinch/pan/tap touch,
   list-first entry + card-stacked tables. Desktop (1600px) and medium (900px) verified pixel-identical.
 - **Phone UX (post-review)**: ticket keys visible on the timeline (epic→story→PR hierarchy at every zoom,

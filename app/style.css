@@ -52,6 +52,8 @@
   --canvas-mean: rgba(232, 233, 235, .22);
   --canvas-band: rgba(140, 152, 212, .055);
   --canvas-band-alt: rgba(140, 152, 212, .022);
+  --canvas-band-focus: rgba(104, 192, 252, .14);
+  --canvas-band-dim: rgba(140, 152, 212, .015);
   --canvas-spine: rgba(140, 152, 212, .30);
   --canvas-epic: rgba(140, 152, 212, .16);
   --canvas-epic-edge: rgba(140, 152, 212, .65);
@@ -220,6 +222,8 @@
   --canvas-mean: rgba(26, 30, 36, .35);
   --canvas-band: rgba(60, 80, 140, .07);
   --canvas-band-alt: rgba(60, 80, 140, .035);
+  --canvas-band-focus: rgba(22, 104, 196, .16);
+  --canvas-band-dim: rgba(60, 80, 140, .018);
   --canvas-spine: rgba(60, 80, 140, .35);
   --canvas-epic: rgba(60, 80, 140, .16);
   --canvas-epic-edge: rgba(60, 80, 140, .65);
@@ -672,11 +676,37 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 }
 .sprint-row:hover { background: var(--bg-hover); color: var(--text-primary); }
 .sprint-row.open { border-color: var(--warning-line-strong); }
+/* prd/37 §4: the selected sprint is the lens — it must be obvious which one */
+.sprint-row.selected {
+  border-color: var(--primary-tint-fg);
+  background: var(--primary-tint-bg);
+  color: var(--text-primary);
+}
+.sprint-row.selected .sprint-id { color: var(--primary-tint-fg); }
+.sprint-row .sprint-late { color: var(--warning); }
+.sprint-row .sprint-never { color: var(--text-tertiary); }
+.sprint-ontime { color: var(--text-secondary); }
+.sprint-focus {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  margin-top: 4px; font-size: 11px; color: var(--text-secondary);
+}
+.sprint-focus b { color: var(--primary-tint-fg); }
+.sprint-focus .chip { height: 20px; padding: 0 7px; font-size: 10.5px; }
 .sprint-row .sprint-id { color: var(--link); font-weight: 600; }
 .sprint-row.open .sprint-id { color: var(--warning); }
 .sprint-row .sprint-window { color: var(--text-primary); }
 .sprint-row .sprint-done, .sprint-row .sprint-scope-count { color: var(--text-secondary); }
 .sprint-carry { color: var(--warning); }
+/* prd/37 §2: a rule whose hours are counted in another rule's pool */
+.rule-stake-note {
+  font-size: 10.5px; color: var(--text-tertiary);
+  border: 1px solid var(--border-hairline); border-radius: 999px;
+  padding: 0 6px;
+}
+/* prd/35: the clock note on a PR drawer / ticket page */
+.clock-note {
+  margin: 6px 0 0; font-size: 11px; color: var(--text-tertiary);
+}
 .sprint-legend { color: var(--text-tertiary); }
 .sprint-plan { color: var(--text-tertiary); font-style: italic; }
 .sprint-carry-list, .sprint-out-keys {
@@ -1152,6 +1182,24 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .policy-table .c-delta.good { color: var(--healthy); }
 .policy-table .c-delta.bad { color: var(--critical); }
 .policy-table .c-delta.muted, .policy-table .muted { color: var(--text-tertiary); }
+/* prd/37 §5: every scenario row carries a verdict, including the bad ones */
+.policy-table .c-verdict { font-size: 11px; max-width: 34ch; }
+.policy-table .c-verdict.good { color: var(--healthy); }
+.policy-table .c-verdict.bad { color: var(--critical); }
+.policy-table .c-verdict.critical { color: var(--critical); font-weight: 600; }
+.policy-table .c-verdict.warning { color: var(--warning); }
+.policy-table .c-verdict.muted { color: var(--text-tertiary); }
+.policy-verdict {
+  margin: 8px 0 0; padding: 6px 9px; font-size: var(--body-font);
+  border-left: 2px solid var(--border-control); color: var(--text-primary);
+}
+.policy-verdict.good { border-left-color: var(--healthy); }
+.policy-verdict.bad, .policy-verdict.critical { border-left-color: var(--critical); }
+.policy-verdict.warning { border-left-color: var(--warning); }
+.policy-verdict.muted { border-left-color: var(--border-hairline); color: var(--text-secondary); }
+.policy-combine {
+  margin: 12px 0 0; font-size: 11px; color: var(--text-tertiary); max-width: 46ch;
+}
 .policy-row-note { display: block; font-size: 10.5px; color: var(--text-tertiary); font-family: var(--font-sans, inherit); }
 .policy-facts { max-width: 520px; }
 .policy-note { margin: 10px 14px 0; font-size: var(--body-font); color: var(--text-tertiary); max-width: 100ch; }
