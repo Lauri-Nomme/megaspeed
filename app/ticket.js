@@ -24,8 +24,10 @@ import { color, onPalette } from './theme.js';
  * scheduled, amber = committed but not started, purple = work, blues = review,
  * green = approval/merge. */
 export const SEGMENT_PHASE = {
-  ready_refined: { token: '--cat-7', color: '', phase: 'waiting', label: 'backlog' },
-  refined_sprint: { token: '--cat-2', color: '', phase: 'waiting', label: 'unscheduled' },
+  // concepts.md §5: the first segment is created → ready; refinement is the
+  // work inside it, so the short phase label is "refinement", never "backlog".
+  created_ready: { token: '--cat-7', color: '', phase: 'waiting', label: 'refinement' },
+  ready_sprint: { token: '--cat-2', color: '', phase: 'waiting', label: 'unscheduled' },
   sprint_in_progress: { token: '--cat-5', color: '', phase: 'waiting', label: 'committed' },
   in_progress_pr_open: { token: '--phase-active', color: '', phase: 'active', label: 'in progress' },
   pr_open_first_review: { token: '--phase-review', color: '', phase: 'review', label: 'in review' },
@@ -45,7 +47,7 @@ export function applyPalette() {
 onPalette(applyPalette);
 
 export function segmentPhase(key) {
-  return SEGMENT_PHASE[key] || SEGMENT_PHASE.ready_refined;
+  return SEGMENT_PHASE[key] || SEGMENT_PHASE.created_ready;
 }
 
 /** "45 h", "0 h", "—" — hours are the analysis unit, never a fake duration. */
@@ -94,6 +96,8 @@ export function segmentBar(payload) {
     }
     const title = `${row.label} — ${segmentHours(row.hours)}` +
       ` (${pct(row.share)} of the measured cycle, ${pct(row.efficiency)} active)` +
+      (row.no_pr_open_hours > 0
+        ? ` · ${segmentHours(row.no_pr_open_hours)} with no PR open` : '') +
       (row.inverted ? ' · boundaries out of order, so no wait' : '');
     return {
       key: row.key,
@@ -119,7 +123,9 @@ export function segmentBar(payload) {
       ? `<i style="background:${phase.color}"></i>`
       : `<i class="hatch" style="--c:${phase.color}"></i>`;
     return `<span class="ticket-seg-key${row.available ? '' : ' zero'}"
-      title="${esc(row.available ? `${row.label} · ${pct(row.efficiency)} active` : row.reason || '')}">
+      title="${esc(row.available
+        ? `${row.label} · ${pct(row.efficiency)} active${row.no_pr_open_hours > 0 ? ` · ${segmentHours(row.no_pr_open_hours)} with no PR open` : ''}`
+        : row.reason || '')}">
       ${swatch}<span>${esc(row.label)}</span> ${value}</span>`;
   }).join('')}</div>`;
   return `${bar}${legend}`;
@@ -219,7 +225,9 @@ export function worklogBlock(payload) {
   }
   const max = Math.max(logged, active, 0.01);
   const buckets = worklog.buckets || {};
-  const late = (buckets.within_week || 0) + (buckets.late || 0);
+  // prd/36 §5: "logged a week late" is the `late` bucket (> 7 days);
+  // within_week (2–7 d) is shown in the bucket line, never counted as it.
+  const late = buckets.late || 0;
   const bucketText = Object.entries(buckets)
     .map(([name, count]) => `${esc(name.replace(/_/g, ' '))} ${count}`).join(' · ');
   return `
@@ -270,10 +278,13 @@ export function ticketStats(payload) {
   const story = payload.story || {};
   const cycle = segments.cycle_hours;
   const largest = segments.largest_label;
+  const total = (segments.rows || []).length;
+  const reopened = payload.reopened || segments.reopened;
   return `<span class="stat-inline"><b>${cycle == null ? '–' : esc(segmentHours(cycle))}</b> cycle</span>
-    <span class="stat-inline"><b>${segments.measured ?? 0}</b>/8 segments</span>
+    <span class="stat-inline"><b>${segments.measured ?? 0}</b>/${total} segments</span>
     <span class="stat-inline"><b>${payload.pr_count ?? 0}</b> PR${payload.pr_count === 1 ? '' : 's'}</span>
     ${story.points != null ? `<span class="stat-inline"><b>${esc(story.points)}</b> points</span>` : ''}
+    ${reopened ? `<span class="stat-inline"><b>reopened</b> ${segments.reopen_count ? `×${esc(segments.reopen_count)}` : ''}</span>` : ''}
     ${largest ? `<span class="stat-inline">most in <b>${esc(largest)}</b> (${pct(segments.largest_share)})</span>` : ''}`;
 }
 
@@ -292,6 +303,15 @@ export function ticketMarkup(payload, { base = '' } = {}) {
       story.summary_class ? story.summary_class : '',
     ].filter(Boolean).join(' · ')
     : 'the store holds no story object for this key; the PR rows are the only evidence';
+  const openPrs = payload.open_prs || [];
+  const reopened = payload.reopened || segments.reopened;
+  // prd/36 §3/§4: the end state and any censored PR are stated in the head, so
+  // the headline can never look like a clean close while a PR is still open.
+  const endPills = [
+    reopened ? `<span class="pill warning" title="the story moved out of done and back">reopened${
+      payload.reopen_count ? ` ×${esc(payload.reopen_count)}` : ''}</span>` : '',
+    ...openPrs.map((pr) => `<span class="pill waiting" title="still open at the snapshot — right-censored">PR #${esc(pr.number)} open · right-censored</span>`),
+  ].filter(Boolean).join(' ');
   return `
     <div class="ticket-head">
       <span class="overline">TICKET</span>
@@ -299,6 +319,7 @@ export function ticketMarkup(payload, { base = '' } = {}) {
       <p class="context">${esc(story
         ? `${story.state || 'unknown state'}${story.censored ? ' · still open' : ''}`
         : 'no STORY object')}</p>
+      ${endPills ? `<p class="context">${endPills}</p>` : ''}
       <p class="context muted">${esc(context)}</p>
     </div>
     <p class="impact ticket-answer" id="ticket-answer" data-kind="${esc(payload.answer_kind || '')}">${esc(payload.answer || '')}</p>
@@ -339,6 +360,14 @@ export function ticketMarkdown(payload, base = '') {
     '',
     `_${payload.hours_mode === 'business' ? 'business hours' : 'wall-clock hours'} · ` +
       `snapshot ${payload.snapshot || '—'} · [open in the app](${ticketHref(key, base)})_`,
+    ...(payload.reopened
+      ? ['', `**reopened** ×${payload.reopen_count || 1} — created→first done ` +
+        `${segmentHours(segments.cycle_first_done_hours)}, created→final done ` +
+        `${segmentHours(segments.cycle_hours)}`]
+      : []),
+    ...((payload.open_prs || []).length
+      ? ['', `**still open:** ${(payload.open_prs || []).map((pr) => `#${pr.number} (right-censored)`).join(', ')}`]
+      : []),
     '',
     '| segment | hours | share | active |',
     '| --- | --- | --- | --- |',

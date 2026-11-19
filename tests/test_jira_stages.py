@@ -390,15 +390,15 @@ class WorkflowLifecycleTests(StoreCase):
         self.assertEqual(metric["stories_decomposed"], 1)
         # the eight segments stay, with the last one split in two
         self.assertEqual(metric["order"], [
-            "ready_refined", "refined_sprint", "sprint_in_progress",
+            "created_ready", "ready_sprint", "sprint_in_progress",
             "in_progress_pr_open", "pr_open_first_review", "review_rounds",
             "final_approval_merge", "merge_verification", "verification_done",
         ])
         self.assertEqual(
             {key: entry["hours"] for key, entry in metric["segments"].items()},
             {
-                "ready_refined": 10.0,          # created +0 → refined +10
-                "refined_sprint": 0.0,          # no sprint membership
+                "created_ready": 10.0,          # created +0 → ready +10
+                "ready_sprint": 0.0,            # no sprint membership
                 "sprint_in_progress": 0.0,
                 "in_progress_pr_open": 10.0,    # started +20 → PR open +30
                 "pr_open_first_review": 5.0,    # +30 → first review +35
@@ -514,8 +514,8 @@ class BackwardCompatTests(StoreCase):
         self.assertEqual(
             {key: entry["hours"] for key, entry in metric["segments"].items()},
             {
-                "ready_refined": 10.0,          # created +0 → refined +10
-                "refined_sprint": 0.0,          # no sprint membership
+                "created_ready": 10.0,          # created +0 → ready +10
+                "ready_sprint": 0.0,            # no sprint membership
                 "sprint_in_progress": 0.0,
                 "in_progress_pr_open": 10.0,    # started +30 → PR open +40
                 "pr_open_first_review": 5.0,    # +40 → first review +45

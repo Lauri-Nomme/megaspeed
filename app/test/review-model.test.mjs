@@ -177,3 +177,25 @@ test('prd/40: a ready row is the author\'s merge click, not a review wait', () =
   assert.equal(matchesScope(review, { kind: 'role', value: 'review' }), true);
   assert.equal(matchesScope(review, { kind: 'role', value: 'author' }), false);
 });
+
+test('prd/34 §3: person and role:sentinel select the same sentinel-only row', () => {
+  const row = {
+    ball: 'review', author: 'AuAu', waiting_on: ['FrMo'],
+    waiting_for: 'FrMo', ball_label: 'FrMo',
+    waiting_roles: { FrMo: 'sentinel' },
+  };
+  assert.equal(matchesScope(row, { kind: 'person', value: 'FrMo' }), true);
+  assert.equal(matchesScope(row, { kind: 'role', value: 'sentinel' }), true);
+  // a sentinel is not a peer review queue, and authorship is not "waiting on"
+  assert.equal(matchesScope(row, { kind: 'role', value: 'review' }), false);
+  assert.equal(matchesScope(row, { kind: 'person', value: 'AuAu' }), false);
+});
+
+test('prd/34 §1: a bot is never a person scope', () => {
+  const row = {
+    ball: 'review', author: 'AuAu', waiting_on: ['RArA'],
+    waiting_roles: { RArA: 'review' },
+  };
+  assert.equal(matchesScope(row, { kind: 'person', value: 'BiBi' }), false);
+  assert.equal(matchesScope(row, { kind: 'person', value: 'RArA' }), true);
+});

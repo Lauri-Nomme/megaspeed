@@ -923,6 +923,43 @@ def _event_order(event_key: str) -> tuple[int, str, int]:
     return (int(match.group(1)), match.group(2) or "", int(match.group(3) or 0))
 
 
+def derive_review_rounds(events: list[dict]) -> int:
+    """Review rounds for one PR, by the ``concepts.md`` §6 definition.
+
+    ``rounds = #pr_pushed (after first review) + #pr_unapproved with cause ≠
+    "push" (after first review)``. Three exclusions the old reducer count did not
+    make: pre-first-review pushes are setup; a ``pure_rebase`` that lost no
+    approval is a head move; and a push-induced unapproval is the same round as
+    its push. This is the store-side twin of
+    ``ballcourt.review_round_events`` — one definition, so the store's
+    ``review_rounds`` and the analysis agree (prd/36 §5).
+    """
+    ordered = sorted(events, key=lambda e: (e["ts"], _event_order(e["event_key"])))
+    author = next(
+        (e.get("actor") for e in ordered if e["activity"] == "pr_opened"), None
+    )
+    first_index = next(
+        (
+            index for index, event in enumerate(ordered)
+            if event["activity"] in ("comment_added", "pr_approved")
+            and event.get("actor") != author
+        ),
+        None,
+    )
+    if first_index is None:
+        return 0
+    rounds = 0
+    for event in ordered[first_index + 1:]:
+        attributes = event.get("attributes") or {}
+        if event["activity"] == "pr_pushed":
+            if attributes.get("push_class") == "pure_rebase" and not attributes.get("approvals_lost"):
+                continue
+            rounds += 1
+        elif event["activity"] == "pr_unapproved" and attributes.get("cause") != "push":
+            rounds += 1
+    return rounds
+
+
 def derive_approvals_lost(events: list[dict]) -> dict[str, bool]:
     """``event_key -> did this push cost an approval?`` over one PR's events.
 
@@ -959,18 +996,19 @@ def _stored_events_for_scope(con, scope) -> dict[tuple[str, int], list[dict]]:
     for start in range(0, len(pairs), 5_000):
         scope_rel = con.values(*pairs[start : start + 5_000])
         rows = con.execute(
-            "SELECT e.repo, e.pr_id, e.event_key, e.ts, e.activity,"
+            "SELECT e.repo, e.pr_id, e.event_key, e.ts, e.activity, e.actor,"
             " CAST(e.attributes AS VARCHAR)"
             " FROM events e JOIN scope_rel s"
             " ON e.repo = s.col0 AND e.pr_id = CAST(s.col1 AS BIGINT)"
             " ORDER BY e.ts ASC, e.event_key ASC"
         ).fetchall()
-        for repo, pr_id, key, ts, activity, attrs in rows:
+        for repo, pr_id, key, ts, activity, actor, attrs in rows:
             grouped[(repo, int(pr_id))].append(
                 {
                     "event_key": key,
                     "ts": ts,
                     "activity": activity,
+                    "actor": actor,
                     "attributes": json.loads(attrs or "{}"),
                 }
             )
@@ -1003,6 +1041,18 @@ def fill_derived(con, events: list[dict]) -> None:
             event = run_events[(repo, pr_id)].get(key)
             if event is not None:
                 event["attributes"]["approvals_lost"] = lost
+        # prd/36 §5: the merge event carries the store's review_rounds, computed
+        # with the same definition the analysis uses (after approvals_lost is
+        # known, so a pure rebase that lost an approval still counts).
+        merged = next(
+            (event for event in union.values() if event["activity"] == "pr_merged"),
+            None,
+        )
+        if merged is not None:
+            rounds = derive_review_rounds(list(union.values()))
+            event = run_events[(repo, pr_id)].get(merged["event_key"])
+            if event is not None:
+                event["attributes"]["review_rounds"] = rounds
 
 
 def recompute_derived(con, scope: set[tuple[str, int]]) -> int:
@@ -1031,6 +1081,23 @@ def recompute_derived(con, scope: set[tuple[str, int]]) -> int:
                     json.dumps(event["attributes"], separators=(",", ":"), sort_keys=True),
                 )
             )
+        # prd/36 §5: the merge event's review_rounds, re-derived with the same
+        # definition as the analysis (and after approvals_lost converged).
+        merged = next(
+            (event for event in events if event["activity"] == "pr_merged"), None
+        )
+        if merged is not None:
+            rounds = derive_review_rounds(events)
+            if merged["attributes"].get("review_rounds") != rounds:
+                merged["attributes"]["review_rounds"] = rounds
+                updates.append(
+                    (
+                        merged["event_key"],
+                        json.dumps(
+                            merged["attributes"], separators=(",", ":"), sort_keys=True
+                        ),
+                    )
+                )
     for start in range(0, len(updates), 5_000):
         update_rel = con.values(*updates[start : start + 5_000])
         con.execute(

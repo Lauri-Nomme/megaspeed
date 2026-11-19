@@ -71,6 +71,13 @@ responsiveness) charge. Consequences:
 precedence constraint, not a peer. A sentinel's pending clock opens only after
 every *peer* reviewer has answered; until then the sentinel is neither charged
 nor blocking. Configurable off for teams whose sentinel reviews in parallel.
+
+**Bots** (``concepts.md`` §2): an ``actor_kind = bot`` account is never a
+constraint, a reviewer or the owner of wait-hours. Bot actors are dropped from
+every interval's holder set (``BallCourt.bots``), so the person-level
+projections cannot charge them, while the interval's ``by``/``kind`` keep the
+activity on the timeline. A PR whose only "responder" was a bot therefore has
+no human holder — the honest answer is "abandoned", not "a human waited".
 """
 
 from __future__ import annotations
@@ -127,6 +134,12 @@ TERMINAL = {"pr_merged", "pr_declined"}
 PARENT_KEY_SHARE = 0.25
 PARENT_KEY_MIN_PRS = 3
 
+#: concepts.md §1: a business day is 8 business hours. The stale-PR signal
+#: (prd/34 §5) is "open longer than this many *business* days", never calendar
+#: days.
+BUSINESS_HOURS_PER_DAY = 8.0
+STALE_BUSINESS_DAYS = 5.0
+
 def _hours(seconds: float) -> float:
     return round(max(0.0, seconds) / 3600.0, 2)
 
@@ -167,6 +180,10 @@ class Interval:
     # business hours per holder on *that person's* calendar (prd/40, S8). Filled
     # by ``load``; empty without a calendar (``hours`` is then the wall clock).
     holder_hours: dict[str, float] = field(default_factory=dict)
+    #: concepts.md §2 / prd/34 §5: the item was closed by a *bot* — an abandoned
+    #: PR, not a wait a human owed. It stays on the timeline and is excluded
+    #: from every person-level aggregate.
+    abandoned: bool = False
 
     @property
     def seconds(self) -> float:
@@ -190,11 +207,41 @@ class Interval:
 
     @property
     def waited_on(self) -> str | None:
-        """Who the ball was with, at person resolution when the store allows it."""
+        """Who the ball was with, at role resolution.
+
+        Person-level consumers read :attr:`holders` (or :attr:`owner` for the
+        named single holder); this stays the queue/role label so a role sum
+        counts one wait per PR however many reviewers were asked.
+        """
         if self.ball_person:
             return self.ball_person
         if self.ball == "author":
             return self.author
+        if self.ball in (REVIEW, "sentinel"):
+            return REVIEW
+        return self.ball
+
+    @property
+    def owner(self) -> str | None:
+        """The one person holding the ball, or ``None`` when it is a queue.
+
+        ``concepts.md`` §2: when the ball is with a single person the answer
+        must *name* them ("waiting on FrMo"), never say "review queue".
+        """
+        people = self.person_holders
+        return people[0] if len(people) == 1 else None
+
+    @property
+    def ball_label(self) -> str:
+        """The named owner when there is exactly one, else the priority label.
+
+        A doubly-blocked PR (author debt + pending reviewers) keeps its
+        ``ball`` label — naming only one of the two sides would hide the other.
+        """
+        if self.owner is not None and (
+            len(self.holders) == 1 or self.ball == "author"
+        ):
+            return self.owner
         if self.ball in (REVIEW, "sentinel"):
             return REVIEW
         return self.ball
@@ -206,8 +253,11 @@ class Interval:
         Falls back to :attr:`waited_on` only when the store has no roster at
         all (an old scrape, a REST-only source): then the single responder is
         the only evidence of who was asked. With a roster, an empty holder set
-        is a real answer — ``ready`` means nobody owes anything.
+        is a real answer — ``ready`` means nobody owes anything, and an
+        ``abandoned`` item (closed by a bot) is nobody's wait.
         """
+        if self.abandoned:
+            return ()
         if self.ball_people or self.roster:
             return self.ball_people
         waited = self.waited_on
@@ -323,6 +373,11 @@ class BallCourt:
     calendar_error: str | None = None
     #: prd/40: the sentinel's pending clock opens only after every peer answered.
     sentinel_after_peers: bool = True
+    #: concepts.md §2: ``actor_kind = bot`` pseudonyms. They are already dropped
+    #: from every interval's holders; the set travels so the projections that
+    #: read an author (``_episodes(kind="author")``, the ``by`` side of an edge)
+    #: can skip them too.
+    bots: set[str] = field(default_factory=set)
 
     @property
     def open_prs(self) -> list[PRState]:
@@ -583,21 +638,25 @@ def _phase_for(state: dict, pr_author: str, next_event: dict, commits_in: int) -
     return "review", "no reviewer action"
 
 
-def _person_for(pr: dict, state: dict, next_event: dict) -> str | None:
+def _person_for(pr: dict, state: dict, next_event: dict,
+                bots: frozenset[str] | set[str] = frozenset()) -> str | None:
     """Best available person for the waiting side of an interval.
 
     ``review`` is a queue, so the responder is only known ex post: it is the
     reviewer who eventually acted. That is a measured fact (this wait ended with
     that person's action), not an assignment of blame — and it is *not* the only
     party the item waited on: :func:`_holders` carries the concurrent holders.
+    A bot responder is never a person to name (concepts.md §2).
     """
     ball = state.get("ball")
     if ball == "author":
-        return pr["actor"]
+        return None if pr["actor"] in bots else pr["actor"]
     if ball == CI:
         return None
     if ball in (REVIEW, "calendar"):
         actor = next_event["actor"]
+        if actor in bots:
+            return None
         if actor != pr["actor"] and next_event["activity"] in REVIEWER_ACTIONS:
             return actor
         if next_event["activity"] == "comment_added" and actor != pr["actor"]:
@@ -606,7 +665,8 @@ def _person_for(pr: dict, state: dict, next_event: dict) -> str | None:
     return ball
 
 
-def _holders(pr: dict, state: dict, next_event: dict | None) -> tuple[str, ...]:
+def _holders(pr: dict, state: dict, next_event: dict | None,
+             bots: frozenset[str] | set[str] = frozenset()) -> tuple[str, ...]:
     """Every party the ball was concurrently with (prd/40).
 
     That is ``{author if author_open} ∪ P`` — both dimensions, always. With no
@@ -614,15 +674,29 @@ def _holders(pr: dict, state: dict, next_event: dict | None) -> tuple[str, ...]:
     who ends it, which is the only evidence of who was asked; with a roster the
     status vector is the truth, so a reviewer who acts without having been asked
     is not retro-charged for the wait someone else held.
+
+    Bots are dropped here, once: every person-level projection reads
+    ``holders``, so an automation account can never be charged a wait
+    (concepts.md §2). Its activity stays on the interval's ``by``/``kind``.
+    An item a bot *declined* is abandoned, not owed by anyone.
     """
+    if (
+        next_event is not None
+        and next_event["activity"] == "pr_declined"
+        and next_event["actor"] in bots
+    ):
+        return ()
     author = pr["actor"]
-    people = {p for p in (state.get("pending") or ()) if p and p != author}
-    if state.get("author_open"):
+    people = {
+        p for p in (state.get("pending") or ())
+        if p and p != author and p not in bots
+    }
+    if state.get("author_open") and author not in bots:
         people.add(author)
     if not state.get("reviewers") and next_event is not None:
         actor = next_event["actor"]
         activity = next_event["activity"]
-        if actor != author and (
+        if actor != author and actor not in bots and (
             activity in REVIEWER_ACTIONS or activity == "comment_added"
         ):
             people.add(actor)
@@ -635,6 +709,7 @@ def _timeline(
     open_pr: bool,
     sentinels: frozenset[str] | set[str] = frozenset(),
     sentinel_after_peers: bool = True,
+    bots: frozenset[str] | set[str] = frozenset(),
 ) -> None:
     pr = state.pr
     commits = state.commits
@@ -655,14 +730,18 @@ def _timeline(
                     object_id=pr["object_id"], repo=pr["repo"], number=pr["pr_id"],
                     tickets=tuple(pr.get("ticket_keys") or []), author=author,
                     start=start, end=end, phase=phase,
-                    ball=current["ball"], ball_person=_person_for(pr, current, event),
-                    ball_people=_holders(pr, current, event),
+                    ball=current["ball"],
+                    ball_person=_person_for(pr, current, event, bots),
+                    ball_people=_holders(pr, current, event, bots),
                     roster=tuple(sorted(current.get("reviewers") or ())),
                     author_open=bool(current.get("author_open")),
                     ready=bool(current.get("ready")),
                     ci=bool(current.get("ci")),
                     by=current["by"], kind=current["kind"], evidence=evidence,
                     commits=commits_in, open=open_pr,
+                    abandoned=bool(
+                        event["activity"] == "pr_declined" and event["actor"] in bots
+                    ),
                 )
             )
         current = _state_after(pr, current or {}, event, sentinels, sentinel_after_peers)
@@ -683,7 +762,7 @@ def _timeline(
                 tickets=tuple(pr.get("ticket_keys") or []), author=author,
                 start=tail_start, end=end, phase=phase,
                 ball=current["ball"], ball_person=None,
-                ball_people=_holders(pr, current, None),
+                ball_people=_holders(pr, current, None, bots),
                 roster=tuple(sorted(current.get("reviewers") or ())),
                 author_open=bool(current.get("author_open")),
                 ready=bool(current.get("ready")),
@@ -713,6 +792,38 @@ OBJECT_SQL = (
 REF_SQL = (
     "SELECT object_id, CAST(attributes AS VARCHAR) FROM objects WHERE object_type = 'PR'"
 )
+PERSON_SQL = (
+    "SELECT object_id, CAST(attributes AS VARCHAR) FROM objects WHERE object_type = 'PERSON'"
+)
+
+
+def _has_column(con, table: str, column: str) -> bool:
+    """Older stores predate a column; reads must degrade, not crash."""
+    rows = con.execute(
+        "SELECT column_name FROM information_schema.columns"
+        " WHERE table_schema = 'main' AND table_name = ?",
+        [table],
+    ).fetchall()
+    return any(row[0] == column for row in rows)
+
+
+def load_bots(con) -> set[str]:
+    """Pseudonyms whose ``actor_kind`` is ``bot`` (concepts.md §2).
+
+    The store's ``PERSON.attributes.actor_kind`` is the projection of
+    ``classify_actor`` (prd/02), so this is the one place the analysis learns
+    which accounts are automation. A store ingested before the classification
+    has no ``attributes`` column at all: then the set is empty and nothing is
+    silently treated as a bot.
+    """
+    if not _has_column(con, "objects", "attributes"):
+        return set()
+    bots: set[str] = set()
+    for object_id, attrs in con.execute(PERSON_SQL).fetchall():
+        attributes = json.loads(attrs) if attrs else {}
+        if attributes.get("actor_kind") == "bot":
+            bots.add(str(object_id).partition(":")[2])
+    return bots
 
 
 def _pr_refs(con) -> dict[str, dict]:
@@ -840,6 +951,7 @@ def load(
             by_pr[key].append(event)
 
     states: list[PRState] = []
+    bots = load_bots(conn)
     for object_id, pr in pr_objects.items():
         pr_events = sorted(by_pr.get(object_id, []), key=lambda e: (e["_ts"], e["key"]))
         commits = sorted(commits_by_pr.get((pr["repo"], pr["pr_id"]), []))
@@ -847,6 +959,7 @@ def load(
         _timeline(
             state, snapshot, open_pr=pr["closed_ts"] is None,
             sentinels=sentinels, sentinel_after_peers=sentinel_after_peers,
+            bots=bots,
         )
         states.append(state)
 
@@ -870,7 +983,7 @@ def load(
     return BallCourt(
         intervals=intervals, prs=states, snapshot=snapshot, sentinels=sentinels,
         events=len(events), calendar=calendar, calendar_error=calendar_error,
-        sentinel_after_peers=sentinel_after_peers,
+        sentinel_after_peers=sentinel_after_peers, bots=bots,
     )
 
 
@@ -900,11 +1013,15 @@ def blocking_graph(bc: BallCourt, level: str = "queue", window: tuple[datetime, 
                 return person, "synthetic"
             return person, "person"
         queue = _queue_of(bc, person, pr, side)
-        if person not in SYNTHETIC:
+        if person not in SYNTHETIC and person not in bc.bots:
             role_people[queue].add(person)
         return queue, "role"
 
     measured = [i for i in bc.intervals if i.measured and i.start < end and i.end > start]
+    # prd/34 §5: an interval that ended with a bot closing the PR is "idle until
+    # automation cleaned it up", not review wait — excluded and reported.
+    abandoned_hours = round(sum(i.hours for i in measured if i.abandoned), 1)
+    measured = [i for i in measured if not i.abandoned]
     for interval in measured:
         pr = prs.get(interval.object_id)
         waited_on = interval.waited_on
@@ -917,7 +1034,16 @@ def blocking_graph(bc: BallCourt, level: str = "queue", window: tuple[datetime, 
             targets = (waited_on,) if waited_on else ()
         if not targets:
             continue
-        x, xkind = endpoint(interval.by, pr, "by")
+        # concepts.md §2: a bot handover is not a person handover. The wait it
+        # ends still belongs to the human side, so attribute the edge to the
+        # PR's author when that is a human; a bot-authored PR has no person
+        # source and contributes no person-level edge.
+        handed_by = interval.by
+        if handed_by in bc.bots:
+            handed_by = interval.author if interval.author not in bc.bots else None
+        if handed_by is None:
+            continue
+        x, xkind = endpoint(handed_by, pr, "by")
         for person in targets:
             hours = interval.hours_for(person)
             y, ykind = endpoint(person, pr, "ball")
@@ -1004,6 +1130,7 @@ def blocking_graph(bc: BallCourt, level: str = "queue", window: tuple[datetime, 
         ),
         "hours_kind": "person-hours" if level == "person" else "wait-hours",
         "level": level,
+        "bots_excluded": sorted(bc.bots),
         "window": {"start": iso(start), "end": iso(end), "days": round(days, 1)},
         "nodes": sorted(nodes.values(), key=lambda n: (-n["hours"], n["id"])),
         "edges": out_edges,
@@ -1011,6 +1138,7 @@ def blocking_graph(bc: BallCourt, level: str = "queue", window: tuple[datetime, 
             "nodes": len(nodes),
             "edges": len(out_edges),
             "hours": total,
+            "abandoned_hours": abandoned_hours,
             "mean_wait_hours": round(total / max(1, sum(e["count"] for e in out_edges)), 1),
             "events": bc.events,
         },
@@ -1074,6 +1202,10 @@ def queue_series(
         })
 
     measured = [i for i in bc.intervals if i.measured and i.start < end and i.end > start]
+    # prd/34 §5: idle-until-a-bot-closed-it is not review wait; exclude it from
+    # the queues and report the hours next to the totals.
+    abandoned_hours = round(sum(i.hours for i in measured if i.abandoned), 1)
+    measured = [i for i in measured if not i.abandoned]
     # WIP is sampled at the bucket midpoints, so the sample points are the same
     # for every interval: build them once and use a *difference array* (add at
     # the first covered bucket, subtract after the last) instead of testing every
@@ -1094,6 +1226,10 @@ def queue_series(
             people = (interval.waited_on,) if interval.waited_on else ()
         for person in people:
             if not person:
+                continue
+            if level == "person" and person in bc.bots:
+                # concepts.md §2: a bot is not a person queue. The holder set
+                # already excludes them; this is the stated invariant.
                 continue
             name = key_for(person, pr)
             entry = stream(name)
@@ -1169,6 +1305,10 @@ def queue_series(
                 "mean_wait_hours": round(mean_hours, 1),
                 "throughput_per_day": round(per_day, 2),
                 "diagnosis": diagnosis,
+                # concepts.md §2/§6: "overloaded" is queue wait, never calendar
+                # utilisation. The name travels with the number so the policy
+                # lab's "busy" (ρ) can never be read as the same metric.
+                "diagnosis_kind": "queue-wait",
                 "prs": items,
             },
         })
@@ -1179,11 +1319,15 @@ def queue_series(
         "assumption": bc.assumption,
         **bc.calendar_warning(),
         "diagnosis_note": (
-            "heuristic vs. the median wait in this window; queue length divides "
-            "wait-hours by the hours the queue could be served in"
+            "queue wait, not calendar utilisation: 'overloaded' = long wait with "
+            "a standing queue, 'slow' = long wait with little WIP, both measured "
+            "against the median wait in this window; the policy lab's 'busy' is "
+            "a different metric (calendar share)"
         ),
+        "diagnosis_kind": "queue-wait",
         "level": level,
         "hours_kind": "person-hours" if level == "person" else "wait-hours",
+        "bots_excluded": sorted(bc.bots),
         "window": {
             "start": iso(start), "end": iso(end), "days": round(days, 1),
             "service_hours": round(service_hours, 1),
@@ -1195,6 +1339,7 @@ def queue_series(
         "totals": {
             "items": sum(s["summary"]["items"] for s in out),
             "hours": round(sum(s["summary"]["hours"] for s in out), 1),
+            "abandoned_hours": abandoned_hours,
             "streams": len(out),
         },
     }
@@ -1225,9 +1370,29 @@ def _parent_keys(prs: dict[str, dict]) -> set[str]:
     return {key for key, count in counts.items() if count >= threshold}
 
 
-def delivery_list(bc: BallCourt, window: tuple[datetime, datetime] | None = None) -> dict:
-    """The triage list: open PRs ranked by what waiting on them costs."""
+def delivery_list(
+    bc: BallCourt,
+    window: tuple[datetime, datetime] | None = None,
+    stale_business_days: float = STALE_BUSINESS_DAYS,
+    done_tickets: set[str] | None = None,
+) -> dict:
+    """The triage list: open PRs ranked by what waiting on them costs.
+
+    ``waiting_on`` is the truth (concepts.md §2): every human holder — the
+    pending reviewers and, while an objection stands, the author — with bots
+    excluded. When exactly one person holds the ball, ``ball_label`` **names
+    them** (``FrMo``), never "review queue"; with several holders it stays the
+    priority label and ``waiting_roles`` says which roles are involved.
+
+    ``stale`` (prd/34 §5) flags a PR open longer than ``stale_business_days``
+    *business* days (8 h each), or one whose ticket is already Done in Jira
+    (``done_tickets``) while the PR is still open. ``unobserved`` marks a PR
+    whose tail has no events since the snapshot: the ball-court excludes that
+    tail from the blocking graph, so this list is where the stuck tail stays
+    visible.
+    """
     start, end = window or (bc.snapshot - timedelta(days=90), bc.snapshot)
+    done_tickets = done_tickets or set()
     prs = {s.pr["object_id"]: s.pr for s in bc.prs}
     last_event: dict[str, Interval] = {}   # includes the unobserved tail
     last_measured: dict[str, Interval] = {}
@@ -1263,9 +1428,9 @@ def delivery_list(bc: BallCourt, window: tuple[datetime, datetime] | None = None
         current = last_measured.get(object_id)
         # the current wait starts when the last event handed the ball over
         waiting_since = tail.start if tail else (current.start if current else pr["created_ts"])
-        waiting_for = (tail.waited_on if tail else None) or (current.waited_on if current else None)
         # everyone the item is waiting on right now (prd/40): the pending
         # reviewers and, while a reviewer's objection stands, the author too.
+        # ``holders`` already excludes bots (concepts.md §2).
         waiting_on = [
             person for person in (tail.holders if tail else (current.holders if current else ()))
             if person not in SYNTHETIC
@@ -1274,6 +1439,27 @@ def delivery_list(bc: BallCourt, window: tuple[datetime, datetime] | None = None
         roster = tail.roster if tail else (current.roster if current else ())
         pending = [person for person in waiting_on if person != pr["actor"]]
         ball = (tail.ball if tail else None) or (current.ball if current else "unknown")
+        # Name the owner when exactly one person holds the ball (concepts.md §2):
+        # the sentinel, a reviewer, or the author. Several holders keep the
+        # priority label; ``waiting_roles`` says which queues they are.
+        if ball in (REVIEW, "sentinel"):
+            role_label = REVIEW
+        else:
+            role_label = ball
+        owner = (tail.owner if tail else None) or (current.owner if current else None)
+        waiting_for = owner or role_label
+        waiting_roles = {
+            person: (
+                "author" if person == pr["actor"]
+                else ("sentinel" if person in bc.sentinels else "review")
+            )
+            for person in waiting_on
+        }
+        ball_label = (
+            (tail.ball_label if tail else None)
+            or (current.ball_label if current else None)
+            or role_label
+        )
         waiting_hours = _hours(
             bc.business_hours(waiting_for, waiting_since, bc.snapshot) * 3600.0
         )
@@ -1286,6 +1472,20 @@ def delivery_list(bc: BallCourt, window: tuple[datetime, datetime] | None = None
             - {object_id}
         ) if story_keys else 0
         kind = (tail.kind if tail else None) or "no_events"
+        # prd/34 §5: the stale signal. Both reasons are stated per row so the
+        # rule (prd/37) and this list quote the same fact.
+        age_business_days = round(age_hours / BUSINESS_HOURS_PER_DAY, 2)
+        done_keys = sorted(key for key in story_keys if key in done_tickets)
+        stale_reasons = []
+        if age_business_days > stale_business_days:
+            stale_reasons.append(
+                f"open {age_business_days:g} business days (limit {stale_business_days:g})"
+            )
+        if done_keys:
+            stale_reasons.append(
+                f"ticket {', '.join(done_keys)} is Done in Jira but this PR is open"
+            )
+        unobserved = bool(tail is not None and tail.phase == SNAPSHOT_PHASE)
         rows.append({
             "object_id": object_id,
             "id": f"{pr['repo'].split('/')[-1]}#{pr['pr_id']}",
@@ -1299,7 +1499,14 @@ def delivery_list(bc: BallCourt, window: tuple[datetime, datetime] | None = None
             "ball": ball,
             "waiting_for": waiting_for,
             "waiting_on": waiting_on,
-            "ball_label": waiting_for or ball,
+            "waiting_roles": waiting_roles,
+            "ball_label": ball_label,
+            "stale": bool(stale_reasons),
+            "stale_reasons": stale_reasons,
+            "stale_business_days": stale_business_days,
+            "age_business_days": age_business_days,
+            "unobserved": unobserved,
+            "unobserved_since": iso(tail.start) if unobserved else None,
             "author_open": author_open,
             "doubly_blocked": bool(author_open and pending),
             "ready_since": iso(waiting_since) if ball == READY else None,
@@ -1340,6 +1547,21 @@ def delivery_list(bc: BallCourt, window: tuple[datetime, datetime] | None = None
         ),
         "snapshot": iso(bc.snapshot),
         "hours_kind": "wait-hours",
+        "bots_excluded": sorted(bc.bots),
+        "scope_note": (
+            "the person scope means 'waiting on X' here and in the queue view: a "
+            "row matches when X is one of its holders (pending reviewer or the "
+            "author whose debt stands), not when X authored it"
+        ),
+        "stale_note": (
+            f"stale = open > {stale_business_days:g} business days "
+            f"({BUSINESS_HOURS_PER_DAY:g} h each) or a ticket that is Done in "
+            "Jira while its PR is still open"
+        ),
+        "unobserved_note": (
+            "unobserved = no events since the snapshot: the blocking graph "
+            "excludes that tail, so the row stays here rather than disappearing"
+        ),
         "window": {"start": iso(start), "end": iso(end)},
         "counts": {
             "open": len(rows),
@@ -1349,6 +1571,8 @@ def delivery_list(bc: BallCourt, window: tuple[datetime, datetime] | None = None
             "oldest_waiting": len(oldest),
             "all": len(rows),
             "waiting_over_week": len([r for r in rows if r["waiting_hours"] >= 168]),
+            "stale": len([r for r in rows if r["stale"]]),
+            "unobserved": len([r for r in rows if r["unobserved"]]),
         },
         "rows": rows,
     }

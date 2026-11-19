@@ -21,7 +21,9 @@ const PERSON_PAGES = ['timeline', 'delivery', 'queue'];
 const ROLE_PAGES = {
   author: ['delivery', 'queue'],
   review: ['delivery', 'queue'],
-  sentinel: ['queue'],
+  // prd/34 §3: a PR waiting only on the sentinel must show under
+  // `role:sentinel` on the delivery list too, not only in the queue chart.
+  sentinel: ['delivery', 'queue'],
   ci: ['queue'],
   calendar: ['queue'],
 };
@@ -95,6 +97,19 @@ function list(ids) {
   return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
 }
 
+/** What a person/role scope means *in this view* (prd/34 §3: one meaning each). */
+export function scopeMeaning(scope, pageId) {
+  if (!scope || scope.kind === 'all') return 'everything';
+  if (scope.kind === 'person') {
+    // Delivery and Queue ask "who is the item waiting on"; the timeline is an
+    // event log, so there the person scope filters *activity by* them.
+    if (pageId === 'delivery' || pageId === 'queue') return `waiting on ${scope.value}`;
+    if (pageId === 'timeline') return `events by ${scope.value}`;
+    return `person ${scope.value}`;
+  }
+  return `the ${scope.value} queue`;
+}
+
 /**
  * The banner sentence for one view: names this view's state first, then what
  * is and is not filtered, so it can never contradict the chart on screen.
@@ -104,7 +119,9 @@ export function scopeBanner(scope, pageId) {
   const filtered = filteredPages(scope);
   const here = filtered.has(pageId);
   const name = VIEW_NAMES[pageId] || pageId;
-  const subject = scope.kind === 'person' ? `person ${scope.value}` : `the ${scope.value} queue`;
+  const subject = scope.kind === 'person'
+    ? `person ${scope.value} (${scopeMeaning(scope, pageId)})`
+    : `the ${scope.value} queue`;
   const inside = [...filtered];
   const outside = Object.keys(VIEW_NAMES).filter((id) => !filtered.has(id));
   const bits = [

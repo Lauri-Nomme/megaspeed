@@ -194,6 +194,16 @@ test('the bottleneck row names the server and its utilisation', () => {
   assert.match(markup, /≈1 h 12 min/);
 });
 
+test('prd/34 §4: "busy" (calendar share) is not "overloaded" (queue wait)', () => {
+  const markup = resourcesMarkup(result());
+  // the distinct name for the distinct metric, with the lens stated
+  assert.match(markup, /≈48% idle/);
+  assert.match(markup, /busy \(ρ\)/);
+  assert.match(markup, /not queue wait/);
+  assert.doesNotMatch(markup, />overloaded</);
+  assert.doesNotMatch(markup, />slow</);
+});
+
 // ------------------------------------------------------------- provenance
 test('the provenance line states window, replications and the ≈ contract', () => {
   const line = provenanceLine(payload());

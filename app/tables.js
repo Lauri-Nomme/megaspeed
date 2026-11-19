@@ -8,6 +8,7 @@
 
 import { fmtAbsolute, fmtHours, esc, whoLabel } from './format.js';
 import { isTicketKey, rowTicket, ticketHref, ticketLink } from './tickets.js';
+import { streamIsQueue } from './scope.js';
 
 export const TABS = [
   { id: 'blocked', label: 'Blocked' },
@@ -63,6 +64,7 @@ export function pill(kind, text, title = '') {
 export function rowStateText(row) {
   if (row.ball === 'ready') return 'ready to merge';
   if (row.blocked) return 'blocked';
+  if (row.stale) return 'stale';
   if (row.waiting_hours >= 7 * 24) return 'waiting 1w+';
   if (row.phase === 'review') return 'in review';
   if (row.phase === 'active') return 'in progress';
@@ -112,7 +114,9 @@ export function deliveryTable(data, tab, { scope = null } = {}) {
     </tr></thead>`;
   const body = rows.map((row) => `
     <tr tabindex="0" data-id="${esc(row.object_id)}" class="row">
-      <td class="c-state" data-label="status">${rowState(row)}</td>
+      <td class="c-state" data-label="status">${rowState(row)}${
+        row.stale ? ` ${pill('waiting', 'stale', (row.stale_reasons || []).join('; '))}` : ''}${
+        row.unobserved ? ` ${pill('neutral', 'unobserved', 'no events since the snapshot — the blocking graph excludes this tail')}` : ''}</td>
       <td class="c-id" data-label="">${ticketLink(rowTicket(row), { cls: 'keys' }) || '<span class="keys">—</span>'}
         <span class="mono id">#${esc(row.number)}</span>
         <span class="repo">${esc(row.repo_short)}</span></td>
@@ -127,17 +131,31 @@ export function deliveryTable(data, tab, { scope = null } = {}) {
 
 export function matchesScope(row, scope) {
   if (!scope || scope.kind === 'all') return true;
-  const person = scope.value;
-  if (scope.kind === 'person') {
-    return row.author === person || row.waiting_for === person || row.ball === person;
-  }
+  // concepts.md §2 + prd/34 §3: on the delivery list (and the queue view) a
+  // person scope means "waiting on X" — the holders, never "authored by X".
+  const waiting = new Set(
+    [...(row.waiting_on || []), row.waiting_for, row.ball_label]
+      .filter(Boolean)
+      .map((person) => String(person).toLowerCase()),
+  );
+  const roles = new Set(
+    Object.values(row.waiting_roles || {}).map((role) => String(role).toLowerCase()),
+  );
+  const value = String(scope.value || '').toLowerCase();
+  if (scope.kind === 'person') return waiting.has(value);
   if (scope.kind === 'role') {
     // prd/40: `ball` is the label; a ready PR is the author's merge click but
     // is nobody's review wait, so the two role scopes stay disjoint.
-    if (scope.value === 'author') return row.author === row.waiting_for || row.ball === 'ready';
-    if (scope.value === 'review') return row.ball === 'review';
-    if (scope.value === 'ready') return row.ball === 'ready';
-    return true;
+    if (value === 'sentinel') return roles.has('sentinel');
+    if (value === 'review') {
+      // a sentinel is a distinct mandatory approver, not a peer review queue;
+      // with no role map (an older payload) fall back to the ball label.
+      if (Object.keys(row.waiting_roles || {}).length) return roles.has('review');
+      return row.ball === 'review';
+    }
+    if (value === 'author') return roles.has('author') || row.ball === 'ready';
+    if (value === 'ready') return row.ball === 'ready';
+    return String(row.ball || '').toLowerCase() === value;
   }
   return true;
 }
@@ -169,8 +187,12 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
   const people = level === 'person';
   const noun = people ? 'people' : 'queues';
   const one = people ? 'person' : 'queue';
-  const overloaded = streams.filter((s) => s.summary.diagnosis === 'overloaded');
-  const slow = streams.filter((s) => s.summary.diagnosis === 'slow');
+  // prd/34 §4: a tile that counts people counts only people. A synthetic role
+  // stream (`review`, `author`, …) is a queue even when the API level says
+  // "person", so it must not inflate "N overloaded people" (QA #10).
+  const counted = people ? streams.filter((stream) => !streamIsQueue(stream)) : streams;
+  const overloaded = counted.filter((s) => s.summary.diagnosis === 'overloaded');
+  const slow = counted.filter((s) => s.summary.diagnosis === 'slow');
   const topBlocking = (blocking && blocking.edges ? blocking.edges.slice(0, 3) : []);
   const waitHours = blocking && blocking.totals ? blocking.totals.hours : 0;
   const rows = delivery ? tabRows(delivery, 'blocked').concat(
@@ -184,7 +206,8 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
         <span class="stat-note">${counts.blocked ? 'waiting on a change, not on a person' : 'nothing blocked'}</span></div>
       <div class="stat"><span class="stat-n">${counts.oldest_waiting}</span>
         <span class="stat-k">waiting over 3 days</span>
-        <span class="stat-note">of ${counts.open} open item${counts.open === 1 ? '' : 's'}</span></div>
+        <span class="stat-note">of ${counts.open} open item${counts.open === 1 ? '' : 's'}${
+          counts.stale ? ` · ${counts.stale} stale` : ''}</span></div>
       <div class="stat"><span class="stat-n">≈${fmtHours(waitHours).replace(' ', ' ')}</span>
         <span class="stat-k">measured wait</span>
         <span class="stat-note">wall clock, all handovers in the window</span></div>
@@ -220,10 +243,11 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
       <section class="panel">
         <div class="panel-head"><h2>${people ? 'People diagnosis' : 'Queue diagnosis'}</h2>
           <button type="button" class="link" data-go="queue">Queue view →</button></div>
-        ${streams.length ? `<table class="table compact"><tbody>${streams.slice(0, 6).map((stream) => `
+        ${counted.length ? `<table class="table compact"><tbody>${counted.slice(0, 8).map((stream) => `
           <tr><td class="c-who" data-label=""><span class="mono">${esc(stream.id)}</span></td>
-            <td class="c-state" data-label="diagnosis">${pill(stream.summary.diagnosis, `≈ ${stream.summary.diagnosis}`)}</td>
-            <td class="c-dur num" data-label="mean wait">≈${esc(fmtHours(stream.summary.mean_wait_hours))}</td></tr>`).join('')}</tbody></table>`
+            <td class="c-state" data-label="diagnosis">${pill(stream.summary.diagnosis, `≈ ${stream.summary.diagnosis} (queue wait)`)}</td>
+            <td class="c-dur num" data-label="mean wait">≈${esc(fmtHours(stream.summary.mean_wait_hours))}</td></tr>`).join('')}</tbody></table>${
+          counted.length > 8 ? `<p class="panel-note">showing the 8 longest of ${counted.length}</p>` : ''}`
     : '<div class="empty-row">No measured waits in this window.</div>'}
       </section>
     </div>`;

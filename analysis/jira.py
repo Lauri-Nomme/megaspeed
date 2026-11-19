@@ -5,9 +5,9 @@ answers the question before it: a story sits in a backlog, gets refined, waits
 for a sprint, starts, opens a PR, goes through review, merges, and only then is
 it closed. prd/21 calls that the **waiting-time decomposition**:
 
-    created ─► refined ─► sprint ─► in progress ─► PR open ─► first review
+    created ─► ready ─► sprint ─► in progress ─► PR open ─► first review
             ─► review rounds ─► final approval ─► merge ─► done
-    └ ready→refined ┘└ refined→sprint ┘└ sprint→in-progress ┘└ in-progress→PR-open ┘
+    └ created→ready ┘└ ready→sprint ┘└ sprint→in-progress ┘└ in-progress→PR-open ┘
                      └ PR-open→first-review ┘└ review rounds ┘
                               └ final-approval→merge ┘└ merge→done ┘
 
@@ -79,8 +79,8 @@ from ingest.taxonomy import normalize_stage
 # the eight segments (prd/21)
 # --------------------------------------------------------------------------- #
 SEGMENTS: tuple[tuple[str, str], ...] = (
-    ("ready_refined", "ready → refined"),
-    ("refined_sprint", "refined → sprint"),
+    ("created_ready", "created → ready"),
+    ("ready_sprint", "ready → sprint"),
     ("sprint_in_progress", "sprint → in progress"),
     ("in_progress_pr_open", "in progress → PR open"),
     ("pr_open_first_review", "PR open → first review"),
@@ -98,10 +98,12 @@ VERIFICATION_SEGMENTS: tuple[tuple[str, str], ...] = (
 SEGMENT_KEYS = tuple(key for key, _ in SEGMENTS)
 SEGMENT_LABEL = dict(SEGMENTS) | dict(VERIFICATION_SEGMENTS)
 #: Which two boundaries delimit each segment. A segment is measured only when
-#: both exist for that story.
+#: both exist for that story. The first segment is ``created → ready``
+#: (concepts.md §5): refinement is the work inside it, not its name; the
+#: ``ready`` boundary falls back to the first ``pointed`` event in ``_cycle``.
 SEGMENT_BOUNDS: dict[str, tuple[str, str]] = {
-    "ready_refined": ("created", "refined"),
-    "refined_sprint": ("refined", "sprint"),
+    "created_ready": ("created", "ready"),
+    "ready_sprint": ("ready", "sprint"),
     "sprint_in_progress": ("sprint", "started"),
     "in_progress_pr_open": ("started", "pr_open"),
     "pr_open_first_review": ("pr_open", "first_review"),
@@ -145,6 +147,8 @@ SEGMENT_SHARE_CRITICAL = 0.40
 
 REVIEW_ACTIONS = ("comment_added", "pr_approved")
 LOG_DELAY_BUCKETS = ("same_day", "next_day", "within_week", "late")
+#: concepts.md §1: a day is 8 business hours, never 24 and never a calendar day.
+BUSINESS_HOURS_PER_DAY = 8.0
 #: What one refinement costs when the store cannot measure it (a fallback, and
 #: stated as such in the payload).
 DEFAULT_REFINEMENT_HOURS = 1.0
@@ -215,6 +219,9 @@ class Story:
     summary_class: str | None
     events: list[dict] = field(default_factory=list)
     prs: list = field(default_factory=list)
+    #: The store's as-of time, set by ``load`` from the ball-court. It bounds an
+    #: open PR's span ("no PR open" gaps cannot be computed without an end).
+    snapshot: datetime | None = None
     # Filled by ``_cycle`` on first use. The derivation is a pure function of
     # the story's own events/PRs, and one payload asks the same story for its
     # cycle four times, so the slot is the memo. Excluded from ``repr``/``eq``
@@ -395,6 +402,8 @@ def load(con, court: ballcourt.BallCourt | None = None) -> JiraData:
                 prs_by_key[str(key)].append(state)
     for story in stories:
         story.prs = prs_by_key.get(story.key, [])
+        if court is not None:
+            story.snapshot = court.snapshot
 
     return JiraData(
         stories=stories,
@@ -431,6 +440,22 @@ def story_for(data: JiraData | None, key: str) -> Story | None:
         if story.key == wanted:
             return story
     return None
+
+
+def done_keys(data: JiraData | None) -> set[str]:
+    """Story keys that reached ``done`` — the "ticket Done but PR open" signal.
+
+    prd/34 §5 / prd/37: a PR still open under a story that Jira already closed
+    is a stale-PR fact the delivery list must be able to flag. ``done`` is the
+    cycle's own final done boundary, so a reopened story that is open again is
+    *not* reported as Done.
+    """
+    if data is None:
+        return set()
+    return {
+        story.key for story in data.stories
+        if _cycle(story).boundaries["done"] is not None
+    }
 
 
 def uses_verification(data: JiraData | None) -> bool:
@@ -520,15 +545,60 @@ class Cycle:
     touches: list[datetime]                              # point-in-time evidence
     review_rounds: int
     missing: list[str]
+    #: Gaps *between* two PRs, labelled with the PRs on each side, so the
+    #: answer can say "the second PR started N days after the first merged".
+    pr_gaps: list[dict] = field(default_factory=list)
+    #: ``done → ready`` (or any leave-done) moves after the first done (prd/36 §4).
+    reopens: list[dict] = field(default_factory=list)
+
+
+def no_pr_open_spans(story: Story, t1: datetime, t2: datetime) -> list[tuple[datetime, datetime]]:
+    """Parts of ``[t1, t2)`` between two PRs — i.e. with no PR open.
+
+    Only the gaps *between* PRs are reported: "no PR open" before the first PR
+    (refinement, sprint, waiting to start) and after the last merge (QA, the
+    close) is the normal shape of the cycle, not the finding. The finding is a
+    segment that spans an interval where a second PR had not started yet.
+    """
+    gaps: list[tuple[datetime, datetime]] = []
+    for gap in between_pr_gaps(story):
+        low = max(gap["start"], t1)
+        high = min(gap["end"], t2)
+        if high > low:
+            gaps.append((low, high))
+    return gaps
+
+
+def between_pr_gaps(story: Story) -> list[dict]:
+    """The gaps between consecutive PRs, with the PRs on each side."""
+    prs = sorted(
+        (
+            (state.pr["created_ts"], state.pr["closed_ts"] or story.snapshot, state.pr["pr_id"])
+            for state in story.prs
+            if state.pr["created_ts"] is not None
+        ),
+        key=lambda item: (item[0], item[2]),
+    )
+    gaps: list[dict] = []
+    for (start, end, number), (next_start, _next_end, next_number) in zip(prs, prs[1:]):
+        if end is None or next_start is None or next_start <= end:
+            continue
+        gaps.append({
+            "start": end,
+            "end": next_start,
+            "from_pr": number,
+            "to_pr": next_number,
+        })
+    return gaps
 
 
 def _cycle(story: Story) -> Cycle:
     """Derive the segment boundaries for one story (memoised on the story).
 
-    The refinement signal is the first ``pointed`` event: Jira's changelog
-    records the estimate when it is *set*, which is what refinement produces.
-    A story with neither a ``pointed`` event nor a status → ``ready`` has no
-    refinement boundary — reported as missing rather than guessed.
+    The refinement signal is the first status → ``ready`` before work starts,
+    falling back to the first ``pointed`` event (Jira's changelog records the
+    estimate when it is *set*, which is what refinement produces). A story with
+    neither has no refinement boundary — reported as missing rather than guessed.
 
     prd/29 adds the workflow's own stages as boundaries:
 
@@ -538,6 +608,10 @@ def _cycle(story: Story) -> Cycle:
       They only exist when the store was projected with a stage map, so an
       unconfigured store reports them missing (which is the honest answer: its
       workflow was collapsed into three categories).
+
+    prd/36 adds two facts the old derivation could not state: the *first* and
+    *final* done (a story can be reopened, §4) and the gaps between its PRs
+    (a segment can span time with no PR open, §2).
 
     Every metric that needs a boundary asks for the cycle, so one payload
     derived the same four cycles per story. The result depends only on the
@@ -550,18 +624,58 @@ def _cycle(story: Story) -> Cycle:
         return cached
     created = story.start
     pointed = _first_event_at(story, "pointed")
-    ready_status = _first_status(story, "ready")
+    sprint = _first_event_at(story, "sprint_added")
+    started = _first_status(story, "in_progress")
+    # The refinement boundary is the first status → ``ready`` *before* work
+    # started: a ``done → ready`` reopen (prd/36 §4) moves a finished story back
+    # to ready, which is not the refinement the first segment measures.
+    ready_stamps = sorted(
+        event["_ts"] for event in story.events
+        if event["activity"] == "status_changed"
+        and normalize_stage(_attrs(event).get("to_status")) == "ready"
+    )
+    ready_status = next(
+        (stamp for stamp in ready_stamps if started is None or stamp <= started),
+        None,
+    )
     # ``refined`` stays the estimate (byte-compatible with prd/21), falling back
     # to the workflow's "ready" status for a store that refines without pointing.
     refined = pointed or ready_status
     ready = ready_status or refined
-    sprint = _first_event_at(story, "sprint_added")
-    started = _first_status(story, "in_progress")
     in_review = _first_status(story, "in_review")
     in_verification = _first_status(story, "in_verification")
-    done = _first_status(story, "done", after=started)
-    if done is None:
-        done = story.closed
+    # prd/36 §4: a story can be Done more than once. ``done`` is the *final*
+    # done (the end state the ticket really reached); ``first_done`` is the end
+    # of the first cycle, and the difference between them is the reopen.
+    done_stamps = sorted(
+        event["_ts"] for event in story.events
+        if event["activity"] == "status_changed"
+        and normalize_stage(_attrs(event).get("to_status")) == "done"
+        and (started is None or event["_ts"] >= started)
+    )
+    first_done = done_stamps[0] if done_stamps else None
+    reopens = [
+        {
+            "ts": event["_ts"],
+            "from": normalize_stage(_attrs(event).get("from_status")),
+            "to": normalize_stage(_attrs(event).get("to_status")),
+        }
+        for event in story.events
+        if event["activity"] == "status_changed"
+        and normalize_stage(_attrs(event).get("from_status")) == "done"
+        and normalize_stage(_attrs(event).get("to_status")) != "done"
+        and (first_done is None or event["_ts"] >= first_done)
+    ]
+    # prd/36 §4: the *final* done is the end state only when the story has not
+    # been reopened after it. A story done → ready and left open is still open:
+    # the first done is reported, the cycle stays right-censored.
+    reopened_and_open = bool(
+        reopens and done_stamps and reopens[-1]["ts"] >= done_stamps[-1]
+    )
+    if reopened_and_open:
+        done = None
+    else:
+        done = done_stamps[-1] if done_stamps else story.closed
 
     prs = list(story.prs)
     pr_open = min((state.pr["created_ts"] for state in prs), default=None)
@@ -588,8 +702,14 @@ def _cycle(story: Story) -> Cycle:
         "approval": approval,
         "merged": merged,
         "done": done,
+        "first_done": first_done,
     }
-    missing = [name for name, value in boundaries.items() if value is None]
+    # ``first_done`` is reported but is not a segment boundary of its own; a
+    # story that never closed must not gain a "missing" entry for it.
+    missing = [
+        name for name, value in boundaries.items()
+        if value is None and name != "first_done"
+    ]
 
     # -- measured work: PR intervals where the author was working -----------
     spans: list[tuple[datetime, datetime, str | None]] = []
@@ -630,6 +750,8 @@ def _cycle(story: Story) -> Cycle:
         touches=sorted(touches),
         review_rounds=rounds,
         missing=missing,
+        pr_gaps=between_pr_gaps(story),
+        reopens=reopens,
     )
     story._cycle_cache = cycle
     return cycle
@@ -703,6 +825,8 @@ def waiting_time_decomposition(
         key: {
             "hours": 0.0, "active_hours": 0.0, "n": 0, "missing": 0,
             "inverted": 0, "efficiencies": [], "label": SEGMENT_LABEL[key],
+            # prd/36 §2: the part of the segment with no PR open at all
+            "no_pr_open_hours": 0.0,
         }
         for key in keys
     }
@@ -712,11 +836,15 @@ def waiting_time_decomposition(
     clamped = 0
     decomposed = 0
     rounds_total = 0
+    reopened_stories = 0
+    per_story_largest: list[float] = []
 
     for story in stories:
         cycle = _cycle(story)
         for name in cycle.missing:
             missing_boundaries[name] += 1
+        if cycle.reopens:
+            reopened_stories += 1
         end = cycle.boundaries["done"] or court.snapshot
         begin = cycle.boundaries["created"]
         cycle_hours = (
@@ -747,12 +875,19 @@ def waiting_time_decomposition(
             if active > elapsed:
                 active = elapsed
                 clamped += 1
+            no_pr = round(sum(
+                court.business_hours(cycle.person, low, high)
+                for low, high in no_pr_open_spans(story, t1, t2)
+            ), 2)
             entry["hours"] += elapsed
             entry["active_hours"] += active
+            entry["no_pr_open_hours"] += no_pr
             entry["n"] += 1
             if elapsed > 0:
                 entry["efficiencies"].append(round(active / elapsed, 4))
             row["segments"][key] = elapsed
+            if no_pr:
+                row.setdefault("no_pr_open", {})[key] = no_pr
             measured += 1
         if measured:
             decomposed += 1
@@ -772,6 +907,10 @@ def waiting_time_decomposition(
             "active_hours": active,
             "efficiency": round(active / hours, 4) if hours > 0 else None,
             "median_efficiency": _median(entry["efficiencies"], 4),
+            # prd/36 §2: hours in this segment with no PR open — stated, never
+            # folded silently into the segment's headline
+            "no_pr_open_hours": round(entry["no_pr_open_hours"], 2),
+            "no_pr_open_share": _share(entry["no_pr_open_hours"], hours),
             "n": entry["n"],
             "missing": entry["missing"],
             "inverted": entry["inverted"],
@@ -782,6 +921,8 @@ def waiting_time_decomposition(
         # prd/26 P5: which stories fed the largest segment, and by how much
         row["largest_hours"] = row["segments"].get(largest)
         row["affected"] = bool(row["largest_hours"])
+        if row["largest_hours"]:
+            per_story_largest.append(row["largest_hours"])
     largest_examples = [
         key for key, hours in sorted(
             (
@@ -807,22 +948,35 @@ def waiting_time_decomposition(
         "largest_hours": out_segments[largest]["hours"],
         "largest_share": out_segments[largest]["share"],
         "largest_efficiency": out_segments[largest]["efficiency"],
+        # concepts.md §6: "per story" is a statistic over stories, never the
+        # cohort total divided by anything. The rule quotes this number.
+        "largest_per_story_hours": _median(per_story_largest),
+        "largest_per_story_mean_hours": (
+            round(sum(per_story_largest) / len(per_story_largest), 2)
+            if per_story_largest else None
+        ),
+        "largest_per_story_basis": "median across the stories that measured it",
         "largest_examples": largest_examples,
         "review_rounds": rounds_total,
+        "reopened_stories": reopened_stories,
+        "reopens": reopened_stories,
+        "no_pr_open_hours": round(
+            sum(entry["no_pr_open_hours"] for entry in out_segments.values()), 2
+        ),
         "missing_boundaries": dict(sorted(missing_boundaries.items())),
         "clamped": clamped,
         "hours_mode": court.hours_mode,
         "rows": rows,
         "heuristic": (
-            "refined = the first 'pointed' event (the estimate refinement "
-            "produces), falling back to the first status → ready; sprint = the "
-            "first 'sprint_added'; in progress / done = the status *stage* "
-            "transitions (the Jira category when no [jira.stages] map is "
-            "configured); in review / in verification bound the review and QA "
-            "waits when the workflow map names those stages; PR open / first "
-            "review / approval / merge come from the story's PRs via "
-            "PR.ticket_keys. A segment needs both boundaries, otherwise it is "
-            "counted as missing"
+            "created → ready = created to the first status → ready, falling back "
+            "to the first 'pointed' event (the estimate refinement produces); "
+            "ready → sprint = that same ready boundary to the first "
+            "'sprint_added'; in progress / done = the status *stage* transitions "
+            "(the Jira category when no [jira.stages] map is configured); in "
+            "review / in verification bound the review and QA waits when the "
+            "workflow map names those stages; PR open / first review / approval / "
+            "merge come from the story's PRs via PR.ticket_keys. A segment needs "
+            "both boundaries, otherwise it is counted as missing"
         ),
         "efficiency_note": (
             "active = measured work spans inside the segment (PR intervals with "
@@ -1353,7 +1507,9 @@ def worklog_cross_check(
             bucket = attributes.get("log_delay_bucket")
             if bucket in buckets:
                 buckets[bucket] += 1
-                if bucket in ("within_week", "late"):
+                # prd/36 §5: "a week late" is the ``late`` bucket (> 7 days);
+                # ``within_week`` is 2–7 days and must not be counted as it.
+                if bucket == "late":
                     story_late += 1
             delay = attributes.get("log_delay_seconds")
             if delay is not None:
@@ -1392,7 +1548,7 @@ def worklog_cross_check(
         if begin is not None and end is not None and end > begin:
             cycle_hours += court.business_hours(cycle.person, begin, end)
 
-    late = buckets["within_week"] + buckets["late"]
+    late = buckets["late"]
     untrusted_share = _share(late, worklogs)
     ratio = round(logged_hours / active_hours, 2) if active_hours > 0 else None
     return {
@@ -1430,9 +1586,10 @@ def worklog_cross_check(
         ),
         "heuristic": (
             "delay = worklog.created − worklog.started, bucketed by the ingest "
-            "(same_day / next_day / within_week / late); active_hours is PR "
-            "intervals in an active or rebasing phase, so a story with no PR "
-            "adds nothing to the denominator"
+            "(same_day / next_day / within_week / late); 'logged a week late' is "
+            "the late bucket (> 7 days) only, never within_week (2–7 d); "
+            "active_hours is PR intervals in an active or rebasing phase, so a "
+            "story with no PR adds nothing to the denominator"
         ),
         "note": _note(data, "no 'worklogged' event in this window", worklogs > 0),
     }
@@ -1579,29 +1736,29 @@ def refinement_cost(
     data: JiraData,
     window: tuple[datetime, datetime],
 ) -> dict:
-    """What one refinement costs, in hours: the median ready→refined segment.
+    """What one refinement costs, in hours: the median created → ready segment.
 
     A re-point or an unrefined start means the estimate was not settled when it
     should have been, so the price of the rule is one more refinement. Measured
-    from the cohort's own ready→refined segments; falls back to a stated
+    from the cohort's own created → ready segments; falls back to a stated
     default when the store has none.
     """
     spans: list[float] = []
     for story in cohort(data, window):
         cycle = _cycle(story)
         begin = cycle.boundaries["created"]
-        refined = cycle.boundaries["refined"]
-        if begin is None or refined is None or refined < begin:
+        ready = cycle.boundaries["ready"]
+        if begin is None or ready is None or ready < begin:
             continue
-        spans.append(round(court.business_hours(cycle.person, begin, refined), 2))
+        spans.append(round(court.business_hours(cycle.person, begin, ready), 2))
     measured = _median(spans)
     return {
         "hours": measured if measured is not None else DEFAULT_REFINEMENT_HOURS,
         "n": len(spans),
         "basis": (
-            "median ready→refined segment of this cohort"
+            "median created → ready segment of this cohort"
             if measured is not None
-            else "default: the cohort has no measured refinement segment"
+            else "default: the cohort has no measured created → ready segment"
         ),
     }
 

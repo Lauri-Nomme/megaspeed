@@ -22,7 +22,7 @@ import {
 } from '/format.js';
 import {
   TABS, tabCounts, tabRows, deliveryTable, overviewMarkup, detailMarkup,
-  impactSentence, entityMarkdown, deliveryMarkdown, reviewStateLine,
+  impactSentence, entityMarkdown, deliveryMarkdown, reviewStateLine, matchesScope,
 } from '/tables.js';
 import { rulesMarkup, rulesStats, rulesMarkdown } from '/rules.js';
 import { sprintStrip } from '/sprints.js';
@@ -875,8 +875,9 @@ function renderDeliveryPage() {
     setHonesty(
       `${counts.all} open item${counts.all === 1 ? '' : 's'} in view · ` +
       `${counts.blocked} blocked · ${counts.oldest} waiting over 3 days · ` +
+      `${data.counts.stale || 0} stale · ${data.counts.unobserved || 0} unobserved · ` +
       `impact = dependents × current wait (≈) · ` +
-      (filtered ? `filtered to ${state.scope.label}` : 'whole team'),
+      (filtered ? `filtered to ${state.scope.label} (waiting on it)` : 'whole team'),
     );
   }
   renderDeliveryDetail();
@@ -894,18 +895,7 @@ function scopedTabCounts(data) {
 }
 
 function matchesScopeRow(row) {
-  const scope = deliveryScope();
-  if (!scope) return true;
-  if (scope.kind === 'person') {
-    return row.author === scope.value || row.waiting_for === scope.value || row.ball === scope.value;
-  }
-  if (scope.kind === 'role') {
-    // prd/40: a ready PR is the author's merge click, not a review wait
-    if (scope.value === 'author') return row.author === row.waiting_for || row.ball === 'ready';
-    if (scope.value === 'review') return row.ball === 'review';
-    if (scope.value === 'ready') return row.ball === 'ready';
-  }
-  return true;
+  return matchesScope(row, deliveryScope());
 }
 
 function deliveryScope() {
@@ -936,6 +926,12 @@ function renderDeliveryDetail() {
       // prd/40: the three facts the old single ball label could not say
       ['state', reviewStateLine(row)],
       ['waiting on', whoLabel(row.ball_label || row.ball)],
+      ...(row.waiting_roles && Object.keys(row.waiting_roles).length
+        ? [['holder roles', Object.entries(row.waiting_roles)
+          .map(([person, role]) => `${person} (${role})`).join(', ')]]
+        : []),
+      ...(row.stale ? [['stale', (row.stale_reasons || []).join('; ')]] : []),
+      ...(row.unobserved ? [['unobserved since', row.unobserved_since]] : []),
       ['waiting since', `${fmtStamp(Date.parse(row.waiting_since))} (${fmtHours(row.waiting_hours)})`],
       ['phase', row.phase],
       ['age', fmtHours(row.age_hours)],
@@ -986,9 +982,10 @@ function renderTicketPage() {
   const data = state.ticket;
   if (data) {
     const missing = (data.segments && data.segments.missing) || [];
+    const total = ((data.segments && data.segments.rows) || []).length;
     setHonesty(
       `${data.pr_count} PR${data.pr_count === 1 ? '' : 's'} joined on ${data.key} · ` +
-      `${data.segments.measured}/8 segments measured · ` +
+      `${data.segments.measured}/${total} segments measured · ` +
       (data.hours_mode === 'business' ? 'business hours' : 'wall-clock hours') +
       (missing.length ? ` · missing boundaries: ${missing.join(', ')}` : ''),
     );
@@ -1132,7 +1129,8 @@ function renderQueuePage() {
   queueChart.setData(data ? { ...data, streams, emptyText } : { streams: [], buckets: 1, window: { start: '', end: '' } });
   $('queue-assumption').textContent = data
     ? `${data.assumption} · ${data.bucket_hours} h buckets over ${data.window.days} days. ` +
-      `Little's law: WIP ≈ throughput × wait. Overloaded = long wait and a standing queue; slow = long wait with little WIP. ` +
+      `Little's law: WIP ≈ throughput × wait. Overloaded = long queue wait with a standing queue; slow = long wait with little WIP. ` +
+      `This is queue wait, not calendar utilisation (the policy lab's “busy”). ` +
       `${data.diagnosis_note}.`
     : '';
   if (data) {
@@ -1147,11 +1145,14 @@ function renderQueuePage() {
 
 function queueMatchesScope(stream) {
   if (state.scope.kind === 'all') return true;
-  if (state.scope.kind === 'person') return stream.id === state.scope.value;
+  const value = String(state.scope.value || '').toLowerCase();
+  if (state.scope.kind === 'person') return String(stream.id).toLowerCase() === value;
   if (state.scope.kind === 'role') {
     // Role/queue scopes match the stream id, including the synthetic `author`
-    // and `review` streams (B4).
-    return String(stream.id).toLowerCase() === String(state.scope.value).toLowerCase();
+    // and `review` streams (B4) — and `role:sentinel` matches the sentinel's
+    // own person stream at the person level, not only the `sentinel` queue.
+    if (String(stream.id).toLowerCase() === value) return true;
+    return value === 'sentinel' && stream.role === 'sentinel';
   }
   return true;
 }
@@ -1412,15 +1413,37 @@ function entityForTarget(target, point) {
 }
 
 // ------------------------------------------------------------------- scope
+/** Roles this dataset actually has a queue/owner for (no dead-end options). */
+function availableRoles() {
+  const seen = new Set(['author', 'review', 'ready']);
+  const events = state.events || [];
+  if (events.some((event) => event.activity === 'build_status')) seen.add('CI');
+  if (events.some((event) => (event.attributes || {}).sentinel === true)) seen.add('sentinel');
+  // a queue stream or a delivery row can name a role even when no event did
+  for (const stream of (state.queues && state.queues.streams) || []) {
+    seen.add(String(stream.id));
+  }
+  for (const row of (state.delivery && state.delivery.rows) || []) {
+    if (row.ball) seen.add(String(row.ball));
+    for (const role of Object.values(row.waiting_roles || {})) seen.add(String(role));
+  }
+  return ROLE_QUEUES.filter((role) => seen.has(role));
+}
+
 function buildScopeOptions() {
   const counts = new Map();
   for (const event of state.events) counts.set(event.actor, (counts.get(event.actor) || 0) + 1);
+  // concepts.md §2: a bot is not a person scope, and "system" is not an actor
+  // a reader can wait on. Both were dead-end options (QA #9/#1).
+  const bots = new Set((state.meta && state.meta.bots) || []);
   const options = [['all:all', 'everything']];
   [...counts.entries()].sort((a, b) => b[1] - a[1])
+    .filter(([actor]) => actor && actor !== 'system' && !bots.has(actor))
     .forEach(([actor]) => options.push([`person:${actor}`, `person ${actor}`]));
-  // Every closed role queue is a scope option, so a role scope set from the
-  // queue chart or a graph node always has a matching <option> (B4).
-  options.push(...ROLE_QUEUES.map((role) => [`role:${role}`, `queue ${role}`]));
+  // Every role queue this dataset can show is a scope option, so a role scope
+  // set from the queue chart or a graph node always has a matching <option>
+  // (B4) — and a role with no data is not offered as a dead end.
+  options.push(...availableRoles().map((role) => [`role:${role}`, `queue ${role}`]));
   $('scope').innerHTML = options.map(([value, label]) =>
     `<option value="${esc(value)}">${esc(label)}</option>`).join('');
   $('scope').value = `${state.scope.kind}:${state.scope.value || 'all'}`;
@@ -1460,8 +1483,11 @@ function scopedEvents() {
 
 /** A person scope is only meaningful inside one tenant's identity space. */
 function validateScope() {
+  const bots = new Set((state.meta && state.meta.bots) || []);
   const person = state.scope.kind === 'person'
-    && !state.events.some((event) => event.actor === state.scope.value);
+    && (state.scope.value === 'system'
+      || bots.has(state.scope.value)
+      || !state.events.some((event) => event.actor === state.scope.value));
   const role = state.scope.kind === 'role'
     && !ROLE_QUEUES.some((queue) => queue.toLowerCase() === String(state.scope.value || '').toLowerCase());
   if (person || role) {

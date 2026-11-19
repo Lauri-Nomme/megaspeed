@@ -275,8 +275,8 @@ class WaitingTimeTests(StoreCase):
         self.assertEqual(metric["stories_decomposed"], 1)
         hours = {key: entry["hours"] for key, entry in metric["segments"].items()}
         self.assertEqual(hours, {
-            "ready_refined": 10.0,
-            "refined_sprint": 10.0,
+            "created_ready": 10.0,
+            "ready_sprint": 10.0,
             "sprint_in_progress": 10.0,
             "in_progress_pr_open": 10.0,
             "pr_open_first_review": 10.0,
@@ -292,7 +292,7 @@ class WaitingTimeTests(StoreCase):
         self.assertEqual(metric["largest_share"], round(20 / 90, 4))
         self.assertEqual(metric["segments"]["review_rounds"]["share"],
                          round(20 / 90, 4))
-        self.assertEqual(metric["segments"]["ready_refined"]["share"],
+        self.assertEqual(metric["segments"]["created_ready"]["share"],
                          round(10 / 90, 4))
         # prd/29: no workflow map, so the review/QA stages do not exist -- the
         # two stage boundaries are honestly reported missing, and the eight
@@ -312,8 +312,8 @@ class WaitingTimeTests(StoreCase):
         self.assertEqual(segments["review_rounds"]["active_hours"], 10.0)
         self.assertEqual(segments["review_rounds"]["efficiency"], 0.5)
         # a segment with no evidence of work is 0% — not "unknown"
-        self.assertEqual(segments["ready_refined"]["active_hours"], 0.0)
-        self.assertEqual(segments["ready_refined"]["efficiency"], 0.0)
+        self.assertEqual(segments["created_ready"]["active_hours"], 0.0)
+        self.assertEqual(segments["created_ready"]["efficiency"], 0.0)
         self.assertEqual(metric["clamped"], 0)
 
     def test_a_dominant_segment_emits_the_plain_language_template(self):
@@ -362,8 +362,8 @@ class WaitingTimeTests(StoreCase):
         self.assertTrue(metric["available"])                 # 2 of 8 are measured
         self.assertEqual(metric["segments"]["sprint_in_progress"]["hours"], 10.0)
         self.assertEqual(metric["segments"]["merge_done"]["n"], 0)
-        self.assertEqual(metric["segments"]["ready_refined"]["missing"], 1)
-        self.assertEqual(metric["missing_boundaries"]["refined"], 1)
+        self.assertEqual(metric["segments"]["created_ready"]["missing"], 1)
+        self.assertEqual(metric["missing_boundaries"]["ready"], 1)
         self.assertEqual(metric["missing_boundaries"]["pr_open"], 1)
         self.assertEqual(metric["explained_share"], round(10 / 40, 4))
 
@@ -553,8 +553,10 @@ class WorklogTests(StoreCase):
             "same_day": 1, "next_day": 1, "within_week": 1, "late": 1,
         })
         self.assertEqual(metric["bucket_shares"]["late"], 0.25)
-        self.assertEqual(metric["late_share"], 0.5)
-        self.assertEqual(metric["untrusted_hours"], 2.0)
+        # prd/36 §5: "a week late" is the late bucket only; within_week is 2–7 d
+        self.assertEqual(metric["late_share"], 0.25)
+        self.assertEqual(metric["untrusted_hours"], 1.0)
+        self.assertEqual(metric["buckets"]["within_week"], 1)
         # (1 + 26 + 120 + 1464) h / 4 / 24
         self.assertEqual(metric["mean_delay_days"], 16.78)
         self.assertEqual(metric["median_delay_days"], 3.04)   # (26 + 120) / 2 h
@@ -577,8 +579,8 @@ class WorklogTests(StoreCase):
         )
         self.assertEqual(suggestion["severity"], "critical")   # ≥ 7 days
         self.assertEqual(suggestion["impact_hours"], 0.0)      # measurement, not wait
-        self.assertEqual(suggestion["evidence"]["untrusted_hours"], 2.0)
-        self.assertEqual(suggestion["evidence"]["late_share"], 0.5)
+        self.assertEqual(suggestion["evidence"]["untrusted_hours"], 1.0)
+        self.assertEqual(suggestion["evidence"]["late_share"], 0.25)
 
     def test_a_large_mismatch_emits_the_ratio_template(self):
         payload = self.payload(self.fixture())
@@ -654,7 +656,7 @@ class JiraConformanceTests(StoreCase):
         )
         self.assertEqual(suggestion["severity"], "critical")   # 33% unrefined starts
         self.assertEqual(suggestion["evidence"]["started_unrefined"], 1)
-        # the median ready→refined segment here is 22.5 h (40 h and 5 h)
+        # the median created→ready segment here is 22.5 h (40 h and 5 h)
         self.assertEqual(suggestion["evidence"]["hours_per_refinement"], 22.5)
         self.assertEqual(suggestion["impact_hours"], 45.0)    # 2 × refinement cost
 

@@ -251,16 +251,24 @@ export function abMarkup(data) {
     <tbody>${rows}${bottleneck}</tbody></table>${noise}`;
 }
 
-/** Per-server utilisation: who is busy, and where the queue is. */
+/** Per-server utilisation: who is *busy* (calendar share), and where the queue is.
+ *
+ * concepts.md §2/§6: utilisation (ρ, calendar share) is a different metric from
+ * the queue view's "overloaded" (queue wait). The label says "busy" and the
+ * table note says which lens this is; neither number is ever called "load".
+ */
 export function resourcesMarkup(result) {
   if (!result || !result.resources) return '';
   const rows = result.resources.map((resource) => {
-    const state = resource.utilisation >= 0.85 ? 'overloaded'
+    // the CSS class carries the colour; the text carries the distinct metric
+    const tone = resource.utilisation >= 0.85 ? 'overloaded'
       : resource.utilisation >= 0.5 ? 'slow' : 'healthy';
+    const label = resource.utilisation >= 0.85 ? 'busy'
+      : resource.utilisation >= 0.5 ? 'partly busy' : 'idle';
     return `<tr>
       <td class="c-who" data-label="">${esc(resource.person)}</td>
       <td class="c-role" data-label="role">${esc(resource.role)}</td>
-      <td data-label="utilisation"><span class="pill ${state}">${predPercent(resource.utilisation)}</span></td>
+      <td data-label="utilisation"><span class="pill ${tone}" title="calendar share (ρ) — not queue wait">${predPercent(resource.utilisation)} ${label}</span></td>
       <td class="c-dur" data-label="mean wait">${predHours(resource.mean_wait_hours)}</td>
       <td class="c-dur" data-label="peak queue">≈${resource.peak_queue}</td>
       <td class="c-dur" data-label="requests">≈${resource.requests}</td>
@@ -270,9 +278,10 @@ export function resourcesMarkup(result) {
     `<p class="policy-warning">${esc(warning)}</p>`).join('');
   return `<table class="table compact policy-table"><thead><tr>
       <th class="c-who">server</th><th class="c-role">role</th>
-      <th>utilisation</th><th class="c-dur">mean wait</th>
+      <th title="calendar share (ρ), not queue wait">busy (ρ)</th><th class="c-dur">mean wait</th>
       <th class="c-dur">peak queue</th><th class="c-dur">requests</th>
-    </tr></thead><tbody>${rows}</tbody></table>${warnings}`;
+    </tr></thead><tbody>${rows}</tbody></table>
+    <p class="panel-note">busy = calendar share (ρ); the queue view's “overloaded” is queue wait — different metrics.</p>${warnings}`;
 }
 
 /** Calibrated facts: what the model was fitted from, in plain numbers. */
@@ -340,7 +349,7 @@ export function policyMarkup(data, scenario) {
   const modelled = trusted
     ? `<h2 class="policy-h">A / B · predicted cycle time</h2>
       ${ab}
-      <h2 class="policy-h">Who is busy</h2>
+      <h2 class="policy-h">Who is busy · calendar share (ρ)</h2>
       ${resourcesMarkup(result)}`
     : `<p class="empty-row">The model did not validate, so its own numbers — baseline
         and scenario alike — are withheld. The calibrated facts below are measured

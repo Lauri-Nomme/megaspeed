@@ -33,8 +33,8 @@ function segment(key, label, bounds, hours, extra = {}) {
 
 function payload(overrides = {}) {
   const rows = [
-    segment('ready_refined', 'ready → refined', ['created', 'refined'], 45),
-    segment('refined_sprint', 'refined → sprint', ['refined', 'sprint'], null),
+    segment('created_ready', 'created → ready', ['created', 'ready'], 45),
+    segment('ready_sprint', 'ready → sprint', ['ready', 'sprint'], null),
     segment('sprint_in_progress', 'sprint → in progress', ['sprint', 'started'], 8),
     segment('in_progress_pr_open', 'in progress → PR open', ['started', 'pr_open'], 2),
     segment('pr_open_first_review', 'PR open → first review', ['pr_open', 'first_review'], 4),
@@ -67,15 +67,15 @@ function payload(overrides = {}) {
         reason: name === 'refined' ? "no 'pointed' event" : null,
       }])),
       measured: 7,
-      missing_segments: ['refined_sprint'],
+      missing_segments: ['ready_sprint'],
       missing: ['refined'],
       total_hours: 72,
       active_hours: 9,
       efficiency: 0.125,
       cycle_hours: 85,
       explained_share: 0.85,
-      largest: 'ready_refined',
-      largest_label: 'ready → refined',
+      largest: 'created_ready',
+      largest_label: 'created → ready',
       largest_hours: 45,
       largest_share: 0.625,
       clamped: 0,
@@ -117,7 +117,7 @@ function payload(overrides = {}) {
       { key: 'DEL-167:pointed', ts: '2026-10-09T15:00:00Z', activity: 'pointed', actor: 'LaAd', attributes: { points: 8 } },
     ],
     event_count: 2,
-    answer: "the store cannot say how long the refined → sprint segment took because the refined boundary is missing (no 'pointed' event); the 7 of 8 segments it can measure cover 72 h, most of it in ready → refined (45 h, 62%).",
+    answer: "the store cannot say how long the ready → sprint segment took because the sprint boundary is missing (no 'sprint_added' event); the 7 of 8 segments it can measure cover 72 h, most of it in created → ready (45 h, 62%).",
     answer_kind: 'partial',
     note: null,
   };
@@ -127,19 +127,19 @@ function payload(overrides = {}) {
 test('the segment bar draws all eight segments and names the absent one', () => {
   const html = segmentBar(payload());
   assert.equal((html.match(/data-segment=/g) || []).length, 8);
-  assert.match(html, /data-segment="ready_refined" data-available="true"/);
-  assert.match(html, /data-segment="refined_sprint" data-available="false"/);
+  assert.match(html, /data-segment="created_ready" data-available="true"/);
+  assert.match(html, /data-segment="ready_sprint" data-available="false"/);
   // an absent segment says why, and never paints hours it does not have
   assert.match(html, /not measurable — the sprint boundary is missing/);
   assert.match(html, /not measured/);
-  assert.doesNotMatch(html, /data-segment="refined_sprint"[^>]*background:/);
+  assert.doesNotMatch(html, /data-segment="ready_sprint"[^>]*background:/);
 });
 
 test('the verification split renders as its own measured QA segment', () => {
   // prd/29: a store whose workflow names a QA stage splits merge→done in two.
   const rows = [
-    segment('ready_refined', 'ready → refined', ['created', 'refined'], 20),
-    segment('refined_sprint', 'refined → sprint', ['refined', 'sprint'], 4),
+    segment('created_ready', 'created → ready', ['created', 'ready'], 20),
+    segment('ready_sprint', 'ready → sprint', ['ready', 'sprint'], 4),
     segment('sprint_in_progress', 'sprint → in progress', ['sprint', 'started'], 2),
     segment('in_progress_pr_open', 'in progress → PR open', ['started', 'pr_open'], 8),
     segment('pr_open_first_review', 'PR open → first review', ['pr_open', 'first_review'], 3),
@@ -195,8 +195,8 @@ test('the segment colours extend the PR gantt vocabulary in lifecycle order', ()
 test('the prose answer is rendered first, and names the missing boundary', () => {
   const html = ticketMarkup(payload());
   assert.match(html, /id="ticket-answer" data-kind="partial"/);
-  assert.match(html, /the store cannot say how long the refined → sprint segment took/);
-  assert.match(html, /because the refined boundary is missing/);
+  assert.match(html, /the store cannot say how long the ready → sprint segment took/);
+  assert.match(html, /because the sprint boundary is missing/);
   // the nine boundary chips name the absent one rather than printing a dash
   const chips = boundaryChips(payload());
   assert.equal((chips.match(/class="ticket-boundary/g) || []).length, 9);
@@ -232,10 +232,59 @@ test('the sprint strip and the worklog block state their own facts', () => {
 test('the ticket Markdown export keeps the answer and links the key', () => {
   const markdown = ticketMarkdown(payload(), 'http://127.0.0.1:8766/');
   assert.match(markdown, /# DEL-167 — why did it take this long\?/);
-  assert.match(markdown, /> the store cannot say how long the refined → sprint segment took/);
+  assert.match(markdown, /> the store cannot say how long the ready → sprint segment took/);
   assert.match(markdown, /\[open in the app\]\(http:\/\/127\.0\.0\.1:8766\/#ticket\/DEL-167\)/);
-  assert.match(markdown, /\| refined → sprint \| not measured \|/);
+  assert.match(markdown, /\| ready → sprint \| not measured \|/);
   assert.match(markdown, /#53 DEL\/delivery-api · open \(right-censored\)/);
+});
+
+test('prd/36 §5: the stats strip derives the segment count instead of /8', () => {
+  const rows = [
+    segment('created_ready', 'created → ready', ['created', 'ready'], 10),
+    segment('ready_sprint', 'ready → sprint', ['ready', 'sprint'], 5),
+    segment('sprint_in_progress', 'sprint → in progress', ['sprint', 'started'], 5),
+    segment('in_progress_pr_open', 'in progress → PR open', ['started', 'pr_open'], 5),
+    segment('pr_open_first_review', 'PR open → first review', ['pr_open', 'first_review'], 5),
+    segment('review_rounds', 'review rounds', ['first_review', 'approval'], 5),
+    segment('final_approval_merge', 'final approval → merge', ['approval', 'merged'], 5),
+    segment('merge_verification', 'merge → verification', ['merged', 'in_verification'], 5),
+    segment('verification_done', 'verification → done', ['in_verification', 'done'], 5),
+  ];
+  const stats = ticketStats(payload({
+    segments: { ...payload().segments, rows, order: rows.map((row) => row.key), measured: 9 },
+  }));
+  assert.match(stats, /9<\/b>\/9 segments/);
+  assert.doesNotMatch(stats, /\/8/);
+});
+
+test('prd/36 §3/§4: the head states the end state, an open PR and a reopen', () => {
+  const html = ticketMarkup(payload({
+    reopened: true,
+    reopen_count: 1,
+    end_state: 'done_with_open_pr',
+    open_prs: [{ number: 53, repo: 'DEL/delivery-api', state: 'open' }],
+    story: { ...payload().story, censored: false },
+  }));
+  assert.match(html, /reopened ×1/);
+  assert.match(html, /PR #53 open · right-censored/);
+  const markdown = ticketMarkdown(payload({
+    reopened: true,
+    reopen_count: 1,
+    segments: { ...payload().segments, cycle_first_done_hours: 60, cycle_hours: 85 },
+    open_prs: [{ number: 53, repo: 'DEL/delivery-api', state: 'open' }],
+  }));
+  assert.match(markdown, /\*\*reopened\*\* ×1/);
+  assert.match(markdown, /created→first done 60 h/);
+  assert.match(markdown, /created→final done 85 h/);
+  assert.match(markdown, /\*\*still open:\*\* #53 \(right-censored\)/);
+});
+
+test('prd/36 §2: a segment says how much of it had no PR open', () => {
+  const rows = payload().segments.rows.map((row) => (
+    row.key === 'review_rounds' ? { ...row, no_pr_open_hours: 12 } : row
+  ));
+  const html = segmentBar(payload({ segments: { ...payload().segments, rows } }));
+  assert.match(html, /review rounds — 10 h \(20% of the measured cycle, 20% active\) · 12 h with no PR open/);
 });
 
 test('a missing story is a stated result, not an empty page', () => {

@@ -282,8 +282,8 @@ class TicketCycleTests(StoreCase):
         self.assertEqual(
             {row["key"]: row["hours"] for row in segments["rows"]},
             {
-                "ready_refined": 10.0,
-                "refined_sprint": 10.0,
+                "created_ready": 10.0,
+                "ready_sprint": 10.0,
                 "sprint_in_progress": 10.0,
                 "in_progress_pr_open": 10.0,
                 "pr_open_first_review": 10.0,
@@ -385,15 +385,16 @@ class TicketCycleTests(StoreCase):
         finally:
             con.close()
         self.assertEqual(payload["answer_kind"], "partial")
-        self.assertIn("the store cannot say how long the ready → refined segment took",
+        self.assertIn("the store cannot say how long the created → ready segment took",
                       payload["answer"])
-        self.assertIn("because the refined boundary is missing", payload["answer"])
+        self.assertIn("because the ready boundary is missing", payload["answer"])
         self.assertIn("no 'pointed' event", payload["answer"])
         self.assertIn("refined", payload["segments"]["missing"])
         refined = next(row for row in payload["segments"]["rows"]
-                       if row["key"] == "ready_refined")
+                       if row["key"] == "created_ready")
         self.assertFalse(refined["available"])
-        self.assertEqual(refined["missing"], ["refined"])
+        self.assertEqual(refined["missing"], ["ready"])
+        self.assertEqual(refined["bounds"], ["created", "ready"])
         self.assertIsNone(refined["hours"])
         # the measured segment is still reported, and never zero-filled
         started = next(row for row in payload["segments"]["rows"]
@@ -577,7 +578,7 @@ class TicketApiTests(unittest.TestCase):
     def test_a_missing_boundary_is_named_by_the_api(self):
         body = get("/api/ticket/DEL-176", tenant="del").json()
         self.assertEqual(body["answer_kind"], "partial")
-        self.assertIn("the refined boundary is missing", body["answer"])
+        self.assertIn("the ready boundary is missing", body["answer"])
         self.assertIn("refined", body["segments"]["missing"])
 
     def test_a_pr_without_a_story_is_still_a_ticket(self):
@@ -586,6 +587,18 @@ class TicketApiTests(unittest.TestCase):
         self.assertIsNone(body["story"])
         self.assertEqual(body["pr_count"], 1)
         self.assertEqual(body["answer_kind"], "story_missing")
+
+    def test_the_delivery_list_flags_done_in_jira_but_pr_open(self):
+        """prd/34 §5: the server passes the ticket layer's Done set in."""
+        body = get("/api/delivery", tenant="del").json()
+        row = next(row for row in body["rows"] if row["number"] == 53)
+        self.assertTrue(row["stale"])
+        self.assertIn("Done in Jira", " ".join(row["stale_reasons"]))
+        self.assertEqual(body["counts"]["stale"], 1)
+        # prd/34 §2: the owner is named, never "review queue"
+        self.assertEqual(row["waiting_on"], ["RrRr"])
+        self.assertEqual(row["ball_label"], "RrRr")
+        self.assertEqual(row["waiting_roles"], {"RrRr": "review"})
 
     def test_an_unknown_ticket_is_a_404(self):
         reply = get("/api/ticket/DEL-404", tenant="del")

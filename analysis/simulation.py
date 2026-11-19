@@ -1175,6 +1175,13 @@ class _Lab:
         self.person_service: dict[str, dict] = {}
         for entry in calibration["reviewers"]:
             person = entry["person"]
+            # concepts.md §2/§6: a sentinel's queue *is* the sentinel gate, which
+            # is modelled by the ``sentinel:N`` slots below. Giving the person a
+            # second, never-used reviewer server made "who is busy" list the
+            # gate and an idle 0%-busy person as two rows for the same load.
+            if person in set(self.sentinels):
+                self.person_service[person] = entry
+                continue
             self.servers[person] = _Server(self.env, person, capacity=1)
             self.person_service[person] = entry
         self.wip = {

@@ -126,13 +126,13 @@ REVIEW_ACTIONS = ("comment_added", "pr_approved")
 # prd/21: what to change when one segment of the ticket cycle dominates. The
 # advice is per segment, because "wait less" is not a rule.
 SEGMENT_ADVICE = {
-    "ready_refined": (
+    "created_ready": (
         "Refine before the sprint, not during it: a story that waits for a "
         "refinement slot is not ready to be committed, so the wait turns into "
         "a carry-over. Refine a story only when the team is ready to size it "
         "and write its acceptance criteria in one sitting."
     ),
-    "refined_sprint": (
+    "ready_sprint": (
         "Plan the sprint from the refined backlog: a pointed story that waits "
         "weeks for a sprint is a scheduling problem, not a work problem. Keep "
         "the refined queue short enough that a story enters the next sprint "
@@ -434,20 +434,12 @@ def load_threads(con) -> list[dict]:
 def load_bots(con) -> set[str]:
     """Pseudonyms that are bots (``actor_kind`` on the PERSON object).
 
-    A bot's review queue is not a person to coach, so person-level rules skip
-    them; the metric still counts their waits, because a wait is a wait.
+    One implementation for the whole product (``ballcourt.load_bots``): the
+    ball-court uses it to keep bots out of every holder set, and the rules use
+    it to keep them out of the person-level aggregates. A bot's queue is not a
+    person to coach, and its waits are not a human's.
     """
-    if not _has_attributes(con):
-        return set()
-    rows = con.execute(
-        "SELECT object_id, CAST(attributes AS VARCHAR) FROM objects WHERE object_type = 'PERSON'"
-    ).fetchall()
-    bots: set[str] = set()
-    for object_id, attrs in rows:
-        attributes = json.loads(attrs) if attrs else {}
-        if attributes.get("actor_kind") == "bot":
-            bots.add(str(object_id).partition(":")[2])
-    return bots
+    return ballcourt.load_bots(con)
 
 
 def _diff_size(attributes: dict) -> int | None:
@@ -495,7 +487,12 @@ def load_pr_sizes(con) -> dict[str, dict]:
 # metrics (prd/17 §Metrics) — each one is independently testable
 # --------------------------------------------------------------------------- #
 def time_to_first_review(court: ballcourt.BallCourt, window) -> dict:
-    """``min(first reviewer comment/approval) − pr_opened`` per PR."""
+    """``min(first reviewer comment/approval) − pr_opened`` per PR.
+
+    ``by_reviewer`` is a person aggregate, so bots are excluded from it
+    (concepts.md §2); their PRs still enter the sample, because the wait a
+    human caused (or waited through) is a fact.
+    """
     samples: list[float] = []
     by_reviewer: dict[str, list[float]] = defaultdict(list)
     missing = 0
@@ -512,7 +509,8 @@ def time_to_first_review(court: ballcourt.BallCourt, window) -> dict:
             continue
         hours = _span_hours(court, first["actor"], pr["created_ts"], first["_ts"])
         samples.append(hours)
-        by_reviewer[first["actor"]].append(hours)
+        if first["actor"] not in court.bots:
+            by_reviewer[first["actor"]].append(hours)
         rows.append(_pr_row(
             pr, reviewer=first["actor"], first_review_hours=hours,
             over_target=hours > TARGET_FIRST_REVIEW_HOURS,
@@ -525,6 +523,7 @@ def time_to_first_review(court: ballcourt.BallCourt, window) -> dict:
         "p90_hours": _p90(samples),
         "target_hours": TARGET_FIRST_REVIEW_HOURS,
         "over_target": sum(1 for h in samples if h > TARGET_FIRST_REVIEW_HOURS),
+        "bots_excluded": sorted(court.bots),
         "by_reviewer": {
             person: {"n": len(values), "median_hours": _median(values)}
             for person, values in sorted(by_reviewer.items())
@@ -926,7 +925,8 @@ def _episodes(court: ballcourt.BallCourt, window, kind: str = "review") -> list[
 
     ``kind="review"`` uses the pending set (every holder who is not the
     author); ``kind="author"`` uses the author's own open debt. The hours are
-    priced on the holder's calendar.
+    priced on the holder's calendar. Bots are not people (concepts.md §2): the
+    holder sets already exclude them, and a bot *author* is skipped here too.
     """
     start, end = window
     by_pr: dict[str, list] = defaultdict(list)
@@ -939,7 +939,11 @@ def _episodes(court: ballcourt.BallCourt, window, kind: str = "review") -> list[
         open_episodes: dict[str, dict] = {}
         for interval in intervals:
             if kind == "author":
-                people = [interval.author] if interval.author_open else []
+                people = (
+                    [interval.author]
+                    if interval.author_open and interval.author not in court.bots
+                    else []
+                )
             else:
                 people = [p for p in interval.person_holders if p != interval.author]
             current = set(people)
@@ -1040,6 +1044,8 @@ def reviewer_responsiveness(court: ballcourt.BallCourt, window) -> dict:
 
     people = []
     for person in sorted(set(review) | set(author) | set(unrequired_by_person)):
+        if person in court.bots:
+            continue
         review_hours = review.get(person, [])
         author_hours = author.get(person, [])
         review_median = _median(review_hours)
@@ -1072,6 +1078,7 @@ def reviewer_responsiveness(court: ballcourt.BallCourt, window) -> dict:
         "people": people,
         "flagged": [p["person"] for p in people if p["flagged"]],
         "reviewers": len(review),
+        "bots_excluded": sorted(court.bots),
         "review_n": len(all_review),
         "review_median_hours": _median(all_review),
         "author_n": len(all_author),
@@ -2240,6 +2247,14 @@ def templates(
         percent = round(share * 100)
         severity = "critical" if share >= SEGMENT_SHARE_CRITICAL else "warning"
         advice = SEGMENT_ADVICE.get(segment, "Shrink the biggest queue.")
+        per_story = wtd.get("largest_per_story_hours")
+        per_story_text = (
+            f"The median story waits {_human_hours(per_story)} in the "
+            f"{wtd['largest_label']} segment"
+            if per_story is not None
+            else f"The largest wait is {_human_hours(hours)} in the "
+                 f"{wtd['largest_label']} segment"
+        )
         out.append(_suggestion(
             "jira-waiting-time", "waiting_time_decomposition",
             f"The team spends {percent}% of ticket cycle time in the "
@@ -2249,18 +2264,22 @@ def templates(
                 # prd/26 P5: the drill-down needs the segment key, not just the
                 # label, to pick the column out of metrics…rows[].segments
                 "segment_key": wtd["largest"],
+                # the cohort total is an aggregate; the per-story figure is a
+                # statistic over stories (concepts.md §6). Both are labelled.
                 "segment_hours": hours,
+                "per_story_hours": per_story,
+                "per_story_basis": wtd.get("largest_per_story_basis"),
                 "share": share,
                 "cycle_hours": wtd["total_hours"],
                 "stories": wtd["stories_decomposed"],
                 "flow_efficiency": wtd["largest_efficiency"],
+                "no_pr_open_hours": wtd["segments"][segment].get("no_pr_open_hours"),
                 "impact_basis": "half the largest segment's hours",
                 "examples": ", ".join(wtd.get("largest_examples") or []),
             },
-            f"{advice} The largest wait is {_human_hours(hours)} per story in "
-            f"the {wtd['largest_label']} segment, {percent}% of the measured "
-            "ticket cycle. Fix that phase first: it is the cheapest hour to "
-            "remove, because nothing is being worked on during it.",
+            f"{advice} {per_story_text}, {percent}% of the measured ticket "
+            "cycle. Fix that phase first: it is the cheapest hour to remove, "
+            "because nothing is being worked on during it.",
             severity, hours / 2.0, wtd["stories_decomposed"],
         ))
 
@@ -2366,7 +2385,10 @@ def templates(
                 "trust the logged hours",
                 {
                     "late_share": wc["late_share"],
-                    "late_worklogs": wc["buckets"]["within_week"] + wc["buckets"]["late"],
+                    # "a week or more late" is the ``late`` bucket (> 7 d);
+                    # within_week (2–7 d) is reported separately, never counted.
+                    "late_worklogs": wc["buckets"]["late"],
+                    "within_week_worklogs": wc["buckets"]["within_week"],
                     "untrusted_hours": wc["untrusted_hours"],
                     "worklogs": wc["worklogs"],
                     "logged_hours": wc["logged_hours"],

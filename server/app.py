@@ -506,6 +506,9 @@ def health(request: Request):
     try:
         with store_conn(path) as con:
             summary = pstore.summary(con)
+            # concepts.md §2: the UI must not offer a bot as a person scope.
+            # One small PERSON read, not a full analysis build.
+            bots = insights_rules.load_bots(con)
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
     return {
@@ -518,6 +521,7 @@ def health(request: Request):
         # of which this many may receive/answer eval frames (SEC-2)
         "harness_browsers": bridge.trusted,
         "calendar": _calendar_brief(tenant),
+        "bots": sorted(bots),
         **summary,
     }
 
@@ -1056,9 +1060,13 @@ def delivery(request: Request):
         return _tenant_error(exc.args[0])
     try:
         with store_conn(path) as con:
-            court = _ballcourt(con, tenant, path)
+            bundle = _analysis_bundle(con, tenant, path)
+            court = bundle.court
             window = analyse.window_from_events(court, _days(days))
-            return analyse.delivery_list(court, window)
+            # prd/34 §5: "ticket Done but PR open" needs the ticket layer's end
+            # state; the bundle caches it, so this costs one load per version.
+            done = jira_analysis.done_keys(bundle.jira(con))
+            return analyse.delivery_list(court, window, done_tickets=done)
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
 

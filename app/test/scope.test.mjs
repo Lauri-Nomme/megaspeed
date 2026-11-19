@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 
 import {
   filteredPages, isRoleQueue, queueLevelForNode, scopeBanner, scopeForNode,
-  scopeForStream, streamIsQueue, streamRoleLabel,
+  scopeForStream, scopeMeaning, streamIsQueue, streamRoleLabel,
 } from '../scope.js';
 
 test('a stream named after a role is a queue, not a person named "author"', () => {
@@ -74,10 +74,24 @@ test('a queue/role scope never claims the timeline is filtered', () => {
   const banner = scopeBanner({ kind: 'role', value: 'author' }, 'timeline');
   assert.match(banner, /this view \(timeline\) is not filtered/);
   assert.match(banner, /filtered: delivery list and queue view/);
-  assert.deepEqual([...filteredPages({ kind: 'role', value: 'sentinel' })], ['queue']);
+  // prd/34 §3: role:sentinel applies to the delivery list too, so a PR waiting
+  // only on the sentinel shows up there as well as in the queue chart.
+  assert.deepEqual([...filteredPages({ kind: 'role', value: 'sentinel' })].sort(),
+    ['delivery', 'queue']);
 });
 
 test('no scope means no banner', () => {
   assert.equal(scopeBanner({ kind: 'all', value: null }, 'queue'), '');
   assert.equal(scopeBanner(null, 'queue'), '');
+});
+
+test('prd/34 §3: a person scope has one stated meaning per view', () => {
+  // Delivery/Queue mean "waiting on X"; the timeline means "events by X".
+  assert.equal(scopeMeaning({ kind: 'person', value: 'FrMo' }, 'delivery'), 'waiting on FrMo');
+  assert.equal(scopeMeaning({ kind: 'person', value: 'FrMo' }, 'queue'), 'waiting on FrMo');
+  assert.equal(scopeMeaning({ kind: 'person', value: 'FrMo' }, 'timeline'), 'events by FrMo');
+  const banner = scopeBanner({ kind: 'person', value: 'FrMo' }, 'delivery');
+  assert.match(banner, /person FrMo \(waiting on FrMo\)/);
+  const role = scopeBanner({ kind: 'role', value: 'sentinel' }, 'delivery');
+  assert.match(role, /the sentinel queue/);
 });

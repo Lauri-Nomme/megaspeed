@@ -371,10 +371,18 @@ class ModelTests(StoreCase):
         self.assertLess(efficiency["aggregate"], 1.0)
         self.assertGreater(result["predicted"]["throughput_per_day"], 3.0)
         self.assertEqual(result["predicted"]["censored"], 0)
-        # every person is a capacity-1 server, and the mandatory gate is a slot
+        # every non-sentinel person is a capacity-1 reviewer server, and the
+        # mandatory gate is a slot — the sentinel is not *also* a person server
+        # (that double row was "WHO IS BUSY" listing the gate and an idle 0%
+        # person for the same load; prd/34 §4).
         self.assertEqual(
             sorted(row["person"] for row in result["resources"]),
-            sorted(list(AUTHORS) + [SENTINEL, "sentinel:1"]),
+            sorted(list(AUTHORS) + ["sentinel:1"]),
+        )
+        self.assertNotIn(SENTINEL, {row["person"] for row in result["resources"]})
+        self.assertEqual(
+            sorted(row["role"] for row in result["resources"]),
+            sorted(["reviewer"] * len(AUTHORS) + ["sentinel"]),
         )
 
 

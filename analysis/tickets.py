@@ -68,9 +68,6 @@ BOUNDARY_ORDER = (
     "in_verification", "pr_open", "first_review", "approval", "merged", "done",
 )
 
-PR_REVIEW_ACTIONS = ("pr_pushed", "pr_unapproved")
-
-
 def normalize_key(key: str) -> str:
     """Accept ``DEL-167``, ``STORY:DEL-167`` or ``TICKET:DEL-167``."""
     text = str(key or "").strip()
@@ -103,11 +100,10 @@ def _pr_rows(court: ballcourt.BallCourt, states: list) -> list[dict]:
         pr = state.pr
         first = jira.first_review(state)
         merged = jira.pr_merge(state)
-        rounds = sum(
-            1 for event in state.events
-            if event["activity"] in PR_REVIEW_ACTIONS
-            and first is not None and event["_ts"] >= first
-        )
+        # concepts.md §6 / prd/40: one review-round definition everywhere — the
+        # same function the rules page and the ticket cycle read.
+        pushes_rounds, unapprovals = ballcourt.review_round_events(state)
+        rounds = len(pushes_rounds) + len(unapprovals)
         pushes = [
             {
                 "ts": _iso(event["_ts"]),
@@ -123,7 +119,9 @@ def _pr_rows(court: ballcourt.BallCourt, states: list) -> list[dict]:
                 "to": _iso(interval.end),
                 "hours": round(interval.hours, 2),
                 "ball": interval.ball,
-                "waited_on": interval.waited_on,
+                # the named owner when one person holds the ball (concepts.md §2)
+                "waited_on": interval.ball_label,
+                "waiting_on": list(interval.person_holders),
                 "measured": interval.measured,
                 "kind": interval.kind,
                 "evidence": interval.evidence,
@@ -190,6 +188,8 @@ def _segment_rows(court: ballcourt.BallCourt, cycle: jira.Cycle | None,
             "share": None,
             "active_hours": None,
             "efficiency": None,
+            "no_pr_open_hours": None,
+            "no_pr_open_share": None,
             "available": False,
             "inverted": False,
             "clamped": False,
@@ -221,9 +221,15 @@ def _segment_rows(court: ballcourt.BallCourt, cycle: jira.Cycle | None,
         if active > elapsed:
             active = elapsed
             row["clamped"] = True
+        no_pr = round(sum(
+            court.business_hours(cycle.person, low, high)
+            for low, high in jira.no_pr_open_spans(cycle.story, t1, t2)
+        ), 2)
         row["hours"] = elapsed
         row["active_hours"] = active
         row["efficiency"] = round(active / elapsed, 4) if elapsed > 0 else None
+        row["no_pr_open_hours"] = no_pr
+        row["no_pr_open_share"] = round(no_pr / elapsed, 4) if elapsed > 0 else 0.0
         rows.append(row)
     return rows
 
@@ -254,6 +260,15 @@ def _segments(court: ballcourt.BallCourt, cycle: jira.Cycle | None,
         if cycle is not None and begin is not None and end is not None and end > begin
         else None
     )
+    # prd/36 §4: a reopened story reports *both* done boundaries — the first
+    # cycle and the final one — never silently only one.
+    first_done = cycle.boundaries.get("first_done") if cycle is not None else None
+    final_done = cycle.boundaries.get("done") if cycle is not None else None
+    cycle_first_done_hours = (
+        round(court.business_hours(cycle.person, begin, first_done), 2)
+        if cycle is not None and begin is not None and first_done is not None
+        and first_done > begin else None
+    )
     largest = max(measured, key=lambda row: (row["hours"], row["key"])) if measured else None
     missing = [name for name in BOUNDARY_ORDER
                if cycle is None or cycle.boundaries.get(name) is None]
@@ -268,19 +283,46 @@ def _segments(court: ballcourt.BallCourt, cycle: jira.Cycle | None,
         "active_hours": active,
         "efficiency": round(active / total, 4) if total > 0 else None,
         "cycle_hours": cycle_hours,
+        "cycle_first_done_hours": cycle_first_done_hours,
+        "first_done": _iso(first_done),
+        "final_done": _iso(final_done),
+        "reopened": bool(cycle is not None and cycle.reopens),
+        "reopen_count": len(cycle.reopens) if cycle is not None else 0,
+        "reopens": [
+            {"ts": _iso(item["ts"]), "from": item["from"], "to": item["to"]}
+            for item in (cycle.reopens if cycle is not None else [])
+        ],
+        # prd/36 §2: the "no PR open" sub-span, stated per segment and summed
+        "no_pr_open_hours": round(
+            sum(row["no_pr_open_hours"] or 0.0 for row in measured), 2
+        ),
+        "pr_gaps": [
+            {
+                "from": _iso(gap["start"]),
+                "to": _iso(gap["end"]),
+                "hours": round(court.business_hours(cycle.person, gap["start"], gap["end"]), 2),
+                "from_pr": gap["from_pr"],
+                "to_pr": gap["to_pr"],
+            }
+            for gap in (cycle.pr_gaps if cycle is not None else [])
+        ],
         "explained_share": round(total / cycle_hours, 4) if cycle_hours else None,
         "largest": largest["key"] if largest else None,
         "largest_label": largest["label"] if largest else None,
         "largest_hours": largest["hours"] if largest else None,
         "largest_share": largest["share"] if largest else None,
+        "largest_no_pr_open_hours": (
+            largest["no_pr_open_hours"] if largest else None
+        ),
         "clamped": sum(1 for row in rows if row["clamped"]),
         "hours_mode": court.hours_mode,
         "heuristic": (
             "the same boundaries and active-work accounting as the prd/21 "
-            "decomposition: refined = first 'pointed' (fallback: status → "
-            "ready), sprint = first 'sprint_added', status stages for "
-            "started/in-review/in-verification/done, and the story's PRs "
-            "(joined on PR.ticket_keys) for open/review/merge"
+            "decomposition: created → ready = the first status → ready, "
+            "falling back to the first 'pointed' estimate; sprint = first "
+            "'sprint_added', status stages for started/in-review/in-verification/"
+            "done, and the story's PRs (joined on PR.ticket_keys) for "
+            "open/review/merge"
         ),
     }
 
@@ -356,14 +398,18 @@ def _worklogs(story: jira.Story | None, pr_rows: list[dict]) -> tuple[list[dict]
     for row in rows:
         if row["bucket"] in buckets:
             buckets[row["bucket"]] += 1
-    late = buckets["within_week"] + buckets["late"]
+    late = buckets["late"]
     return rows, {
         "worklogs": len(rows),
         "logged_hours": logged,
         "active_hours": active,
         "logged_to_active_ratio": round(logged / active, 2) if active > 0 else None,
         "buckets": buckets,
+        # prd/36 §5: "logged a week late" is the ``late`` bucket (> 7 days);
+        # within_week (2–7 d) is not a week late and is reported separately.
         "late_share": round(late / len(rows), 4) if rows else None,
+        "late_worklogs": late,
+        "within_week_worklogs": buckets["within_week"],
         "note": (
             None if rows else
             "no 'worklogged' event names this ticket, so logged time cannot be "
@@ -396,14 +442,37 @@ def _answer(
     segments: dict,
     prs: list[dict],
 ) -> tuple[str, str]:
-    """One sentence: where the time went, or which boundary the store lacks."""
+    """One sentence: where the time went, or which boundary the store lacks.
+
+    prd/36 makes the sentence honest about four things the old one hid:
+
+    * the **real end state** — a Done ticket with an open PR says so
+      ("Done in Jira, but PR #53 is still open (right-censored)");
+    * **reopens** — both the created→first-done and created→final-done spans;
+    * a **multi-PR idle gap** inside the largest segment ("N h of it had no PR
+      open: PR #53 started 11 business days after PR #52 merged");
+    * the boundary a segment is missing, as before.
+    """
     measured = [row for row in segments["rows"] if row["available"]]
     missing = [row for row in segments["rows"] if not row["available"]]
+    open_prs = [pr for pr in prs if pr.get("censored")]
     censored = story is not None and segments["boundaries"]["done"]["ts"] is None
     suffix = (
         "; the story is still open, so the cycle is right-censored at the snapshot"
         if censored else ""
     )
+    # prd/36 §3: the end state is stated, and an open PR is disclosed rather
+    # than left to a table row.
+    prefix = ""
+    if open_prs and not censored:
+        numbers = ", ".join(f"#{pr['number']}" for pr in open_prs)
+        prefix = (
+            f"Done in Jira, but PR {numbers} is still open (right-censored); "
+            "the cycle is measured to the ticket's done, not to that PR. "
+        )
+    elif open_prs and censored:
+        numbers = ", ".join(f"#{pr['number']}" for pr in open_prs)
+        prefix = f"Still open in Jira, with PR {numbers} open too (right-censored). "
     if story is None:
         if prs:
             plural = "s" if len(prs) != 1 else ""
@@ -413,37 +482,98 @@ def _answer(
                 "story_missing",
             )
         return f"the store has no story and no PR for {key}.", "story_missing"
+    reopened = bool(segments.get("reopened"))
+    # prd/36 §4: a reopened story always states both boundaries, even when a
+    # segment is missing and the answer is otherwise partial.
+    reopen_note = ""
+    if reopened:
+        first_hours = segments.get("cycle_first_done_hours")
+        final_hours = segments.get("cycle_hours")
+        reopens = segments.get("reopen_count") or 1
+        if censored:
+            reopen_note = (
+                f" {key} was reopened {reopens} time"
+                f"{'' if reopens == 1 else 's'}: {first_hours:g} h from created to "
+                f"the first done, and still open at the snapshot "
+                f"({final_hours:g} h)."
+            )
+        else:
+            reopen_note = (
+                f" {key} was reopened {reopens} time"
+                f"{'' if reopens == 1 else 's'}: {first_hours:g} h from created to "
+                f"the first done and {final_hours:g} h to the final done."
+            )
     if not measured:
         first = missing[0]
         boundary = first["missing"][0]
         return (
-            f"the store cannot say where {key}'s time went because no segment has "
-            f"both boundaries — the {boundary} boundary is missing "
-            f"({first['reason']}){suffix}.",
+            f"{prefix}the store cannot say where {key}'s time went because no "
+            f"segment has both boundaries — the {boundary} boundary is missing "
+            f"({first['reason']}){reopen_note}{suffix}.",
             "unmeasurable",
         )
     total = segments["total_hours"]
     biggest = max(measured, key=lambda row: (row["hours"], row["key"]))
     percent = round(100 * (biggest["share"] or 0))
+    # prd/36 §2: a segment that spans a gap with no PR open says so.
+    gap_note = ""
+    gap_hours = biggest.get("no_pr_open_hours") or 0.0
+    if gap_hours > 0:
+        gap_note = f" {gap_hours:g} h of it had no PR open"
+        window_from = biggest.get("from") or ""
+        window_to = biggest.get("to") or ""
+        overlapping = [
+            gap for gap in (segments.get("pr_gaps") or [])
+            if gap.get("from") and gap.get("to")
+            and gap["from"] <= window_to and window_from <= gap["to"]
+        ]
+        if overlapping:
+            gap = max(overlapping, key=lambda item: item["hours"])
+            days = gap["hours"] / jira.BUSINESS_HOURS_PER_DAY
+            gap_note += (
+                f" — PR #{gap['to_pr']} started {days:g} business day"
+                f"{'' if days == 1 else 's'} after PR #{gap['from_pr']} merged"
+            )
     if missing:
         first = missing[0]
         boundary = first["missing"][0]
         return (
-            f"the store cannot say how long the {first['label']} segment took "
-            f"because the {boundary} boundary is missing ({first['reason']}); the "
-            f"{len(measured)} of {len(segments['rows'])} segments it can measure "
-            f"cover {total:g} h, most of it in {biggest['label']} "
-            f"({biggest['hours']:g} h, {percent}%){suffix}.",
+            f"{prefix}the store cannot say how long the {first['label']} segment "
+            f"took because the {boundary} boundary is missing "
+            f"({first['reason']}); the {len(measured)} of {len(segments['rows'])} "
+            f"segments it can measure cover {total:g} h, most of it in "
+            f"{biggest['label']} ({biggest['hours']:g} h, {percent}%)"
+            f"{gap_note}{reopen_note}{suffix}.",
             "partial",
         )
     efficiency = segments["efficiency"]
     active = f"{round(100 * efficiency)}%" if efficiency is not None else "no"
-    cycle = segments["cycle_hours"]
-    span = f"{cycle:g} h" if cycle is not None else "the measured window"
+    if reopened:
+        first_hours = segments.get("cycle_first_done_hours")
+        final_hours = segments.get("cycle_hours")
+        reopens = segments.get("reopen_count") or 1
+        if censored:
+            span = (
+                f"{key} took {first_hours:g} h from created to the first done, "
+                f"then was reopened and is still open ({final_hours:g} h to the "
+                "snapshot)"
+            )
+        else:
+            span = (
+                f"{key} took {first_hours:g} h from created to the first done and "
+                f"{final_hours:g} h to the final done (reopened {reopens} "
+                f"time{'' if reopens == 1 else 's'})"
+            )
+    else:
+        cycle = segments["cycle_hours"]
+        span = (
+            f"{key} took {cycle:g} h from created to done"
+            if cycle is not None else f"{key}'s cycle is the measured window"
+        )
     return (
-        f"{key} took {span} from created to done: most of it went to "
-        f"{biggest['label']} ({biggest['hours']:g} h, {percent}% of the measured "
-        f"cycle), and {active} of the measured time was active work.",
+        f"{prefix}{span}: most of it went to {biggest['label']} "
+        f"({biggest['hours']:g} h, {percent}% of the measured cycle), and "
+        f"{active} of the measured time was active work{gap_note}{suffix}.",
         "measured",
     )
 
@@ -497,7 +627,28 @@ def ticket(
             "closed": _iso(story.closed),
             "cycle_hours": segments["cycle_hours"],
             "censored": segments["boundaries"]["done"]["ts"] is None,
+            "reopened": segments["reopened"],
         }
+
+    open_prs = [
+        {
+            "number": pr["number"],
+            "repo": pr["repo"],
+            "state": pr["state"],
+            "opened": pr["opened"],
+            "censored_at": pr["censored_at"],
+            "cycle_hours": pr["cycle_hours"],
+        }
+        for pr in prs if pr.get("censored")
+    ]
+    if story is None:
+        end_state = "story_missing"
+    elif segments["boundaries"]["done"]["ts"] is None:
+        end_state = "open"
+    elif open_prs:
+        end_state = "done_with_open_pr"
+    else:
+        end_state = "done"
 
     return {
         "ok": True,
@@ -508,6 +659,10 @@ def ticket(
         "assumption": court.assumption,
         **court.calendar_warning(),
         "story": story_row,
+        "end_state": end_state,
+        "open_prs": open_prs,
+        "reopened": segments["reopened"],
+        "reopen_count": segments["reopen_count"],
         "segments": segments,
         "prs": prs,
         "pr_count": len(prs),
