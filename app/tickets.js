@@ -109,6 +109,25 @@ export function isTicketKey(value) {
   return TICKET_KEY_RE.test(ticketKey(value));
 }
 
+/**
+ * Resolve a "go to ticket" box / pasted link to a key, or `''`.
+ *
+ * Accepts the forms people actually paste: `DEL-155`, `del-155`,
+ * `STORY:DEL-155`, `TICKET:DEL-155`, `#ticket/DEL-155` and a full
+ * `…/#ticket/DEL-155` URL. Anything else is not a key (the caller says so
+ * instead of navigating to a 404).
+ */
+export function ticketFromQuery(raw) {
+  let text = String(raw == null ? '' : raw).trim();
+  const hash = text.indexOf('#ticket/');
+  if (hash >= 0) text = text.slice(hash + '#ticket/'.length);
+  try {
+    text = decodeURIComponent(text);
+  } catch { /* a malformed escape is simply not a key */ }
+  const key = ticketKey(text.toUpperCase());
+  return TICKET_KEY_RE.test(key) ? key : '';
+}
+
 /** The in-app route for a ticket. `base` is the page URL for copied Markdown. */
 export function ticketHref(key, base = '') {
   return `${base}#ticket/${encodeURIComponent(ticketKey(key))}`;

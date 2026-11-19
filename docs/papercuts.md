@@ -24,3 +24,5 @@ Copying the URL should reproduce the exact view for someone else: **tenant + vie
 ## P-3 · Move the build version to bottom-left
 
 The `v0.9.0 · <sha>` build identity currently sits at the end of the sticky `.meta` provenance strip (pinned under the top bar), tertiary and crowded among provenance · honesty · timebasis. Move it to a small bottom-left footer (`position: fixed; left; bottom`), the conventional place for a build identity, on every page (desktop + phone). Keep it tertiary/subtle and keep the `#app-version` id + `renderVersion()` wiring; just relocate the element (or render it into a bottom-left slot).
+
+**Done.** `#app-version` lives in `<footer class="app-footer">` (`index.html`), outside the `.meta` strip; `style.css` pins it `position: fixed; left: 190px; bottom: 6px` on desktop (clear of the sidebar) and `left: 10px; bottom: 4px` on the phone. `renderVersion()` and the `/api/meta` fetch are unchanged, and the screenshot bridge flattens the footer into the still frame. Covered by `app/test/version.test.mjs` and `app/test/navigation.test.mjs`.

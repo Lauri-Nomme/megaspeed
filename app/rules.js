@@ -7,6 +7,7 @@
  */
 
 import { fmtHours, esc } from './format.js';
+import { prSizePanel } from './prsize.js';
 import { linkifyTickets, markdownLinkTickets, ticketHref } from './tickets.js';
 
 const SEVERITY_LABEL = {
@@ -393,7 +394,7 @@ export function personSignalNote(data, { below = true } = {}) {
     (below ? '; the team rules below still apply.' : '.');
 }
 
-export function rulesMarkup(data, { base = '' } = {}) {
+export function rulesMarkup(data, { base = '', prSize = null, caps = null } = {}) {
   const suggestions = (data && data.suggestions) || [];
   const note = personSignalNote(data, { below: suggestions.length > 0 });
   if (!suggestions.length) {
@@ -403,11 +404,22 @@ export function rulesMarkup(data, { base = '' } = {}) {
       <p class="muted">That is a result, not a missing screen: first review under 24 h, cycle
         time under 9 d (72 business hours), two review rounds or fewer, no lost approvals.
         Widen the timeframe or switch to people to check the per-person rules.</p>
-    </div>`;
+    </div>
+    ${prSizePanel(prSize, { caps })}`;
+  }
+  // prd/39: the calibration panel sits next to the size rule (or after the list
+  // when the rule does not fire), so the threshold the rule quotes is adjustable
+  // exactly where it is read.
+  const rows = suggestions.map((suggestion) =>
+    ruleRow(suggestion, { base, metrics: (data && data.metrics) || {} }));
+  const panel = prSizePanel(prSize, { caps });
+  if (panel) {
+    const index = suggestions.findIndex((suggestion) => suggestion.metric === 'pr_size');
+    if (index >= 0) rows.splice(index + 1, 0, panel);
+    else rows.push(panel);
   }
   return `${note ? `<p class="rules-note">${esc(note)}</p>` : ''}
-    <div class="rules-list">${suggestions.map((suggestion) =>
-      ruleRow(suggestion, { base, metrics: (data && data.metrics) || {} })).join('')}</div>`;
+    <div class="rules-list">${rows.join('')}</div>`;
 }
 
 export function rulesMarkdown(data, base = '') {

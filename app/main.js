@@ -32,8 +32,12 @@ import {
   defaultScenario, policyMarkdown, policyMarkup, predHours,
   PRESETS, readScenario, scenarioQuery,
 } from '/policy.js';
-import { annotateRow, epicKeySet, keyListsOf, rowTicket, ticketKey } from '/tickets.js';
+import { annotateRow, epicKeySet, keyListsOf, rowTicket, ticketFromQuery, ticketKey } from '/tickets.js';
 import { versionLabel, versionTitle } from '/version.js';
+import {
+  DEFAULT_SIZE_CAPS, capPercent, capsQuery, flagCounts, normalizeSizeCaps,
+  rememberSizeCaps, sizeCapsForTenant,
+} from '/prsize.js';
 import {
   ROLE_QUEUES, filteredPages, queueLevelForNode, scopeBanner, scopeForNode, scopeForStream,
 } from '/scope.js';
@@ -84,11 +88,17 @@ const state = {
   eventTotal: 0,
   objectCapped: false,
   epicKeys: new Set(),
-  page: 'timeline',
+  // prd/38 #24: the nav's first item is the front door ("what needs attention?"),
+  // so Overview is the default view; Timeline is one click away.
+  page: 'overview',
   // prd/10 §3.1: dark is the default; light is the stored (or linked) choice.
   theme: DEFAULT_THEME,
   scope: { kind: 'all', value: null, label: 'everything' },
   timeframe: '1q',
+  // prd/39: the PR-size caps are a per-tenant setting (default 10 / 400). The
+  // map keeps every tenant's choice; `sizeCaps` is the active tenant's.
+  sizeCaps: { ...DEFAULT_SIZE_CAPS },
+  sizeCapsMap: {},
   // B6: the timeline's window is the timeframe only until the user brushes or
   // zooms. `timeframeCustom` says the control and the chart have diverged, and
   // `tfWindow` remembers the window the active preset actually produced (the
@@ -108,6 +118,8 @@ const state = {
   sprint: null,
   rules: null,
   rulesLevel: 'team',
+  // prd/39: the two PR-size distributions the Rules panel draws.
+  prSize: null,
   policy: null,
   policyScenario: defaultScenario(),
   blockingLevel: 'queue',
@@ -122,7 +134,10 @@ const state = {
   ticket: null,
   ticketKey: null,
   ticketError: null,
-  ticketFrom: 'timeline',
+  ticketFrom: 'overview',
+  // prd/38 #18: one snapshot age string per render, so the provenance line and
+  // the Sources row cannot say "9 h ago" and "10 h ago" on the same page.
+  snapshotAge: null,
   emptyReason: '',
 };
 
@@ -191,6 +206,16 @@ const queueChart = new QueueChart({
 // ------------------------------------------------------------------ helpers
 function ageOf(iso) {
   return iso ? fmtAge(Date.parse(iso)) : 'unknown age';
+}
+
+/* prd/38 #18: the snapshot age is computed once per store version and reused.
+ * Two calls minutes apart used to round "9 h 50 min" and "10 h 5 min" to 9 h and
+ * 10 h on the same page; one string cannot disagree with itself. */
+function snapshotAge() {
+  const meta = state.meta;
+  if (!meta || !meta.as_of) return 'unknown age';
+  if (!state.snapshotAge) state.snapshotAge = ageOf(meta.as_of);
+  return state.snapshotAge;
 }
 
 function cached(key) {
@@ -508,9 +533,9 @@ function renderPage() {
 
 async function showPage(page) {
   if (!PAGES[page]) return;
-  // prd/28: a phone bottom sheet belongs to the page that opened it; navigating
-  // through the drawer must not leave the old PR floating over the new view.
-  if (isPhone() && page !== state.page) closeDrawer();
+  // prd/38 #19: a PR drawer belongs to the view that opened it. Any view change
+  // closes it (desktop and phone), so it can never float over a different view.
+  if (page !== state.page) closeDrawer();
   // Leaving the ticket route needs no special case: renderPage() re-serialises
   // the URL from `state.page`, so the ticket hash (and `view=ticket`) drop off
   // together with the page (P-2).
@@ -545,8 +570,20 @@ async function ensureData(page) {
     state.queues = cached(key);
   }
   if (page === 'rules') {
-    const key = `rules:${tenant}:${state.timeframe}:${state.rulesLevel}:${stamp}`;
-    if (!cached(key)) state.cache.set(key, await getJSON(withTenant(`/api/insights?level=${state.rulesLevel}&${q}`)));
+    // prd/39: the distributions are cap-independent; the size *rule* is not, so
+    // the insights key carries the chosen caps (a slider move is a new answer).
+    const sizeKey = `prsize:${tenant}:${stamp}`;
+    if (!cached(sizeKey)) {
+      state.cache.set(sizeKey, await getJSON(withTenant('/api/pr-size')));
+    }
+    state.prSize = cached(sizeKey);
+    const caps = capsQuery(state.sizeCaps);
+    const key = `rules:${tenant}:${state.timeframe}:${state.rulesLevel}:${caps}:${stamp}`;
+    if (!cached(key)) {
+      state.cache.set(key, await getJSON(withTenant(
+        `/api/insights?level=${state.rulesLevel}&${q}&${caps}`,
+      )));
+    }
     state.rules = cached(key);
   }
   if (page === 'ticket') {
@@ -639,6 +676,8 @@ async function loadTenants() {
       ? data.default
       : (list[0] ? list[0].name : null);
   }
+  // prd/39: the active tenant's stored size calibration (default 10 / 400).
+  state.sizeCaps = sizeCapsForTenant(state.sizeCapsMap, state.tenant);
   renderTenantSwitcher();
   return list;
 }
@@ -696,11 +735,13 @@ function resetTenantData() {
   state.sprints = null;
   state.sprint = null;
   state.rules = null;
+  state.prSize = null;
   state.selection = null;
   state.drawerEntity = null;
   state.ticket = null;
   state.ticketKey = null;
   state.ticketError = null;
+  state.snapshotAge = null;
   state.emptyReason = '';
   state.eventCapped = false;
   state.eventTotal = 0;
@@ -737,6 +778,9 @@ async function setTenant(name, { silent = false } = {}) {
   if (state.tenant) state.scopes[state.tenant] = state.scope;
   state.tenant = name;
   state.scope = state.scopes[name] || { kind: 'all', value: null, label: 'everything' };
+  // prd/39: the size calibration is per tenant too (two datasets can need
+  // different knees); the stored choice wins, the default is 10 / 400.
+  state.sizeCaps = sizeCapsForTenant(state.sizeCapsMap, name);
   resetTenantData();
   closeDrawer();
   renderTenantSwitcher();
@@ -1080,7 +1124,10 @@ function renderTicketPage() {
 async function openTicket(key, { push = true } = {}) {
   const wanted = ticketKey(key);
   if (!wanted) return;
-  if (state.page !== 'ticket') state.ticketFrom = state.page;
+  if (state.page !== 'ticket') {
+    state.ticketFrom = state.page;
+    closeDrawer();
+  }
   state.ticketKey = wanted;
   state.ticket = null;
   state.ticketError = null;
@@ -1145,7 +1192,7 @@ async function applyRoute() {
     return;
   }
   if (state.page === 'ticket') {
-    await showPage(route.view || state.ticketFrom || 'timeline');
+    await showPage(route.view || state.ticketFrom || 'overview');
     return;
   }
   if (route.view && route.view !== state.page) await showPage(route.view);
@@ -1266,8 +1313,14 @@ function renderRulesPage() {
   buildRulesLevels();
   const data = state.rules;
   $('rules-list').innerHTML = data
-    ? rulesMarkup(data)
+    ? rulesMarkup(data, {
+      base: appBase(),
+      prSize: state.prSize,
+      caps: state.sizeCaps,
+    })
     : '<div class="empty-row">Loading the rule engine…</div>';
+  // prd/39: the panel's count/markers follow the sliders without a re-render.
+  updatePrSizePanel();
   $('rules-stats').innerHTML = data ? rulesStats(data) : '';
   // Each view owns its disclosure (B7): on this page say what the cohort is,
   // so "aggregated into 2 h buckets" never describes a rule.
@@ -1296,6 +1349,54 @@ async function setRulesLevel(level) {
   await ensureData('rules');
   renderRulesPage();
   saveUI();
+}
+
+/* prd/39: the live half of the PR-size panel. The count is recomputed from the
+ * API's per-PR rows (not from the histograms), so a slider move is exact; only
+ * the rule's own evidence needs a refetch, and that happens on release. */
+function updatePrSizePanel() {
+  const payload = state.prSize;
+  const root = $('pr-size-panel');
+  if (!payload || !root) return;
+  const caps = normalizeSizeCaps(state.sizeCaps);
+  const counts = flagCounts(payload.rows, caps);
+  const set = (selector, value) => {
+    for (const node of root.querySelectorAll(selector)) node.textContent = String(value);
+  };
+  set('[data-pr-size-large]', counts.large);
+  set('[data-pr-size-total]', counts.total);
+  for (const kind of ['commits', 'lines']) {
+    const series = payload[kind] || {};
+    const cap = caps[kind];
+    set(`[data-pr-size-cap="${kind}"]`, cap);
+    set(`[data-pr-size-cap-label="${kind}"]`, cap);
+    const marker = root.querySelector(`[data-pr-size-marker="${kind}"]`);
+    if (marker) marker.style.left = `${capPercent(series.edges, cap).toFixed(2)}%`;
+    const slider = root.querySelector(`[data-pr-size="${kind}"]`);
+    if (slider && !slider.disabled) slider.value = String(cap);
+  }
+  const split = root.querySelector('[data-pr-size-split]');
+  if (split) {
+    split.textContent = ` · ${counts.overCommits} over commits · ${counts.overLines} over changed lines`;
+  }
+}
+
+function persistSizeCaps() {
+  state.sizeCapsMap = rememberSizeCaps(state.sizeCapsMap, state.tenant, state.sizeCaps);
+  saveUI();
+}
+
+function setSizeCaps(next, { refetch = false } = {}) {
+  state.sizeCaps = normalizeSizeCaps(next);
+  persistSizeCaps();
+  updatePrSizePanel();
+  if (!refetch) return;
+  // The size rule's evidence quotes the caps, so re-ask once the slider is
+  // released (not on every pixel of the drag, which would replace the input).
+  state.cache.clear();
+  ensureData('rules').then(() => {
+    if (state.page === 'rules') renderRulesPage();
+  }).catch((err) => setStatus(`size calibration failed: ${err.message}`, 'stale'));
 }
 
 // ------------------------------------------------------------------- policy
@@ -1370,9 +1471,12 @@ function renderSourcesPage() {
     ['build', versionLabel(state.build) || '—'],
     ['store', storeLabel(meta)],
     ['source', meta.source || '—'],
-    ['snapshot', meta.as_of ? `${fmtStamp(Date.parse(meta.as_of))} (${ageOf(meta.as_of)})` : '—'],
+    // prd/38 #18: one age string, the same one the provenance line uses.
+    ['snapshot', meta.as_of ? `${fmtStamp(Date.parse(meta.as_of))} (${snapshotAge()})` : '—'],
     ['events', String(meta.events ?? '—')],
-    ['PRs', `${meta.prs ?? '—'} kept of ${meta.prs_seen ?? '—'} seen`],
+    // "kept of seen" is the ingest run's figure, not the object count: a
+    // combined tenant's latest run is Jira and reports 0 PRs seen.
+    ['PRs', `${meta.prs_kept ?? '—'} kept of ${meta.prs_seen ?? '—'} seen`],
     ['commits', String(meta.commits ?? '—')],
     ['dropped', `${meta.prs_dropped ?? '—'} PRs had no ticket key`],
     ['window', `${meta.first_ts ? fmtDay(Date.parse(meta.first_ts)) : '—'} → ${meta.last_ts ? fmtDay(Date.parse(meta.last_ts)) : '—'}`],
@@ -1426,7 +1530,7 @@ function openPrDrawer(pr) {
     // prd/35: this is a wall-clock span, so it is "calendar days", never `d`
     // (a `d` is 8 business hours everywhere else).
     ['cycled', `${fmtCalendarDuration(cycle)} (calendar time)`],
-    ['commits', String(pr.commits.length)],
+    ['commits', String(pr.commits ? pr.commits.length : (pr.commit_count ?? 0))],
     ...["waiting", "active", "review", "ci", "rebasing", "unobserved"].map((phase) => [
       phase === 'unobserved' ? 'no events since' : PHASE[phase].label,
       totals.get(phase) ? fmtCalendarDuration(totals.get(phase)) : '—',
@@ -1451,6 +1555,84 @@ function openDrawer(entity) {
     `<button type="button" class="drawer-close" data-drawer="close" aria-label="close">×</button>` +
     detailMarkup(entity);
   drawer.hidden = false;
+}
+
+/* prd/38 #12: a ticket's PR row is a doorway, not a dead end. The ticket payload
+ * carries the server's intervals, so the drawer can price the PR without the
+ * timeline's event port (and without colliding with its lifecycle cache). */
+function openTicketPrDrawer(pr) {
+  if (!pr) return;
+  const key = state.ticketKey;
+  const phases = new Map();
+  for (const interval of pr.intervals || []) {
+    if (!interval.measured) continue;
+    const hours = Number(interval.hours) || 0;
+    if (hours <= 0) continue;
+    phases.set(interval.phase, (phases.get(interval.phase) || 0) + hours);
+  }
+  const classes = Object.entries(pr.push_classes || {})
+    .map(([name, count]) => `${name} ×${count}`).join(' · ') || '—';
+  const facts = [
+    ['ticket', key || '—'],
+    ['author', pr.author || '—'],
+    ['state', `${pr.state}${pr.censored ? ' · right-censored' : ''}`],
+    ['cycle', pr.cycle_hours == null ? '—' : fmtHours(pr.cycle_hours)],
+    ['commits', String(pr.commit_count ?? 0)],
+    ['review rounds', String(pr.review_rounds ?? 0)],
+    ['push classes', classes],
+    ...['waiting', 'active', 'review', 'ci', 'rebasing', 'unobserved'].map((phase) => [
+      phase === 'unobserved' ? 'no events since' : PHASE[phase].label,
+      phases.get(phase) ? fmtHours(phases.get(phase)) : '—',
+    ]),
+  ];
+  openDrawer({
+    overline: 'PULL REQUEST',
+    pr: {
+      id: pr.object_id,
+      object_id: pr.object_id,
+      number: pr.number,
+      repo: pr.repo,
+      repoFull: pr.repo,
+      ticket: key,
+      actor: pr.author,
+      state: pr.state,
+      closed: pr.state !== 'open',
+      created: Date.parse(pr.opened),
+      commits: [],
+      commit_count: pr.commit_count ?? 0,
+      intervals: pr.intervals,
+    },
+    facts,
+    clockNote: 'timestamps are UTC · these spans are business hours on the team calendar',
+    children: [key, `${pr.repo}#${pr.number}`].filter(Boolean),
+  });
+}
+
+/* prd/38 #12: a delivery row opens the same PR drawer. The timeline holds the
+ * full PR (events, commits, lifecycle) when it is loaded; a row outside the
+ * loaded slice falls back to the row's own facts instead of a dead click. */
+function openDeliveryPrDrawer(row) {
+  if (!row) return;
+  const pr = timeline.prs.find((candidate) => candidate.id === row.object_id);
+  if (pr) {
+    openPrDrawer(pr);
+    return;
+  }
+  openDrawer({
+    overline: 'PULL REQUEST',
+    row,
+    facts: [
+      ['ticket', rowTicket(row) || '—'],
+      ['author', row.author || '—'],
+      ['state', row.state || 'open'],
+      ['waiting on', whoLabel(row.ball_label || row.ball)],
+      ['waiting since', `${fmtStamp(Date.parse(row.waiting_since))} (${fmtHours(row.waiting_hours)})`],
+      ['age', fmtHours(row.age_hours)],
+      ['commits in log', String(row.commits ?? 0)],
+    ],
+    impact: impactSentence(row),
+    children: [rowTicket(row), row.id].filter(Boolean),
+  });
 }
 
 function closeDrawer() {
@@ -1543,6 +1725,11 @@ function buildScopeOptions() {
   // set from the queue chart or a graph node always has a matching <option>
   // (B4) — and a role with no data is not offered as a dead end.
   options.push(...availableRoles().map((role) => [`role:${role}`, `queue ${role}`]));
+  // prd/38 #20: a ticket scope set by the "Timeline" chip is a real option, so
+  // the select can show it (and the user can clear it like any other scope).
+  if (state.scope.kind === 'ticket' && state.scope.value) {
+    options.splice(1, 0, [`ticket:${state.scope.value}`, `ticket ${state.scope.value}`]);
+  }
   $('scope').innerHTML = options.map(([value, label]) =>
     `<option value="${esc(value)}">${esc(label)}</option>`).join('');
   $('scope').value = `${state.scope.kind}:${state.scope.value || 'all'}`;
@@ -1576,8 +1763,30 @@ function setScopeFromQueue(stream) {
 }
 
 function scopedEvents() {
-  if (state.scope.kind !== 'person') return state.events;
-  return state.events.filter((event) => event.actor === state.scope.value);
+  if (state.scope.kind === 'person') {
+    return state.events.filter((event) => event.actor === state.scope.value);
+  }
+  if (state.scope.kind === 'ticket') {
+    const key = String(state.scope.value || '').toUpperCase();
+    const prIds = ticketPrIds(key);
+    const wanted = new Set([`STORY:${key}`, `TICKET:${key}`]);
+    return state.events.filter((event) => (event.objects || [])
+      .some((id) => wanted.has(id) || prIds.has(id)));
+  }
+  return state.events;
+}
+
+/** The store's PR object ids that name ``key`` (prd/38 #20 ticket scope). */
+function ticketPrIds(key) {
+  const wanted = String(key || '').toUpperCase();
+  const ids = new Set();
+  for (const object of state.objects || []) {
+    if (object.object_type !== 'PR') continue;
+    if ((object.ticket_keys || []).some((ticket) => String(ticket).toUpperCase() === wanted)) {
+      ids.add(object.object_id);
+    }
+  }
+  return ids;
 }
 
 /** A person scope is only meaningful inside one tenant's identity space. */
@@ -1589,7 +1798,9 @@ function validateScope() {
       || !state.events.some((event) => event.actor === state.scope.value));
   const role = state.scope.kind === 'role'
     && !ROLE_QUEUES.some((queue) => queue.toLowerCase() === String(state.scope.value || '').toLowerCase());
-  if (person || role) {
+  const ticket = state.scope.kind === 'ticket'
+    && !String(state.scope.value || '').trim();
+  if (person || role || ticket) {
     state.scope = { kind: 'all', value: null, label: 'everything' };
     return false;
   }
@@ -1598,6 +1809,33 @@ function validateScope() {
 
 function scopedObjects(events) {
   if (state.scope.kind === 'all') return state.objects;
+  if (state.scope.kind === 'ticket') {
+    const key = String(state.scope.value || '').toUpperCase();
+    const prIds = ticketPrIds(key);
+    const epics = new Set();
+    for (const object of state.objects || []) {
+      if (object.object_type !== 'STORY') continue;
+      const storyKey = ticketKey(object.object_id) || (object.ticket_keys || [])[0];
+      if (String(storyKey || '').toUpperCase() === key) {
+        const epic = object.attributes && object.attributes.epic_key;
+        if (epic) epics.add(epic);
+      }
+    }
+    return state.objects.filter((object) => {
+      if (object.object_type === 'PR') return prIds.has(object.object_id);
+      if (object.object_type === 'COMMIT') {
+        return prIds.has(`PR:${object.repo}#${object.pr_id}`);
+      }
+      if (object.object_type === 'STORY' || object.object_type === 'TICKET') {
+        const storyKey = ticketKey(object.object_id) || (object.ticket_keys || [])[0];
+        return String(storyKey || '').toUpperCase() === key;
+      }
+      if (object.object_type === 'EPIC') {
+        return epics.has(ticketKey(object.object_id) || (object.ticket_keys || [])[0]);
+      }
+      return false;
+    });
+  }
   if (state.scope.kind !== 'person') return state.objects;
   const person = state.scope.value;
   const ids = new Set(events.map((event) => `PR:${event.repo}#${event.pr_id}`));
@@ -1716,7 +1954,7 @@ function renderProvenance() {
   const capped = state.objectCapped ? ` · objects capped at ${state.objects.length}` : '';
   $('provenance').textContent =
     `${meta.tenant ? `${meta.tenant} · ` : ''}` +
-    `Snapshot from ${ageOf(meta.as_of)}: ${meta.events} events, ${meta.prs} PRs, ${meta.commits} commits · ` +
+    `Snapshot from ${snapshotAge()}: ${meta.events} events, ${meta.prs} PRs, ${meta.commits} commits · ` +
     `${meta.source || 'unknown source'}, ${meta.prs_dropped} PRs without a ticket key dropped${capped}`;
   $('nav-count').textContent = `${meta.events} events · ${meta.prs} PRs`;
   const calendar = meta.calendar || {};
@@ -2015,6 +2253,7 @@ async function load({ force = false } = {}) {
     // Same snapshot as last time (e.g. the store file was touched by a no-op
     // run): nothing to refetch, so nothing is refetched.
     state.meta = health;
+    state.snapshotAge = null;
     renderProvenance();
     setStatus(liveStatusText(), 'live');
     window.__megaspeedReady = true;
@@ -2023,6 +2262,7 @@ async function load({ force = false } = {}) {
 
   setEmpty('');
   state.meta = health;
+  state.snapshotAge = null;
   state.stamp = stamp;
   const previousView = timeline.captureView();
   try {
@@ -2313,6 +2553,9 @@ async function domToImage(element, rect, { viewport = false, elementRect = null 
     .shot .sidebar { height: auto !important; }
     .shot:not(.viewport) .drawer { position: static !important; width: auto; box-shadow: none; }
     .shot .app { min-height: 0 !important; }
+    /* P-3: the fixed build footer is part of the still frame; pin it to the
+       capture's bottom-left instead of letting foreignObject stack it. */
+    .shot .app-footer { position: absolute !important; left: 0 !important; bottom: 0 !important; }
     .shot .table th { top: auto !important; }
     /* prd/28: a phone capture is the viewport, not the off-canvas drawer. The
        drawer is painted only when it is open, as an overlay on the page. */
@@ -2445,6 +2688,40 @@ $('queue-level').addEventListener('change', async (event) => {
 });
 $('load-all').addEventListener('click', () => { loadFullRange(); });
 
+/* prd/39: `input` updates the live count; `change` fires on release, when the
+ * rule's evidence can be refetched without replacing the slider mid-drag. */
+document.addEventListener('input', (event) => {
+  const slider = event.target.closest('[data-pr-size]');
+  if (!slider) return;
+  setSizeCaps(
+    { ...state.sizeCaps, [slider.dataset.prSize]: Number(slider.value) },
+    { refetch: false },
+  );
+});
+
+document.addEventListener('change', (event) => {
+  const slider = event.target.closest('[data-pr-size]');
+  if (!slider) return;
+  setSizeCaps(
+    { ...state.sizeCaps, [slider.dataset.prSize]: Number(slider.value) },
+    { refetch: true },
+  );
+});
+
+/* prd/38: the top-bar "go to ticket" box resolves a key to its route. */
+$('ticket-jump').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const input = $('ticket-jump-input');
+  const key = ticketFromQuery(input.value);
+  if (!key) {
+    flashStatus('not a ticket key — try DEL-155', 'stale');
+    input.focus();
+    return;
+  }
+  input.value = '';
+  await openTicket(key);
+});
+
 document.addEventListener('click', async (event) => {
   const menuItem = event.target.closest('#menu [data-menu]');
   if (menuItem) {
@@ -2509,7 +2786,7 @@ document.addEventListener('click', async (event) => {
     return;
   }
   if (event.target.closest('#ticket-back')) {
-    await showPage(state.ticketFrom || 'timeline');
+    await showPage(state.ticketFrom || 'overview');
     return;
   }
   const ticket = event.target.closest('[data-ticket]');
@@ -2570,9 +2847,37 @@ document.addEventListener('click', async (event) => {
     renderBlockingStats();
     return;
   }
+  // prd/39: a slider drag updates the count live; the rule refetches on release.
+  const sizeSlider = event.target.closest('[data-pr-size]');
+  if (sizeSlider) {
+    setSizeCaps(
+      { ...state.sizeCaps, [sizeSlider.dataset.prSize]: Number(sizeSlider.value) },
+      { refetch: false },
+    );
+    return;
+  }
+  if (event.target.closest('[data-pr-size-reset]')) {
+    setSizeCaps({ ...DEFAULT_SIZE_CAPS }, { refetch: true });
+    flashStatus(`size caps reset to ${DEFAULT_SIZE_CAPS.commits} / ${DEFAULT_SIZE_CAPS.lines}`, 'live');
+    return;
+  }
+  // prd/38 #12: a ticket's PR row opens the PR drawer.
+  const prRow = event.target.closest('tr.pr-row[data-pr]');
+  if (prRow) {
+    const pr = ((state.ticket && state.ticket.prs) || [])
+      .find((candidate) => candidate.object_id === prRow.dataset.pr);
+    openTicketPrDrawer(pr);
+    return;
+  }
   const row = event.target.closest('tr.row');
   if (row && row.dataset.id) {
     selectRow(row.dataset.id);
+    // prd/38 #12: the delivery/overview row is the same doorway. On a phone the
+    // delivery detail sheet is already the PR's panel, so the drawer does not
+    // stack on top of it; the overview has no such sheet, so it opens the drawer.
+    if ((state.page === 'delivery' && !isPhone()) || state.page === 'overview') {
+      openDeliveryPrDrawer(findDeliveryRow(row.dataset.id));
+    }
     return;
   }
   const go = event.target.closest('[data-go]');
@@ -2590,10 +2895,23 @@ document.addEventListener('click', async (event) => {
     if (action === 'copy') {
       await copyMarkdown(state.drawerEntity);
     } else if (action === 'timeline') {
-      const author = state.drawerEntity?.pr?.actor || state.selection?.row?.author;
+      // prd/38 #20: scope to the ticket/PR the drawer came from — never to the
+      // author. The delivery selection (if any) is kept, and the PR is marked
+      // on the timeline, so the chip does not lose what the user was looking at.
+      const entity = state.drawerEntity;
+      const ticket = entity?.pr?.ticket || (entity?.row ? rowTicket(entity.row) : '');
+      const prId = entity?.pr?.id || entity?.row?.object_id || null;
+      const keepRow = state.selection && state.selection.row ? state.selection.row : null;
       closeDrawer();
-      if (author) setScope('person', author, { silent: true });
+      if (ticket) {
+        setScope('ticket', ticket, { silent: true });
+      } else if (prId) {
+        const author = entity?.pr?.actor || entity?.row?.author;
+        if (author) setScope('person', author, { silent: true });
+      }
+      if (keepRow) state.selection = { row: keepRow };
       await showPage('timeline');
+      if (prId) timeline.focusPr(prId);
     } else if (action === 'blocking') {
       closeDrawer();
       await showPage('blocking');
@@ -2617,10 +2935,21 @@ document.addEventListener('keydown', (event) => {
     return;
   }
   if (event.key !== 'Enter' && event.key !== ' ') return;
+  const prRow = event.target.closest && event.target.closest('tr.pr-row[data-pr]');
+  if (prRow) {
+    event.preventDefault();
+    const pr = ((state.ticket && state.ticket.prs) || [])
+      .find((candidate) => candidate.object_id === prRow.dataset.pr);
+    openTicketPrDrawer(pr);
+    return;
+  }
   const row = event.target.closest && event.target.closest('tr.row[data-id]');
   if (row) {
     event.preventDefault();
     selectRow(row.dataset.id);
+    if ((state.page === 'delivery' && !isPhone()) || state.page === 'overview') {
+      openDeliveryPrDrawer(findDeliveryRow(row.dataset.id));
+    }
   }
 });
 
@@ -2665,6 +2994,8 @@ function saveUI() {
       tenant: state.tenant,
       // scope is per tenant (prd/12): remember each dataset's own lens
       scopes: state.scopes,
+      // prd/39: the PR-size calibration is a per-tenant preference too
+      sizeCaps: state.sizeCapsMap,
     }));
   } catch { /* private mode: not worth a banner */ }
 }
@@ -2689,6 +3020,14 @@ function restoreUI() {
       if (scope && scope.kind) state.scopes[name] = scope;
     }
   }
+  if (stored.sizeCaps && typeof stored.sizeCaps === 'object') {
+    // prd/39: one calibration per tenant, normalised on read (an old or
+    // hand-edited value cannot become an invalid cap).
+    for (const [name, caps] of Object.entries(stored.sizeCaps)) {
+      state.sizeCapsMap[name] = normalizeSizeCaps(caps);
+    }
+  }
+  state.sizeCaps = sizeCapsForTenant(state.sizeCapsMap, state.tenant);
   if (PAGES[stored.page] && stored.page !== 'ticket') state.page = stored.page;
   if (TIMEFRAMES[stored.timeframe]) state.timeframe = stored.timeframe;
   if (stored.tab) {

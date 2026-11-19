@@ -38,6 +38,12 @@ export const VIEW_NAMES = {
   sources: 'sources',
 };
 
+/* prd/38 #20: the Timeline chip from a PR/ticket scopes to *that ticket*, not
+ * to the author. A ticket scope narrows the two views that can answer "where
+ * did this ticket's time go": the timeline (its events) and the delivery list
+ * (the open PRs that name it). */
+const TICKET_PAGES = ['timeline', 'delivery'];
+
 export function isRoleQueue(id) {
   const value = String(id ?? '').toLowerCase();
   return ROLE_QUEUES.some((role) => role.toLowerCase() === value);
@@ -84,6 +90,7 @@ export function queueLevelForNode(node) {
 export function filteredPages(scope) {
   if (!scope || scope.kind === 'all') return new Set();
   if (scope.kind === 'person') return new Set(PERSON_PAGES);
+  if (scope.kind === 'ticket') return new Set(TICKET_PAGES);
   if (scope.kind === 'role') {
     return new Set(ROLE_PAGES[String(scope.value || '').toLowerCase()] || []);
   }
@@ -97,9 +104,14 @@ function list(ids) {
   return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
 }
 
-/** What a person/role scope means *in this view* (prd/34 §3: one meaning each). */
+/** What a person/role/ticket scope means *in this view* (prd/34 §3: one meaning each). */
 export function scopeMeaning(scope, pageId) {
   if (!scope || scope.kind === 'all') return 'everything';
+  if (scope.kind === 'ticket') {
+    if (pageId === 'delivery') return `the open PRs that name ${scope.value}`;
+    if (pageId === 'timeline') return `events for ${scope.value} and its PRs`;
+    return `ticket ${scope.value}`;
+  }
   if (scope.kind === 'person') {
     // Delivery and Queue ask "who is the item waiting on"; the timeline is an
     // event log, so there the person scope filters *activity by* them.
@@ -119,9 +131,11 @@ export function scopeBanner(scope, pageId) {
   const filtered = filteredPages(scope);
   const here = filtered.has(pageId);
   const name = VIEW_NAMES[pageId] || pageId;
-  const subject = scope.kind === 'person'
-    ? `person ${scope.value} (${scopeMeaning(scope, pageId)})`
-    : `the ${scope.value} queue`;
+  const subject = scope.kind === 'ticket'
+    ? `ticket ${scope.value} (${scopeMeaning(scope, pageId)})`
+    : scope.kind === 'person'
+      ? `person ${scope.value} (${scopeMeaning(scope, pageId)})`
+      : `the ${scope.value} queue`;
   const inside = [...filtered];
   const outside = Object.keys(VIEW_NAMES).filter((id) => !filtered.has(id));
   const bits = [

@@ -54,6 +54,12 @@
       </div>
     </div>
     <span class="grow"></span>
+    <form class="ticket-jump" id="ticket-jump" role="search" autocomplete="off">
+      <label class="sr-only" for="ticket-jump-input">go to ticket</label>
+      <input id="ticket-jump-input" name="ticket" type="search" placeholder="go to ticket…"
+             aria-label="go to ticket — for example DEL-155" spellcheck="false">
+      <button type="submit" title="open the ticket" aria-label="open the ticket">→</button>
+    </form>
     <button type="button" class="theme-toggle" id="theme-toggle" aria-pressed="false"
             aria-label="switch to the light theme" title="switch to the light theme">☾</button>
     <div class="density" id="density" role="group" aria-label="density">
@@ -105,9 +111,6 @@
         <span class="dot">·</span>
         <span class="timebasis" id="timebasis" title="prd/19: business hours when the tenant has a calendar, wall-clock otherwise">wall-clock hours</span>
         <span class="range-meta mono" id="range-meta" hidden></span>
-        <span class="dot">·</span>
-        <span class="build mono" id="app-version" hidden
-              title="build identity (prd/32): git tag + short SHA"></span>
       </div>
 
       <!-- Timeline -->
@@ -268,6 +271,10 @@
       <div class="menu" id="menu" role="menu" hidden></div>
     </main>
   </div>
+  <footer class="app-footer" id="app-footer" aria-label="build">
+    <span class="build mono" id="app-version" hidden
+          title="build identity (prd/32): git tag + short SHA"></span>
+  </footer>
   <div class="scrim" id="scrim" hidden></div>
 </div>
 <script type="module" src="/main.js"></script>

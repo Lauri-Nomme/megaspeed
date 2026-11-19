@@ -44,7 +44,7 @@ from urllib.parse import urlencode
 from ingest import fixtures, taxonomy
 from ingest.config import Config
 from ingest.pipeline import run
-from ingest.store import connect, summary
+from ingest.store import connect, summary, write_run
 from ingest.transport import FixtureTransport
 from server import app as app_module
 from server.harness import BrowserBridge
@@ -654,6 +654,63 @@ class ServerPerformanceTests(unittest.TestCase):
         self.assertEqual(
             second.business_hours(None, monday, monday + timedelta(hours=8)), 4.0
         )
+
+
+class SummaryRunTests(unittest.TestCase):
+    """prd/38 #18: PR counts come from the run that saw PRs, not the latest run.
+
+    A combined tenant has a Bitbucket run (PRs) followed by a Jira run (issues).
+    The Jira run is the latest snapshot and legitimately reports 0 PRs seen;
+    Sources used to print "131 kept of 0 seen" because it read that run.
+    """
+
+    def test_pr_counts_come_from_the_pr_bearing_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = make_store(root, "combined", n=8, seed=11)
+            con = connect(db)
+            try:
+                pr_run = con.execute(
+                    "SELECT as_of, prs_seen, prs_kept FROM ingest_runs"
+                    " ORDER BY as_of DESC LIMIT 1"
+                ).fetchone()
+                later = pr_run[0] + timedelta(hours=2)
+                write_run(con, {
+                    "run_id": "fixture-jira-after",
+                    "source": "jira-cloud",
+                    "as_of": later,
+                    "source_watermark": later,
+                    "classifier_version": "deterministic-v1",
+                    "prs_seen": 0,
+                    "prs_kept": 0,
+                    "prs_dropped": 0,
+                    "events_written": 0,
+                    "events_skipped": 0,
+                    "issues_seen": 3,
+                    "issues_kept": 3,
+                    "issues_skipped": 0,
+                })
+                result = summary(con)
+            finally:
+                con.close()
+            self.assertEqual(result["source"], "jira-cloud")   # snapshot is latest
+            self.assertEqual(result["prs_seen"], int(pr_run[1]))
+            self.assertEqual(result["prs_kept"], int(pr_run[2]))
+            self.assertGreater(result["prs_seen"], 0)
+
+    def test_a_store_with_no_pr_run_reports_zero_not_a_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = make_store(root, "jira-only", n=4, seed=12)
+            con = connect(db)
+            try:
+                con.execute("UPDATE ingest_runs SET prs_seen = 0, prs_kept = 0, prs_dropped = 0")
+                result = summary(con)
+            finally:
+                con.close()
+            self.assertEqual(result["prs_seen"], 0)
+            self.assertEqual(result["prs_kept"], 0)
+            self.assertEqual(result["prs_dropped"], 0)
 
 
 if __name__ == "__main__":

@@ -26,9 +26,9 @@ test('the phone breakpoint is <= 640px and nothing wider', () => {
   assert.equal(isPhoneWidth(undefined), false);
 });
 
-test('phone is list-first, but a saved page wins', () => {
-  assert.equal(phoneEntryPage(null), 'delivery');
-  assert.equal(phoneEntryPage(undefined), 'delivery');
+test('prd/38 #24: the app lands on Overview, but a saved page wins', () => {
+  assert.equal(phoneEntryPage(null), 'overview');
+  assert.equal(phoneEntryPage(undefined), 'overview');
   assert.equal(phoneEntryPage('timeline'), 'timeline');
   assert.equal(phoneEntryPage('ticket'), 'ticket');
   // the first phone timeline is the story hierarchy, where the Jira keys live

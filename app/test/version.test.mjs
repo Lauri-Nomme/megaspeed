@@ -45,12 +45,15 @@ test('the tooltip names where the identity came from', () => {
 
 /* ---- the wiring -------------------------------------------------------- */
 
-test('the meta strip carries the version element on every page', () => {
+test('the build footer carries the version element on every page', () => {
   const html = read('index.html');
   assert.match(html, /id="app-version"/);
-  // inside the sticky meta strip, which every page shares
+  // P-3: the build identity is a fixed bottom-left footer, outside the meta
+  // strip (which stays provenance/honesty/timebasis only).
+  const footer = html.slice(html.indexOf('<footer class="app-footer"'), html.indexOf('<script type="module"'));
+  assert.match(footer, /id="app-version"/);
   const meta = html.slice(html.indexOf('<div class="meta"'), html.indexOf('<!-- Timeline -->'));
-  assert.match(meta, /id="app-version"/);
+  assert.doesNotMatch(meta, /id="app-version"/);
 });
 
 test('main.js fetches /api/meta once and renders it', () => {
@@ -67,10 +70,17 @@ test('main.js fetches /api/meta once and renders it', () => {
   assert.match(main, /\['build', versionLabel\(state\.build\)/);
 });
 
-test('the version line is styled and stays visible on the phone layout', () => {
+test('the version line is a fixed bottom-left footer on desktop and phone', () => {
   const css = read('style.css');
   assert.match(css, /\.build \{ color: var\(--text-tertiary\)/);
-  // the phone hides the "·" separators, not the version itself: no rule may
-  // hide .build
-  assert.doesNotMatch(css, /\.build[^{]*\{[^}]*display: none/s);
+  // P-3: `position: fixed; left; bottom` — the conventional build-stamp slot.
+  assert.match(css, /\.app-footer \{[^}]*position: fixed/s);
+  assert.match(css, /\.app-footer \{[^}]*left: 190px/s);
+  assert.match(css, /\.app-footer \{[^}]*bottom: 6px/s);
+  // the phone overrides the sidebar offset, not visibility
+  assert.match(css, /\.app-footer \{ left: 10px; bottom: 4px; \}/);
+  // no rule may hide the build label itself; only the empty `[hidden]` state
+  // (a server older than /api/meta) is display:none.
+  assert.doesNotMatch(css, /\.build\s*\{[^}]*display: none/s);
+  assert.match(css, /\.app-footer \.build\[hidden\] \{ display: none; \}/);
 });

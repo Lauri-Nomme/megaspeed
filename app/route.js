@@ -27,7 +27,7 @@ export const ROUTE_VIEWS = [
 ];
 
 /** The closed set of scope kinds (scope.js owns the behaviour). */
-export const SCOPE_KINDS = ['person', 'role'];
+export const SCOPE_KINDS = ['person', 'role', 'ticket'];
 
 /* prd/10 §3.1: dark is the default, so a dark view is the absence of a
  * parameter. `?theme=light` is a shareable light view; `?theme=dark` is

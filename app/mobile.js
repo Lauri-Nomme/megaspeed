@@ -26,11 +26,11 @@ export function isPhone() {
   return isPhoneWidth(window.innerWidth);
 }
 
-/* prd/28 §3: phone is list-first. The Delivery list is the entry unless the
- * user has already chosen a page (a restored preference wins — the phone is not
- * allowed to hide the page someone deliberately opened). */
+/* prd/38 #24: the app lands on Overview (the "what needs attention?" front
+ * door) on every device, not the densest view. A saved page still wins — the
+ * phone is not allowed to hide the page someone deliberately opened. */
 export function phoneEntryPage(savedPage = null) {
-  return savedPage || 'delivery';
+  return savedPage || 'overview';
 }
 
 /* The phone timeline opens on the story hierarchy: its gutter labels are the

@@ -585,10 +585,47 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 #honesty:empty { display: none; }
 .timebasis { color: var(--text-tertiary); }
 .timebasis::before { content: "· "; color: var(--border-control); }
-/* prd/32: the build identity (tag · short SHA) rides in the meta strip, so it
- * is on every page without a separate footer; tertiary so it never competes
- * with the provenance sentence. */
-.build { color: var(--text-tertiary); font-size: 10.5px; }
+/* prd/32 + P-3: the build identity (tag · short SHA) is a small fixed
+ * bottom-left footer — the conventional place for a build stamp — so it stays on
+ * every page without crowding the provenance strip. Tertiary: it is identity,
+ * never a status. On desktop it clears the sidebar; on a phone the sidebar is
+ * off-canvas, so it can sit at the real left edge. */
+.app-footer {
+  position: fixed;
+  left: 190px;
+  bottom: 6px;
+  z-index: 8;
+  pointer-events: none;
+  padding: 0 4px;
+  background: var(--bg-app);
+}
+.app-footer .build { color: var(--text-tertiary); font-size: 10.5px; }
+.app-footer .build[hidden] { display: none; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+}
+
+/* --- ticket jump (prd/38) ---------------------------------------------- */
+.ticket-jump { display: inline-flex; align-items: center; gap: 4px; }
+.ticket-jump input {
+  width: 150px;
+  height: var(--control-h);
+  padding: 0 8px;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--text-primary);
+  background: var(--bg-control);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-control);
+}
+.ticket-jump input::placeholder { color: var(--text-tertiary); }
+.ticket-jump button {
+  width: calc(var(--control-h) + 2px);
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+}
 
 /* --- toolbar ----------------------------------------------------------- */
 .toolbar {
@@ -878,6 +915,14 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 }
 .table th.num, .table td.num { text-align: right; }
 .table tr.row { cursor: pointer; }
+/* prd/38 #12: a ticket's PR rows and the overview's attention rows are
+ * doorways too; the cursor + focus ring say so before the click. */
+.table tr.pr-row { cursor: pointer; }
+.table tr.pr-row:hover, .table tr.row:hover { background: var(--bg-hover); }
+.table tr.pr-row:focus-visible, .table tr.row:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
 .table tr.row:hover { background: var(--bg-surface); }
 .table tr.selected { background: var(--select-wash); }
 .table.compact td { height: calc(var(--row-h) - 4px); }
@@ -988,6 +1033,8 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 }
 .panel-head h2 { margin: 0; font-size: 12px; font-weight: 600; }
 .panel-note { margin: 6px 14px calc(var(--density-pad) + 4px); font-size: var(--body-font); color: var(--text-tertiary); }
+.attention-more { display: flex; align-items: baseline; gap: 8px; }
+.attention-more .link { font-size: 11.5px; }
 .link {
   background: transparent; border: 0; height: auto; padding: 0;
   color: var(--link); font-size: 11.5px;
@@ -1127,6 +1174,74 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .rules-empty { padding: 22px 16px; color: var(--text-secondary); font-size: var(--row-font); max-width: 760px; }
 .rules-empty p { margin: 0 0 6px; }
 .rules-empty .muted { color: var(--text-tertiary); font-size: var(--body-font); }
+
+/* --- PR-size calibration (prd/39) -------------------------------------- */
+/* Two distributions on one panel: each is a row of bars over its own bucket
+ * axis, with the current cap drawn as a vertical marker and a slider under it.
+ * The count above is recomputed from the per-PR rows on every slider move. */
+.prsize-panel {
+  padding: var(--density-pad) 14px calc(var(--density-pad) + 4px);
+  border-bottom: 1px solid var(--border-hairline);
+  border-left: 3px solid var(--info-accent);
+  background: var(--bg-surface);
+}
+.prsize-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.prsize-head .muted { color: var(--text-tertiary); font-size: 11px; }
+.prsize-count { margin: 4px 0 8px; font-size: var(--body-font); color: var(--text-primary); }
+.prsize-count b { font-family: var(--font-mono); }
+.prsize-row { margin: 10px 0 4px; }
+.prsize-rowhead { display: flex; align-items: baseline; gap: 10px; font-size: 11.5px; color: var(--text-secondary); }
+.prsize-rowhead label { color: var(--text-primary); }
+.prsize-cap-label { color: var(--text-tertiary); font-size: 11px; }
+.prsize-cap-label b { color: var(--text-primary); font-family: var(--font-mono); }
+.prsize-chart {
+  position: relative;
+  height: 64px;
+  margin: 4px 0 2px;
+  background: var(--bg-app);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-control);
+  overflow: hidden;
+}
+.prsize-bar {
+  position: absolute;
+  bottom: 0;
+  background: var(--primary-tint-bg);
+  border-top: 1px solid var(--accent-line);
+  box-sizing: border-box;
+}
+.prsize-bar:hover { background: var(--primary-tint-fg); }
+.prsize-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1.5px dashed var(--warning);
+  transform: translateX(-0.75px);
+  pointer-events: none;
+}
+.prsize-marker b {
+  position: absolute;
+  top: 1px;
+  left: 3px;
+  padding: 0 3px;
+  font-size: 9.5px;
+  font-family: var(--font-mono);
+  color: var(--warning);
+  background: var(--bg-app);
+  border-radius: 2px;
+}
+.prsize-row input[type="range"] { width: 100%; height: 22px; accent-color: var(--warning); }
+.prsize-row input[type="range"]:disabled { opacity: .45; }
+.prsize-empty {
+  margin: 4px 0;
+  padding: 10px;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  background: var(--bg-app);
+  border: 1px dashed var(--border-hairline);
+  border-radius: var(--radius-control);
+}
 
 .stub { padding: 18px 16px 40px; max-width: 760px; }
 .stub h2 { margin: 0 0 8px; font-size: 15px; }
@@ -1366,6 +1481,13 @@ a.child.ticket-link { color: var(--link); }
   .theme-toggle { order: 3; width: 44px; min-width: 44px; font-size: 16px; }
   .density { order: 4; }
   .topbar .status { order: 5; margin-left: auto; font-size: 10.5px; max-width: 160px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  /* prd/38: the ticket jump gets its own full-width row on a phone, so the
+   * control is reachable without shrinking the dataset/scope row. */
+  .ticket-jump { order: 7; flex-basis: 100%; }
+  .ticket-jump input { width: auto; flex: 1; height: 36px; }
+  .ticket-jump button { width: 44px; height: 36px; }
+  /* P-3: the sidebar is off-canvas here, so bottom-left is the real left edge. */
+  .app-footer { left: 10px; bottom: 4px; }
   .ctx-row {
     display: flex;
     order: 6;

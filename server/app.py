@@ -27,6 +27,8 @@ one failure this whole feature exists to prevent.
     GET  /api/queues?level=&days=&tenant=     per-person WIP / throughput series
     GET  /api/delivery?days=&tenant=          triage list: blocked / oldest waiting
     GET  /api/insights?level=&days=&tenant=   ranked "change this" rules (prd/17)
+    GET  /api/pr-size?tenant=&size_commits=&size_lines=
+                                        PR-size distributions + caps (prd/39)
     GET  /api/sprints?days=&tenant=     sprint lens (prd/26 P6): bands, scope
                                         (in/out of a sprint) and carry-over
     GET  /api/simulate?days=&scenario=&tenant= policy lab: calibrated model,
@@ -982,10 +984,31 @@ ANALYSIS_PARAMS = {
     "blocking": ("level", "days"),
     "queues": ("level", "days", "bucket_hours"),
     "delivery": ("days",),
-    "insights": ("level", "days"),
+    "insights": ("level", "days", "size_commits", "size_lines"),
     "sprints": ("days",),
     "simulate": ("days", "scenario", "seed", "tolerance", "replications"),
+    "pr-size": ("size_commits", "size_lines"),
 }
+
+# prd/39: the PR-size caps are a per-tenant calibration. They arrive as query
+# parameters (the UI persists them per tenant, like the scope/timeframe), so the
+# server stays a read-only projection: the rule re-evaluates at the requested
+# caps without a settings write path.
+SIZE_CAP_MIN = insights_rules.SIZE_CAP_MIN
+SIZE_CAP_MAX = insights_rules.SIZE_CAP_MAX
+
+
+def _size_caps(request: Request) -> dict:
+    """The requested PR-size caps; ``None`` keys fall back to the defaults."""
+    commits = _int_param(
+        request, "size_commits", default=None,
+        minimum=SIZE_CAP_MIN, maximum=SIZE_CAP_MAX,
+    )
+    lines = _int_param(
+        request, "size_lines", default=None,
+        minimum=SIZE_CAP_MIN, maximum=SIZE_CAP_MAX,
+    )
+    return insights_rules.size_caps({"commits": commits, "lines": lines})
 
 
 @app.get("/api/blocking")
@@ -1095,6 +1118,7 @@ def insights(request: Request):
     try:
         days = _num_param(request, "days", minimum=0, maximum=3650)
         level = _insight_level(request.query_params.get("level") or "team")
+        caps = _size_caps(request)
     except ValueError as exc:
         return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["insights"])))
     try:
@@ -1114,11 +1138,92 @@ def insights(request: Request):
             sizes = bundle.sizes(con)
             payload = insights_rules.insights(
                 court, threads, window, level=level, bots=bots, sizes=sizes,
-                jira=jira,
+                jira=jira, caps=caps,
             )
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
     payload["tenant"] = tenant
+    return payload
+
+
+@app.get("/api/pr-size")
+def pr_size(request: Request):
+    """The two PR-size distributions behind the size caps (prd/39).
+
+    ``commits`` is a histogram of commits per PR (COMMIT objects, the same count
+    the size rule uses); ``lines`` is the changed-lines histogram when the store
+    captured ``lines_added``/``lines_removed`` (``available: false`` otherwise).
+    Each carries bucket ``edges`` + ``counts``, the sorted raw ``values`` (so the
+    UI can re-bucket exactly at any cap without a request), and the maximum.
+    ``caps`` is the calibration this answer was computed at (``size_commits`` /
+    ``size_lines`` override the 10 / 400 defaults), and ``large_prs`` is the
+    count of PRs over either cap — the number the sliders move.
+
+    Tenant-scoped and cached like the other analysis views: the cache key is
+    ``(tenant, store version, calendar version, caps)``, so a slider move is one
+    cheap re-read and an ingest run or calendar edit drops it.
+    """
+    unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["pr-size"]))
+    if unknown is not None:
+        return unknown
+    try:
+        caps = _size_caps(request)
+    except ValueError as exc:
+        return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["pr-size"])))
+    try:
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    try:
+        with store_conn(path) as con:
+            payload = _pr_size_payload(con, tenant, path, caps)
+    except Exception as exc:  # noqa: BLE001
+        return _store_error(exc)
+    return JSONResponse(payload, headers={"X-Tenant": tenant})
+
+
+# One payload per (tenant, store + calendar version, caps). The distributions
+# themselves do not depend on the caps, but the "large" flag and count do; the
+# entry is tiny (histograms + sorted values), so keying on the caps is simpler
+# than maintaining two layers. A store/calendar change makes old entries
+# unreachable, so they age out by size.
+_pr_size_lock = threading.Lock()
+_pr_size_cache: dict[tuple, dict] = {}
+PR_SIZE_CACHE_SIZE = 64
+
+
+def _pr_size_payload(con, tenant: str, path: Path, caps: dict) -> dict:
+    cache_key = (
+        tenant, _file_stamp(path), _calendar_key(tenant),
+        caps["commits"], caps["lines"],
+    )
+    with _pr_size_lock:
+        if cache_key in _pr_size_cache:
+            return _pr_size_cache[cache_key]
+    bundle = _analysis_bundle(con, tenant, path)
+    court = bundle.court
+    jira = bundle.jira(con)
+    window = insights_rules.window_for(court, None, jira)
+    payload = insights_rules.pr_size_distribution(
+        court, window, bundle.sizes(con), caps=caps,
+    )
+    start, end = window
+    payload.update({
+        "ok": True,
+        "tenant": tenant,
+        "as_of": pstore.iso(court.snapshot),
+        "hours_mode": court.hours_mode,
+        "assumption": court.assumption,
+        "window": {
+            "start": pstore.iso(start),
+            "end": pstore.iso(end),
+            "days": round(max(0.0, (end - start).total_seconds()) / 86400.0, 1),
+        },
+    })
+    with _pr_size_lock:
+        if len(_pr_size_cache) >= PR_SIZE_CACHE_SIZE:
+            _pr_size_cache.clear()
+        _pr_size_cache[cache_key] = payload
     return payload
 
 

@@ -198,16 +198,18 @@ class StoreCase(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def metric(self, fixture: Fixture, name: str, days: float | None = None):
+    def metric(self, fixture: Fixture, name: str, days: float | None = None,
+               caps: dict | None = None):
         court, threads, sizes, _bots = self.load(fixture)
         window = rules.window_for(court, days)
-        return rules.metrics(court, threads, window, sizes)[name]
+        return rules.metrics(court, threads, window, sizes, caps=caps)[name]
 
-    def insights(self, fixture: Fixture, level: str = "team", days: float | None = None):
+    def insights(self, fixture: Fixture, level: str = "team", days: float | None = None,
+                 caps: dict | None = None):
         court, threads, sizes, bots = self.load(fixture)
         window = rules.window_for(court, days)
         return rules.insights(
-            court, threads, window, level=level, bots=bots, sizes=sizes
+            court, threads, window, level=level, bots=bots, sizes=sizes, caps=caps
         )
 
     def load(self, fixture: Fixture):
@@ -868,6 +870,76 @@ class PrSizeTests(StoreCase):
         self.assertIsNone(metric["large_median_first_review_hours"])
         self.assertIsNone(by_id(self.insights(fx), "pr-size"))
 
+    # -- prd/39: the caps are the tenant's calibration -------------------- #
+    def test_caps_rebucket_the_metric_and_the_rule(self):
+        fx = self.commits_fixture()          # commits 12, 12, 2, 3, 1
+        default = self.metric(fx, "pr_size")
+        self.assertEqual(default["caps"], {"commits": 10, "lines": 400})
+        self.assertEqual(default["large_prs"], 2)
+        # the same store at a tighter commit cap: 12, 12, 3 are over
+        tighter = self.metric(fx, "pr_size", caps={"commits": 2, "lines": 400})
+        self.assertEqual(tighter["commits_cap"], 2)
+        self.assertEqual(tighter["large_prs"], 3)
+        self.assertEqual(tighter["over_commits_cap"], 3)
+        # the rule (and its evidence) re-evaluate against the chosen caps
+        payload = self.insights(fx, caps={"commits": 2, "lines": 400})
+        self.assertEqual(payload["targets"]["size_commit_cap"], 2)
+        self.assertEqual(payload["metrics"]["pr_size"]["large_prs"], 3)
+        suggestion = by_id(payload, "pr-size")
+        self.assertIsNotNone(suggestion)
+        self.assertEqual(suggestion["evidence"]["commits_cap"], 2)
+        self.assertIn("2 commits", suggestion["title"])
+
+    def test_size_caps_are_clamped_and_defaulted(self):
+        self.assertEqual(
+            rules.size_caps({"commits": 0, "lines": 10_000_000}),
+            {"commits": 1, "lines": 10_000},
+        )
+        self.assertEqual(
+            rules.size_caps({"commits": "nope"}),
+            {"commits": 10, "lines": 400},
+        )
+        # a bool is not a cap (True would otherwise read as 1)
+        self.assertEqual(rules.size_caps({"commits": True})["commits"], 10)
+
+    def test_the_distribution_matches_the_objects(self):
+        fx = self.commits_fixture()          # commit counts: 12, 12, 2, 3, 1
+        court, _threads, sizes, _bots = self.load(fx)
+        window = rules.window_for(court, None)
+        body = rules.pr_size_distribution(court, window, sizes)
+        self.assertEqual(body["n"], 5)
+        self.assertEqual(body["commits"]["values"], [1, 2, 3, 12, 12])
+        self.assertEqual(body["commits"]["max"], 12)
+        self.assertEqual(sum(body["commits"]["counts"]), 5)
+        # the cap is an edge, so the marker lands on a boundary
+        self.assertIn(10, body["commits"]["edges"])
+        self.assertFalse(body["lines"]["available"])
+        self.assertEqual(body["large_prs"], 2)
+        self.assertEqual(
+            {row["number"]: row["commits"] for row in body["rows"]},
+            {1: 12, 2: 12, 3: 2, 4: 3, 5: 1},
+        )
+
+    def test_the_line_distribution_matches_the_pr_attributes(self):
+        fx = self.lines_fixture()            # changed lines: 500, 450, 50, 100
+        court, _threads, sizes, _bots = self.load(fx)
+        window = rules.window_for(court, None)
+        body = rules.pr_size_distribution(court, window, sizes)
+        self.assertTrue(body["lines"]["available"])
+        self.assertEqual(body["lines"]["values"], [50, 100, 450, 500])
+        self.assertEqual(sum(body["lines"]["counts"]), 4)
+        self.assertIn(400, body["lines"]["edges"])
+        self.assertEqual(body["large_prs"], 2)
+        # moving only the line cap re-buckets the "large" count exactly
+        tighter = rules.pr_size_distribution(
+            court, window, sizes, caps={"commits": 10, "lines": 50}
+        )
+        self.assertEqual(tighter["large_prs"], 3)      # 100, 450, 500
+        looser = rules.pr_size_distribution(
+            court, window, sizes, caps={"commits": 10, "lines": 500}
+        )
+        self.assertEqual(looser["large_prs"], 0)
+
 
 # --------------------------------------------------------------------------- #
 # the evidence drill-down (prd/26 P5)
@@ -1198,10 +1270,17 @@ class InsightsApiTests(unittest.TestCase):
         fx.event(3, "pr_pushed", "XxXx", 15, push_class="content")
         fx.event(3, "pr_approved", "YyYy", 20)
         fx.person("XxXx")
+        # prd/39: known commit counts for the PR-size distribution endpoint
+        for _ in range(12):
+            fx.commit(1)
+        for _ in range(2):
+            fx.commit(2)
+        fx.commit(3)
         return fx
 
     def setUp(self):
         app_module._analysis_cache = None
+        app_module._pr_size_cache.clear()
 
     def test_insights_returns_a_ranked_tenant_scoped_list(self):
         reply = get("/api/insights", tenant="del", level="team", days=3650)
@@ -1295,6 +1374,83 @@ class InsightsApiTests(unittest.TestCase):
         rebase = body["metrics"]["rebase_waste"]["rows"]
         self.assertEqual(rebase[0]["tickets"], ["ENG-1"])
         self.assertEqual(rebase[0]["lost_on_pure_rebase"], 1)
+
+    # -- prd/39: the PR-size distributions + caps --------------------------- #
+    def test_pr_size_endpoint_returns_the_store_distribution(self):
+        reply = get("/api/pr-size", tenant="del")
+        self.assertEqual(reply.status, 200, reply.body.decode())
+        self.assertEqual(reply.headers.get("x-tenant"), "del")
+        body = reply.json()
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["tenant"], "del")
+        self.assertEqual(body["n"], 3)
+        # commits per PR match the COMMIT objects in the store
+        rows = connect(self.store, read_only=True).execute(
+            "SELECT pr_id, count(*) FROM objects WHERE object_type = 'COMMIT'"
+            " GROUP BY pr_id ORDER BY pr_id"
+        ).fetchall()
+        expected = sorted(int(count) for _pr_id, count in rows)
+        self.assertEqual(body["commits"]["values"], expected)
+        self.assertEqual(sum(body["commits"]["counts"]), body["n"])
+        self.assertIn(body["caps"]["commits"], body["commits"]["edges"])
+        # changed lines come from the PR object's lines_added + lines_removed
+        self.assertTrue(body["lines"]["available"])
+        self.assertEqual(body["lines"]["values"], [15])
+        self.assertEqual(body["large_prs"], 1)          # #1: 12 commits > 10
+        self.assertEqual(body["over_commits_cap"], 1)
+        self.assertEqual(body["defaults"], {"commits": 10, "lines": 400})
+
+    def test_pr_size_caps_rebucket_the_count_without_a_reload(self):
+        default = get("/api/pr-size", tenant="del").json()
+        self.assertEqual(default["large_prs"], 1)
+        tighter = get("/api/pr-size", tenant="del", size_commits=1).json()
+        self.assertEqual(tighter["caps"]["commits"], 1)
+        self.assertEqual(tighter["large_prs"], 2)       # 12 and 2 commits
+        looser = get("/api/pr-size", tenant="del", size_commits=50).json()
+        self.assertEqual(looser["large_prs"], 0)
+        # the line slider is independent of the commit slider
+        lines = get("/api/pr-size", tenant="del", size_commits=50, size_lines=20).json()
+        self.assertEqual(lines["caps"]["lines"], 20)
+        self.assertEqual(lines["large_prs"], 0)         # 15 changed lines
+        self.assertEqual(
+            get("/api/pr-size", tenant="del", size_commits=1, size_lines=20).json()["large_prs"],
+            2,
+        )
+
+    def test_the_size_rule_uses_the_requested_caps(self):
+        body = get("/api/insights", tenant="del", days=3650, size_commits=1).json()
+        self.assertEqual(body["targets"]["size_commit_cap"], 1)
+        self.assertEqual(body["targets"]["size_default_commit_cap"], 10)
+        self.assertEqual(body["metrics"]["pr_size"]["commits_cap"], 1)
+        self.assertEqual(body["metrics"]["pr_size"]["caps"]["commits"], 1)
+        self.assertEqual(body["metrics"]["pr_size"]["large_prs"], 2)
+
+    def test_pr_size_rejects_bad_caps_and_unknown_params(self):
+        for query in ({"size_commits": 0}, {"size_lines": -5},
+                      {"size_commits": "many"}, {"metric": "pr_size"}):
+            with self.subTest(query=query):
+                reply = get("/api/pr-size", tenant="del", **query)
+                self.assertEqual(reply.status, 400, reply.body.decode())
+                self.assertIn("valid", reply.json())
+
+    def test_pr_size_is_cached_per_store_and_caps(self):
+        real = app_module.insights_rules.pr_size_distribution
+        with mock.patch.object(
+            app_module.insights_rules, "pr_size_distribution", side_effect=real
+        ) as distribution:
+            first = get("/api/pr-size", tenant="del")
+            second = get("/api/pr-size", tenant="del")
+            self.assertEqual(first.body, second.body)
+            self.assertEqual(distribution.call_count, 1)      # one build, not two
+            # a different calibration is a different answer, not a cache hit
+            third = get("/api/pr-size", tenant="del", size_commits=5)
+            self.assertEqual(third.status, 200)
+            self.assertEqual(distribution.call_count, 2)
+
+    def test_pr_size_is_tenant_scoped(self):
+        reply = get("/api/pr-size", tenant="nope")
+        self.assertEqual(reply.status, 404)
+        self.assertEqual(reply.json()["valid"], ["del"])
 
     def test_an_unknown_tenant_is_a_clean_404(self):
         reply = get("/api/insights", tenant="nope")

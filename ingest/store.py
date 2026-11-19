@@ -455,6 +455,15 @@ def summary(con) -> dict:
     run = con.execute(
         "SELECT as_of, source, prs_seen, prs_kept, prs_dropped FROM ingest_runs ORDER BY as_of DESC LIMIT 1"
     ).fetchone()
+    # prd/38 #18: a combined tenant has more than one ingest run (Bitbucket PRs,
+    # then Jira issues). The latest run is the Jira one and its PR counters are
+    # legitimately 0, which made Sources read "131 kept of 0 seen". The PR
+    # counters are a fact of the last run that actually saw PRs; the snapshot
+    # (as_of) stays the latest run, because that is when the store was captured.
+    pr_run = con.execute(
+        "SELECT prs_seen, prs_kept, prs_dropped FROM ingest_runs"
+        " WHERE prs_seen > 0 ORDER BY as_of DESC LIMIT 1"
+    ).fetchone()
     return {
         "events": int(events or 0),
         "prs": counts.get("PR", 0),
@@ -467,9 +476,9 @@ def summary(con) -> dict:
         "last_ts": iso(last) if last else None,
         "as_of": iso(run[0]) if run else None,
         "source": run[1] if run else None,
-        "prs_seen": int(run[2]) if run else 0,
-        "prs_kept": int(run[3]) if run else 0,
-        "prs_dropped": int(run[4]) if run else 0,
+        "prs_seen": int(pr_run[0]) if pr_run else 0,
+        "prs_kept": int(pr_run[1]) if pr_run else 0,
+        "prs_dropped": int(pr_run[2]) if pr_run else 0,
     }
 
 

@@ -366,7 +366,7 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
 | **sentinel queue** | the sentinel's wait vs its target | median sentinel wait vs 24 h target |
 | **vacation blocking** | wait caused by a person's absence | calendar overrides/vacations overlapping a wait |
 | **rebase waste** | rebase effort that produced no new review value | `rebase_conflict` pushes |
-| **PR size** | PRs over the size caps | >10 commits or >400 changed lines |
+| **PR size** | PRs over the size caps | > the tenant's commit cap or changed-line cap (defaults 10 commits / 400 changed lines; prd/39) |
 | **point churn** | stories re-pointed after work started | `pointed` events after `started` |
 | **worklog cross-check** | logged hours vs active hours (and the log delay) | worklogs ÷ active hours; `log_delay_bucket` = created−started gap |
 | **carry-over** | stories committed to a closed sprint but not done by its close | §Sprint carry-over |

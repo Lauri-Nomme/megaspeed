@@ -112,9 +112,19 @@ def _count(n: int, noun: str) -> str:
     """`1 PR` / `2 PRs` — titles are read as sentences, so they agree."""
     return f"{n} {noun}" + ("" if n == 1 else "s")
 # A PR is "large" past either cap. 400 changed lines is the common review-size
-# guideline; commits are the coarse proxy until diff size is captured.
+# guideline; commits are the coarse proxy until diff size is captured. These are
+# the *defaults*: prd/39 makes the caps a per-tenant setting, so every metric and
+# rule takes a ``caps`` override and reports the caps it used.
 SIZE_COMMIT_CAP = 10
 SIZE_LINE_CAP = 400
+# The API validates the same bounds; the analysis clamps defensively so a caller
+# that bypasses the endpoint cannot turn a typo into "every PR is large".
+SIZE_CAP_MIN = 1
+SIZE_CAP_MAX = 10_000
+# A histogram is for reading a knee, not for storing every value: ~18 buckets
+# over [0, max] with the cap forced onto an edge, so the marker sits on a bar
+# boundary. The raw sorted values still travel in the payload for exact re-bucketing.
+SIZE_HISTOGRAM_BUCKETS = 18
 # Confidence ramps from 0 to 1 over this many observations (prd/17 ranking).
 CONFIDENCE_SAMPLE = 20
 DEFAULT_ROUND_HOURS = 24.0
@@ -229,6 +239,37 @@ def _p90(values: list[float]) -> float | None:
 def _confidence(n: int) -> float:
     """Sample-size confidence in [0.05, 1]: a 20-observation metric is trusted."""
     return round(max(0.05, min(1.0, max(0, n) / CONFIDENCE_SAMPLE)), 2)
+
+
+def _cap(value, default: int) -> int:
+    """One validated size cap: an int in ``[SIZE_CAP_MIN, SIZE_CAP_MAX]``."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    if isinstance(value, bool):            # True is not a cap
+        return default
+    return max(SIZE_CAP_MIN, min(SIZE_CAP_MAX, number))
+
+
+def size_caps(caps: dict | None = None) -> dict:
+    """The PR-size caps a metric/rule evaluates against (prd/39).
+
+    ``None`` or a missing key means the v1 default, so every existing caller
+    keeps the old 10 / 400 behaviour; the endpoint passes the tenant's chosen
+    caps and the rule re-evaluates against them. The response always carries the
+    caps it used, so a number can never be read against the wrong threshold.
+    """
+    caps = caps or {}
+    return {
+        "commits": _cap(caps.get("commits"), SIZE_COMMIT_CAP),
+        "lines": _cap(caps.get("lines"), SIZE_LINE_CAP),
+    }
+
+
+def default_size_caps() -> dict:
+    """The stated v1 defaults, for the UI's "reset" and the API payload."""
+    return {"commits": SIZE_COMMIT_CAP, "lines": SIZE_LINE_CAP}
 
 
 #: concepts.md §1 (prd/35): one `d` is 8 business hours — one working day,
@@ -1346,7 +1387,9 @@ def conformance(court: ballcourt.BallCourt, window) -> dict:
     }
 
 
-def pr_size(court: ballcourt.BallCourt, window, sizes: dict[str, dict] | None = None) -> dict:
+def pr_size(court: ballcourt.BallCourt, window,
+            sizes: dict[str, dict] | None = None,
+            caps: dict | None = None) -> dict:
     """Commits per PR (COMMIT objects) and diff size when captured, vs latency.
 
     Diff size is optional: ``sizes`` comes from :func:`load_pr_sizes`, which
@@ -1354,8 +1397,17 @@ def pr_size(court: ballcourt.BallCourt, window, sizes: dict[str, dict] | None = 
     ``lines_removed`` or ``diff_size``. Until the scrape-side capture lands the
     metric is honest about it (``diff_size.pending``) and the size cap is on
     commits alone.
+
+    prd/39: ``caps`` is the tenant's calibration (``{"commits": n, "lines": n}``);
+    the metric and the rule that reads it use exactly these caps, and the payload
+    reports them next to the defaults. A PR is large iff ``commits > cap`` or
+    ``changed_lines > line_cap`` — the same definition :func:`pr_size_distribution`
+    draws.
     """
     sizes = sizes or {}
+    chosen = size_caps(caps)
+    commit_cap = chosen["commits"]
+    line_cap = chosen["lines"]
     rows: list[dict] = []
     for state in cohort(court, window):
         pr = state.pr
@@ -1365,8 +1417,8 @@ def pr_size(court: ballcourt.BallCourt, window, sizes: dict[str, dict] | None = 
         first = _first_review(state)
         pushes, unapprovals = _rounds(state)
         large = bool(
-            commits > SIZE_COMMIT_CAP
-            or (diff_size is not None and diff_size > SIZE_LINE_CAP)
+            commits > commit_cap
+            or (diff_size is not None and diff_size > line_cap)
         )
         rows.append(_pr_row(
             pr,
@@ -1410,12 +1462,14 @@ def pr_size(court: ballcourt.BallCourt, window, sizes: dict[str, dict] | None = 
             "p90": _p90([float(value) for value in diff_sizes]),
             "max": int(max(diff_sizes)) if diff_sizes else 0,
         },
-        "commits_cap": SIZE_COMMIT_CAP,
-        "lines_cap": SIZE_LINE_CAP,
-        "over_commits_cap": sum(1 for row in rows if row["commits"] > SIZE_COMMIT_CAP),
+        "commits_cap": commit_cap,
+        "lines_cap": line_cap,
+        "caps": chosen,
+        "default_caps": default_size_caps(),
+        "over_commits_cap": sum(1 for row in rows if row["commits"] > commit_cap),
         "over_lines_cap": sum(
             1 for row in rows
-            if row["diff_size"] is not None and row["diff_size"] > SIZE_LINE_CAP
+            if row["diff_size"] is not None and row["diff_size"] > line_cap
         ),
         "large_prs": len(large),
         "small_prs": len(small),
@@ -1425,6 +1479,138 @@ def pr_size(court: ballcourt.BallCourt, window, sizes: dict[str, dict] | None = 
         "large_median_rounds": _median([float(row["rounds"]) for row in large]),
         "small_median_rounds": _median([float(row["rounds"]) for row in small]),
         "rows": _drill_order(rows),
+    }
+
+
+def _histogram_edges(values: list[int], cap: int,
+                     buckets: int = SIZE_HISTOGRAM_BUCKETS) -> list[int]:
+    """Nice histogram edges over ``[0, max(values, cap)]``, including the cap.
+
+    Bucket widths are chosen from a small "nice" set so the axis is readable
+    (1, 2, 5, 10, 25, 50, 100, …), and the cap is forced onto an edge so its
+    marker sits on a bar boundary rather than inside a bar. The final edge is
+    above the maximum, so the last bucket is closed at the top.
+    """
+    top = max([int(cap), *(int(v) for v in values if v is not None)] or [0])
+    top = max(1, top)
+    if top <= buckets:
+        step = 1
+    else:
+        raw = top / buckets
+        nice = (1, 2, 5, 10, 20, 25, 50, 100, 200, 250, 500,
+                1_000, 2_000, 2_500, 5_000, 10_000)
+        step = next((size for size in nice if size >= raw), nice[-1])
+    edges = list(range(0, top + step + 1, step))
+    if 0 <= cap <= edges[-1] and cap not in edges:
+        edges = sorted({*edges, int(cap)})
+    if len(edges) < 2:
+        edges = [0, 1]
+    return edges
+
+
+def histogram(values: list[int], edges: list[int]) -> list[int]:
+    """Count ``values`` into ``[edges[i], edges[i+1])``; the last bucket is closed."""
+    counts = [0] * (len(edges) - 1)
+    for value in values:
+        number = int(value)
+        for index in range(len(edges) - 1):
+            if edges[index] <= number < edges[index + 1]:
+                counts[index] += 1
+                break
+        else:
+            if number >= edges[-1]:
+                counts[-1] += 1
+    return counts
+
+
+def pr_size_distribution(court: ballcourt.BallCourt, window,
+                         sizes: dict[str, dict] | None = None,
+                         caps: dict | None = None) -> dict:
+    """The two size distributions behind the caps (prd/39).
+
+    A PR contributes its commit count (COMMIT objects, the same count
+    :func:`pr_size` uses) and, when the store captured it, its changed lines
+    (``lines_added + lines_removed``). The response carries:
+
+    * ``commits`` / ``lines`` — bucket ``edges`` + ``counts`` for drawing, the
+      sorted raw ``values`` for exact client-side re-bucketing at any cap, the
+      ``max``, and (for lines) whether the store captured diff size at all;
+    * the chosen ``caps`` and the stated ``defaults``;
+    * ``large_prs`` at those caps, split into ``over_commits_cap`` /
+      ``over_lines_cap`` (a PR over both is counted once in ``large_prs``);
+    * ``rows`` — one item per PR, so the UI's drill-down and the live count use
+      the same per-PR facts.
+
+    Bucket edges include the cap, so the marker always lands on a boundary.
+    """
+    sizes = sizes or {}
+    chosen = size_caps(caps)
+    rows: list[dict] = []
+    for state in cohort(court, window):
+        pr = state.pr
+        info = sizes.get(pr["object_id"]) or {}
+        diff_size = info.get("diff_size")
+        commits = len(state.commits)
+        rows.append({
+            "kind": "pr",
+            "object_id": pr["object_id"],
+            "id": f"{pr['repo'].split('/')[-1]}#{pr['pr_id']}",
+            "repo": pr["repo"],
+            "number": pr["pr_id"],
+            "tickets": list(pr.get("ticket_keys") or ()),
+            "state": pr["state"] if pr["closed_ts"] else "open",
+            "commits": commits,
+            "diff_size": diff_size,
+        })
+    rows.sort(key=lambda row: row["object_id"])
+
+    commit_values = [row["commits"] for row in rows]
+    line_values = [row["diff_size"] for row in rows if row["diff_size"] is not None]
+    commit_edges = _histogram_edges(commit_values, chosen["commits"])
+    line_edges = _histogram_edges(line_values, chosen["lines"])
+    large = [
+        row for row in rows
+        if row["commits"] > chosen["commits"]
+        or (row["diff_size"] is not None and row["diff_size"] > chosen["lines"])
+    ]
+    large_ids = {row["object_id"] for row in large}
+    for row in rows:
+        row["large"] = row["object_id"] in large_ids
+    over_commits = sum(1 for row in rows if row["commits"] > chosen["commits"])
+    over_lines = sum(
+        1 for row in rows
+        if row["diff_size"] is not None and row["diff_size"] > chosen["lines"]
+    )
+    return {
+        "n": len(rows),
+        "caps": chosen,
+        "defaults": default_size_caps(),
+        "commits": {
+            "edges": commit_edges,
+            "counts": histogram(commit_values, commit_edges),
+            "max": max(commit_values) if commit_values else 0,
+            "values": sorted(commit_values),
+        },
+        "lines": {
+            "edges": line_edges,
+            "counts": histogram(line_values, line_edges),
+            "max": max(line_values) if line_values else 0,
+            "values": sorted(line_values),
+            "available": bool(line_values),
+            "n": len(line_values),
+        },
+        "large_prs": len(large),
+        "small_prs": len(rows) - len(large),
+        "large_share": round(len(large) / len(rows), 2) if rows else 0.0,
+        "over_commits_cap": over_commits,
+        "over_lines_cap": over_lines,
+        "rows": rows,
+        "definition": "large = commits > commit cap OR changed lines > line cap",
+        "note": (
+            "changed lines come from the PR object's lines_added + lines_removed "
+            "(or diff_size); a store ingested before the diff-size capture reports "
+            "lines.available: false and calibrates on commits alone"
+        ),
     }
 
 
@@ -1772,13 +1958,14 @@ def sentinel_tail(court: ballcourt.BallCourt, window) -> dict:
 
 def metrics(court: ballcourt.BallCourt, threads: list[dict], window,
             sizes: dict[str, dict] | None = None,
-            jira: jira_analysis.JiraData | None = None) -> dict:
+            jira: jira_analysis.JiraData | None = None,
+            caps: dict | None = None) -> dict:
     """Every prd/17 metric, in one deterministic pass.
 
     The Jira half (prd/21) is merged in under its own keys; with no Jira data in
     the store every one of those metrics is ``available: false`` with the same
     note, so "the ticket layer is missing" is a stated result rather than a
-    silent zero.
+    silent zero. ``caps`` is the tenant's PR-size calibration (prd/39).
     """
     done_tickets = jira_analysis.done_keys(jira) if jira is not None else set()
     return {
@@ -1795,7 +1982,7 @@ def metrics(court: ballcourt.BallCourt, threads: list[dict], window,
         # prd/37 §6: the two rules the data wanted on top of the signals
         "sentinel_tail": sentinel_tail(court, window),
         "stale_prs": stale_prs(court, window, done_tickets),
-        "pr_size": pr_size(court, window, sizes),
+        "pr_size": pr_size(court, window, sizes, caps=caps),
         "vacation_blocking": vacation_blocking(court, window),
         "stacked_cascade": stack_analysis.metrics(court, window),
         "review_cost": {"hours_per_round": round_cost_hours(court, window)},
@@ -2956,10 +3143,17 @@ def insights(
     bots: set[str] | None = None,
     sizes: dict[str, dict] | None = None,
     jira: jira_analysis.JiraData | None = None,
+    caps: dict | None = None,
 ) -> dict:
-    """The API payload: metrics + ranked, evidence-backed suggestions."""
+    """The API payload: metrics + ranked, evidence-backed suggestions.
+
+    ``caps`` is the tenant's PR-size calibration (prd/39): the ``pr_size`` metric,
+    its rule and the drill-down all evaluate against it, and ``targets`` reports
+    the chosen caps so the page cannot quote a threshold the rule did not use.
+    """
     start, end = window
-    computed = metrics(court, threads, window, sizes, jira)
+    chosen_caps = size_caps(caps)
+    computed = metrics(court, threads, window, sizes, jira, caps=chosen_caps)
     round_hours = computed["review_cost"]["hours_per_round"]
     suggestions = rank(templates(computed, level, round_hours, bots))
     # prd/37 §2: the headline total counts each cost pool once (most specific).
@@ -3003,8 +3197,10 @@ def insights(
             "first_review_hours": TARGET_FIRST_REVIEW_HOURS,
             "cycle_hours": TARGET_CYCLE_HOURS,
             "max_review_rounds": MAX_REVIEW_ROUNDS,
-            "size_commit_cap": SIZE_COMMIT_CAP,
-            "size_line_cap": SIZE_LINE_CAP,
+            "size_commit_cap": chosen_caps["commits"],
+            "size_line_cap": chosen_caps["lines"],
+            "size_default_commit_cap": SIZE_COMMIT_CAP,
+            "size_default_line_cap": SIZE_LINE_CAP,
             "flow_efficiency": TARGET_FLOW_EFFICIENCY,
             "flow_efficiency_touch_hours": TOUCH_HOURS,
             "hours_per_round": round_hours,

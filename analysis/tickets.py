@@ -151,6 +151,7 @@ def _pr_rows(court: ballcourt.BallCourt, states: list) -> list[dict]:
             "opened": _iso(opened),
             "closed": _iso(closed),
             "cycle_hours": cycle,
+            "commit_count": len(state.commits),
             "censored": closed is None,
             "censored_at": _iso(court.snapshot) if closed is None else None,
             "review_rounds": rounds,

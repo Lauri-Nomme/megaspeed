@@ -114,7 +114,10 @@ export function deliveryTable(data, tab, { scope = null } = {}) {
       <th class="c-impact num" title="dependents × current wait, estimated">Impact</th>
     </tr></thead>`;
   const body = rows.map((row) => `
-    <tr tabindex="0" data-id="${esc(row.object_id)}" class="row">
+    <tr tabindex="0" data-id="${esc(row.object_id)}" data-pr="${esc(row.object_id)}"
+        class="row" role="button"
+        title="open PR #${esc(row.number)} ${esc(row.repo_short)} in the drawer"
+        aria-label="open PR #${esc(row.number)} ${esc(row.repo_short)} in the drawer">
       <td class="c-state" data-label="status">${rowState(row)}${
         row.stale ? ` ${pill('waiting', 'stale', (row.stale_reasons || []).join('; '))}` : ''}${
         row.unobserved ? ` ${pill('neutral', 'unobserved', 'no events since the snapshot — the blocking graph excludes this tail')}` : ''}</td>
@@ -132,6 +135,15 @@ export function deliveryTable(data, tab, { scope = null } = {}) {
 
 export function matchesScope(row, scope) {
   if (!scope || scope.kind === 'all') return true;
+  const value = String(scope.value || '').toLowerCase();
+  // prd/38 #20: a ticket scope is "the PRs that name this ticket", not the
+  // author and not a person's queue.
+  if (scope.kind === 'ticket') {
+    const keys = [...(row.tickets || []), ...(row.story_tickets || []), rowTicket(row)]
+      .filter(Boolean)
+      .map((key) => String(key).toLowerCase());
+    return keys.includes(value);
+  }
   // concepts.md §2 + prd/34 §3: on the delivery list (and the queue view) a
   // person scope means "waiting on X" — the holders, never "authored by X".
   const waiting = new Set(
@@ -142,7 +154,6 @@ export function matchesScope(row, scope) {
   const roles = new Set(
     Object.values(row.waiting_roles || {}).map((role) => String(role).toLowerCase()),
   );
-  const value = String(scope.value || '').toLowerCase();
   if (scope.kind === 'person') return waiting.has(value);
   if (scope.kind === 'role') {
     // prd/40: `ball` is the label; a ready PR is the author's merge click but
@@ -196,9 +207,13 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
   const slow = counted.filter((s) => s.summary.diagnosis === 'slow');
   const topBlocking = (blocking && blocking.edges ? blocking.edges.slice(0, 3) : []);
   const waitHours = blocking && blocking.totals ? blocking.totals.hours : 0;
-  const rows = delivery ? tabRows(delivery, 'blocked').concat(
+  // prd/38 #25: the list is the actionable subset, not the whole table, so when
+  // it is truncated say how many are left instead of silently showing six.
+  const attention = delivery ? tabRows(delivery, 'blocked').concat(
     tabRows(delivery, 'oldest').filter((row) => !row.blocked),
-  ).slice(0, 6) : [];
+  ) : [];
+  const rows = attention.slice(0, 6);
+  const hidden = Math.max(0, attention.length - rows.length);
   const overloadedLabel = overloaded.length === 1 ? `overloaded ${one}` : `overloaded ${noun}`;
   return `
     <div class="stats">
@@ -222,13 +237,21 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
         <div class="panel-head"><h2>Needs attention</h2>
           <button type="button" class="link" data-go="delivery">Delivery list →</button></div>
         ${rows.length ? `<table class="table compact"><tbody>${rows.map((row) => `
-          <tr tabindex="0" data-id="${esc(row.object_id)}" class="row">
+          <tr tabindex="0" data-id="${esc(row.object_id)}" data-pr="${esc(row.object_id)}"
+              class="row" role="button"
+              title="open PR #${esc(row.number)} ${esc(row.repo_short)} in the drawer"
+              aria-label="open PR #${esc(row.number)} ${esc(row.repo_short)} in the drawer">
             <td class="c-state" data-label="status">${rowState(row)}</td>
             <td class="c-id" data-label="">${ticketLink(rowTicket(row))}
               <span class="mono id">#${esc(row.number)}</span>
               <span class="repo">${esc(row.repo_short)}</span></td>
             <td class="c-dur num" data-label="waiting">${esc(fmtHours(row.waiting_hours))}</td>
-          </tr>`).join('')}</tbody></table>`
+          </tr>`).join('')}</tbody></table>${
+            hidden > 0
+              ? `<p class="panel-note attention-more"><button type="button" class="link"
+                   data-go="delivery">+${hidden} more open item${hidden === 1 ? '' : 's'} →</button>
+                   <span class="muted">the full triage list</span></p>`
+              : ''}`
     : '<div class="empty-row">No open item is waiting right now.</div>'}
       </section>
       <section class="panel">

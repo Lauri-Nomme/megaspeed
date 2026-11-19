@@ -180,7 +180,11 @@ export function prTable(payload) {
       : `<span class="pill ${pr.state === 'merged' ? 'healthy' : 'neutral'}">${esc(pr.state)}</span>`;
     const classes = Object.entries(pr.push_classes || {})
       .map(([name, count]) => `${esc(name)} ×${count}`).join(' · ') || '—';
-    return `<tr class="pr-row" data-pr="${esc(pr.object_id)}">
+    return `<tr class="pr-row" data-pr="${esc(pr.object_id)}"
+        data-pr-ticket="${esc((payload && payload.key) || '')}"
+        tabindex="0" role="button"
+        title="open PR #${esc(pr.number)} ${esc(String(pr.repo || '').split('/').pop())} in the drawer"
+        aria-label="open PR #${esc(pr.number)} ${esc(String(pr.repo || '').split('/').pop())} in the drawer">
       <td class="c-id" data-label=""><span class="mono id">#${esc(pr.number)}</span>
         <span class="repo">${esc(String(pr.repo || '').split('/').pop())}</span></td>
       <td class="c-state" data-label="state">${state}</td>

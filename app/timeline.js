@@ -1148,6 +1148,16 @@ export class Timeline {
     if (this.onSelection) this.onSelection(null);
   }
 
+  /* prd/38 #20: "Timeline" from a PR drawer keeps the PR selected on the chart.
+   * The ticket scope narrows the lanes; this marks the exact PR the user came
+   * from, so the destination is not just a filtered list with no anchor. */
+  focusPr(id) {
+    const pr = this.prs.find((candidate) => candidate.id === id);
+    this.focusPrId = pr ? pr.id : null;
+    this.schedule();
+    return Boolean(pr);
+  }
+
   render() {
     this.dirty = false;
     const ctx = this.ctx;
@@ -1797,6 +1807,14 @@ export class Timeline {
       ctx.lineTo(x, barY + barH);
       ctx.closePath();
       ctx.fill();
+    }
+    if (this.focusPrId === pr.id) {
+      // prd/38 #20: the PR the drawer's Timeline chip came from stays marked.
+      const start = Math.max(g.gutter, this.px(pr.created));
+      const stop = Math.min(g.gutter + g.plotW, this.px(end));
+      ctx.strokeStyle = rgba(color('--focus-ring'), 0.95);
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(start - 1, barY - 1.5, Math.max(2, stop - start) + 2, barH + 3);
     }
   }
 
