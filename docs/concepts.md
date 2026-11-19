@@ -188,7 +188,9 @@ Each entry: **Definition** (what it is) · **Derivation** (how it's computed fro
 
 ### Pull request (PR)
 - **Definition**: a Bitbucket PR, `PR:<repo>#<n>`, with state `open`/`merged`/`declined` and a link to
-  one or more tickets (`ticket_keys`).
+  one or more tickets (`ticket_keys`). Its **commit count is the number of COMMIT objects it owns** —
+  one canonical fact read by the size rule, the flow-efficiency rows, the delivery row and both PR
+  drawers; the per-interval commit count is evidence inside a phase, never the PR's total.
 - **Purpose**: the unit of code-level work, review, merge; nested under its story on the ticket view.
 
 ### Sprint
@@ -343,7 +345,11 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
   "100.1 d per story" for a whole-team total) is a bug — the label must match the statistic.
 
 ### Sprint "done" / scope / carry-over
-- **Definition**: a story is *done in sprint S* if it reached `done` **by S's end** (not "by now").
+- **Definition**: a story is *done in sprint S* if it reached `done` **by S's end** (not "by now")
+  **and no PR it names is still open**. A story whose Jira status is Done while one of its PRs is open
+  is reported as `unmerged` (the same fact as §9 "Done in Jira, PR open") and is **not** counted as
+  delivered; it is not a carry-over either (it was never re-committed), so the sprint shows the three
+  delivered outcomes plus `unmerged` rather than silently trusting the workflow label.
   Scope-in = committed at S start; scope-out = never committed or removed to backlog; *carried over* =
   committed to a **closed** sprint but not done by its close — it finished late, or is still open. An
   explicit `sprint_added` re-add into a second sprint is reported separately (`explicit_readd`), never
@@ -369,6 +375,13 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
 - **Purpose**: answer "what should we change first". Each rule's evidence must agree with the other
   views' numbers for the same concept (a "smaller PRs" rule must not contradict the policy-lab's
   size-cap scenario — if they disagree, the metric they use is different and must be named).
+- **Policy-lab cross-check (prd/43)**: a rule whose *primary advice* is one of the lab's preset
+  policies carries the lab's own verdict in `policy_lab.note` — a policy the model makes slower says
+  **"the policy lab models this at +N % cycle — not a measured win"**, a within-noise result says "no
+  clear effect", and a supported one is quoted as the model's percentage. The payload's
+  `policy_lab.note` names **the lab's best scenario** (the one-line cross-reference on the Rules page).
+  The note is computed from the same `/api/simulate` comparison the Policy page shows, never a second
+  number that could drift.
 
 ### The rule metrics (one definition each, used identically by the rule and any view that quotes it)
 
@@ -445,11 +458,12 @@ These are comparisons, not new units. Each names its cohort and its basis wherev
 ### Response time
 - **Definition**: the business hours from a person *being added as a reviewer* to their first response —
   an approval, needs-work, unapproval or comment. A person asked twice and answering once has one sample
-  and one `never`; `never` is not a zero.
+  and one `never`; `never` is not a zero. For a **sentinel** the clock opens at the **last peer
+  answer** — any response, not only an approval (their ball only arrives then, `sentinel_after_peers` §2),
+  so the peer phase is not charged to them.
 - **Derivation**: `ballcourt.response_times` reads the `reviewer_changed` add events and the first
-  responder action by that person, priced on the responder's own calendar. The **sentinel lag** is
-  separate: the hours from the last peer approval to the sentinel approval (the precedence gate's wait,
-  not a response to being added).
+  responder action by that person, priced on the responder's own calendar. An unanswered request keeps
+  its age (`never_oldest_hours`), so a forgotten orphan is a quantity, not just a count.
 - **Purpose**: answer "who is the constraint" by response, next to the queue-wait ranking (which answers
   "who holds the most wait"). The two are different metrics and are labelled as such.
 

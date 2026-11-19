@@ -381,6 +381,7 @@ def _sprint_rows(court, data: jira.JiraData, story: jira.Story | None) -> dict:
         if sprint.get("id") is not None
     }
     done = jira._done_at(story)
+    unmerged_prs = jira.story_unmerged_prs(story)
     rows: dict[int, dict] = {}
     order: list[int] = []
     for event in story.of("sprint_added"):
@@ -395,6 +396,11 @@ def _sprint_rows(court, data: jira.JiraData, story: jira.Story | None) -> dict:
                 outcome = "unknown"
             elif done is None:
                 outcome = "never"
+            elif done <= boundary and unmerged_prs:
+                # prd/43 §5: the ticket chip cannot say "done by end" while the
+                # story's code is still unmerged (DEL-167) — that is the same
+                # fact the delivery list calls "Done in Jira, PR open".
+                outcome = "unmerged"
             elif done <= boundary:
                 outcome = "by_end"
             else:
@@ -415,6 +421,8 @@ def _sprint_rows(court, data: jira.JiraData, story: jira.Story | None) -> dict:
                 "closed": closed,
                 "outcome": outcome,
                 "done_by_end": outcome == "by_end",
+                "unmerged": outcome == "unmerged",
+                "unmerged_prs": list(unmerged_prs),
                 "slip_hours": slip,
             }
             order.append(sid)
@@ -436,6 +444,9 @@ def _sprint_rows(court, data: jira.JiraData, story: jira.Story | None) -> dict:
         "sprints_involved": len(order),
         "late": sum(1 for row in carried if row["outcome"] == "late"),
         "never": sum(1 for row in carried if row["outcome"] == "never"),
+        # not a carry-over (the story was not re-committed), but not delivered
+        # either: the chip and the sprint strip both show it separately.
+        "unmerged": sum(1 for row in memberships if row["outcome"] == "unmerged"),
         "missed_sprints": [row["sprint_id"] for row in carried],
         "explicit_readd": len(order) > 1,
     }

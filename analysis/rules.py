@@ -78,6 +78,7 @@ import math
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
+from analysis import advice
 from analysis import ballcourt
 from analysis import jira as jira_analysis
 from analysis import stack as stack_analysis
@@ -795,7 +796,10 @@ def flow_efficiency(court: ballcourt.BallCourt, window) -> dict:
             ),
             "touches": len(touches),
             "credited_touches": len(credited),
-            "commits": sum(i.commits for i in intervals),
+            # one canonical count: the PR's COMMIT objects. Summing the
+            # intervals' commits dropped a commit that landed at the open
+            # instant (prd/43 §5: one PR, one set of numbers).
+            "commits": len(state.commits),
             # the same "excess waiting" the flow-efficiency rule prices, per PR
             "affected": bool(
                 elapsed > 0
@@ -1165,17 +1169,32 @@ def reviewer_responsiveness(court: ballcourt.BallCourt, window) -> dict:
 
 
 def rework_loops(court: ballcourt.BallCourt, window) -> dict:
-    """Review rounds per PR, by push class (``concepts.md`` §6, prd/40)."""
+    """Review rounds per PR, by push class (``concepts.md`` §6, prd/40).
+
+    prd/43 §1: the metric also measures whether rounds *explain* the cycle —
+    Pearson ``r`` and the marginal hours per extra round over **merged** PRs
+    with a measured cycle. That is the evidence the review-round-cap rule
+    ranks on (the QA measured r ≈ 0.6, the strongest of the size levers).
+    """
     rounds: list[int] = []
     by_class: dict[str, dict] = defaultdict(lambda: {"pushes": 0, "prs": set()})
     rows: list[dict] = []
     excluded_pure_rebase = 0
     excluded_push_unapprovals = 0
     excluded_pre_first_review = 0
+    # (rounds, cycle hours): merged PRs only — an open PR's cycle is censored,
+    # and a declined one is not delivered work (same cohort as pr_size's r).
+    pairs: list[tuple[int, float]] = []
+    cycle_by_rounds: dict[int, list[float]] = defaultdict(list)
     for state in cohort(court, window):
         pushes, unapprovals = _rounds(state)
         count = len(pushes) + len(unapprovals)
         rounds.append(count)
+        pr = state.pr
+        if pr["state"] == "merged" and pr["closed_ts"] is not None:
+            cycle = _span_hours(court, None, pr["created_ts"], pr["closed_ts"])
+            pairs.append((count, cycle))
+            cycle_by_rounds[count].append(cycle)
         # what the old #pr_pushed + #pr_unapproved would have counted, so the
         # correction is visible instead of looking like missing data
         first = ballcourt.first_review(state)
@@ -1205,6 +1224,18 @@ def rework_loops(court: ballcourt.BallCourt, window) -> dict:
             over_max_rounds=count > MAX_REVIEW_ROUNDS,
             affected=count > MAX_REVIEW_ROUNDS,
         ))
+    xs = [float(value) for value, _ in pairs]
+    ys = [cycle for _, cycle in pairs]
+    correlation = _pearson(xs, ys)
+    slope: float | None = None
+    if len(pairs) >= 3:
+        mean_x = sum(xs) / len(xs)
+        mean_y = sum(ys) / len(ys)
+        variance = sum((value - mean_x) ** 2 for value in xs)
+        if variance > 0:
+            slope = round(
+                sum((x - mean_x) * (y - mean_y) for x, y in pairs) / variance, 2
+            )
     return {
         "n": len(rounds),
         "total_rounds": sum(rounds),
@@ -1217,6 +1248,19 @@ def rework_loops(court: ballcourt.BallCourt, window) -> dict:
         "prs_over_max": sum(1 for r in rounds if r > MAX_REVIEW_ROUNDS),
         "excess_rounds": sum(max(0, r - MAX_REVIEW_ROUNDS) for r in rounds),
         "max_rounds": MAX_REVIEW_ROUNDS,
+        # prd/43 §1: is the round count the lever? Measured on merged PRs only.
+        "rounds_cycle_n": len(pairs),
+        "rounds_cycle_correlation": correlation,
+        "rounds_cycle_slope_hours": slope,
+        "median_cycle_by_rounds": {
+            str(count): _median(values)
+            for count, values in sorted(cycle_by_rounds.items())
+        },
+        "rounds_cycle_basis": (
+            "Pearson r between a PR's review rounds (concepts.md §6) and its "
+            "created → merged cycle, over MERGED PRs with a measured cycle; "
+            "the slope is the marginal hours per extra round"
+        ),
         "excluded_pure_rebase": excluded_pure_rebase,
         "excluded_push_unapprovals": excluded_push_unapprovals,
         "excluded_pre_first_review": excluded_pre_first_review,
@@ -2360,15 +2404,45 @@ def templates(
                 "warning", excess, resp["review_n"],
             ))
 
-    # 4. rework_loops.
+    # 4. rework_loops — the review-round cap (prd/43 §1).
+    # This is the lever the data supports most strongly: the QA measured
+    # r ≈ 0.6 between rounds and cycle, and the lab's 2-round preset is its
+    # best result. It fires on excess rounds (the measured saving) or on a
+    # strong correlation (the lever is real even when no PR breached 3 yet).
     rw = m["rework_loops"]
-    if rw["excess_rounds"] > 0:
+    correlation = rw.get("rounds_cycle_correlation")
+    correlation_n = rw.get("rounds_cycle_n") or 0
+    lever = (
+        correlation is not None and correlation >= 0.4 and correlation_n >= 5
+    )
+    if rw["excess_rounds"] > 0 or lever:
+        slope = rw.get("rounds_cycle_slope_hours")
+        # the marginal slope is a better price than cycle ÷ rounds only when the
+        # correlation says the slope is real; otherwise use the stated cost.
+        measured_slope = (
+            slope if slope is not None and slope > 0
+            and correlation is not None and correlation >= 0.3 else None
+        )
+        hours_per_round = measured_slope if measured_slope is not None else round_hours
+        if correlation is not None and correlation_n >= 5:
+            title = (
+                f"Review rounds track cycle time (r = {correlation:.2f}) — "
+                f"cap them at {MAX_REVIEW_ROUNDS}"
+            )
+        else:
+            title = (
+                f"Review loops run to {round(rw['p90_rounds'] or 0)} rounds at p90 "
+                f"(target {MAX_REVIEW_ROUNDS} max)"
+            )
+        evidence = (
+            f" Each extra round adds ≈{_human_hours(hours_per_round)} of cycle "
+            f"in this store (r = {correlation:.2f} over {correlation_n} merged "
+            f"PRs), so the cap is a measured lever, not a style preference."
+            if correlation is not None and correlation_n >= 3 else ""
+        )
         out.append(_suggestion(
-            "rework-loops", "rework_loops",
-            # prd/41 P1: the target is MAX_REVIEW_ROUNDS, the same number the
-            # footer and the conformance metric state — never a second "cap 2".
-            f"Review loops run to {round(rw['p90_rounds'] or 0)} rounds at p90 "
-            f"(target {MAX_REVIEW_ROUNDS} max)",
+            "round-cap", "rework_loops",
+            title,
             {
                 "prs": rw["n"],
                 "median_rounds": rw["median_rounds"],
@@ -2377,11 +2451,17 @@ def templates(
                 "excess_rounds": rw["excess_rounds"],
                 "max_rounds": MAX_REVIEW_ROUNDS,
                 "hours_per_round": round_hours,
+                # prd/43 §1: the correlation the cap is ranked on
+                "rounds_cycle_correlation": correlation,
+                "rounds_cycle_n": correlation_n,
+                "hours_per_extra_round": (
+                    hours_per_round if correlation is not None else None
+                ),
             },
             f"Cap review rounds at {MAX_REVIEW_ROUNDS}: if a PR needs one more "
             "round, the owner and reviewer agree the remaining blockers in one "
-            "pass instead of another comment round.",
-            "warning", rw["excess_rounds"] * round_hours, rw["n"],
+            f"pass instead of another comment round.{evidence}",
+            "warning", rw["excess_rounds"] * hours_per_round, rw["n"],
         ))
 
     # 5. rebase_waste.
@@ -3056,12 +3136,15 @@ def templates(
             else "warning"
         )
         never = worst["never_done"]
+        unmerged = worst.get("unmerged", 0)
         title = (
             f"S{worst['sprint_id']} delivered {delivered} of {committed} "
             f"committed stories ({round(share * 100)}%) by its close"
         )
         if late:
             title += f" — {late} finished late"
+        if unmerged:
+            title += f", {unmerged} Done in Jira with an unmerged PR"
         if never:
             title += f", {never} still open"
         out.append(_suggestion(
@@ -3072,6 +3155,10 @@ def templates(
                 "stories": committed,
                 "points": worst["points"],
                 "done_by_end": delivered,
+                # prd/43 §5: the Jira-done count and the "code never merged"
+                # count that was excluded from delivery
+                "done_by_end_jira": worst.get("done_by_end_jira", delivered),
+                "unmerged": unmerged,
                 "done_late": late,
                 "never_done": never,
                 "done_share": share,
@@ -3114,6 +3201,8 @@ STAKE_RULES = {
     "pr-size": ("pr_wait", 4),
     "review-tail": ("pr_wait", 5),
     "conformance-rounds": ("pr_wait", 6),
+    "round-cap": ("pr_wait", 7),
+    # the old id, kept so a cached/older payload still attributes once
     "rework-loops": ("pr_wait", 7),
     "comment-tax": ("pr_wait", 8),
     "stale-prs": ("pr_wait", 9),
@@ -3280,18 +3369,29 @@ def insights(
     sizes: dict[str, dict] | None = None,
     jira: jira_analysis.JiraData | None = None,
     caps: dict | None = None,
+    policy_lab: dict | None = None,
 ) -> dict:
     """The API payload: metrics + ranked, evidence-backed suggestions.
 
     ``caps`` is the tenant's PR-size calibration (prd/39): the ``pr_size`` metric,
     its rule and the drill-down all evaluate against it, and ``targets`` reports
     the chosen caps so the page cannot quote a threshold the rule did not use.
+
+    ``policy_lab`` is the Rules ↔ Policy-lab cross-check (prd/43 §1): the lab's
+    own preset results, which :func:`analysis.advice.attach` stamps onto the
+    matching rules. The server computes it (and caches it); a caller that does
+    not pass it gets a stated no-result block, never an invented note.
     """
     start, end = window
     chosen_caps = size_caps(caps)
     computed = metrics(court, threads, window, sizes, jira, caps=chosen_caps)
     round_hours = computed["review_cost"]["hours_per_round"]
     suggestions = rank(templates(computed, level, round_hours, bots))
+    # prd/43 §1: the lab's verdict travels with the rule it bears on.
+    cross_check = policy_lab if policy_lab is not None else advice.unavailable(
+        "the policy lab was not run for this request"
+    )
+    advice.attach(suggestions, cross_check)
     # prd/37 §2: the headline total counts each cost pool once (most specific).
     at_stake = attribute_at_stake(suggestions)
     days = round(max(0.0, (end - start).total_seconds()) / 86400.0, 1)
@@ -3303,6 +3403,8 @@ def insights(
         "assumption": court.assumption,
         **court.calendar_warning(),
         "level": level,
+        # prd/43 §1: the one-line "the lab's best scenario is X" cross-reference
+        "policy_lab": cross_check,
         # prd/21: the ticket layer's availability travels next to the numbers, so
         # a store without the Jira ingest says so instead of reporting zeroes.
         "jira": computed["jira"],

@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **936** (`tests/`) + **96** (`scrape/tests`) + **219** (node `app/test`) green.
+Tests: **950** (`tests/`) + **96** (`scrape/tests`) + **226** (node `app/test`) green.
 
 ## Scrape (airgapped) — full value, reliable
 
@@ -46,6 +46,12 @@ Tests: **936** (`tests/`) + **96** (`scrape/tests`) + **219** (node `app/test`) 
   headline counts each cost pool once) · **sprint lens** (`/api/sprints`, bands + story filter + URL,
   done-by-end/late/never, carry-over at the close) · timeline/blocking/queue/delivery/overview/sources/
   policy-lab (work-unit throughput + a verdict per scenario row).
+- **Rules ↔ policy-lab reconciliation (prd/43)**: each rule whose primary advice is a lab preset carries
+  the lab's own verdict ("models this at +N % cycle — not a measured win", "no clear effect", or the
+  supported %), a **review-round-cap** rule ranks on the measured rounds↔cycle correlation (r ≈ 0.6),
+  and the page states the lab's best scenario. The sentinel's response clock is gate-aware (last peer
+  approval → response, ~6 h), the ticket-page Timeline chip scopes to the ticket, the overview tile
+  counts people only, and sprint "by end" excludes Jira-done stories whose PRs never merged.
 - **Responsive** (≤640px): off-canvas drawer, two-row top bar, bottom-sheet detail, pinch/pan/tap touch,
   list-first entry + card-stacked tables. Desktop (1600px) and medium (900px) verified pixel-identical.
 - **Phone UX (post-review)**: ticket keys visible on the timeline (epic→story→PR hierarchy at every zoom,

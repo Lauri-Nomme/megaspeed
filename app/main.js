@@ -41,7 +41,8 @@ import {
   rememberSizeCaps, sizeCapsForTenant,
 } from '/prsize.js';
 import {
-  ROLE_QUEUES, filteredPages, queueLevelForNode, scopeBanner, scopeForNode, scopeForStream,
+  ROLE_QUEUES, drawerTimelineScope, filteredPages, queueLevelForNode, scopeBanner,
+  scopeForNode, scopeForStream,
 } from '/scope.js';
 import {
   bindLongPress, hintText, initMobile, isPhone, phoneEntryLanes, phoneEntryPage,
@@ -912,9 +913,10 @@ function scopeToSprint(sprint) {
 
 function timelineStatsLine() {
   const band = sprintById(state.sprint);
-  return band
-    ? `${band.done_by_end ?? band.done ?? 0} of ${band.story_count || 0} stories done by end`
-    : 'filtered';
+  if (!band) return 'filtered';
+  const unmerged = band.unmerged || 0;
+  return `${band.done_by_end ?? band.done ?? 0} of ${band.story_count || 0} stories done by end` +
+    (unmerged ? ` · ${unmerged} Done in Jira with an unmerged PR` : '');
 }
 
 function renderLegend() {
@@ -1560,6 +1562,12 @@ function openPrDrawer(pr, row = null) {
   const segments = timeline.lifecycle(pr);
   const totals = timeline.phases(pr);
   const cycle = segments.length ? segments[segments.length - 1].to - segments[0].from : 0;
+  // prd/43 §5: the phase spans come from the *server's* business-hour intervals
+  // when the delivery row carries them, exactly the numbers the ticket-page
+  // drawer shows. Calendar-time phases stay as the fallback for a PR outside the
+  // delivery payload, and the clock note says which one is on screen.
+  const phaseHours = row && row.phase_hours && Object.keys(row.phase_hours).length
+    ? row.phase_hours : null;
   // prd/42 M6: the drawer is complete — reviewers, approvals, open threads and
   // the last event are facts, not dashes. prd/42 P6: the cycle is one canonical
   // duration (business hours) when the delivery row can price it, never a
@@ -1586,7 +1594,11 @@ function openPrDrawer(pr, row = null) {
     ...(cycleHours
       ? [['cycle (business hours)', cycleHours]]
       : [['cycled', `${fmtCalendarDuration(cycle)} (calendar time)`]]),
-    ['commits', String(pr.commits ? pr.commits.length : (pr.commit_count ?? 0))],
+    // prd/43 §5: the row's count is the PR's COMMIT objects — the same count
+    // the ticket-page drawer and the size rule read.
+    ['commits', String(row && row.commits != null
+      ? row.commits
+      : (pr.commit_count ?? (pr.commits ? pr.commits.length : 0)))],
     ...(row ? [
       ['waiting on author', row.author_open ? `yes · ${fmtHours(row.waiting_hours)}` : 'no'],
       ['CI', row.ci ? 'running' : 'not running'],
@@ -1597,16 +1609,21 @@ function openPrDrawer(pr, row = null) {
     ] : []),
     ...["waiting", "active", "review", "ci", "rebasing", "unobserved"].map((phase) => [
       phase === 'unobserved' ? 'unobserved' : PHASE[phase].label,
-      totals.get(phase) ? fmtCalendarDuration(totals.get(phase)) : '—',
+      phaseHours
+        ? (phaseHours[phase] != null ? fmtHours(phaseHours[phase]) : '—')
+        : (totals.get(phase) ? fmtCalendarDuration(totals.get(phase)) : '—'),
     ]),
   ];
   openDrawer({
     overline: 'PULL REQUEST',
+    ticket: pr.ticket || null,
     pr,
     facts,
     // prd/35: state the clock once, where the numbers are.
-    clockNote: 'timestamps are UTC · cycle, wait and age are business hours on the team calendar; ' +
-      'the phase spans are elapsed calendar time',
+    clockNote: phaseHours
+      ? 'timestamps are UTC · cycle, wait and phase spans are business hours on the team calendar'
+      : 'timestamps are UTC · cycle, wait and age are business hours on the team calendar; ' +
+        'the phase spans are elapsed calendar time',
     children: [pr.ticket, pr.epic, `${pr.repo}#${pr.number}`].filter(Boolean),
     impact: pr.closed ? 'Closed: its wait is history, not a live bottleneck.' : undefined,
   });
@@ -1670,6 +1687,9 @@ function openTicketPrDrawer(pr) {
   ];
   openDrawer({
     overline: 'PULL REQUEST',
+    // prd/43 §3: the ticket-page drawer names its ticket at the top level too,
+    // so the Timeline chip scopes even if the PR object lost its key.
+    ticket: key,
     pr: {
       id: pr.object_id,
       object_id: pr.object_id,
@@ -2993,19 +3013,17 @@ document.addEventListener('click', async (event) => {
     if (action === 'copy') {
       await copyMarkdown(state.drawerEntity);
     } else if (action === 'timeline') {
-      // prd/38 #20: scope to the ticket/PR the drawer came from — never to the
-      // author. The delivery selection (if any) is kept, and the PR is marked
-      // on the timeline, so the chip does not lose what the user was looking at.
+      // prd/38 #20 + prd/43 §3: scope to the ticket/PR the drawer came from —
+      // never to the author. The entity's ticket can live at the top level (the
+      // ticket-page drawer), on the PR (timeline/delivery) or on the row; one
+      // helper reads all three, so the chip scopes the same from every opener.
       const entity = state.drawerEntity;
-      const ticket = entity?.pr?.ticket || (entity?.row ? rowTicket(entity.row) : '');
+      const scope = drawerTimelineScope(entity);
       const prId = entity?.pr?.id || entity?.row?.object_id || null;
       const keepRow = state.selection && state.selection.row ? state.selection.row : null;
       closeDrawer();
-      if (ticket) {
-        setScope('ticket', ticket, { silent: true });
-      } else if (prId) {
-        const author = entity?.pr?.actor || entity?.row?.author;
-        if (author) setScope('person', author, { silent: true });
+      if (scope) {
+        setScope(scope.kind, scope.value, { silent: true });
       }
       if (keepRow) state.selection = { row: keepRow };
       await showPage('timeline');

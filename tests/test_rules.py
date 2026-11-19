@@ -24,7 +24,7 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import urlencode
 
-from analysis import ballcourt, rules
+from analysis import advice, ballcourt, rules
 from ingest.store import connect, ensure_schema, write_events, write_objects, write_run
 from server import app as app_module
 
@@ -208,11 +208,12 @@ class StoreCase(unittest.TestCase):
         return rules.metrics(court, threads, window, sizes, caps=caps)[name]
 
     def insights(self, fixture: Fixture, level: str = "team", days: float | None = None,
-                 caps: dict | None = None):
+                 caps: dict | None = None, policy_lab: dict | None = None):
         court, threads, sizes, bots = self.load(fixture)
         window = rules.window_for(court, days)
         return rules.insights(
-            court, threads, window, level=level, bots=bots, sizes=sizes, caps=caps
+            court, threads, window, level=level, bots=bots, sizes=sizes, caps=caps,
+            policy_lab=policy_lab,
         )
 
     def load(self, fixture: Fixture):
@@ -348,7 +349,9 @@ class ResponseTimeTests(StoreCase):
         self.assertEqual(people["CaOs"]["n"], 1)
         self.assertEqual(people["CaOs"]["never"], 0)
         self.assertEqual(people["XxXx"]["median_hours"], 4.0)
-        self.assertEqual(people["FrMo"]["median_hours"], 40.0)
+        # prd/43 §2: the sentinel's clock opens at the last peer approval (10 h),
+        # not at "added as reviewer" (0 h): 40 − 10 = 30 h, not 40 h.
+        self.assertEqual(people["FrMo"]["median_hours"], 30.0)
         # asked twice, answered once: "slow" and "asleep" are different facts
         self.assertEqual(people["FrMo"]["never"], 1)
         self.assertEqual(people["FrMo"]["role"], "sentinel")
@@ -363,6 +366,69 @@ class ResponseTimeTests(StoreCase):
         self.assertEqual(fr["sentinel_lag_n"], 1)
         self.assertEqual(fr["sentinel_lag_median_hours"], 30.0)   # 10 → 40
         self.assertIn("peer approval", body["sentinel_lag_basis"])
+
+    def test_the_sentinel_response_clock_is_gate_aware(self):
+        """prd/43 §2: ~6 h, not the ~20 h "added as reviewer" clock.
+
+        FrMo is added at open, every peer approves by 14 h and he answers at
+        20 h. The old clock priced the whole 20 h; the precedence gate opened
+        at 14 h, so his own lag is 6 h and the "×N slower" label is computed
+        from that, not from the peer phase.
+        """
+        fx = Fixture()
+        fx.pr(1, "AaAa", state="merged", closed=T0 + timedelta(hours=26))
+        fx.event(1, "reviewer_changed", "AaAa", 0, change="added",
+                 people=("FrMo", "CaOs", "DaKo"))
+        fx.event(1, "pr_approved", "CaOs", 8)
+        fx.event(1, "pr_approved", "DaKo", 14)          # the gate opens here
+        fx.event(1, "pr_approved", "FrMo", 20, sentinel=True)
+        fx.event(1, "pr_merged", "FrMo", 26)
+        court = self.load(fx)[0]
+        body = ballcourt.response_times(court)
+        fr = next(row for row in body["people"] if row["person"] == "FrMo")
+        self.assertEqual(fr["role"], "sentinel")
+        self.assertEqual(fr["median_hours"], 6.0)
+        # the separate peer → sentinel column agrees: one fact, one number
+        self.assertEqual(fr["sentinel_lag_median_hours"], 6.0)
+        self.assertEqual(body["gate_aware_n"], 1)
+        self.assertTrue(body["sentinel_after_peers"])
+        self.assertIn("last peer", body["basis"])
+        # peer clocks are unchanged: CaOs 0 → 8
+        caos = next(row for row in body["people"] if row["person"] == "CaOs")
+        self.assertEqual(caos["median_hours"], 8.0)
+
+    def test_the_gate_opens_at_the_last_peer_answer_not_only_an_approval(self):
+        """concepts.md §2: "answered" includes a comment or needs-work."""
+        fx = Fixture()
+        fx.pr(1, "AaAa", state="merged", closed=T0 + timedelta(hours=26))
+        fx.event(1, "reviewer_changed", "AaAa", 0, change="added",
+                 people=("FrMo", "CaOs", "DaKo"))
+        fx.event(1, "pr_approved", "CaOs", 8)
+        fx.event(1, "pr_approved", "DaKo", 10)
+        fx.event(1, "comment_added", "DaKo", 16, severity="suggestion")
+        fx.event(1, "pr_approved", "FrMo", 20, sentinel=True)
+        fx.event(1, "pr_merged", "FrMo", 26)
+        court = self.load(fx)[0]
+        fr = next(
+            row for row in ballcourt.response_times(court)["people"]
+            if row["person"] == "FrMo"
+        )
+        # 20 − 16 (the last peer answer), not 20 − 10 (the last approval)
+        self.assertEqual(fr["median_hours"], 4.0)
+
+    def test_the_forgotten_sentinel_requests_stay_surfaced(self):
+        """prd/43 §2: the orphans (#55/#60) are a quantity, not a lost count."""
+        fx = Fixture()
+        fx.pr(1, "AaAa")                     # open, the ticket is waiting
+        fx.event(1, "reviewer_changed", "AaAa", 0, change="added",
+                 people=("FrMo", "CaOs"))
+        fx.event(1, "pr_approved", "CaOs", 4)   # the gate opened 4 h in; no answer
+        court = self.load(fx)[0]
+        body = ballcourt.response_times(court)
+        fr = next(row for row in body["people"] if row["person"] == "FrMo")
+        self.assertEqual(fr["never"], 1)
+        self.assertIsNotNone(fr["never_oldest_hours"])
+        self.assertGreater(fr["never_oldest_hours"], 0)
 
     def test_the_queue_payload_carries_the_comparison(self):
         court = self.load(self.fixture())[0]
@@ -511,17 +577,68 @@ class ReworkLoopTests(StoreCase):
         self.assertEqual(metric["excluded_pre_first_review"], 1)
 
     def test_emits_a_round_cap_rule(self):
-        suggestion = by_id(self.insights(self.fixture()), "rework-loops")
+        suggestion = by_id(self.insights(self.fixture()), "round-cap")
         self.assertIsNotNone(suggestion)
         # one closed PR: 100 h cycle ÷ 2 rounds = 50 h per round
         self.assertAlmostEqual(suggestion["impact_hours"], 50.0, places=1)
         self.assertEqual(suggestion["evidence"]["excess_rounds"], 1)
         self.assertEqual(suggestion["evidence"]["prs_over_target"], 1)
-        # prd/41 P1: one target — the rule, the footer and the metric agree
+        # prd/41 P1: one target — the rule, the footer and the metric agree,
+        # and prd/43 §1 makes it the review-round-cap lever.
         self.assertEqual(suggestion["evidence"]["max_rounds"], 3)
         self.assertIn("target 3 max", suggestion["title"])
         self.assertNotIn("cap 2", suggestion["title"])
         self.assertIn("Cap review rounds at 3", suggestion["suggestion"])
+
+    def test_the_round_cap_rule_carries_the_correlation_and_the_lab(self):
+        """prd/43 §1: r ≈ 0.6, and the lab's round-cap is the best scenario.
+
+        Six merged PRs with rounds 0-3 and a rising cycle: the metric reports
+        the correlation and the marginal hours per round, the rule ranks on
+        them, and the policy-lab note (supplied by the server) says the model
+        supports it. This is the lever the QA said was not a Rules item at all.
+        """
+        fx = Fixture()
+        for number, (rounds, cycle) in enumerate(
+            ((0, 20), (1, 30), (1, 34), (2, 45), (2, 52), (3, 70)), start=1
+        ):
+            fx.pr(number, "AaAa", state="merged", closed=T0 + timedelta(hours=cycle))
+            fx.event(number, "comment_added", "RrRr", 1, severity="suggestion")
+            for index in range(rounds):
+                fx.event(number, "pr_pushed", "AaAa", 2 + index * 3,
+                         push_class="content")
+            fx.event(number, "pr_approved", "RrRr", cycle - 1)
+            fx.event(number, "pr_merged", "RrRr", cycle)
+        metric = self.metric(fx, "rework_loops")
+        self.assertEqual(metric["rounds_cycle_n"], 6)
+        self.assertGreater(metric["rounds_cycle_correlation"], 0.9)
+        self.assertGreater(metric["rounds_cycle_slope_hours"], 0)
+        self.assertEqual(metric["median_cycle_by_rounds"]["0"], 20.0)
+        report = advice.report({
+            "roundcap2": {
+                "cycle_median_hours": {"percent": -13.0, "direction": "down",
+                                       "better": True},
+                "throughput_work_per_day": {"percent": 4.7, "direction": "up",
+                                            "better": True},
+                "within_noise": False,
+                "verdict": "cycle 13.0 % shorter, delivered work 4.7 % more",
+                "verdict_tone": "good",
+            },
+        })
+        payload = self.insights(fx, policy_lab=report)
+        suggestion = by_id(payload, "round-cap")
+        self.assertIsNotNone(suggestion)
+        self.assertIn("r = ", suggestion["title"])
+        self.assertEqual(suggestion["evidence"]["rounds_cycle_correlation"],
+                         metric["rounds_cycle_correlation"])
+        self.assertTrue(suggestion["policy_lab"]["supports"])
+        self.assertIn("−13 % cycle", suggestion["policy_lab"]["note"])
+        # the one-line cross-reference the Rules page shows
+        self.assertEqual(
+            payload["policy_lab"]["best"]["label"], "cap review at 2 rounds"
+        )
+        self.assertIn("the lab's best scenario is cap review at 2 rounds",
+                      payload["policy_lab"]["note"])
 
 
 # --------------------------------------------------------------------------- #
@@ -762,6 +879,154 @@ class StaleAndSentinelTailTests(StoreCase):
 # --------------------------------------------------------------------------- #
 # 8c. at-stake additivity and impact-sorted drill-downs (prd/37 §2/§3)
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# prd/43 §5: one PR, one set of numbers
+# --------------------------------------------------------------------------- #
+class OnePrOneSetOfNumbersTests(StoreCase):
+    """The list inspector and the drawer must not disagree about one PR."""
+
+    def fixture(self) -> Fixture:
+        fx = Fixture()
+        # PR 1: three commits, all dated at the open instant — the old
+        # per-interval sum counted none of them (`start < c <= end`), so the
+        # list said "commits in log 0" while the ticket drawer said 3.
+        fx.pr(1, "AaAa")
+        for _ in range(3):
+            fx.commit(1)
+        fx.event(1, "reviewer_changed", "AaAa", 0, change="added",
+                 people=("RrRr", "FrMo"))
+        fx.event(1, "comment_added", "RrRr", 5, severity="suggestion")
+        fx.event(1, "pr_approved", "RrRr", 20)
+        return fx
+
+    def test_the_delivery_row_counts_the_pr_commit_objects(self):
+        court, threads, sizes, _bots = self.load(self.fixture())
+        window = rules.window_for(court, None)
+        rows = ballcourt.delivery_list(court, window)["rows"]
+        self.assertEqual(rows[0]["commits"], 3)
+        state = court.prs[0]
+        self.assertEqual(len(state.commits), 3)
+        # the size rule reads the same canonical count
+        pr_size = rules.metrics(court, threads, window, sizes)["pr_size"]
+        self.assertEqual(pr_size["rows"][0]["commits"], 3)
+        # and flow efficiency no longer sums the intervals either
+        flow = rules.metrics(court, threads, window, sizes)["flow_efficiency"]
+        self.assertEqual(flow["prs"][0]["commits"], 3)
+
+    def test_the_delivery_row_carries_the_business_hour_phase_spans(self):
+        court, _threads, _sizes, _bots = self.load(self.fixture())
+        window = rules.window_for(court, None)
+        row = ballcourt.delivery_list(court, window)["rows"][0]
+        state = court.prs[0]
+        expected = {}
+        for interval in state.intervals:
+            if interval.measured and interval.hours > 0:
+                expected[interval.phase] = round(
+                    expected.get(interval.phase, 0.0) + round(interval.hours, 2), 2
+                )
+        self.assertEqual(row["phase_hours"], expected)
+        self.assertGreater(row["phase_hours"].get("review", 0), 0)
+        # the raw last event, not the derived `kind` — the ticket drawer labels
+        # the same event `comment_added`, and the list must not say
+        # `author_reply` for it.
+        self.assertEqual(row["last_event_activity"], "pr_approved")
+
+
+# --------------------------------------------------------------------------- #
+# prd/43 §1: Rules ↔ Policy-lab cross-check
+# --------------------------------------------------------------------------- #
+def _compare(percent, *, better, delivered=None, delivered_better=None,
+             within_noise=False, verdict_tone=None):
+    return {
+        "cycle_median_hours": {
+            "percent": percent,
+            "direction": "down" if percent < 0 else "up",
+            "better": better,
+        },
+        "throughput_work_per_day": {
+            "percent": delivered,
+            "direction": "up" if (delivered or 0) > 0 else "down",
+            "better": delivered_better,
+        },
+        "within_noise": within_noise,
+        "verdict": "a verdict",
+        "verdict_tone": verdict_tone,
+    }
+
+
+class PolicyLabCrossCheckTests(unittest.TestCase):
+    """The two advice surfaces must agree, in both directions (prd/43 §1)."""
+
+    def report(self):
+        return advice.report({
+            "refine": _compare(82.0, better=False),
+            "sentinel2": _compare(-3.0, better=True, within_noise=True),
+            "size3": _compare(289.0, better=False),
+            "sla4": _compare(-9.0, better=True, delivered=-8.4,
+                             delivered_better=False),
+            "roundcap2": _compare(-13.0, better=True, delivered=4.7,
+                                  delivered_better=True),
+        })
+
+    def test_a_contradicted_rule_says_not_a_measured_win(self):
+        report = self.report()
+        suggestions = [
+            {"id": "jira-waiting-time"},   # refine before start
+            {"id": "sentinel-tail"},       # a second sentinel
+            {"id": "pr-size"},             # smaller PRs
+            {"id": "round-cap"},           # the cap the lab supports
+        ]
+        advice.attach(suggestions, report)
+        refine = suggestions[0]["policy_lab"]
+        self.assertEqual(refine["label"], "refine before start")
+        self.assertTrue(refine["contradiction"])
+        self.assertFalse(refine["supports"])
+        # the PRD's exact phrasing, with the caveat that explains the gap
+        self.assertTrue(refine["note"].startswith(
+            "the policy lab models this at +82 % cycle — not a measured win"
+        ))
+        self.assertIn("cannot see the ticket-level wait", refine["note"])
+        sentinel = suggestions[1]["policy_lab"]
+        self.assertIn("no clear effect", sentinel["note"])
+        self.assertIn("−3 % cycle", sentinel["note"])
+        self.assertTrue(sentinel["contradiction"])   # no effect ≠ a measured win
+        size = suggestions[2]["policy_lab"]
+        self.assertIn("+289 % cycle", size["note"])
+        self.assertIn("not a measured win", size["note"])
+        capped = suggestions[3]["policy_lab"]
+        self.assertTrue(capped["supports"])
+        self.assertFalse(capped["contradiction"])
+        self.assertIn("−13 % cycle", capped["note"])
+
+    def test_the_best_scenario_is_the_one_the_lab_supports(self):
+        report = self.report()
+        self.assertTrue(report["available"])
+        self.assertEqual(report["best"]["id"], "roundcap2")
+        self.assertEqual(report["best"]["label"], "cap review at 2 rounds")
+        self.assertEqual(
+            report["note"],
+            "the lab's best scenario is cap review at 2 rounds — −13 % cycle",
+        )
+
+    def test_a_mixed_sla_result_quotes_delivered_work(self):
+        report = self.report()
+        suggestion = {"id": "review-sla"}
+        advice.attach([suggestion], report)
+        note = suggestion["policy_lab"]["note"]
+        self.assertIn("−9 % cycle", note)
+        self.assertIn("−8 % delivered work", note)
+        self.assertIn("mixed", note)
+
+    def test_no_lab_result_is_stated_not_invented(self):
+        report = advice.report({"refine": None})
+        self.assertFalse(report["available"])
+        self.assertIsNone(report["best"])
+        self.assertIn("no validated result", report["note"])
+        suggestion = {"id": "jira-waiting-time"}
+        advice.attach([suggestion], report)
+        self.assertNotIn("policy_lab", suggestion)
+
+
 class AtStakeTests(unittest.TestCase):
     def suggestion(self, sid, impact, sample, scope=None, metric=None):
         return {
@@ -1386,6 +1651,40 @@ class InsightsApiTests(unittest.TestCase):
     def setUp(self):
         app_module._analysis_cache = None
         app_module._pr_size_cache.clear()
+        app_module._advice_cache.clear()
+
+    def test_insights_carries_the_policy_lab_cross_check(self):
+        """prd/43 §1: the Rules payload names the lab's verdict and its best."""
+        report = advice.report({
+            "size3": _compare(289.0, better=False),
+            "roundcap2": _compare(-13.0, better=True),
+        })
+        with mock.patch.object(
+            app_module, "_advice_payload", return_value=report,
+        ):
+            body = get("/api/insights", tenant="del", level="team", days=3650).json()
+        self.assertEqual(
+            body["policy_lab"]["note"],
+            "the lab's best scenario is cap review at 2 rounds — −13 % cycle",
+        )
+        flow = by_id(body, "flow-efficiency")
+        self.assertIsNotNone(flow)
+        self.assertTrue(flow["policy_lab"]["contradiction"])
+        self.assertIn("+289 % cycle — not a measured win",
+                      flow["policy_lab"]["note"])
+
+    def test_the_api_runs_the_real_lab_or_states_why_it_did_not(self):
+        body = get("/api/insights", tenant="del", level="team", days=3650).json()
+        lab = body["policy_lab"]
+        self.assertIn("available", lab)
+        self.assertIn("note", lab)
+        self.assertIn("basis", lab)
+        if lab["available"]:
+            self.assertGreaterEqual(len(lab["policies"]), 1)
+        # every rule's note is one of the lab's own lines, never a guess
+        for suggestion in body["suggestions"]:
+            if "policy_lab" in suggestion:
+                self.assertTrue(suggestion["policy_lab"]["note"])
 
     def test_insights_returns_a_ranked_tenant_scoped_list(self):
         reply = get("/api/insights", tenant="del", level="team", days=3650)

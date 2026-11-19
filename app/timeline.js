@@ -445,6 +445,8 @@ export class Timeline {
         doneByEnd: sprint.done_by_end ?? sprint.done ?? 0,
         doneLate: sprint.done_late || 0,
         neverDone: sprint.never_done || 0,
+        // prd/43 §5: Jira-done but the story's PRs never merged
+        unmerged: sprint.unmerged || 0,
         lateHours: sprint.late_hours || 0,
         carriedIn: sprint.carried_in || [],
         carriedOut: sprint.carried_out || [],

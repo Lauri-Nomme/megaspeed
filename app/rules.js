@@ -26,6 +26,13 @@ export function fmtImpact(hours) {
 /** "median_hours" -> "median", "merged_prs" -> "merged PRs". */
 export function evidenceLabel(key) {
   if (key === 'diff_size_pending') return 'diff size';
+  // prd/43 §1: the review-round cap's evidence reads as prose, not snake_case.
+  const cap = {
+    rounds_cycle_correlation: 'rounds ↔ cycle r',
+    rounds_cycle_n: 'merged PRs',
+    hours_per_extra_round: 'per extra round',
+  }[key];
+  if (cap) return cap;
   // prd/22: the stack evidence reads as prose, not as snake_case.
   const stacked = {
     re_review_hours: 're-review',
@@ -332,6 +339,30 @@ export function stakeNote(suggestion) {
   return '';
 }
 
+/* prd/43 §1: the Rules ↔ Policy-lab cross-check.
+ *
+ * A rule and the calibrated model must not disagree silently. When the lab's
+ * preset scenario bears on a rule's advice, the rule carries the lab's own
+ * verdict: a contradicted policy says "not a measured win", a no-clear-effect
+ * policy says so, and a supported one is the lever the page ranks on. The line
+ * is plain text from the API (`policy_lab.note`), so the two surfaces cannot
+ * drift into two phrasings. */
+export function labNote(suggestion) {
+  const lab = suggestion && suggestion.policy_lab;
+  if (!lab || !lab.note) return '';
+  const tone = lab.contradiction ? 'contradiction' : lab.supports ? 'supports' : 'neutral';
+  return `<p class="rule-lab ${tone}" data-lab-policy="${esc(lab.policy || '')}"
+    title="the policy lab's calibrated model on ${esc(lab.label || 'this policy')}">
+    <span class="lab-tag mono">policy lab</span> ${esc(lab.note)}</p>`;
+}
+
+/** prd/43 §1: "the lab's best scenario is X" — the one cross-reference line. */
+export function labBestLine(data) {
+  const lab = data && data.policy_lab;
+  if (!lab || !lab.available || !lab.best) return '';
+  return lab.note || '';
+}
+
 export function ruleRow(suggestion, { base = '', metrics = {} } = {}) {
   const severity = SEVERITY_LABEL[suggestion.severity] || 'info';
   const facts = evidenceItems(suggestion.evidence);
@@ -358,6 +389,9 @@ export function ruleRow(suggestion, { base = '', metrics = {} } = {}) {
         </div>
         <h2 class="rule-title">${esc(suggestion.title)}</h2>
         <p class="rule-action">${esc(suggestion.suggestion)}</p>
+        ${assumed ? `<p class="rule-assumed">at stake is an assumption (${esc(
+          (suggestion.evidence || {}).impact_basis || 'an assumption')}) — not a measured saving.</p>` : ''}
+        ${labNote(suggestion)}
         <dl class="rule-evidence">
           ${facts.map((fact) => `<div class="fact"><dt>${esc(fact.label)}</dt>
             <dd class="mono">${linkifyTickets(fact.value, base)}</dd></div>`).join('')}
@@ -408,9 +442,11 @@ export function personSignalNote(data, { below = true } = {}) {
 export function rulesMarkup(data, { base = '', prSize = null, caps = null } = {}) {
   const suggestions = (data && data.suggestions) || [];
   const note = personSignalNote(data, { below: suggestions.length > 0 });
+  const lab = labBestLine(data);
   if (!suggestions.length) {
     return `<div class="rules-empty">
       ${note ? `<p>${esc(note)}</p>` : ''}
+      ${lab ? `<p class="rules-lab" data-lab-best>${esc(lab)}</p>` : ''}
       <p>No rule crosses its threshold in this window.</p>
       <p class="muted">That is a result, not a missing screen: first review under 24 h, cycle
         time under 9 d (72 business hours), two review rounds or fewer, no lost approvals.
@@ -430,6 +466,7 @@ export function rulesMarkup(data, { base = '', prSize = null, caps = null } = {}
     else rows.push(panel);
   }
   return `${note ? `<p class="rules-note">${esc(note)}</p>` : ''}
+    ${lab ? `<p class="rules-lab" data-lab-best>${esc(lab)}</p>` : ''}
     <div class="rules-list">${rows.join('')}</div>`;
 }
 
@@ -458,6 +495,8 @@ export function rulesMarkdown(data, base = '') {
       `${(stake.pools || []).length} cost pool${(stake.pools || []).length === 1 ? '' : 's'}; ` +
       `${fmtImpact(stake.overlap_hours)} of overlapping estimates is not added._`, '');
   }
+  const lab = labBestLine(data);
+  if (lab) lines.push(`_${lab}._`, '');
   for (const suggestion of data.suggestions) {
     const facts = evidenceItems(suggestion.evidence)
       .map((fact) => `${fact.label} ${markdownLinkTickets(fact.value, base)}`).join(' · ');
@@ -471,6 +510,8 @@ export function rulesMarkdown(data, base = '') {
       `- impact: ${fmtImpact(suggestion.impact_hours)} (confidence ${suggestion.confidence})${shared}${
         (suggestion.evidence || {}).impact_assumed ? ' — assumed, not measured' : ''}`,
       `- rule: ${suggestion.suggestion}`,
+      ...(suggestion.policy_lab && suggestion.policy_lab.note
+        ? [`- policy lab: ${suggestion.policy_lab.note}`] : []),
       `- evidence: ${facts}`,
     );
     // prd/26 P5: the exported rule carries its items too, not only the count.

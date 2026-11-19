@@ -721,6 +721,8 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 }
 .sprint-row.selected .sprint-id { color: var(--primary-tint-fg); }
 .sprint-row .sprint-late { color: var(--warning); }
+/* prd/43 §5: Jira says done, the code never merged — same warning family. */
+.sprint-row .sprint-unmerged { color: var(--warning); font-style: italic; }
 .sprint-row .sprint-never { color: var(--text-tertiary); }
 .sprint-ontime { color: var(--text-secondary); }
 .sprint-focus {
@@ -1132,6 +1134,28 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .rule.sev-critical .rule-impact { color: var(--critical); }
 .rule-title { margin: 3px 0 2px; font-size: var(--rule-title); font-weight: 600; }
 .rule-action { margin: 0; font-size: var(--rule-action); color: var(--text-secondary); max-width: 118ch; }
+/* prd/43 §1: an assumption is a footnote, never a saving. */
+.rule-assumed {
+  margin: 3px 0 0; font-size: calc(var(--body-font) - 2px);
+  color: var(--warning); font-style: italic;
+}
+/* prd/43 §1: the policy lab's verdict on this rule's advice, in one line. */
+.rule-lab {
+  margin: 4px 0 0; padding: 2px 0 2px 8px;
+  border-left: 2px solid var(--border-hairline);
+  font-size: calc(var(--body-font) - 1px); color: var(--text-secondary);
+}
+.rule-lab.contradiction { border-left-color: var(--warning); color: var(--warning); }
+.rule-lab.supports { border-left-color: var(--healthy); color: var(--text-primary); }
+.rule-lab .lab-tag {
+  font-size: 9.5px; text-transform: uppercase; letter-spacing: .07em;
+  color: var(--text-tertiary); margin-right: 5px;
+}
+.rules-lab {
+  margin: 0 0 8px; padding: 5px 10px; border-radius: var(--radius-sm);
+  background: var(--bg-raised); color: var(--text-secondary);
+  font-size: calc(var(--body-font) - 1px);
+}
 .rule-evidence { display: flex; flex-wrap: wrap; gap: 3px 14px; margin: 7px 0 0; }
 .rule-evidence .fact { display: flex; align-items: baseline; gap: 5px; font-size: calc(var(--body-font) - 1px); }
 .rule-evidence dt { color: var(--text-tertiary); }

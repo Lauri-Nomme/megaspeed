@@ -376,6 +376,28 @@ class TicketCycleTests(StoreCase):
         self.assertIsNone(open_pr["merged"])
         self.assertEqual(open_pr["review_rounds"], 1)
 
+    def test_a_jira_done_story_with_an_unmerged_pr_is_not_delivered(self):
+        """prd/43 §5: the chip cannot say "done by end" while #53 is open.
+
+        DEL-167 is Jira-done before its sprint closes, but PR #53 never merged.
+        The membership says `unmerged` (not `by_end`), `done_by_end` is false,
+        and it is *not* a carry-over (the story was never re-committed). This is
+        the same fact the delivery list calls "Done in Jira, PR open".
+        """
+        con, court, data = self.load()
+        try:
+            payload = tickets.ticket(court, data, "DEL-167")
+        finally:
+            con.close()
+        sprints = payload["sprints"]
+        self.assertEqual(sprints["unmerged"], 1)
+        self.assertFalse(sprints["carried_over"])
+        membership = sprints["memberships"][0]
+        self.assertEqual(membership["outcome"], "unmerged")
+        self.assertFalse(membership["done_by_end"])
+        self.assertTrue(membership["unmerged"])
+        self.assertEqual(membership["unmerged_prs"], [f"PR:{REPO}#53"])
+
     def test_sprints_worklogs_and_events_travel_with_the_ticket(self):
         con, court, data = self.load()
         try:
