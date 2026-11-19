@@ -20,3 +20,7 @@ Copying the URL should reproduce the exact view for someone else: **tenant + vie
 ```
 
 `app/route.js` serialises/parses it (tenant, view, ticket, timeframe, scope); `main.js:syncUrl()` `replaceState`s on every navigation and `pushState`s only when a ticket opens, so Back returns from a ticket to the page it was opened from. A bare `#ticket/KEY` still resolves. Covered by `app/test/route.test.mjs`.
+
+## P-3 · Move the build version to bottom-left
+
+The `v0.9.0 · <sha>` build identity currently sits at the end of the sticky `.meta` provenance strip (pinned under the top bar), tertiary and crowded among provenance · honesty · timebasis. Move it to a small bottom-left footer (`position: fixed; left; bottom`), the conventional place for a build identity, on every page (desktop + phone). Keep it tertiary/subtle and keep the `#app-version` id + `renderVersion()` wiring; just relocate the element (or render it into a bottom-left slot).
