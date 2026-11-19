@@ -164,7 +164,7 @@ SEGMENT_ADVICE = {
         "first look, not the review itself, is what this segment measures."
     ),
     "review_rounds": (
-        "Cap review rounds: if a PR needs a third pass, the author and reviewer "
+        "Cap review rounds: if a PR needs a fourth pass, the author and reviewer "
         "agree the remaining blockers in one conversation instead of another "
         "comment round. Nits and out-of-scope notes belong on the ticket."
     ),
@@ -1194,9 +1194,11 @@ def rework_loops(court: ballcourt.BallCourt, window) -> dict:
         "mean_rounds": round(sum(rounds) / len(rounds), 2) if rounds else None,
         "median_rounds": _median([float(r) for r in rounds]),
         "p90_rounds": _p90([float(r) for r in rounds]),
-        "prs_over_2": sum(1 for r in rounds if r > 2),
+        # prd/41 P1: one target everywhere — the same MAX_REVIEW_ROUNDS the
+        # footer and the conformance metric quote (concepts.md §6).
+        "prs_over_target": sum(1 for r in rounds if r > MAX_REVIEW_ROUNDS),
         "prs_over_max": sum(1 for r in rounds if r > MAX_REVIEW_ROUNDS),
-        "excess_rounds": sum(max(0, r - 2) for r in rounds),
+        "excess_rounds": sum(max(0, r - MAX_REVIEW_ROUNDS) for r in rounds),
         "max_rounds": MAX_REVIEW_ROUNDS,
         "excluded_pure_rebase": excluded_pure_rebase,
         "excluded_push_unapprovals": excluded_push_unapprovals,
@@ -2304,20 +2306,25 @@ def templates(
 
     # 4. rework_loops.
     rw = m["rework_loops"]
-    if rw["excess_rounds"] > 0 and (rw["p90_rounds"] or 0) > 2:
+    if rw["excess_rounds"] > 0:
         out.append(_suggestion(
             "rework-loops", "rework_loops",
-            f"Review loops run to {round(rw['p90_rounds'])} rounds at p90 (cap 2)",
+            # prd/41 P1: the target is MAX_REVIEW_ROUNDS, the same number the
+            # footer and the conformance metric state — never a second "cap 2".
+            f"Review loops run to {round(rw['p90_rounds'] or 0)} rounds at p90 "
+            f"(target {MAX_REVIEW_ROUNDS} max)",
             {
                 "prs": rw["n"],
                 "median_rounds": rw["median_rounds"],
                 "p90_rounds": rw["p90_rounds"],
-                "prs_over_2": rw["prs_over_2"],
+                "prs_over_target": rw["prs_over_target"],
                 "excess_rounds": rw["excess_rounds"],
+                "max_rounds": MAX_REVIEW_ROUNDS,
                 "hours_per_round": round_hours,
             },
-            "Cap review rounds at two: if a PR needs a third round, the owner and reviewer "
-            "agree the remaining blockers in one pass instead of another comment round.",
+            f"Cap review rounds at {MAX_REVIEW_ROUNDS}: if a PR needs one more "
+            "round, the owner and reviewer agree the remaining blockers in one "
+            "pass instead of another comment round.",
             "warning", rw["excess_rounds"] * round_hours, rw["n"],
         ))
 
@@ -2680,10 +2687,39 @@ def templates(
             else f"The largest wait is {_human_hours(hours)} in the "
                  f"{wtd['largest_label']} segment"
         )
+        # prd/41 B4(a): the top two segments are often within a point. Say it,
+        # so "fix that phase first" is not a ranking the data cannot support.
+        tie_note = ""
+        if wtd.get("tied") and wtd.get("runner_up_label"):
+            tie_note = (
+                f" {wtd['largest_label']} and {wtd['runner_up_label']} are "
+                f"statistically tied ({share * 100:.1f}% vs "
+                f"{(wtd.get('runner_up_share') or 0.0) * 100:.1f}%, within "
+                f"{wtd.get('tie_threshold_points', 1):g} point): treat them as "
+                "one problem, not as a first and a second."
+            )
+        # prd/41 B4(c): the segment is not all review — the part with no PR open
+        # is a missing PR, and the rule must not fold it into "review rounds".
+        segment_entry = wtd["segments"][segment]
+        no_pr_hours = segment_entry.get("no_pr_open_hours") or 0.0
+        no_pr_share = segment_entry.get("no_pr_open_share") or 0.0
+        gap_note = ""
+        if no_pr_hours > 0:
+            gap_note = (
+                f" {_human_hours(no_pr_hours)} of it ({round(no_pr_share * 100)}%) "
+                "had no PR open at all — that is a missing PR, not a review round."
+            )
+        closing = (
+            "Fix both together — the ranking between them is inside the noise."
+            if tie_note else
+            "Fix that phase first: it is the cheapest hour to remove, because "
+            "nothing is being worked on during it."
+        )
         out.append(_suggestion(
             "jira-waiting-time", "waiting_time_decomposition",
             f"The team spends {percent}% of ticket cycle time in the "
-            f"{wtd['largest_label']} segment",
+            f"{wtd['largest_label']} segment"
+            + (f" (tied with {wtd['runner_up_label']})" if tie_note else ""),
             {
                 "segment": wtd["largest_label"],
                 # prd/26 P5: the drill-down needs the segment key, not just the
@@ -2698,13 +2734,23 @@ def templates(
                 "cycle_hours": wtd["total_hours"],
                 "stories": wtd["stories_decomposed"],
                 "flow_efficiency": wtd["largest_efficiency"],
-                "no_pr_open_hours": wtd["segments"][segment].get("no_pr_open_hours"),
-                "impact_basis": "half the largest segment's hours",
+                "no_pr_open_hours": no_pr_hours,
+                "no_pr_open_share": no_pr_share,
+                "runner_up": wtd.get("runner_up_label"),
+                "runner_up_share": wtd.get("runner_up_share"),
+                "tied": bool(wtd.get("tied")),
+                "tie_points": wtd.get("tie_points"),
+                # prd/41 B4(b): the at-stake figure is half the segment, an
+                # assumption — never a measured saving.
+                "impact_basis": (
+                    "assumption: half the largest segment's hours — not a "
+                    "measured saving"
+                ),
+                "impact_assumed": True,
                 "examples": ", ".join(wtd.get("largest_examples") or []),
             },
             f"{advice} {per_story_text}, {percent}% of the measured ticket "
-            "cycle. Fix that phase first: it is the cheapest hour to remove, "
-            "because nothing is being worked on during it.",
+            f"cycle.{gap_note}{tie_note} {closing}",
             severity, hours / 2.0, wtd["stories_decomposed"],
         ))
 
@@ -2718,6 +2764,15 @@ def templates(
         carried = co["carried_over"]
         severity = (
             "critical" if co["share"] >= 0.25 or carried >= 5 else "warning"
+        )
+        # prd/41 B8: the sprint lens counts every story in the store; this rule
+        # counts the stories created in the chosen timeframe. Both numbers are
+        # right for their scope, so the scope is stated with the number.
+        window = co.get("window") or {}
+        scope_note = (
+            f" (stories created in the {window.get('days')}-day window; the "
+            "sprint lens counts every story in the store)"
+            if window.get("days") is not None else ""
         )
         out.append(_suggestion(
             "jira-carry-over", "carry_over",
@@ -2734,6 +2789,10 @@ def templates(
                 "wait_hours": co["wait_hours"],
                 "median_wait_hours": co["median_wait_hours"],
                 "target_share": co["target_share"],
+                # prd/41 B8: the window this count is filtered to
+                "window_days": window.get("days"),
+                "window_start": window.get("start"),
+                "window_end": window.get("end"),
                 # prd/25: ticket keys in evidence are doorways to the detail page
                 "examples": ", ".join(row["key"] for row in co["rows"][:5]),
             },
@@ -2742,7 +2801,10 @@ def templates(
             "or still open (it takes capacity from the next plan). Split the "
             "story until it fits one sprint, and leave it in the backlog until "
             "it does — a carry-over is a commitment the team already knew it "
-            "would break.",
+            "would break."
+            + (f" This count is the stories created in the {window.get('days')}"
+               "-day window; the sprint lens counts every story in the store, "
+               "so it can be larger." if window.get("days") is not None else ""),
             severity, co["late_hours"], co["stories_in_a_sprint"] or carried,
         ))
 
@@ -2955,6 +3017,9 @@ def templates(
             f"{round(share * 100)}% teaches the team to distrust every plan it "
             "makes.",
             severity, sd["late_hours"], committed,
+            # prd/41 B8: the headline is about S{n}, so the drill-down must be
+            # that sprint's items — not every closed sprint's.
+            scope={"kind": "sprint", "sprint": worst["sprint_id"]},
         ))
 
     return out

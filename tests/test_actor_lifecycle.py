@@ -176,6 +176,36 @@ class BotExclusionTests(StoreCase):
         person = next((p for p in metric["people"] if p["person"] == "RArA"), None)
         self.assertTrue(person is None or person["review_n"] == 0)
 
+    def test_the_stretch_that_ends_at_a_bot_comment_is_abandoned_too(self):
+        """prd/41 B1: the automation's closing comment is not the decline event.
+
+        The corpus emits ``comment_added`` by the bot and ``pr_declined`` at the
+        same instant, so the long final interval ends at the *comment*. The old
+        flag only looked for a ``pr_declined`` boundary and left 400 h charged to
+        the author and the sentinel.
+        """
+        store = Store()
+        store.objects.append(_person(BOT, "bot"))
+        store.pr(2, "AuAu", state="declined", closed=T0 + timedelta(hours=400))
+        store.roster(2, "RArA")
+        store.event(2, "comment_added", "RArA", 5, severity="suggestion")
+        store.event(2, "comment_added", BOT, 400)      # the automation's note
+        store.event(2, "pr_declined", BOT, 400)        # and the close, same instant
+        court = self.court(store)
+        long_tail = max(court.intervals, key=lambda interval: interval.hours)
+        self.assertTrue(long_tail.abandoned)
+        self.assertEqual(long_tail.holders, ())
+        graph = ballcourt.blocking_graph(court, level="person")
+        # the 395 h dead stretch is reported, never charged to a person
+        self.assertAlmostEqual(graph["totals"]["abandoned_hours"], 395.0, places=1)
+        # only the 5 h before the bot's note was a real wait
+        self.assertEqual(
+            [(edge["from"], edge["to"], edge["hours"]) for edge in graph["edges"]],
+            [("AuAu", "RArA", 5.0)],
+        )
+        queues = ballcourt.queue_series(court, level="person")
+        self.assertAlmostEqual(queues["totals"]["abandoned_hours"], 395.0, places=1)
+
 
 # --------------------------------------------------------------------------- #
 # prd/34 §2 — name the owner
@@ -347,11 +377,32 @@ class LifecycleHonestyTests(StoreCase):
                       if row["key"] == "review_rounds")
         self.assertEqual(rounds["no_pr_open_hours"], 100.0)
         self.assertEqual(rounds["no_pr_open_share"], round(100 / 113, 4))
-        self.assertIn("100 h of it had no PR open", payload["answer"])
+        # prd/41 B5: a material gap is named in the headline itself, and the
+        # day count is rounded (never "12.5000001").
+        self.assertIn(
+            "review rounds (113 h, 66% of the measured cycle), "
+            "100 h of which had no PR open.",
+            payload["answer"],
+        )
         self.assertIn("PR #2 started 12.5 business days after PR #1 merged",
                       payload["answer"])
+        # the sentences are joined, never run together ("active work 100 h …")
+        self.assertIn("active work. PR #2 started", payload["answer"])
+        self.assertNotIn("12.5000", payload["answer"])
         self.assertEqual(payload["segments"]["pr_gaps"][0]["from_pr"], 1)
         self.assertEqual(payload["segments"]["pr_gaps"][0]["to_pr"], 2)
+
+    def test_the_review_rounds_rule_surfaces_the_no_pr_open_share(self):
+        """prd/41 B4(c): "cap review rounds" is partly advice about no PR open."""
+        court, data, window = self.jira_store(self.gap_fixture())
+        payload = rules.insights(court, [], window, jira=data)
+        suggestion = next(
+            item for item in payload["suggestions"]
+            if item["id"] == "jira-waiting-time"
+        )
+        self.assertEqual(suggestion["evidence"]["segment"], "review rounds")
+        self.assertGreater(suggestion["evidence"]["no_pr_open_share"], 0.5)
+        self.assertIn("had no PR open at all", suggestion["suggestion"])
 
     def test_the_headline_states_done_in_jira_with_an_open_pr(self):
         fx = Fixture()

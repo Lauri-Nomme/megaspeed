@@ -470,9 +470,60 @@ def _events(story: jira.Story | None) -> list[dict]:
     ]
 
 
+#: prd/41 B5: a no-PR-open stretch inside the headline segment is *material*
+#: when it is at least one business day — below that it is noise, above it the
+#: headline must say the segment was partly a missing PR, not review.
+MATERIAL_GAP_HOURS = 8.0
+
+
+def _gap_notes(biggest: dict, segments: dict) -> tuple[str, str]:
+    """The no-PR-open gap, as a headline clause and a follow-up sentence.
+
+    prd/41 B5: "most of it went to review rounds (62 %)" hid that 60 h of the
+    segment had no PR open at all. A material gap is named in the headline
+    itself (", 60 h of which had no PR open"); the largest overlapping PR gap
+    becomes its own sentence with a rounded business-day count.
+    """
+    hours = biggest.get("no_pr_open_hours") or 0.0
+    if hours <= 0:
+        return "", ""
+    clause = ""
+    if hours >= MATERIAL_GAP_HOURS:
+        clause = f", {hours:g} h of which had no PR open"
+    parts = []
+    if hours < MATERIAL_GAP_HOURS:
+        parts.append(f"{hours:g} h of that segment had no PR open.")
+    window_from = biggest.get("from") or ""
+    window_to = biggest.get("to") or ""
+    overlapping = [
+        gap for gap in (segments.get("pr_gaps") or [])
+        if gap.get("from") and gap.get("to")
+        and gap["from"] <= window_to and window_from <= gap["to"]
+    ]
+    if overlapping:
+        gap = max(overlapping, key=lambda item: item["hours"])
+        days = round(gap["hours"] / jira.BUSINESS_HOURS_PER_DAY, 1)
+        parts.append(
+            f"PR #{gap['to_pr']} started {days:g} business day"
+            f"{'' if days == 1 else 's'} after PR #{gap['from_pr']} merged."
+        )
+    return clause, " ".join(parts)
+
+
 # --------------------------------------------------------------------------- #
 # the prose answer (prd/10 §7: honesty in a sentence)
 # --------------------------------------------------------------------------- #
+def _after_prefix(prefix: str, body: str) -> str:
+    """Join the prefix and the body without a lowercase sentence after a stop.
+
+    prd/41 B5: "… (right-censored). the store cannot say …" is a join bug; a
+    sentence that follows a full stop starts with a capital.
+    """
+    if prefix.endswith(". ") and body[:1].islower():
+        body = body[0].upper() + body[1:]
+    return f"{prefix}{body}"
+
+
 def _answer(
     key: str,
     story: jira.Story | None,
@@ -495,7 +546,7 @@ def _answer(
     open_prs = [pr for pr in prs if pr.get("censored")]
     censored = story is not None and segments["boundaries"]["done"]["ts"] is None
     suffix = (
-        "; the story is still open, so the cycle is right-censored at the snapshot"
+        " The story is still open, so the cycle is right-censored at the snapshot."
         if censored else ""
     )
     # prd/36 §3: the end state is stated, and an open PR is disclosed rather
@@ -543,46 +594,32 @@ def _answer(
     if not measured:
         first = missing[0]
         boundary = first["missing"][0]
-        return (
-            f"{prefix}the store cannot say where {key}'s time went because no "
+        body = (
+            f"the store cannot say where {key}'s time went because no "
             f"segment has both boundaries — the {boundary} boundary is missing "
-            f"({first['reason']}){reopen_note}{suffix}.",
-            "unmeasurable",
+            f"({first['reason']}).{reopen_note}{suffix}"
         )
+        return _after_prefix(prefix, body), "unmeasurable"
     total = segments["total_hours"]
     biggest = max(measured, key=lambda row: (row["hours"], row["key"]))
     percent = round(100 * (biggest["share"] or 0))
-    # prd/36 §2: a segment that spans a gap with no PR open says so.
-    gap_note = ""
-    gap_hours = biggest.get("no_pr_open_hours") or 0.0
-    if gap_hours > 0:
-        gap_note = f" {gap_hours:g} h of it had no PR open"
-        window_from = biggest.get("from") or ""
-        window_to = biggest.get("to") or ""
-        overlapping = [
-            gap for gap in (segments.get("pr_gaps") or [])
-            if gap.get("from") and gap.get("to")
-            and gap["from"] <= window_to and window_from <= gap["to"]
-        ]
-        if overlapping:
-            gap = max(overlapping, key=lambda item: item["hours"])
-            days = gap["hours"] / jira.BUSINESS_HOURS_PER_DAY
-            gap_note += (
-                f" — PR #{gap['to_pr']} started {days:g} business day"
-                f"{'' if days == 1 else 's'} after PR #{gap['from_pr']} merged"
-            )
+    # prd/41 B5: a no-PR-open gap is part of the headline when it is material,
+    # and the day count is rounded to one decimal (never "7.51875").
+    gap_clause, gap_sentence = _gap_notes(biggest, segments)
     if missing:
         first = missing[0]
         boundary = first["missing"][0]
-        return (
-            f"{prefix}the store cannot say how long the {first['label']} segment "
+        body = (
+            f"the store cannot say how long the {first['label']} segment "
             f"took because the {boundary} boundary is missing "
             f"({first['reason']}); the {len(measured)} of {len(segments['rows'])} "
             f"segments it can measure cover {total:g} h, most of it in "
             f"{biggest['label']} ({biggest['hours']:g} h, {percent}%)"
-            f"{gap_note}{reopen_note}{suffix}.",
-            "partial",
+            f"{gap_clause}."
+            f"{(' ' + gap_sentence) if gap_sentence else ''}"
+            f"{reopen_note}{suffix}"
         )
+        return _after_prefix(prefix, body), "partial"
     efficiency = segments["efficiency"]
     active = f"{round(100 * efficiency)}%" if efficiency is not None else "no"
     if reopened:
@@ -607,12 +644,13 @@ def _answer(
             f"{key} took {cycle:g} h from created to done"
             if cycle is not None else f"{key}'s cycle is the measured window"
         )
-    return (
-        f"{prefix}{span}: most of it went to {biggest['label']} "
-        f"({biggest['hours']:g} h, {percent}% of the measured cycle), and "
-        f"{active} of the measured time was active work{gap_note}{suffix}.",
-        "measured",
+    body = (
+        f"{span}: most of it went to {biggest['label']} "
+        f"({biggest['hours']:g} h, {percent}% of the measured cycle)"
+        f"{gap_clause}. {active} of the measured time was active work."
+        f"{(' ' + gap_sentence) if gap_sentence else ''}{suffix}"
     )
+    return _after_prefix(prefix, body), "measured"
 
 
 # --------------------------------------------------------------------------- #

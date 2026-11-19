@@ -527,6 +527,10 @@ export class BlockingMap {
         <div class="row"><span class="k">${esc(lens.label)}</span>
           <span class="v" style="color:${lensColor(value / Math.max(1e-9, Math.max(...this.nodes.map((n) => lens.value(n) || 0))))}">${esc(lensText(lens, value))}</span></div>
         <div class="row"><span class="k">waited on</span><span class="v">${fmtHours(node.hours)} · ${node.count} waits</span></div>
+        ${node.kind === 'person' && node.solo_hours != null
+          ? `<div class="row"><span class="k" title="the part of the total where this person was the only open ball — the marginal load; person-hours charge every concurrent holder">solo</span><span class="v">${fmtHours(node.solo_hours)}${
+            node.solo_share != null ? ` · ${Math.round(node.solo_share * 100)}%` : ''}</span></div>`
+          : ''}
         <div class="row"><span class="k">waits on</span><span class="v">${fmtHours(node.out_hours)}</span></div>
         <div class="row"><span class="k">wip now</span><span class="v">${node.wip_now}</span></div>
         ${node.people && node.people.length ? `<div class="row"><span class="k">people</span><span class="v">${esc(node.people.join(' '))}</span></div>` : ''}

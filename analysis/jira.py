@@ -144,6 +144,10 @@ WORKLOG_RATIO_LOW = 0.5            # logged ÷ active below this: under-logged
 WORKLOG_RATIO_HIGH = 2.0           # above this: logged time is not the work
 SEGMENT_SHARE_TARGET = 0.25        # one segment over a quarter of the cycle
 SEGMENT_SHARE_CRITICAL = 0.40
+#: prd/41 B4: two segments whose shares differ by less than this many
+#: *percentage points* are a statistical tie, not a ranking. The rule says so
+#: instead of presenting "the largest segment" as the one thing to fix.
+SEGMENT_TIE_POINTS = 1.0
 #: prd/37: a sprint "delivered on time" when this share of its committed stories
 #: reached done by its close. Stated in the rule and the sprint payload.
 SPRINT_ON_TIME_TARGET = 0.80
@@ -922,6 +926,20 @@ def waiting_time_decomposition(
             "bounds": list(SEGMENT_BOUNDS[key]),
         }
     largest = max(keys, key=lambda key: (out_segments[key]["hours"], key))
+    # prd/41 B4: the top two segments are often within a point of each other;
+    # naming one as "the" bottleneck would be a ranking the data does not
+    # support, so the tie is stated.
+    runners = sorted(
+        (key for key in keys if key != largest),
+        key=lambda key: (-out_segments[key]["hours"], key),
+    )
+    runner_up = runners[0] if runners else None
+    runner_share = out_segments[runner_up]["share"] if runner_up else None
+    tie_points = (
+        round((out_segments[largest]["share"] - runner_share) * 100.0, 2)
+        if runner_share is not None else None
+    )
+    tied = bool(tie_points is not None and tie_points <= SEGMENT_TIE_POINTS)
     for row in rows:
         # prd/26 P5: which stories fed the largest segment, and by how much
         row["largest_hours"] = row["segments"].get(largest)
@@ -953,6 +971,15 @@ def waiting_time_decomposition(
         "largest_hours": out_segments[largest]["hours"],
         "largest_share": out_segments[largest]["share"],
         "largest_efficiency": out_segments[largest]["efficiency"],
+        # prd/41 B4: the runner-up and the tie verdict travel with the largest
+        # segment, so no view can quote one as the bottleneck without the other
+        "runner_up": runner_up,
+        "runner_up_label": SEGMENT_LABEL.get(runner_up) if runner_up else None,
+        "runner_up_hours": out_segments[runner_up]["hours"] if runner_up else None,
+        "runner_up_share": runner_share,
+        "tie_points": tie_points,
+        "tie_threshold_points": SEGMENT_TIE_POINTS,
+        "tied": tied,
         # concepts.md §6: "per story" is a statistic over stories, never the
         # cohort total divided by anything. The rule quotes this number.
         "largest_per_story_hours": _median(per_story_largest),
@@ -1173,6 +1200,15 @@ def carry_over(
         "available": with_sprints > 0,
         "stories": len(stories),
         "stories_in_a_sprint": with_sprints,
+        # prd/41 B8: the cohort is the stories *created in the window*, while
+        # the sprint lens counts every story in the store. Both are right for
+        # their scope; the window travels so the two counts can never be read as
+        # one fact.
+        "window": {
+            "start": iso(window[0]),
+            "end": iso(window[1]),
+            "days": round((window[1] - window[0]).total_seconds() / 86400.0, 1),
+        },
         "carried_over": carried,
         "share": _share(carried, with_sprints),
         "share_of_stories": _share(carried, len(stories)),
@@ -1640,6 +1676,14 @@ def sprints(
         "available": available,
         "sprints": bands,
         "count": len(bands),
+        # prd/41 B8: scope and carry-over count the stories created in this
+        # window; the bands are the store's sprints. The window travels so a
+        # reader can reconcile this view with a window-filtered Rules number.
+        "window": {
+            "start": iso(window[0]),
+            "end": iso(window[1]),
+            "days": round((window[1] - window[0]).total_seconds() / 86400.0, 1),
+        },
         # "active" is the store's own state, not merely a missing completion:
         # a closed sprint whose completion timestamp was lost still has a band
         # that must stop at the snapshot, but it is not the current sprint.

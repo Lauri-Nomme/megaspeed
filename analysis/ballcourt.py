@@ -69,8 +69,11 @@ responsiveness) charge. Consequences:
 
 **Sentinel gate** (``sentinel_after_peers``, default on): the sentinel is a
 precedence constraint, not a peer. A sentinel's pending clock opens only after
-every *peer* reviewer has answered; until then the sentinel is neither charged
-nor blocking. Configurable off for teams whose sentinel reviews in parallel.
+every *peer* reviewer has **responded at least once**; until then the sentinel is
+neither charged nor blocking. A peer whose verdict was withdrawn (a
+``walked_back`` blocker) or staled by a push has had their turn, so the gate
+opens and both owe a verdict. Configurable off for teams whose sentinel reviews
+in parallel.
 
 **Bots** (``concepts.md`` §2): an ``actor_kind = bot`` account is never a
 constraint, a reviewer or the owner of wait-hours. Bot actors are dropped from
@@ -139,6 +142,11 @@ PARENT_KEY_MIN_PRS = 3
 #: days.
 BUSINESS_HOURS_PER_DAY = 8.0
 STALE_BUSINESS_DAYS = 5.0
+#: concepts.md §1: a working week is 5 d = **40 business hours**. It is the one
+#: threshold behind every "waiting over a week" label (prd/41 B3): the Overview
+#: card, the row pill, the list header and the footer all read this number.
+WAITING_WEEK_HOURS = 5.0 * BUSINESS_HOURS_PER_DAY
+
 
 def _hours(seconds: float) -> float:
     return round(max(0.0, seconds) / 3600.0, 2)
@@ -170,6 +178,13 @@ class Interval:
     # the reviewer roster at the time (asked, not necessarily answered), so a
     # consumer can say "2/3 reviewers pending" without replaying the log
     roster: tuple[str, ...] = ()
+    # prd/41 B6: every reviewer who still owes a verdict (``status = none``),
+    # including a sentinel whose charging clock the precedence gate defers. The
+    # delivery list names all of them; ``ball_people`` stays the gated set the
+    # person-hour projections charge.
+    pending_all: tuple[str, ...] = ()
+    #: reviewers whose verdict stands (``status = approved``), for "0/2 approved"
+    approved: tuple[str, ...] = ()
     # the two independent dimensions the label is derived from
     author_open: bool = False   # debt ≠ ∅: a reviewer's objection still stands
     ready: bool = False         # every reviewer answered, not merged
@@ -426,19 +441,27 @@ def _derive(
     debt: set[str],
     sentinels: frozenset[str] | set[str] = frozenset(),
     sentinel_after_peers: bool = True,
+    answered: frozenset[str] | set[str] = frozenset(),
 ) -> dict:
     """The derived state (prd/40): pending set, debt flag, ready, ball label.
 
     ``P = {r : status[r] = none}``. With ``sentinel_after_peers`` a sentinel is
-    removed from ``P`` while any *peer* is still pending: the sentinel is a
+    removed from ``P`` while a *peer* is still pending: the sentinel is a
     precedence constraint, so their clock opens only when the peers answered.
     ``ball`` is a priority-ordered *label*; ``holders`` (the author while their
     debt stands, plus ``P``) is the truth.
+
+    ``answered`` (prd/41 B6) is the set of reviewers who have acted at least
+    once. The gate defers the sentinel only while a peer has *never responded*:
+    a peer whose verdict was withdrawn (a ``walked_back`` blocker) or staled by
+    a push has answered, so the sentinel's turn has come and both owe a verdict.
+    ``pending_all`` is that ungated set — who owes, as opposed to who is charged.
     """
-    pending = {r for r in reviewers if status.get(r, STATUS_NONE) == STATUS_NONE}
+    pending_all = {r for r in reviewers if status.get(r, STATUS_NONE) == STATUS_NONE}
+    pending = set(pending_all)
     if sentinel_after_peers and sentinels:
         peers = pending - sentinels
-        if peers:
+        if peers - set(answered):
             pending &= peers
     author_open = bool(debt)
     ready = (not author_open) and not pending and bool(reviewers)
@@ -450,6 +473,7 @@ def _derive(
         ball = READY
     return {
         "pending": frozenset(pending),
+        "pending_all": frozenset(pending_all),
         "author_open": author_open,
         "ready": ready,
         "ball": ball,
@@ -466,7 +490,8 @@ def _state_after(
     """Advance the participant-status state machine by one event (prd/40).
 
     State: ``reviewers`` (the roster), ``status[r]`` (Bitbucket's participant
-    status), ``debt`` (whose objection still stands) and the ``ci`` flag.
+    status), ``debt`` (whose objection still stands), ``answered`` (who has
+    responded at least once, for the sentinel gate) and the ``ci`` flag.
     Everything else — pending, author_open, ready, ball — is derived by
     :func:`_derive`; no transition flips a ball, it only changes a status.
     """
@@ -479,6 +504,7 @@ def _state_after(
     reviewers = set(state.get("reviewers") or ())
     status = dict(state.get("status") or {})
     debt = set(state.get("debt") or ())
+    answered = set(state.get("answered") or ())
     ci = bool(state.get("ci"))
 
     def enlist(person: str) -> None:
@@ -499,22 +525,27 @@ def _state_after(
                 reviewers.discard(person)
                 status.pop(person, None)
                 debt.discard(person)
+                answered.discard(person)
         elif change == "reviewed" and actor != author:
             # a completed review proves the person was asked; it is an answer
             enlist(actor)
             status[actor] = STATUS_REVIEWED
+            answered.add(actor)
     elif activity == "pr_approved" and actor != author:
         enlist(actor)
         status[actor] = STATUS_APPROVED
+        answered.add(actor)
         # an approval clears *this* reviewer's objection, not the author's debt
         # from someone else (S1b)
         debt.discard(actor)
     elif activity == "pr_needs_work" and actor != author:
         enlist(actor)
         status[actor] = STATUS_NEEDS_WORK
+        answered.add(actor)
         debt.add(actor)
     elif activity == "pr_unapproved" and actor != author:
         enlist(actor)
+        answered.add(actor)
         if attrs.get("cause") == "push":
             # the push withdrew the approval: the reviewer owes a new verdict,
             # and the author owes nothing for it (S2a)
@@ -559,9 +590,18 @@ def _state_after(
             # a blocker comment is an objection, not a fresh obligation: the
             # author owes the fix, the reviewer is not also "pending"
             enlist(actor)
-            status[actor] = STATUS_NEEDS_WORK
-            debt.add(actor)
-            kind = "blocker_comment"
+            answered.add(actor)
+            if (event.get("thread_outcome") or "") == "walked_back":
+                # prd/41 B6: the reviewer withdrew the blocker themselves, so
+                # nothing is owed to them and they gave no verdict — they are
+                # pending (status none), never an answered "needs work"
+                status[actor] = STATUS_NONE
+                debt.discard(actor)
+                kind = "blocker_comment_withdrawn"
+            else:
+                status[actor] = STATUS_NEEDS_WORK
+                debt.add(actor)
+                kind = "blocker_comment"
         else:
             # a suggestion does not move the ball: keep whoever has it
             kind = "comment"
@@ -576,7 +616,9 @@ def _state_after(
         kind = activity
     else:
         # outside this slice's vocabulary but must not crash: keep the label
-        derived = _derive(reviewers, status, debt, sentinels, sentinel_after_peers)
+        derived = _derive(
+            reviewers, status, debt, sentinels, sentinel_after_peers, answered
+        )
         previous = {
             "by": state.get("by", actor),
             "kind": state.get("kind", activity),
@@ -587,16 +629,20 @@ def _state_after(
             "reviewers": frozenset(reviewers),
             "status": status,
             "debt": frozenset(debt),
+            "answered": frozenset(answered),
             "ci": ci,
             **derived,
             **previous,
         }
 
-    derived = _derive(reviewers, status, debt, sentinels, sentinel_after_peers)
+    derived = _derive(
+        reviewers, status, debt, sentinels, sentinel_after_peers, answered
+    )
     return {
         "reviewers": frozenset(reviewers),
         "status": status,
         "debt": frozenset(debt),
+        "answered": frozenset(answered),
         "ci": ci,
         **derived,
         "by": actor,
@@ -717,6 +763,32 @@ def _timeline(
     person_events = [e for e in state.events if e["_ts"] >= pr["created_ts"]]
     if not person_events:
         return
+    # prd/41 B1: a PR the automation closed is abandoned, not a human wait. The
+    # close often arrives as a bot comment plus the decline at the same instant,
+    # so the stretch that *ends* at that close is the tail — and it must carry
+    # the flag, not only the interval an explicit ``pr_declined`` ended.
+    bot_declines = [
+        event["_ts"] for event in person_events
+        if event["activity"] == "pr_declined" and event["actor"] in bots
+    ]
+    declined_ts = min(bot_declines) if bot_declines else None
+
+    def facts(state_dict: dict) -> dict:
+        """The per-interval participant fields every branch shares."""
+        return {
+            "roster": tuple(sorted(state_dict.get("reviewers") or ())),
+            "pending_all": tuple(sorted(
+                person for person in (state_dict.get("pending_all") or ())
+                if person not in bots
+            )),
+            "approved": tuple(sorted(
+                person for person, value in (state_dict.get("status") or {}).items()
+                if value == STATUS_APPROVED and person not in bots
+            )),
+            "author_open": bool(state_dict.get("author_open")),
+            "ready": bool(state_dict.get("ready")),
+            "ci": bool(state_dict.get("ci")),
+        }
 
     current: dict | None = None
     for index, event in enumerate(person_events):
@@ -733,15 +805,12 @@ def _timeline(
                     ball=current["ball"],
                     ball_person=_person_for(pr, current, event, bots),
                     ball_people=_holders(pr, current, event, bots),
-                    roster=tuple(sorted(current.get("reviewers") or ())),
-                    author_open=bool(current.get("author_open")),
-                    ready=bool(current.get("ready")),
-                    ci=bool(current.get("ci")),
                     by=current["by"], kind=current["kind"], evidence=evidence,
                     commits=commits_in, open=open_pr,
                     abandoned=bool(
-                        event["activity"] == "pr_declined" and event["actor"] in bots
+                        declined_ts is not None and event["_ts"] >= declined_ts
                     ),
+                    **facts(current),
                 )
             )
         current = _state_after(pr, current or {}, event, sentinels, sentinel_after_peers)
@@ -763,12 +832,12 @@ def _timeline(
                 start=tail_start, end=end, phase=phase,
                 ball=current["ball"], ball_person=None,
                 ball_people=_holders(pr, current, None, bots),
-                roster=tuple(sorted(current.get("reviewers") or ())),
-                author_open=bool(current.get("author_open")),
-                ready=bool(current.get("ready")),
-                ci=bool(current.get("ci")),
                 by=current["by"],
                 kind=current["kind"], evidence=evidence, commits=0, open=open_pr,
+                # prd/41 B1: the tail to ``closed_ts`` of a bot-declined PR is
+                # the abandoned stretch too, so its hours never reach a person.
+                abandoned=bool(declined_ts is not None),
+                **facts(current),
             )
         )
 
@@ -783,6 +852,17 @@ EVENT_SQL = (
 LINK_SQL = (
     "SELECT event_key, object_id FROM event_objects"
     " WHERE object_type = 'PERSON' ORDER BY event_key, object_id"
+)
+# prd/41 B6: the review-thread outcome is what says a mandatory blocker was
+# withdrawn (``walked_back``) instead of standing. A comment event links to its
+# THREAD object, and the THREAD carries the closed-vocabulary outcome.
+THREAD_LINK_SQL = (
+    "SELECT event_key, object_id FROM event_objects"
+    " WHERE object_type = 'THREAD' ORDER BY event_key, object_id"
+)
+THREAD_OUTCOME_SQL = (
+    "SELECT object_id, CAST(attributes AS VARCHAR) FROM objects"
+    " WHERE object_type = 'THREAD' ORDER BY object_id"
 )
 OBJECT_SQL = (
     "SELECT object_type, object_id, repo, pr_id, ticket_keys, actor, state, created_at, closed_at"
@@ -888,6 +968,22 @@ def load(
         person = object_id.partition(":")[2]
         if person:
             people_by_event[event_key].append(person)
+    # prd/41 B6: a comment event's THREAD outcome (walked_back / rejected / …).
+    # Absent on a store ingested before the thread classifier: then nothing is
+    # treated as withdrawn and the mandatory-comment behaviour is unchanged.
+    thread_outcome: dict[str, str] = {}
+    if _has_column(conn, "objects", "attributes"):
+        for object_id, attrs in conn.execute(THREAD_OUTCOME_SQL).fetchall():
+            payload = json.loads(attrs) if attrs else {}
+            outcome = payload.get("thread_outcome")
+            if outcome:
+                thread_outcome[object_id] = outcome
+    outcome_by_event: dict[str, str] = {}
+    if thread_outcome:
+        for event_key, object_id in conn.execute(THREAD_LINK_SQL).fetchall():
+            outcome = thread_outcome.get(object_id)
+            if outcome:
+                outcome_by_event[event_key] = outcome
     events = []
     for key, ts, activity, actor, repo, pr_id, attrs in conn.execute(EVENT_SQL).fetchall():
         events.append({
@@ -900,6 +996,7 @@ def load(
             "pr_id": pr_id,
             "attributes": json.loads(attrs) if attrs else {},
             "people": tuple(people_by_event.get(key, ())),
+            "thread_outcome": outcome_by_event.get(key),
         })
     objects = []
     for otype, oid, repo, pr_id, keys, actor, state, created, closed in conn.execute(OBJECT_SQL).fetchall():
@@ -1110,6 +1207,13 @@ def blocking_graph(bc: BallCourt, level: str = "queue", window: tuple[datetime, 
         entry["hours"] = round(entry["hours"], 1)
         entry["out_hours"] = round(entry.get("out_hours", 0.0), 1)
         entry["solo_hours"] = round(entry.get("solo_hours", 0.0), 1)
+        # prd/41 P4: person-level hours charge every concurrent holder, so a
+        # person who is one of several reviewers looks busier than the wait they
+        # alone caused. solo_share makes the two numbers linkable at a glance.
+        entry["solo_share"] = (
+            round(entry["solo_hours"] / entry["hours"], 4)
+            if entry["hours"] > 0 else None
+        )
         entry["per_day"] = round(entry["hours"] / days, 2)
     out_edges.sort(key=lambda e: e["hours"], reverse=True)
 
@@ -1131,6 +1235,17 @@ def blocking_graph(bc: BallCourt, level: str = "queue", window: tuple[datetime, 
         "hours_kind": "person-hours" if level == "person" else "wait-hours",
         "level": level,
         "bots_excluded": sorted(bc.bots),
+        # prd/41 P4: the two person-level figures are different questions and
+        # the payload says how they relate, so total and solo are never read as
+        # the same "load".
+        "hours_note": (
+            "person-hours charge every concurrent holder, so one wait with three "
+            "holders is counted three times; solo_hours is the part where that "
+            "person was the only open ball — read solo as the marginal load and "
+            "hours as the shared wait it came from"
+            if level == "person" else
+            "wait-hours count each wait once, under the role/queue that held it"
+        ),
         "window": {"start": iso(start), "end": iso(end), "days": round(days, 1)},
         "nodes": sorted(nodes.values(), key=lambda n: (-n["hours"], n["id"])),
         "edges": out_edges,
@@ -1302,6 +1417,10 @@ def queue_series(
                 "intervals": entry["count"],
                 "hours": round(entry["hours"], 1),
                 "solo_hours": round(entry.get("solo_hours", 0.0), 1),
+                "solo_share": (
+                    round(entry.get("solo_hours", 0.0) / entry["hours"], 4)
+                    if entry["hours"] > 0 else None
+                ),
                 "mean_wait_hours": round(mean_hours, 1),
                 "throughput_per_day": round(per_day, 2),
                 "diagnosis": diagnosis,
@@ -1328,6 +1447,14 @@ def queue_series(
         "level": level,
         "hours_kind": "person-hours" if level == "person" else "wait-hours",
         "bots_excluded": sorted(bc.bots),
+        # prd/41 P4: total and solo answer different questions (shared wait vs
+        # marginal load); the note travels with the numbers.
+        "hours_note": (
+            "person-hours charge every concurrent holder; solo_hours is the part "
+            "where that person was the only open ball"
+            if level == "person" else
+            "wait-hours count each wait once, under the role/queue that held it"
+        ),
         "window": {
             "start": iso(start), "end": iso(end), "days": round(days, 1),
             "service_hours": round(service_hours, 1),
@@ -1431,13 +1558,30 @@ def delivery_list(
         # everyone the item is waiting on right now (prd/40): the pending
         # reviewers and, while a reviewer's objection stands, the author too.
         # ``holders`` already excludes bots (concepts.md §2).
-        waiting_on = [
-            person for person in (tail.holders if tail else (current.holders if current else ()))
-            if person not in SYNTHETIC
-        ]
         author_open = bool(tail.author_open if tail else (current.author_open if current else False))
         roster = tail.roster if tail else (current.roster if current else ())
+        # prd/41 B6: who *owes* is every reviewer with status ``none`` — the
+        # sentinel included even while the precedence gate defers its charging
+        # clock — plus the author while their debt stands. ``holders`` stays the
+        # gated set behind ``ball_label``/the person-hour projections.
+        latest = tail if tail is not None else current
+        owes = tuple(
+            person for person in (latest.pending_all if latest is not None else ())
+            if person not in SYNTHETIC
+        )
+        if roster or owes:
+            waiting_on = sorted(
+                set(owes) | ({pr["actor"]} if author_open and pr["actor"] not in bc.bots else set())
+            )
+        else:
+            # no roster in the store (an old scrape): the responder is the only
+            # evidence of who was asked
+            waiting_on = [
+                person for person in (tail.holders if tail else (current.holders if current else ()))
+                if person not in SYNTHETIC
+            ]
         pending = [person for person in waiting_on if person != pr["actor"]]
+        approved = list(latest.approved if latest is not None else ())
         ball = (tail.ball if tail else None) or (current.ball if current else "unknown")
         # Name the owner when exactly one person holds the ball (concepts.md §2):
         # the sentinel, a reviewer, or the author. Several holders keep the
@@ -1512,6 +1656,7 @@ def delivery_list(
             "ready_since": iso(waiting_since) if ball == READY else None,
             "reviewers_total": len(roster),
             "reviewers_pending": len(pending),
+            "reviewers_approved": len(approved),
             "phase": current.phase if current else "no events",
             "kind": kind,
             "waiting_since": iso(waiting_since),
@@ -1529,7 +1674,12 @@ def delivery_list(
 
     rows.sort(key=lambda r: (-r["blocked"], -r["impact_hours"], -r["waiting_hours"]))
     blocked = [r for r in rows if r["blocked"]]
-    oldest = [r for r in rows if not r["blocked"] and r["waiting_hours"] >= 72]
+    # prd/41 B3: one threshold — a working week is 40 business hours
+    # (concepts.md §1) — behind every "waiting over a week" label.
+    oldest = [
+        r for r in rows
+        if not r["blocked"] and r["waiting_hours"] >= WAITING_WEEK_HOURS
+    ]
     ready = [r for r in rows if r["ball"] == READY]
     return {
         "ok": True,
@@ -1570,7 +1720,15 @@ def delivery_list(
             "doubly_blocked": len([r for r in rows if r["doubly_blocked"]]),
             "oldest_waiting": len(oldest),
             "all": len(rows),
-            "waiting_over_week": len([r for r in rows if r["waiting_hours"] >= 168]),
+            # prd/41 B3: the footer's number and the row pill read the same
+            # threshold; the constant travels so no view hardcodes its own.
+            "waiting_over_week": len(
+                [r for r in rows if r["waiting_hours"] >= WAITING_WEEK_HOURS]
+            ),
+            "waiting_week_hours": WAITING_WEEK_HOURS,
+            "waiting_week_days": round(
+                WAITING_WEEK_HOURS / BUSINESS_HOURS_PER_DAY, 1
+            ),
             "stale": len([r for r in rows if r["stale"]]),
             "unobserved": len([r for r in rows if r["unobserved"]]),
         },

@@ -414,7 +414,7 @@ class ReworkLoopTests(StoreCase):
         fx.pr(3, "AaAa")
         fx.pr(4, "AaAa")
         fx.event(4, "comment_added", "RrRr", 5, severity="suggestion")
-        for hours in (10, 20, 30):
+        for hours in (10, 20, 30, 40):
             fx.event(4, "pr_pushed", "AaAa", hours, push_class="content")
         return fx
 
@@ -423,13 +423,16 @@ class ReworkLoopTests(StoreCase):
         self.assertEqual(metric["n"], 4)
         # PR1: 2 content pushes (the cause=push unapproval is the same round)
         # PR2: 1 rebase_conflict (the pure rebase lost no approval)
-        # PR3: 0, PR4: 3 content pushes
-        self.assertEqual(metric["total_rounds"], 6)
+        # PR3: 0, PR4: 4 content pushes
+        self.assertEqual(metric["total_rounds"], 7)
         self.assertEqual(metric["median_rounds"], 1.5)
-        self.assertEqual(metric["p90_rounds"], 3.0)
-        self.assertEqual(metric["prs_over_2"], 1)
+        self.assertEqual(metric["p90_rounds"], 4.0)
+        # prd/41 P1: the target is MAX_REVIEW_ROUNDS (3), the number the footer
+        # and the conformance metric quote — not a second "cap 2".
+        self.assertEqual(metric["max_rounds"], 3)
+        self.assertEqual(metric["prs_over_target"], 1)
         self.assertEqual(metric["excess_rounds"], 1)
-        self.assertEqual(metric["by_push_class"]["content"], {"pushes": 5, "prs": 2})
+        self.assertEqual(metric["by_push_class"]["content"], {"pushes": 6, "prs": 2})
         self.assertEqual(metric["by_push_class"]["rebase_conflict"], {"pushes": 1, "prs": 1})
         # the exclusions are reported, not silently dropped
         self.assertNotIn("pure_rebase", metric["by_push_class"])
@@ -452,7 +455,12 @@ class ReworkLoopTests(StoreCase):
         # one closed PR: 100 h cycle ÷ 2 rounds = 50 h per round
         self.assertAlmostEqual(suggestion["impact_hours"], 50.0, places=1)
         self.assertEqual(suggestion["evidence"]["excess_rounds"], 1)
-        self.assertEqual(suggestion["evidence"]["prs_over_2"], 1)
+        self.assertEqual(suggestion["evidence"]["prs_over_target"], 1)
+        # prd/41 P1: one target — the rule, the footer and the metric agree
+        self.assertEqual(suggestion["evidence"]["max_rounds"], 3)
+        self.assertIn("target 3 max", suggestion["title"])
+        self.assertNotIn("cap 2", suggestion["title"])
+        self.assertIn("Cap review rounds at 3", suggestion["suggestion"])
 
 
 # --------------------------------------------------------------------------- #

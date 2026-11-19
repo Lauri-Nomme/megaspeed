@@ -1849,6 +1849,27 @@ def _flow_verdict(entry: dict) -> dict:
     }
 
 
+def _pr_count_verdict(entry: dict) -> dict:
+    """The PR-count row: packaging, with the *signed* change (prd/41 B7).
+
+    The old text took ``abs(percent)`` and always said "higher", so a −1.1 %
+    delta read "PR count 1.1 % higher" next to "▾ −1.1 %". The direction now
+    comes from the same delta the cell shows.
+    """
+    percent = entry.get("percent")
+    if percent is None or entry.get("direction") == "same":
+        return {"text": "unchanged", "tone": "muted"}
+    word = "lower" if entry.get("direction") == "down" else "higher"
+    note = (
+        "fewer PRs, not necessarily less work"
+        if word == "lower" else "more PRs, not necessarily more work"
+    )
+    return {
+        "text": f"PR count {abs(percent):.1f} % {word} — {note}",
+        "tone": "muted",
+    }
+
+
 def _annotate(compare: dict) -> None:
     """Attach a verdict line to every A/B row and one overall verdict."""
     verdicts = {
@@ -1871,15 +1892,7 @@ def _annotate(compare: dict) -> None:
         ),
         "flow_efficiency": _flow_verdict(compare["flow_efficiency"]),
         # PR count is packaging: more PRs is not more work (concepts.md §1)
-        "throughput_per_day": {
-            "text": (
-                "PR count {p:.1f} % higher — more PRs, not necessarily more work"
-                .format(p=abs(compare["throughput_per_day"].get("percent") or 0))
-                if compare["throughput_per_day"].get("percent")
-                else "unchanged"
-            ),
-            "tone": "muted",
-        },
+        "throughput_per_day": _pr_count_verdict(compare["throughput_per_day"]),
     }
     for key, verdict in verdicts.items():
         if key in compare:
@@ -1896,6 +1909,15 @@ def _annotate(compare: dict) -> None:
     lead = verdicts["lead_hours"]
     cycle = verdicts["cycle_median_hours"]
     work = verdicts["throughput_work_per_day"]
+    # the overall sentence already quotes cycle time and delivered work, so the
+    # other rows are the only ones appended — never the same delta twice (B7)
+    headline = ("cycle_median_hours", "throughput_work_per_day", "throughput_per_day")
+    others_bad = [
+        verdict for key, verdict in verdicts.items()
+        if key not in headline and verdict["tone"] in ("bad", "critical")
+    ]
+    bad = [verdict for verdict in verdicts.values() if verdict["tone"] in ("bad", "critical")]
+    good = [verdict for verdict in verdicts.values() if verdict["tone"] == "good"]
     if lead["tone"] == "critical":
         if cycle["tone"] == "good":
             compare["verdict"] = (
@@ -1909,8 +1931,6 @@ def _annotate(compare: dict) -> None:
             )
         compare["verdict_tone"] = "critical"
         return
-    bad = [verdict for verdict in verdicts.values() if verdict["tone"] in ("bad", "critical")]
-    good = [verdict for verdict in verdicts.values() if verdict["tone"] == "good"]
     if not bad and good:
         compare["verdict"] = (
             f"{cycle['text']}, {work['text']} — the policy helps on both "
@@ -1918,10 +1938,14 @@ def _annotate(compare: dict) -> None:
         )
         compare["verdict_tone"] = "good"
     elif bad and good:
-        compare["verdict"] = (
-            f"mixed: {cycle['text']} and {work['text']}, but "
-            + "; ".join(verdict["text"] for verdict in bad)
-        )
+        parts = [cycle["text"]]
+        if work["tone"] in ("bad", "critical", "good"):
+            parts.append(work["text"])
+        compare["verdict"] = "mixed: " + " and ".join(parts)
+        if others_bad:
+            compare["verdict"] += ", but " + "; ".join(
+                verdict["text"] for verdict in others_bad
+            )
         compare["verdict_tone"] = "warning"
     elif bad:
         compare["verdict"] = (

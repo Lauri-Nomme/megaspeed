@@ -208,6 +208,11 @@ export function ruleItems(suggestion, metrics = {}, base = '') {
     // a person-scoped rule drills into *that person's* items, not the team's
     rows = rows.filter((row) => row.person === scope.person);
   }
+  if (scope.kind === 'sprint' && scope.sprint != null) {
+    // prd/41 B8: the headline names one sprint, so the drill-down is that
+    // sprint's items — not every closed sprint's.
+    rows = rows.filter((row) => String(row.sprint_id) === String(scope.sprint));
+  }
   // prd/37 §3: "affected first" must be literally true — sort by the wait
   // hours the row carries (the impact), not by key. A metric's own order is
   // the tie-break.
@@ -333,6 +338,12 @@ export function ruleRow(suggestion, { base = '', metrics = {} } = {}) {
   const person = suggestion.scope && suggestion.scope.kind === 'person'
     ? suggestion.scope.person : null;
   const note = stakeNote(suggestion);
+  // prd/41 B4(b): an at-stake figure derived from an assumption says so; it is
+  // not a measured saving.
+  const assumed = Boolean((suggestion.evidence || {}).impact_assumed);
+  const stakeTitle = assumed
+    ? `assumed hours removed by this rule (${esc((suggestion.evidence || {}).impact_basis || 'an assumption')}); not a measured saving`
+    : `estimated hours removed by this rule (impact × confidence ${esc(suggestion.confidence)}); the headline counts each cost pool once`;
   return `
     <article class="rule sev-${esc(severity)}" data-rule="${esc(suggestion.id)}">
       <div class="rule-rank mono" aria-hidden="true">${String(suggestion.rank).padStart(2, '0')}</div>
@@ -342,7 +353,7 @@ export function ruleRow(suggestion, { base = '', metrics = {} } = {}) {
           <span class="rule-metric mono">${esc(suggestion.metric)}</span>
           ${person ? `<span class="rule-scope mono" title="pseudonym — the store holds no raw names">${esc(person)}</span>` : ''}
           <span class="grow"></span>
-          <span class="rule-impact num" title="estimated hours removed by this rule (impact × confidence ${esc(suggestion.confidence)}); the headline counts each cost pool once">${fmtImpact(suggestion.impact_hours)} at stake</span>
+          <span class="rule-impact num" title="${stakeTitle}">${fmtImpact(suggestion.impact_hours)} at stake${assumed ? ' <span class="muted">(assumed)</span>' : ''}</span>
           ${note}
         </div>
         <h2 class="rule-title">${esc(suggestion.title)}</h2>
@@ -457,7 +468,8 @@ export function rulesMarkdown(data, base = '') {
       '',
       `- severity: ${suggestion.severity}`,
       `- metric: ${suggestion.metric}`,
-      `- impact: ${fmtImpact(suggestion.impact_hours)} (confidence ${suggestion.confidence})${shared}`,
+      `- impact: ${fmtImpact(suggestion.impact_hours)} (confidence ${suggestion.confidence})${shared}${
+        (suggestion.evidence || {}).impact_assumed ? ' — assumed, not measured' : ''}`,
       `- rule: ${suggestion.suggestion}`,
       `- evidence: ${facts}`,
     );
