@@ -130,6 +130,20 @@ def _pr_rows(court: ballcourt.BallCourt, states: list) -> list[dict]:
             }
             for interval in state.intervals
         ]
+        # prd/42 M6: the drawer's review facts come from the last interval's
+        # status vector — reviewers asked, who approved, who still owes — and
+        # the PR's last event, so "waiting on author / CI / rebasing" is never a
+        # dash when the store knows the answer.
+        latest = state.intervals[-1] if state.intervals else None
+        waiting_on = sorted(
+            set(latest.pending_all if latest is not None else ())
+            | (
+                {pr["actor"]}
+                if latest is not None and latest.author_open
+                and pr["actor"] not in court.bots else set()
+            )
+        )
+        last_event = state.events[-1] if state.events else None
         active = round(sum(
             interval["hours"] for interval in intervals
             if interval["measured"] and interval["phase"] in ACTIVE_PHASES
@@ -161,6 +175,19 @@ def _pr_rows(court: ballcourt.BallCourt, states: list) -> list[dict]:
             "pushes": pushes,
             "push_classes": dict(sorted(classes.items())),
             "intervals": intervals,
+            "reviewers": list(latest.roster if latest is not None else ()),
+            "reviewers_total": len(latest.roster if latest is not None else ()),
+            "reviewers_approved": len(latest.approved if latest is not None else ()),
+            "reviewers_pending": len(latest.pending_all if latest is not None else ()),
+            "approved": list(latest.approved if latest is not None else ()),
+            "waiting_on": waiting_on,
+            "author_open": bool(latest.author_open if latest is not None else False),
+            "ci": bool(latest.ci if latest is not None else False),
+            "phase": latest.phase if latest is not None else "no events",
+            "last_event": _iso(last_event["_ts"]) if last_event is not None else None,
+            "last_event_activity": last_event["activity"] if last_event is not None else None,
+            "last_event_actor": last_event["actor"] if last_event is not None else None,
+            "open_threads": 0,
         })
     rows.sort(key=lambda row: (row["opened"] or "", row["object_id"]))
     return rows
@@ -511,6 +538,241 @@ def _gap_notes(biggest: dict, segments: dict) -> tuple[str, str]:
 
 
 # --------------------------------------------------------------------------- #
+# cohort benchmark (prd/42 M2)
+# --------------------------------------------------------------------------- #
+def _benchmark(court: ballcourt.BallCourt, data: jira.JiraData,
+               story: jira.Story | None, segments: dict) -> dict:
+    """Where this story's cycle sits among its peers.
+
+    "73 h" means nothing without a cohort. Rank 1 is the *fastest* story, so
+    "13th of 87 fastest" reads as "faster than 74 stories". The same-points
+    median answers "is 73 h slow for an 8-point story?" — the comparison a lead
+    actually makes.
+
+    The cohort is **completed** stories only: an open story's "cycle" is
+    censored at the snapshot, and mixing the two made the DEL-167 cohort 100
+    instead of the 87 completed stories (and moved every rank).
+    """
+    current = segments.get("cycle_hours")
+    censored = bool(segments.get("boundaries", {}).get("done", {}).get("ts") is None)
+    if story is None or current is None:
+        return {
+            "available": False,
+            "note": "the story has no measured created → done cycle, so it has no cohort rank",
+        }
+    if censored:
+        return {
+            "available": False,
+            "note": (
+                "the story is still open, so its cycle is right-censored and "
+                "has no completed cohort rank"
+            ),
+        }
+    cycles: list[tuple[str, float, int | None]] = []
+    for peer in data.stories:
+        cycle = jira._cycle(peer)
+        begin = cycle.boundaries.get("created")
+        done = cycle.boundaries.get("done")
+        if begin is None or done is None or done <= begin:
+            continue
+        hours = round(court.business_hours(peer.actor, begin, done), 2)
+        cycles.append((peer.key, hours, peer.points))
+    if not cycles:
+        return {"available": False, "note": "no completed story cycle in the cohort"}
+    ordered = sorted(cycles, key=lambda item: (item[1], item[0]))
+    rank = 1 + sum(1 for item in ordered if item[1] < current)
+    same_points = [
+        hours for key, hours, points in ordered
+        if story.points is not None and points == story.points
+    ]
+    return {
+        "available": True,
+        "rank": rank,
+        "n": len(ordered),
+        "faster": max(0, rank - 1),
+        "slower": max(0, len(ordered) - rank),
+        "percentile": round(rank / len(ordered), 4),
+        "median_hours": _median([item[1] for item in ordered]),
+        "points": story.points,
+        "points_n": len(same_points),
+        "points_median_hours": _median(same_points),
+        "censored": False,
+        "basis": (
+            "rank = 1 + completed stories with a shorter measured created → done "
+            "cycle; the cohort is every completed story in the store (open "
+            "stories are censored and excluded)"
+        ),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# "Done in Jira, PR open" (prd/42 M4)
+# --------------------------------------------------------------------------- #
+def done_but_open(court: ballcourt.BallCourt, data: jira.JiraData,
+                  delivery: dict | None = None) -> dict:
+    """Open PRs whose ticket is already Done in Jira — with who owes each.
+
+    This is the first-class list the QA run had to reconstruct by hand: three
+    items where Jira says Done but the code was never merged. The extra case is
+    ``opened_after_close`` — a PR opened *after* its ticket was closed (DEL-183:
+    nine days later), which means the work could not have been part of the
+    delivered story at all. Ticket keys travel with every row so the list links
+    to ``#ticket/KEY`` like every other view.
+    """
+    done = jira.done_keys(data)
+    by_key = {story.key: story for story in data.stories}
+    rows_by_id = {
+        row["object_id"]: row for row in ((delivery or {}).get("rows") or [])
+    }
+    out: list[dict] = []
+    for state in court.prs:
+        pr = state.pr
+        if pr["closed_ts"] is not None:
+            continue
+        for key in pr.get("ticket_keys") or ():
+            story = by_key.get(key)
+            if key not in done or story is None:
+                continue
+            closed = jira._cycle(story).boundaries.get("done")
+            opened = pr["created_ts"]
+            after = bool(closed is not None and opened is not None and opened > closed)
+            row = rows_by_id.get(pr["object_id"]) or {}
+            out.append({
+                "key": key,
+                "object_id": pr["object_id"],
+                "id": f"{pr['repo'].split('/')[-1]}#{pr['pr_id']}",
+                "repo": pr["repo"],
+                "repo_short": pr["repo"].split("/")[-1],
+                "number": pr["pr_id"],
+                "state": pr["state"],
+                "author": pr["actor"],
+                "ticket_closed": _iso(closed),
+                "pr_opened": _iso(opened),
+                "opened_after_close": after,
+                "opened_after_close_hours": (
+                    round(court.business_hours(pr["actor"], closed, opened), 2)
+                    if after else 0.0
+                ),
+                "waiting_on": list(row.get("waiting_on") or ()),
+                "waiting_hours": row.get("waiting_hours"),
+                "age_hours": row.get("age_hours"),
+                "stale_reasons": list(row.get("stale_reasons") or ()),
+                "reviewers_approved": row.get("reviewers_approved"),
+                "reviewers_total": row.get("reviewers_total"),
+            })
+    out.sort(key=lambda row: (
+        not row["opened_after_close"],
+        -(row["waiting_hours"] or 0),
+        row["key"],
+    ))
+    return {
+        "available": bool(data.stories),
+        "count": len(out),
+        "opened_after_close": sum(1 for row in out if row["opened_after_close"]),
+        "rows": out,
+        "note": (
+            "a ticket is Done when its final done boundary exists; the PR is "
+            "still open at the snapshot. 'PR opened after the ticket closed' is "
+            "a stronger finding: the work cannot have been part of the delivered "
+            "story"
+        ),
+    }
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return round(ordered[middle], 2)
+    return round((ordered[middle - 1] + ordered[middle]) / 2.0, 2)
+
+
+# --------------------------------------------------------------------------- #
+# epics are not stories (prd/42 P9)
+# --------------------------------------------------------------------------- #
+def _epic(court: ballcourt.BallCourt, data: jira.JiraData,
+          key: str, epic: dict) -> dict:
+    """A minimal epic page: the parent, its children and why it has no cycle.
+
+    An epic is a grouping, not a work item: it has no created → done cycle of
+    its own, and rendering one as "0/9 segments" made the product look broken.
+    The page now says what it is and lists the child stories with their own
+    cycles, so the epic is a doorway rather than a dead end.
+    """
+    children = [
+        story for story in data.stories
+        if (story.epic_key or "") == key
+    ]
+    child_rows = []
+    for story in children:
+        cycle = jira._cycle(story)
+        begin = cycle.boundaries.get("created")
+        done = cycle.boundaries.get("done")
+        end = done or court.snapshot
+        hours = (
+            round(court.business_hours(story.actor, begin, end), 2)
+            if begin is not None and end is not None and end > begin else None
+        )
+        child_rows.append({
+            "key": story.key,
+            "state": story.state,
+            "points": story.points,
+            "cycle_hours": hours,
+            "censored": done is None,
+        })
+    child_rows.sort(key=lambda row: (row["cycle_hours"] is None, row["cycle_hours"] or 0, row["key"]))
+    story_count = len(child_rows)
+    open_count = sum(1 for row in child_rows if row["censored"])
+    return {
+        "ok": True,
+        "key": key,
+        "kind": "epic",
+        "available": False,
+        "snapshot": _iso(court.snapshot),
+        "hours_mode": court.hours_mode,
+        "assumption": court.assumption,
+        **court.calendar_warning(),
+        "epic": {
+            "key": key,
+            "object_id": epic.get("object_id"),
+            "state": epic.get("state"),
+            "created": _iso(epic.get("created")),
+            "closed": _iso(epic.get("closed")),
+            "stories": child_rows,
+            "story_count": story_count,
+            "open_stories": open_count,
+            "points": sum(row["points"] or 0 for row in child_rows),
+        },
+        "story": None,
+        "end_state": "epic",
+        "open_prs": [],
+        "reopened": False,
+        "reopen_count": 0,
+        "segments": {"rows": [], "boundaries": {}, "measured": 0, "missing": []},
+        "prs": [],
+        "pr_count": 0,
+        "sprints": {"memberships": []},
+        "worklogs": [],
+        "worklog": {},
+        "events": [],
+        "event_count": 0,
+        "answer": (
+            f"{key} is an epic — a parent grouping of {story_count} "
+            f"stor{'y' if story_count == 1 else 'ies'}, not a story. It has no "
+            "created → done cycle of its own; open a child story for the cycle, "
+            "or read the children below."
+        ),
+        "answer_kind": "epic",
+        "note": (
+            "an epic is not a work item: the eight story segments describe "
+            "stories, and an epic has none"
+        ),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # the prose answer (prd/10 §7: honesty in a sentence)
 # --------------------------------------------------------------------------- #
 def _after_prefix(prefix: str, body: str) -> str:
@@ -660,12 +922,18 @@ def ticket(
     court: ballcourt.BallCourt,
     data: jira.JiraData | None,
     key: str,
+    threads: list[dict] | None = None,
 ) -> dict | None:
     """The full cycle of one ticket, or ``None`` when the store has never seen it.
 
     ``None`` is the API's 404: a key with no story *and* no PR is not a ticket
     the store can answer about. A story without PRs (or a PR without a story) is
-    a real, partially measured ticket and is returned with the gap named.
+    a real, partially measured ticket and is returned with the gap named. An
+    epic key is answered as an epic (prd/42 P9), never as a story with 0/9
+    segments.
+
+    ``threads`` (the review threads from ``rules.load_threads``) lets each PR
+    row carry its open-thread count, which the PR drawer shows (prd/42 M6).
     """
     data = data or jira.EMPTY
     wanted = normalize_key(key)
@@ -673,6 +941,11 @@ def ticket(
         return None
     story = jira.story_for(data, wanted)
     states = _pr_states(court, wanted)
+    # prd/42 P9: an epic key is a parent grouping, not a story — even when every
+    # PR in the corpus names it as its epic link (DEL-1 has 131).
+    epic = (data.epic_objects or {}).get(wanted)
+    if story is None and epic is not None:
+        return _epic(court, data, wanted, epic)
     if story is None and not states:
         return None
 
@@ -683,10 +956,19 @@ def ticket(
     # folding it into "done".
     segments = _segments(court, cycle, verification=jira.uses_verification(data))
     prs = _pr_rows(court, states)
+    open_threads: dict[tuple[str, int], int] = {}
+    for thread in threads or ():
+        if thread.get("closed_at") is not None:
+            continue
+        pair = (thread.get("repo"), thread.get("pr_id"))
+        open_threads[pair] = open_threads.get(pair, 0) + 1
+    for row in prs:
+        row["open_threads"] = open_threads.get((row["repo"], row["number"]), 0)
     sprints = _sprint_rows(court, data, story)
     worklog_rows, worklog = _worklogs(story, prs)
     events = _events(story)
     answer, answer_kind = _answer(wanted, story, segments, prs)
+    benchmark = _benchmark(court, data, story, segments)
 
     story_row = None
     if story is not None:
@@ -728,6 +1010,7 @@ def ticket(
     return {
         "ok": True,
         "key": wanted,
+        "kind": "story",
         "available": story is not None,
         "snapshot": _iso(court.snapshot),
         "hours_mode": court.hours_mode,
@@ -741,6 +1024,8 @@ def ticket(
         "segments": segments,
         "prs": prs,
         "pr_count": len(prs),
+        # prd/42 M2: "73 h" is read against its cohort, not in a vacuum.
+        "benchmark": benchmark,
         "sprints": sprints,
         "worklogs": worklog_rows,
         "worklog": worklog,

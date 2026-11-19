@@ -778,7 +778,9 @@ def _ticket_payload(con, tenant: str, path: Path, key: str) -> dict | None:
         if cache_key in _ticket_cache:
             return _ticket_cache[cache_key]
     bundle = _analysis_bundle(con, tenant, path)
-    payload = ticket_view.ticket(bundle.court, bundle.jira(con), key)
+    payload = ticket_view.ticket(
+        bundle.court, bundle.jira(con), key, threads=bundle.threads(con),
+    )
     if payload is not None:
         payload["tenant"] = tenant
     with _ticket_lock:
@@ -1053,9 +1055,16 @@ def queues(request: Request):
         return _tenant_error(exc.args[0])
     try:
         with store_conn(path) as con:
-            court = _ballcourt(con, tenant, path)
+            bundle = _analysis_bundle(con, tenant, path)
+            court = bundle.court
             window = analyse.window_from_events(court, _days(days))
-            return analyse.queue_series(court, level, window, bucket_hours)
+            payload = analyse.queue_series(court, level, window, bucket_hours)
+            # prd/42 M7: a pseudonym legend by role (sentinel / bot / author /
+            # reviewer / story owner) — never a real name (prd/02).
+            payload["legend"] = analyse.person_legend(
+                court, bundle.jira(con).stories,
+            )
+            return payload
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
 
@@ -1088,8 +1097,22 @@ def delivery(request: Request):
             window = analyse.window_from_events(court, _days(days))
             # prd/34 §5: "ticket Done but PR open" needs the ticket layer's end
             # state; the bundle caches it, so this costs one load per version.
-            done = jira_analysis.done_keys(bundle.jira(con))
-            return analyse.delivery_list(court, window, done_tickets=done)
+            jira = bundle.jira(con)
+            done = jira_analysis.done_keys(jira)
+            payload = analyse.delivery_list(court, window, done_tickets=done)
+            # prd/42 M4: a first-class list of Done-in-Jira tickets with an
+            # open PR, with who owes each — the QA run had to reconstruct it.
+            payload["done_open"] = ticket_view.done_but_open(court, jira, payload)
+            # prd/42 M6: the PR drawer shows open threads instead of a dash.
+            open_threads: dict[tuple, int] = {}
+            for thread in bundle.threads(con):
+                if thread.get("closed_at") is not None:
+                    continue
+                pair = (thread.get("repo"), thread.get("pr_id"))
+                open_threads[pair] = open_threads.get(pair, 0) + 1
+            for row in payload.get("rows") or ():
+                row["open_threads"] = open_threads.get((row["repo"], row["number"]), 0)
+            return payload
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
 
@@ -1341,11 +1364,16 @@ def simulate(request: Request):
         return JSONResponse(hit)
     try:
         with store_conn(path) as con:
-            court = _ballcourt(con, tenant, path)
+            bundle = _analysis_bundle(con, tenant, path)
+            court = bundle.court
             window = analyse.window_from_events(court, _days(days))
             # the calibration excludes the store's bot actors from the reviewer
             # pool by default (FR-7): a service account is not capacity to staff
-            calibration = policy_lab.calibrate(court, window, conn=con)
+            jira = bundle.jira(con)
+            refinement = jira_analysis.refinement_cost(court, jira, window)
+            calibration = policy_lab.calibrate(
+                court, window, conn=con, refinement=refinement,
+            )
             payload = policy_lab.simulate(
                 calibration, scenario, seed=seed, tolerance=tolerance,
                 replications=replications,

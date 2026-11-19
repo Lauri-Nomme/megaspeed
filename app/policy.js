@@ -64,6 +64,16 @@ export const KNOBS = [
     key: 'review_first', label: 'review before new work', kind: 'toggle',
     note: 'reviews preempt the reviewer’s own authoring',
   },
+  {
+    // prd/42 M3: the two options a lead names that the lab could not test.
+    key: 'refine_before_start', label: 'refine before start', kind: 'toggle',
+    note: 'spend the measured created → ready refinement before the first review; one rework round is caught before it happens',
+  },
+  {
+    key: 'review_round_cap', label: 'review-round cap', kind: 'select',
+    options: [['', 'off (today)'], ['1', '1 round'], ['2', '2 rounds'], ['3', '3 rounds']],
+    note: 'stop the loop at the cap: the owner and reviewer agree the remainder in one pass',
+  },
 ];
 
 /** A named policy the page can apply in one click. */
@@ -73,12 +83,15 @@ export const PRESETS = [
   { id: 'wip1', label: 'WIP limit 1', scenario: { wip_limit: 1 } },
   { id: 'reviewfirst', label: 'review first', scenario: { review_first: true } },
   { id: 'size3', label: 'cap PRs at 3 commits', scenario: { size_cap_commits: 3 } },
+  { id: 'refine', label: 'refine before start', scenario: { refine_before_start: true } },
+  { id: 'roundcap2', label: 'cap review at 2 rounds', scenario: { review_round_cap: 2 } },
 ];
 
 /** The scenario object a page state holds, from the knob defaults. */
 export function defaultScenario() {
   return { name: 'scenario', wip_limit: null, sentinels: 1, review_sla_hours: null,
-    size_cap_commits: null, stack_depth_cap: null, review_first: false };
+    size_cap_commits: null, stack_depth_cap: null, review_first: false,
+    refine_before_start: false, review_round_cap: null };
 }
 
 /** Read the controls back into a scenario (numbers, not strings). */
@@ -99,6 +112,8 @@ export function readScenario(root) {
   scenario.size_cap_commits = number('size_cap_commits');
   scenario.stack_depth_cap = number('stack_depth_cap');
   scenario.review_first = Boolean(value('review_first'));
+  scenario.refine_before_start = Boolean(value('refine_before_start'));
+  scenario.review_round_cap = number('review_round_cap');
   return scenario;
 }
 
@@ -107,7 +122,8 @@ export function isBaselineScenario(scenario) {
   return !scenario
     || (!scenario.wip_limit && (scenario.sentinels ?? 1) === 1
       && !scenario.review_sla_hours && !scenario.size_cap_commits
-      && !scenario.stack_depth_cap && !scenario.review_first);
+      && !scenario.stack_depth_cap && !scenario.review_first
+      && !scenario.refine_before_start && !scenario.review_round_cap);
 }
 
 /** The query string for `/api/simulate`, scenario as compact JSON. */
@@ -324,6 +340,7 @@ export function calibrationMarkup(calibration) {
   const rework = calibration.rework || {};
   const size = calibration.pr_size || {};
   const stack = calibration.stack_depth || {};
+  const refinement = calibration.refinement || {};
   const facts = [
     ['PRs opened', `${calibration.prs.n} (${calibration.prs.merged} merged)`],
     ['arrival', `${predRate(arrival.per_business_day)} · ≈${arrival.mean_interarrival_hours} h apart`],
@@ -331,6 +348,8 @@ export function calibrationMarkup(calibration) {
     ['rework', `${predPercent(rework.probability)} of PRs · ${predPercent(rework.push_class.content)} content`],
     ['sentinel gate', `≈${sentinel.observed.mean_hours} h observed · ${predPercent(sentinel.utilisation)} busy`],
     ['PR size', `≈${size.commits.median} commits median`],
+    // prd/42 M3: the refinement knob prices a measured segment, not a guess.
+    ['refinement', refinement.hours == null ? 'not measurable (no Jira layer)' : `≈${refinement.hours} h created → ready`],
     ['stack depth', stack.available ? `${predPercent(0)} measured` : 'not measurable (no ref digests)'],
     ['window', `${window.business_days} business days · ${window.business_hours} h`],
   ];

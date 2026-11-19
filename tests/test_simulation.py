@@ -570,6 +570,35 @@ class ScenarioTests(StoreCase):
         self.assertIn("not necessarily more work",
                       compare["throughput_per_day"]["verdict"])
 
+    def test_the_refinement_and_round_cap_knobs_are_wired(self):
+        """prd/42 M3: the two options a lead names can actually be tested."""
+        calibration = copy.deepcopy(self.loaded())
+        calibration["refinement"] = {
+            "hours": 6.0, "n": 20, "basis": "median created → ready segment",
+        }
+        baseline = simulation.run(calibration, simulation.Scenario(), seed=5)
+        refined = simulation.run(
+            calibration, simulation.Scenario(refine_before_start=True), seed=5,
+        )
+        # the knob spends the measured refinement and catches one round: with a
+        # 6 h segment and one 2 h answer removed, the cycle is longer, not free
+        self.assertGreater(
+            refined["predicted"]["cycle_hours"]["median"],
+            baseline["predicted"]["cycle_hours"]["median"],
+        )
+        self.assertEqual(refined["scenario"]["refine_before_start"], True)
+        self.assertEqual(refined["scenario"]["review_round_cap"], None)
+        # a 1-round cap stops the loop earlier than the historical 2 actions
+        capped = simulation.run(
+            calibration, simulation.Scenario(review_round_cap=1), seed=5,
+        )
+        self.assertLess(
+            capped["predicted"]["cycle_hours"]["median"],
+            baseline["predicted"]["cycle_hours"]["median"],
+        )
+        self.assertEqual(capped["scenario"]["review_round_cap"], 1)
+        self.assertEqual(calibration["refinement"]["hours"], 6.0)
+
     def test_a_review_sla_shortens_the_cycle(self):
         calibration = self.loaded()
         baseline = simulation.run(calibration, simulation.Scenario(), seed=5)

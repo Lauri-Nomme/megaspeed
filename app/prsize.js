@@ -16,6 +16,8 @@
  * re-bucketing without a browser. main.js owns the input events and persistence.
  */
 
+import { esc } from './format.js';
+
 export const DEFAULT_SIZE_CAPS = Object.freeze({ commits: 10, lines: 400 });
 export const SIZE_CAP_MIN = 1;
 export const SIZE_CAP_MAX = 10_000;
@@ -161,6 +163,29 @@ function seriesMarkup(kind, label, series, caps, sliderMax, { available = true }
 }
 
 /**
+ * prd/42 M8: size vs cycle next to the sliders.
+ *
+ * A firing size rule is not evidence that size is the lever. The correlation is
+ * the evidence the sliders were missing: a weak r means "cap PRs" would be a
+ * guess (the QA run measured r ≈ 0.20 for lines), while review rounds explain
+ * far more of the cycle (r ≈ 0.60).
+ */
+export function correlationLine(payload) {
+  const correlations = payload && payload.correlations;
+  if (!correlations || !correlations.n) return '';
+  const fmt = (value) => (value == null ? '—' : Number(value).toFixed(2));
+  const weak = correlations.commits != null && Math.abs(correlations.commits) < 0.3
+    && (correlations.lines == null || Math.abs(correlations.lines) < 0.3);
+  return `<p class="prsize-corr" data-pr-size-corr="${fmt(correlations.commits)}">
+    <b>size vs cycle</b>: r = ${esc(fmt(correlations.commits))} for commits${
+      correlations.lines == null ? '' : ` · ${esc(fmt(correlations.lines))} for changed lines`}${
+      correlations.rounds == null ? '' : ` · ${esc(fmt(correlations.rounds))} for review rounds`}
+    over ${correlations.n} closed PR${correlations.n === 1 ? '' : 's'}${
+      weak ? ' — weak, so capping size is not a proven lever by itself' : ''}.
+    <span class="muted">${esc(correlations.basis || '')}</span></p>`;
+}
+
+/**
  * The "PR size" panel: two histograms + two sliders + the live count.
  *
  * `payload` is `/api/pr-size`; `caps` is the tenant's persisted choice (falls
@@ -189,6 +214,7 @@ export function prSizePanel(payload, { caps = null } = {}) {
       <b data-pr-size-large>${counts.large}</b> of <b data-pr-size-total>${counts.total}</b>
       PRs are flagged large<span class="muted" data-pr-size-split> ·
       ${counts.overCommits} over commits · ${counts.overLines} over changed lines</span>.</p>
+    ${correlationLine(payload)}
     ${seriesMarkup('commits', 'commits per PR', commits, chosen, commitMax)}
     ${seriesMarkup('lines', 'changed lines per PR', lines, chosen, lineMax, { available: !pending })}
     <p class="panel-note">A PR is large iff <code>commits &gt; cap</code> or

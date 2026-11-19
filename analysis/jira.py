@@ -137,6 +137,10 @@ NO_JIRA_NOTE = (
 
 # v1 targets, stated in every payload that uses them (never a hidden constant).
 CARRY_OVER_SHARE_TARGET = 0.10     # ≤ 10% of stories may move between sprints
+#: prd/42 M5: a story added within the sprint's first day is planning jitter,
+#: not scope creep. The QA run measured "more than a day after the start" (25
+#: of 30 in S2); the grace period reproduces that fact exactly.
+SPRINT_SCOPE_CREEP_GRACE = timedelta(days=1)
 POINT_CHURN_SHARE_TARGET = 0.10    # ≤ 10% may be re-pointed after work started
 WORKLOG_DELAY_TARGET_DAYS = 1.0    # logging same/next day is the honest case
 WORKLOG_LATE_SHARE_TARGET = 0.25   # > 25% logged a week late is not a record
@@ -259,6 +263,10 @@ class JiraData:
     stories: list[Story] = field(default_factory=list)
     sprints: dict[str, dict] = field(default_factory=dict)
     epics: int = 0
+    #: prd/42 P9: the epic objects themselves (key, state, timestamps), so the
+    #: ticket page can say "this is an epic, not a story" instead of rendering
+    #: a story page with 0/9 segments.
+    epic_objects: dict[str, dict] = field(default_factory=dict)
     events: int = 0
     note: str | None = None
 
@@ -349,6 +357,7 @@ def load(con, court: ballcourt.BallCourt | None = None) -> JiraData:
     rows = con.execute(OBJECT_SQL_ATTRS if has_attrs else OBJECT_SQL).fetchall()
     sprints: dict[str, dict] = {}
     stories: list[Story] = []
+    epic_objects: dict[str, dict] = {}
     epics = 0
     for row in rows:
         otype, oid, keys, actor, state, created, closed = row[:7]
@@ -365,6 +374,15 @@ def load(con, court: ballcourt.BallCourt | None = None) -> JiraData:
             }
         elif otype == "EPIC":
             epics += 1
+            key = str((list(keys or [None]))[0] or str(oid).partition(":")[2])
+            epic_objects[key] = {
+                "key": key,
+                "object_id": oid,
+                "state": state,
+                "created": to_naive_utc(created) if created else None,
+                "closed": to_naive_utc(closed) if closed else None,
+                "summary_class": attributes.get("summary_class"),
+            }
         elif otype == "STORY":
             key = (list(keys or [None]))[0] or str(oid).partition(":")[2]
             stories.append(Story(
@@ -379,7 +397,10 @@ def load(con, court: ballcourt.BallCourt | None = None) -> JiraData:
                 summary_class=attributes.get("summary_class"),
             ))
     if not stories:
-        return JiraData(sprints=sprints, epics=epics, note=NO_JIRA_NOTE)
+        return JiraData(
+            sprints=sprints, epics=epics, epic_objects=epic_objects,
+            note=NO_JIRA_NOTE,
+        )
 
     by_id = {story.object_id: story for story in stories}
     sprint_links: dict[str, list[str]] = defaultdict(list)
@@ -418,6 +439,7 @@ def load(con, court: ballcourt.BallCourt | None = None) -> JiraData:
         stories=stories,
         sprints=sprints,
         epics=epics,
+        epic_objects=epic_objects,
         events=sum(len(story.events) for story in stories),
     )
 
@@ -1458,6 +1480,7 @@ def sprints(
     stories = list(data.stories)
     in_window = cohort(data, window)
     memberships, outcomes, boundaries = sprint_outcomes(court, data)
+    sprint_index = _sprint_index(data)
 
     # -- per-sprint scope ---------------------------------------------------
     def _empty_sprint_row(sprint: dict | None, sid: int) -> dict:
@@ -1486,6 +1509,11 @@ def sprints(
             "current_stories": [],
             "carried_in": [],
             "carried_out": [],
+            # prd/42 M5: a story added after the sprint's start was not part of
+            # the commitment the sprint was planned with. `at_start` is the
+            # store's own membership-at-start signal; a later add without it is
+            # the scope-creep fact.
+            "added_after_start_stories": [],
             "points": 0,
             "done_points": 0,
             "done": 0,
@@ -1526,6 +1554,19 @@ def sprints(
             row["stories"].append(key)
             if membership["current_sprint"] == sid:
                 row["current_stories"].append(key)
+            # prd/42 M5: an add after the sprint's measured start, without the
+            # `at_start` marker, is scope added mid-sprint.
+            band_start = (sprint_index.get(sid) or {}).get("start")
+            for event in story.of("sprint_added"):
+                if event_sprint_id(event) != sid:
+                    continue
+                at_start = bool(_attrs(event).get("at_start"))
+                if (
+                    not at_start and band_start is not None
+                    and event["_ts"] > band_start + SPRINT_SCOPE_CREEP_GRACE
+                    and key not in row["added_after_start_stories"]
+                ):
+                    row["added_after_start_stories"].append(key)
             verdict = outcome["outcomes"].get(sid)
             points = story.points or 0
             row["points"] += points
@@ -1569,6 +1610,11 @@ def sprints(
         row["carried_out"].sort()
         row["story_count"] = len(row["stories"])
         row["current_count"] = len(row["current_stories"])
+        row["added_after_start_stories"].sort()
+        row["added_after_start"] = len(row["added_after_start_stories"])
+        row["added_after_start_share"] = _share(
+            row["added_after_start"], row["story_count"]
+        )
         committed = row["done_by_end"] + row["done_late"] + row["never_done"]
         row["done_share"] = _share(row["done_by_end"], committed)
         row["on_time"] = committed > 0 and row["done_by_end"] == committed
@@ -1630,8 +1676,38 @@ def sprints(
         row["key"],
     ))
 
-    carry_rows = [
-        {
+    ordered_bands = [
+        band for band in bands if band.get("sprint_id") is not None
+    ]
+
+    def _destination(sid: int | None, sprints: list[int]) -> tuple[int | None, bool | None]:
+        """The next sprint a carried-over story landed in, and whether it did.
+
+        prd/42 M5: "carried over" is only half the fact — the other half is
+        where it went. A story that never reappears in the *next* sprint was
+        silently dropped, not re-committed.
+        """
+        if sid is None:
+            return None, None
+        index = next(
+            (i for i, band in enumerate(ordered_bands)
+             if band["sprint_id"] == sid),
+            None,
+        )
+        if index is None or index + 1 >= len(ordered_bands):
+            return None, None
+        nxt = ordered_bands[index + 1]["sprint_id"]
+        return nxt, nxt in sprints
+
+    carry_rows = []
+    for row in rows:
+        if not row["carried_over"]:
+            continue
+        destination, reappears = _destination(
+            row["missed_sprints"][-1] if row["missed_sprints"] else None,
+            row["sprints"],
+        )
+        carry_rows.append({
             "kind": "story",
             "object_id": row["object_id"],
             "key": row["key"],
@@ -1645,11 +1721,18 @@ def sprints(
             "done_at": row["done_at"],
             "status": "late" if row["done_at"] else "never",
             "wait_hours": row["slip_hours"],
+            # prd/42 M5: where the story went next (or that it went nowhere).
+            "destination_sprint": destination,
+            "reappears": reappears,
             "affected": True,
-        }
-        for row in rows if row["carried_over"]
-    ]
+        })
     late = sum(1 for row in carry_rows if row["status"] == "late")
+    never_reappeared = sum(
+        1 for row in carry_rows if row["reappears"] is False
+    )
+    no_destination = sum(
+        1 for row in carry_rows if row["reappears"] is None
+    )
     delivery = sprint_delivery(court, data, window)
 
     available = bool(data.sprints) or any(
@@ -1716,6 +1799,10 @@ def sprints(
             "stories": sorted(story.key for story in carried),
             "late": late,
             "never": len(carry_rows) - late,
+            # prd/42 M5: the destination half of carry-over.
+            "reappeared": sum(1 for row in carry_rows if row["reappears"] is True),
+            "never_reappeared": never_reappeared,
+            "no_next_sprint": no_destination,
             "sprints_involved": len({
                 sid for row in carry_rows for sid in row["missed_sprints"]
             }),

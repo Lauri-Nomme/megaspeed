@@ -108,7 +108,7 @@ test('every knob the model accepts is on the page, and nothing else', () => {
   // the closed set the API accepts (server/analysis) must match the page
   const allowed = new Set([
     'wip_limit', 'sentinels', 'review_sla_hours', 'size_cap_commits',
-    'stack_depth_cap', 'review_first',
+    'stack_depth_cap', 'review_first', 'refine_before_start', 'review_round_cap',
   ]);
   assert.deepEqual(new Set(KNOBS.map((knob) => knob.key)), allowed);
 });

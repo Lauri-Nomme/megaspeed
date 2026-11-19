@@ -17,6 +17,7 @@
 import { Timeline, ACTIVITY_ORDER, ACTIVITY_COLOR, PHASE, PHASE_ORDER } from '/timeline.js';
 import { BlockingMap, LENSES } from '/graph.js';
 import { QueueChart } from '/queues.js';
+import { legendMarkup, responseTable } from '/queues.js';
 import {
   DAY, fmtAge, fmtBucket, fmtCalendarDuration, fmtCalendarHours, fmtCompact, fmtDay,
   fmtHours, fmtRange, fmtStamp, esc, whoLabel,
@@ -424,7 +425,10 @@ function flashStatus(text, cls = 'live', ms = 2500) {
  * change, ticket, scope, timeframe — updates the same string. `#ticket/KEY`
  * stays the ticket route; the query carries what used to be session-local. */
 function routeHref() {
-  const sprint = sprintRange();
+  // prd/42 P10: the sprint lens is a timeline filter. A Queue/Blocking/Rules
+  // URL must not keep `sprint=2&from=&to=` describing a view that ignores it.
+  const usesSprint = state.page === 'timeline';
+  const sprint = usesSprint ? sprintRange() : { start: null, end: null };
   return serializeRoute({
     tenant: state.tenant,
     // A ticket page without its key is a transient boot state, not a place to
@@ -435,7 +439,7 @@ function routeHref() {
     scope: state.scope,
     // prd/37 §4: a selected sprint travels with its measured range, so the lens
     // (filter + band + window) is shareable, not just the window.
-    sprint: state.sprint,
+    sprint: usesSprint ? state.sprint : null,
     from: Number.isFinite(sprint.start) ? sprint.start : null,
     to: Number.isFinite(sprint.end) ? sprint.end : null,
     // dark is the default, so only a light view puts anything in the URL: an
@@ -471,7 +475,13 @@ function syncTitle() {
 // -------------------------------------------------------------------- views
 /** The one honesty line (B7): each view states its own cohort, or clears it. */
 function setHonesty(text) {
-  $('honesty').textContent = text || '';
+  // prd/42 P7: the top bar already ends with the clock basis ("business hours"
+  // / "wall-clock hours"), so a disclosure that repeats it produced
+  // "· business hours · · business hours". Strip the duplicate suffix; the
+  // canonical basis stays in #timebasis.
+  let value = text || '';
+  value = value.replace(/\s*·\s*(business|wall-clock) hours\s*$/i, '');
+  $('honesty').textContent = value;
 }
 
 /** B3: the banner is derived from the filters the views really apply. */
@@ -1108,6 +1118,17 @@ function renderTicketPage() {
     `← ${PAGES[state.ticketFrom] ? PAGES[state.ticketFrom].title : 'back'}`;
   const data = state.ticket;
   if (data) {
+    if (data.kind === 'epic') {
+      const epic = data.epic || {};
+      setHonesty(
+        `epic ${data.key} · ${epic.story_count || 0} child stories · ` +
+        `not a story, so it has no cycle of its own`,
+      );
+      $('ticket-assumption').textContent =
+        `${data.assumption} · snapshot ${fmtStamp(Date.parse(data.snapshot))} · ` +
+        'an epic groups stories; each child story carries its own cycle.';
+      return;
+    }
     const missing = (data.segments && data.segments.missing) || [];
     const total = ((data.segments && data.segments.rows) || []).length;
     setHonesty(
@@ -1272,10 +1293,18 @@ function renderQueuePage() {
     emptyText = `No stream matches scope ${state.scope.label} at this level — switch level to ${other}.`;
   }
   queueChart.setData(data ? { ...data, streams, emptyText } : { streams: [], buckets: 1, window: { start: '', end: '' } });
+  // prd/42 M1/M7: the response-time column and the pseudonym legend sit under
+  // the chart, so "who is the constraint" is answerable without the raw store.
+  const responseHost = $('queue-response');
+  if (responseHost) responseHost.innerHTML = data ? responseTable(data) : '';
+  const legendHost = $('queue-legend');
+  if (legendHost) legendHost.innerHTML = data ? legendMarkup(data) : '';
   $('queue-assumption').textContent = data
     ? `${data.assumption} · ${data.bucket_hours} h buckets over ${data.window.days} calendar days. ` +
       `Little's law: WIP ≈ throughput × wait. Overloaded = long queue wait with a standing queue; slow = long wait with little WIP. ` +
-      `This is queue wait, not calendar utilisation (the policy lab's “busy”). ` +
+      // prd/42 P3: state the basis of the relative label, with the number.
+      `Both labels are relative to the median wait in this window (≈${fmtHours(data.baseline_mean_wait_hours || 0)}); ` +
+      `they are queue wait, not calendar utilisation (the policy lab's “busy”). ` +
       `${data.diagnosis_note}.`
     : '';
   if (data) {
@@ -1339,7 +1368,9 @@ function renderRulesPage() {
       `${data.targets.max_review_rounds} rounds max · ` +
       `size cap ${data.targets.size_commit_cap} commits / ${data.targets.size_line_cap} lines · ` +
       `one review round ≈ ${fmtHours(data.targets.hours_per_round)} ` +
-      `(${data.targets.hours_per_round_basis}) · ranked by impact × confidence.` +
+      `(${data.targets.hours_per_round_basis}) · ranked by impact × confidence; ` +
+      // prd/42 P2: severity is a tie-break, not the rank.
+      `severity breaks ties, so a critical rule with low confidence can rank below a warning one.` +
       (data.metrics && data.metrics.pr_size && data.metrics.pr_size.diff_size.pending
         ? ' Diff size is not captured yet, so the size metric uses commit count only.'
         : '')
@@ -1522,21 +1553,50 @@ function selectRow(objectId) {
   }
 }
 
-function openPrDrawer(pr) {
+function openPrDrawer(pr, row = null) {
+  // A timeline click has no row in hand; the delivery payload usually knows the
+  // same PR, and its review facts are what make the drawer complete (M6).
+  if (!row) row = findDeliveryRow(pr.id);
   const segments = timeline.lifecycle(pr);
   const totals = timeline.phases(pr);
   const cycle = segments.length ? segments[segments.length - 1].to - segments[0].from : 0;
+  // prd/42 M6: the drawer is complete — reviewers, approvals, open threads and
+  // the last event are facts, not dashes. prd/42 P6: the cycle is one canonical
+  // duration (business hours) when the delivery row can price it, never a
+  // second "calendar days" spelling of the same number.
+  const cycleHours = row && row.age_hours != null
+    ? fmtHours(row.age_hours)
+    : (pr.cycle_hours != null ? fmtHours(pr.cycle_hours) : null);
   const facts = [
     ['ticket', pr.ticket || '—'],
     ...(pr.epic ? [['epic', pr.epic]] : []),
     ['author', pr.actor],
     ['state', pr.state + (pr.closed ? '' : ' · right-censored')],
-    // prd/35: this is a wall-clock span, so it is "calendar days", never `d`
-    // (a `d` is 8 business hours everywhere else).
-    ['cycled', `${fmtCalendarDuration(cycle)} (calendar time)`],
+    ...(row ? [
+      ['reviewers', row.reviewers_total
+        ? `${row.reviewers_approved || 0}/${row.reviewers_total} approved · ${row.reviewers_pending || 0} pending`
+        : 'no roster in the store'],
+      ['approvals', (row.approved || []).join(', ') || 'none'],
+      ['waiting on', waitingLabel(row) || '—'],
+      ['open threads', String(row.open_threads ?? 0)],
+      ['last event', row.last_event || row.waiting_since
+        ? `${fmtStamp(Date.parse(row.last_event || row.waiting_since))} · ${row.last_event_activity || row.kind || ''}`
+        : '—'],
+    ] : []),
+    ...(cycleHours
+      ? [['cycle (business hours)', cycleHours]]
+      : [['cycled', `${fmtCalendarDuration(cycle)} (calendar time)`]]),
     ['commits', String(pr.commits ? pr.commits.length : (pr.commit_count ?? 0))],
+    ...(row ? [
+      ['waiting on author', row.author_open ? `yes · ${fmtHours(row.waiting_hours)}` : 'no'],
+      ['CI', row.ci ? 'running' : 'not running'],
+      ['rebasing', row.rebasing ? 'yes' : 'no'],
+      ['no events since', row.unobserved
+        ? fmtStamp(Date.parse(row.unobserved_since || row.waiting_since))
+        : 'events observed through the last event'],
+    ] : []),
     ...["waiting", "active", "review", "ci", "rebasing", "unobserved"].map((phase) => [
-      phase === 'unobserved' ? 'no events since' : PHASE[phase].label,
+      phase === 'unobserved' ? 'unobserved' : PHASE[phase].label,
       totals.get(phase) ? fmtCalendarDuration(totals.get(phase)) : '—',
     ]),
   ];
@@ -1545,8 +1605,8 @@ function openPrDrawer(pr) {
     pr,
     facts,
     // prd/35: state the clock once, where the numbers are.
-    clockNote: 'timestamps are UTC · this drawer’s spans are elapsed calendar time; ' +
-      'the delivery list and ticket page price waits in business hours on the team calendar',
+    clockNote: 'timestamps are UTC · cycle, wait and age are business hours on the team calendar; ' +
+      'the phase spans are elapsed calendar time',
     children: [pr.ticket, pr.epic, `${pr.repo}#${pr.number}`].filter(Boolean),
     impact: pr.closed ? 'Closed: its wait is history, not a live bottleneck.' : undefined,
   });
@@ -1559,6 +1619,9 @@ function openDrawer(entity) {
     `<button type="button" class="drawer-close" data-drawer="close" aria-label="close">×</button>` +
     detailMarkup(entity);
   drawer.hidden = false;
+  // prd/42 B2: the drawer is beside the content, not on top of the list
+  // inspector. The class lets the shell reserve its width on desktop.
+  if (typeof document !== 'undefined' && $('app')) $('app').classList.add('drawer-open');
 }
 
 /* prd/38 #12: a ticket's PR row is a doorway, not a dead end. The ticket payload
@@ -1581,11 +1644,27 @@ function openTicketPrDrawer(pr) {
     ['author', pr.author || '—'],
     ['state', `${pr.state}${pr.censored ? ' · right-censored' : ''}`],
     ['cycle', pr.cycle_hours == null ? '—' : fmtHours(pr.cycle_hours)],
+    // prd/42 M6: the review facts the ticket payload now carries.
+    ['reviewers', pr.reviewers_total
+      ? `${pr.reviewers_approved || 0}/${pr.reviewers_total} approved · ${pr.reviewers_pending || 0} pending`
+      : 'no roster in the store'],
+    ['approvals', (pr.approved || []).join(', ') || 'none'],
+    ['waiting on', (pr.waiting_on || []).join(' + ') || 'nobody'],
+    ['open threads', String(pr.open_threads ?? 0)],
+    ['last event', pr.last_event
+      ? `${fmtStamp(Date.parse(pr.last_event))} · ${pr.last_event_activity || ''}`
+      : '—'],
     ['commits', String(pr.commit_count ?? 0)],
     ['review rounds', String(pr.review_rounds ?? 0)],
     ['push classes', classes],
+    ['waiting on author', pr.author_open ? 'yes' : 'no'],
+    ['CI', pr.ci ? 'running' : 'not running'],
+    ['rebasing', pr.phase === 'rebasing' ? 'yes' : 'no'],
+    ['no events since', pr.censored && pr.last_event
+      ? `${fmtStamp(Date.parse(pr.last_event))} · ${pr.phase}`
+      : 'events observed through the last event'],
     ...['waiting', 'active', 'review', 'ci', 'rebasing', 'unobserved'].map((phase) => [
-      phase === 'unobserved' ? 'no events since' : PHASE[phase].label,
+      phase === 'unobserved' ? 'unobserved' : PHASE[phase].label,
       phases.get(phase) ? fmtHours(phases.get(phase)) : '—',
     ]),
   ];
@@ -1619,7 +1698,7 @@ function openDeliveryPrDrawer(row) {
   if (!row) return;
   const pr = timeline.prs.find((candidate) => candidate.id === row.object_id);
   if (pr) {
-    openPrDrawer(pr);
+    openPrDrawer(pr, row);
     return;
   }
   openDrawer({
@@ -1629,9 +1708,23 @@ function openDeliveryPrDrawer(row) {
       ['ticket', rowTicket(row) || '—'],
       ['author', row.author || '—'],
       ['state', row.state || 'open'],
+      ['reviewers', row.reviewers_total
+        ? `${row.reviewers_approved || 0}/${row.reviewers_total} approved · ${row.reviewers_pending || 0} pending`
+        : 'no roster in the store'],
+      ['approvals', (row.approved || []).join(', ') || 'none'],
       ['waiting on', waitingLabel(row)],
+      ['open threads', String(row.open_threads ?? 0)],
+      ['last event', row.last_event || row.waiting_since
+        ? `${fmtStamp(Date.parse(row.last_event || row.waiting_since))} · ${row.last_event_activity || row.kind || ''}`
+        : '—'],
       ['waiting since', `${fmtStamp(Date.parse(row.waiting_since))} (${fmtHours(row.waiting_hours)})`],
       ['age', fmtHours(row.age_hours)],
+      ['waiting on author', row.author_open ? 'yes' : 'no'],
+      ['CI', row.ci ? 'running' : 'not running'],
+      ['rebasing', row.rebasing ? 'yes' : 'no'],
+      ['no events since', row.unobserved
+        ? fmtStamp(Date.parse(row.unobserved_since || row.waiting_since))
+        : 'events observed through the last event'],
       ['commits in log', String(row.commits ?? 0)],
     ],
     impact: impactSentence(row),
@@ -1642,6 +1735,7 @@ function openDeliveryPrDrawer(row) {
 function closeDrawer() {
   state.drawerEntity = null;
   $('drawer').hidden = true;
+  if (typeof document !== 'undefined' && $('app')) $('app').classList.remove('drawer-open');
 }
 
 // --------------------------------------------------------------- pivot menu

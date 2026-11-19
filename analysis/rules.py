@@ -236,6 +236,23 @@ def _p90(values: list[float]) -> float | None:
     return _percentile(values, 0.9)
 
 
+def _pearson(xs: list[float], ys: list[float]) -> float | None:
+    """Pearson correlation, or ``None`` when there is no variance to correlate."""
+    n = min(len(xs), len(ys))
+    if n < 3:
+        return None
+    x = [float(value) for value in xs[:n]]
+    y = [float(value) for value in ys[:n]]
+    mean_x = sum(x) / n
+    mean_y = sum(y) / n
+    cov = sum((a - mean_x) * (b - mean_y) for a, b in zip(x, y))
+    var_x = sum((a - mean_x) ** 2 for a in x)
+    var_y = sum((b - mean_y) ** 2 for b in y)
+    if var_x <= 0 or var_y <= 0:
+        return None
+    return round(cov / math.sqrt(var_x * var_y), 3)
+
+
 def _confidence(n: int) -> float:
     """Sample-size confidence in [0.05, 1]: a 20-observation metric is trusted."""
     return round(max(0.05, min(1.0, max(0, n) / CONFIDENCE_SAMPLE)), 2)
@@ -1553,6 +1570,13 @@ def pr_size_distribution(court: ballcourt.BallCourt, window,
         info = sizes.get(pr["object_id"]) or {}
         diff_size = info.get("diff_size")
         commits = len(state.commits)
+        pushes, unapprovals = _rounds(state)
+        closed = pr["closed_ts"] is not None
+        end = pr["closed_ts"] or court.snapshot
+        cycle = (
+            round(court.business_hours(pr["actor"], pr["created_ts"], end), 2)
+            if pr["created_ts"] is not None and end > pr["created_ts"] else None
+        )
         rows.append({
             "kind": "pr",
             "object_id": pr["object_id"],
@@ -1563,6 +1587,9 @@ def pr_size_distribution(court: ballcourt.BallCourt, window,
             "state": pr["state"] if pr["closed_ts"] else "open",
             "commits": commits,
             "diff_size": diff_size,
+            "rounds": len(pushes) + len(unapprovals),
+            "cycle_hours": cycle,
+            "censored": not closed,
         })
     rows.sort(key=lambda row: row["object_id"])
 
@@ -1570,6 +1597,33 @@ def pr_size_distribution(court: ballcourt.BallCourt, window,
     line_values = [row["diff_size"] for row in rows if row["diff_size"] is not None]
     commit_edges = _histogram_edges(commit_values, chosen["commits"])
     line_edges = _histogram_edges(line_values, chosen["lines"])
+    # prd/42 M8: size vs cycle, so "cap PRs" is not mistaken for a proven lever.
+    # Measured on *merged* PRs only: an open PR's cycle is censored at the
+    # snapshot, and a declined PR (usually a bot-closed zombie) has a long idle
+    # cycle with few review rounds — including either flips the correlation's
+    # sign (measured: rounds +0.61 merged, −0.23 with declined included).
+    closed_rows = [
+        row for row in rows
+        if row["state"] == "merged" and row["cycle_hours"] is not None
+    ]
+    def correlation(key: str) -> float | None:
+        values = [
+            (row[key], row["cycle_hours"]) for row in closed_rows
+            if row.get(key) is not None
+        ]
+        return _pearson([value for value, _ in values], [cycle for _, cycle in values])
+    correlations = {
+        "n": len(closed_rows),
+        "commits": correlation("commits"),
+        "lines": correlation("diff_size"),
+        "rounds": correlation("rounds"),
+        "basis": (
+            "Pearson r over MERGED PRs with a measured created → merged cycle "
+            "(open PRs are censored and declined PRs are not delivered work); "
+            "rounds = the review rounds (concepts.md §6). A weak r means size is "
+            "not the lever, even when the size rule fires."
+        ),
+    }
     large = [
         row for row in rows
         if row["commits"] > chosen["commits"]
@@ -1606,6 +1660,8 @@ def pr_size_distribution(court: ballcourt.BallCourt, window,
         "large_share": round(len(large) / len(rows), 2) if rows else 0.0,
         "over_commits_cap": over_commits,
         "over_lines_cap": over_lines,
+        # prd/42 M8: the evidence the sliders need next to them.
+        "correlations": correlations,
         "rows": rows,
         "definition": "large = commits > commit cap OR changed lines > line cap",
         "note": (
@@ -2462,7 +2518,13 @@ def templates(
         if sp["ticket_done_open"]:
             reasons.append(f"{sp['ticket_done_open']} with the ticket already Done")
         examples = ", ".join(
-            row["id"] for row in sp["rows"] if row["affected"]
+            # prd/42 P8: every example is ticket-first, so the evidence can
+            # link to #ticket/KEY like every other view.
+            (
+                f"{row['tickets'][-1]} {row['id']}"
+                if row.get("tickets") else row["id"]
+            )
+            for row in sp["rows"] if row["affected"]
         )
         out.append(_suggestion(
             "stale-prs", "stale_prs",
@@ -2527,6 +2589,15 @@ def templates(
                 "longest_hours": longest,
                 "threshold_hours": st["threshold_hours"],
                 "person": names,
+                # prd/42 P8: ticket keys, not bare PR ids, so the rule's
+                # examples are links like every other view's.
+                "examples": ", ".join(
+                    (
+                        f"{row['tickets'][-1]} {row['id']}"
+                        if row.get("tickets") else row["id"]
+                    )
+                    for row in st["rows"] if row["affected"]
+                ),
             },
             "Add a second sentinel or a rotation: these items have no other "
             "holder, so nobody else can move them. A mandatory approval that "

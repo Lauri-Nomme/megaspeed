@@ -422,6 +422,72 @@ export function fmtWipTick(value) {
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
 }
 
+/**
+ * prd/42 M1: the response-time comparison, as a column.
+ *
+ * The queue chart answers "who holds the most wait"; this table answers "who
+ * takes longest to answer a review request". The sentinel's median is shown
+ * against the peers' median, so the 8× gap is one glance rather than a
+ * raw-store computation. A reviewer who never answered is counted, not
+ * dropped — that is the difference between "slow" and "asleep".
+ */
+export function responseTable(data) {
+  const response = data && data.response;
+  const people = (response && response.people) || [];
+  if (!people.length) return '';
+  const peer = response.reviewer_median_hours;
+  const rows = people.map((row) => {
+    const ratio = row.role === 'sentinel' && peer && row.median_hours
+      ? `×${(row.median_hours / peer).toFixed(1)}`
+      : '';
+    const lag = row.sentinel_lag_median_hours != null
+      ? `${esc(fmtHours(row.sentinel_lag_median_hours))}`
+      : '—';
+    return `<tr data-response-person="${esc(row.person)}" class="${row.role === 'sentinel' ? 'sentinel' : ''}">
+      <td class="c-who" data-label="person"><span class="mono">${esc(row.person)}</span>
+        ${row.role === 'sentinel' ? '<span class="pill warning" title="mandatory approver on every PR">sentinel</span>' : ''}</td>
+      <td class="c-dur num" data-label="median response">${
+        row.median_hours == null ? '—' : esc(fmtHours(row.median_hours))}${
+        ratio ? ` <span class="muted">${ratio}</span>` : ''}</td>
+      <td class="c-dur num" data-label="mean">${
+        row.mean_hours == null ? '—' : `≈${esc(fmtHours(row.mean_hours))}`}</td>
+      <td class="c-dur num" data-label="p90">${
+        row.p90_hours == null ? '—' : esc(fmtHours(row.p90_hours))}</td>
+      <td class="c-dur num" data-label="never">${row.never || 0}</td>
+      <td class="c-dur num" data-label="peer → sentinel">${lag}</td>
+    </tr>`;
+  }).join('');
+  return `<section class="response-panel" aria-labelledby="response-title">
+    <div class="response-head">
+      <h2 class="policy-h" id="response-title">Response time</h2>
+      <span class="muted">added as reviewer → first response${
+        peer != null ? ` · peer median ${esc(fmtHours(peer))}` : ''}</span>
+    </div>
+    <table class="table compact response-table"><thead><tr>
+      <th class="c-who">person</th><th class="c-dur num">median</th>
+      <th class="c-dur num">mean</th><th class="c-dur num">p90</th>
+      <th class="c-dur num" title="asked but never answered">never</th>
+      <th class="c-dur num" title="last peer approval → sentinel approval">peer → sentinel</th>
+    </tr></thead><tbody>${rows}</tbody></table>
+    <p class="panel-note">${esc((response && response.basis) || '')}. ${
+      esc((response && response.sentinel_lag_basis) || '')}.</p>
+  </section>`;
+}
+
+/** prd/42 M7: a pseudonym legend by role — never a name (prd/02). */
+export function legendMarkup(data) {
+  const legend = data && data.legend;
+  const people = (legend && legend.people) || [];
+  if (!people.length) return '';
+  const chips = people.map((row) => `<span class="legend-person" data-role="${esc(row.role)}"
+      title="${esc(`${row.person}: ${row.role} · ${row.prs_authored} PRs authored · ${row.approvals} approvals · ${row.stories_owned} stories owned`)}">
+      <span class="mono">${esc(row.person)}</span>
+      <span class="legend-role">${esc(row.role)}</span></span>`).join('');
+  return `<div class="people-legend" aria-label="pseudonym roles">
+    <span class="legend-label">who is who</span>${chips}
+    <span class="legend-note">${esc((legend && legend.note) || '')}</span></div>`;
+}
+
 /** Shorten text with an ellipsis so a canvas label never paints past its box. */
 function fitText(ctx, text, maxWidth) {
   if (maxWidth <= 0) return '';

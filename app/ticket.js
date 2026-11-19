@@ -290,6 +290,13 @@ export function eventsList(payload, { limit = 40 } = {}) {
 /** The stats strip: counts before content (prd/10 §11). */
 export function ticketStats(payload) {
   if (!payload) return '';
+  if (payload.kind === 'epic') {
+    const epic = payload.epic || {};
+    return `<span class="stat-inline"><b>epic</b> not a story</span>
+      <span class="stat-inline"><b>${epic.story_count || 0}</b> stor${epic.story_count === 1 ? 'y' : 'ies'}</span>
+      <span class="stat-inline"><b>${epic.points || 0}</b> points</span>
+      <span class="stat-inline"><b>${epic.open_stories || 0}</b> still open</span>`;
+  }
   const segments = payload.segments || {};
   const story = payload.story || {};
   const cycle = segments.cycle_hours;
@@ -297,11 +304,41 @@ export function ticketStats(payload) {
   const total = (segments.rows || []).length;
   const reopened = payload.reopened || segments.reopened;
   return `<span class="stat-inline"><b>${cycle == null ? '–' : esc(segmentHours(cycle))}</b> cycle</span>
+    ${benchmarkLine(payload)}
     <span class="stat-inline"><b>${segments.measured ?? 0}</b>/${total} segments</span>
     <span class="stat-inline"><b>${payload.pr_count ?? 0}</b> PR${payload.pr_count === 1 ? '' : 's'}</span>
     ${story.points != null ? `<span class="stat-inline"><b>${esc(story.points)}</b> points</span>` : ''}
     ${reopened ? `<span class="stat-inline"><b>reopened</b> ${segments.reopen_count ? `×${esc(segments.reopen_count)}` : ''}</span>` : ''}
     ${largest ? `<span class="stat-inline">most in <b>${esc(largest)}</b> (${pct(segments.largest_share)})</span>` : ''}`;
+}
+
+/**
+ * prd/42 M2: the cohort benchmark next to the cycle headline.
+ *
+ * "73 h" is read against its cohort: "73rd of 87 fastest · median 89.7 h ·
+ * 8-pt median 109 h". The same-points median is the comparison a lead makes
+ * ("is this slow for an 8?"), and a censored story says so rather than
+ * implying a finished cycle.
+ */
+export function benchmarkLine(payload) {
+  const benchmark = payload && payload.benchmark;
+  if (!benchmark || !benchmark.available) return '';
+  const ordinal = (n) => {
+    const mod = n % 100;
+    if (mod >= 11 && mod <= 13) return `${n}th`;
+    return `${n}${['th', 'st', 'nd', 'rd'][n % 10] || 'th'}`;
+  };
+  const parts = [
+    `${ordinal(benchmark.rank)} of ${benchmark.n} fastest`,
+    benchmark.median_hours == null ? '' : `median ${segmentHours(benchmark.median_hours)}`,
+    benchmark.points_median_hours == null || benchmark.points == null
+      ? ''
+      : `${benchmark.points}-pt median ${segmentHours(benchmark.points_median_hours)}`,
+  ].filter(Boolean);
+  const title = `${benchmark.basis || ''}${benchmark.censored
+    ? ' · this story is still open, so its cycle is right-censored at the snapshot' : ''}`;
+  return `<span class="stat-inline benchmark" data-benchmark-rank="${benchmark.rank}"
+      title="${esc(title)}">${esc(parts.join(' · '))}</span>`;
 }
 
 /**
@@ -322,9 +359,46 @@ export function clockNote(payload) {
     'are wall-clock hours';
 }
 
+/**
+ * prd/42 P9: an epic is a parent grouping, not a story.
+ *
+ * The old page rendered an epic as a story with "0/9 segments", which read as
+ * a broken ticket. The epic page now says what it is, lists the child stories
+ * with their own cycles, and links each one — a doorway, not a dead end.
+ */
+export function epicMarkup(payload, { base = '' } = {}) {
+  const epic = payload.epic || {};
+  const children = epic.stories || [];
+  const rows = children.map((story) => `<tr>
+      <td class="c-id" data-label="story">${ticketHref(story.key, base)
+        ? `<a class="ticket-link mono" href="${esc(ticketHref(story.key, base))}" data-ticket="${esc(story.key)}">${esc(story.key)}</a>`
+        : `<span class="mono">${esc(story.key)}</span>`}</td>
+      <td class="c-state" data-label="state"><span class="pill ${story.censored ? 'waiting' : 'healthy'}">${esc(story.state || 'unknown')}${story.censored ? ' · open' : ''}</span></td>
+      <td class="c-dur num" data-label="points">${story.points == null ? '—' : esc(story.points)}</td>
+      <td class="c-dur num" data-label="cycle">${story.cycle_hours == null ? '—' : esc(segmentHours(story.cycle_hours))}</td>
+    </tr>`).join('');
+  return `
+    <div class="ticket-head">
+      <span class="overline">EPIC</span>
+      <h2 class="mono">${esc(payload.key || '')}</h2>
+      <p class="context">${esc(epic.state || 'unknown state')} · a parent grouping of ${epic.story_count || 0} stor${epic.story_count === 1 ? 'y' : 'ies'}${epic.points ? ` · ${epic.points} points` : ''}</p>
+      <p class="clock-note">an epic has no created → done cycle of its own; the cycle belongs to each child story</p>
+    </div>
+    <p class="impact ticket-answer" id="ticket-answer" data-kind="epic">${esc(payload.answer || '')}</p>
+    <section class="ticket-panel">
+      <h2 class="policy-h">child stories · ${children.length}</h2>
+      ${rows ? `<table class="table compact ticket-epic">
+        <thead><tr><th class="c-id">story</th><th class="c-state">state</th>
+          <th class="c-dur num">points</th><th class="c-dur num">cycle</th></tr></thead>
+        <tbody>${rows}</tbody></table>`
+    : '<p class="empty-row">No story in this store names this epic, so there is nothing to drill into.</p>'}
+    </section>`;
+}
+
 /** The whole page body. `base` is the page URL used by copied Markdown links. */
 export function ticketMarkup(payload, { base = '' } = {}) {
   if (!payload) return '<p class="empty-row">Loading the ticket…</p>';
+  if (payload.kind === 'epic') return epicMarkup(payload, { base });
   const story = payload.story;
   const segments = payload.segments || {};
   const key = payload.key || '';

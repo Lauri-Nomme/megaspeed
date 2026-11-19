@@ -364,7 +364,13 @@ class Scenario:
                            PRs (no cascade rebase); unavailable when the store has
                            no ref digests;
     ``review_first``       reviews preempt the reviewer's own author work
-                           ("stop starting, start finishing").
+                           ("stop starting, start finishing");
+    ``refine_before_start`` prd/42 M3: spend one refinement (the measured
+                           created → ready segment) before the first review, and
+                           catch one round of rework before it happens;
+    ``review_round_cap``   prd/42 M3: stop the review loop at this many rounds
+                           (the reviewer and author agree the remainder in one
+                           pass instead of another comment round).
     """
 
     name: str = "baseline"
@@ -374,6 +380,8 @@ class Scenario:
     size_cap_commits: int | None = None
     stack_depth_cap: int | None = None
     review_first: bool = False
+    refine_before_start: bool = False
+    review_round_cap: int | None = None
 
     @property
     def is_baseline(self) -> bool:
@@ -388,6 +396,8 @@ class Scenario:
             "size_cap_commits": self.size_cap_commits,
             "stack_depth_cap": self.stack_depth_cap,
             "review_first": self.review_first,
+            "refine_before_start": self.refine_before_start,
+            "review_round_cap": self.review_round_cap,
         }
 
     @classmethod
@@ -404,6 +414,7 @@ class Scenario:
         allowed = {
             "name", "wip_limit", "sentinels", "review_sla_hours",
             "size_cap_commits", "stack_depth_cap", "review_first",
+            "refine_before_start", "review_round_cap",
         }
         unknown = sorted(set(raw) - allowed)
         if unknown:
@@ -417,13 +428,18 @@ class Scenario:
         sla = _positive_float(raw.get("review_sla_hours"), "review_sla_hours")
         size_cap = _positive_int(raw.get("size_cap_commits"), "size_cap_commits")
         depth_cap = _positive_int(raw.get("stack_depth_cap"), "stack_depth_cap")
+        round_cap = _positive_int(raw.get("review_round_cap"), "review_round_cap")
         review_first = raw.get("review_first", False)
         if not isinstance(review_first, bool):
             raise SimulationError("review_first must be true or false")
+        refine = raw.get("refine_before_start", False)
+        if not isinstance(refine, bool):
+            raise SimulationError("refine_before_start must be true or false")
         return cls(
             name=name, wip_limit=wip, sentinels=sentinels, review_sla_hours=sla,
             size_cap_commits=size_cap, stack_depth_cap=depth_cap,
-            review_first=review_first,
+            review_first=review_first, refine_before_start=refine,
+            review_round_cap=round_cap,
         )
 
 
@@ -658,7 +674,7 @@ def _store_bots(conn) -> set[str]:
 
 
 def calibrate(court, window=None, conn=None, bots=None,
-              include_bots: bool = False) -> dict:
+              include_bots: bool = False, refinement: dict | None = None) -> dict:
     """Derive the model from the store. Every number here is recomputable.
 
     ``window`` defaults to the whole store (``ballcourt.window_from_events``).
@@ -667,6 +683,11 @@ def calibrate(court, window=None, conn=None, bots=None,
     the store marks ``actor_kind: bot`` *and* every name passed in ``bots``, so
     the obvious call ``calibrate(court, window, conn=con)`` cannot staff a
     service account as a reviewer. ``include_bots=True`` is for debugging only.
+
+    ``refinement`` is the measured created → ready cost (prd/42 M3,
+    ``jira.refinement_cost``); the policy lab's refinement knob needs it, and it
+    is passed in because the simulation's own input is the ball-court, not the
+    Jira layer.
     """
     bots = set() if include_bots else (set(bots or ()) | _store_bots(conn))
     start, end = window or ballcourt.window_from_events(court, None)
@@ -1005,6 +1026,18 @@ def calibrate(court, window=None, conn=None, bots=None,
             "elasticity": elasticity,
         },
         "stack_depth": _stack_depth(court),
+        # prd/42 M3: the refinement knob's measured cost (created → ready).
+        "refinement": (
+            {
+                "hours": refinement.get("hours"),
+                "n": refinement.get("n", 0),
+                "basis": refinement.get("basis"),
+            }
+            if refinement else {
+                "hours": None, "n": 0,
+                "basis": "no Jira layer, so the created → ready cost is unavailable",
+            }
+        ),
         "queueing": {
             "model": (
                 "M/G/1 with a realised-queue factor: "
@@ -1208,6 +1241,9 @@ class _Lab:
         # than drawn from the fitted lognormal (an independent heavy draw would
         # re-add the cycle's tail, which the residue already balances)
         self.unmeasured_hours = (calibration.get("unmeasured") or {}).get("mean_hours") or 0.0
+        # prd/42 M3: refinement is the measured created → ready segment. It is
+        # a delay before the first review, not a capacity-consuming service.
+        self.refinement_hours = (calibration.get("refinement") or {}).get("hours") or 0.0
         self.backlog = 0
         self.max_backlog = 0
         self.prs: list[_PR] = []
@@ -1302,6 +1338,15 @@ class _Lab:
             or responses_hist["histogram"],
             0,
         )
+        # prd/42 M3: a review-round cap stops the loop at the cap. Refinement
+        # before the first review is modelled as catching one round before it
+        # happens — the same assumption the rule's advice makes ("refine before
+        # the sprint"), stated here rather than hidden.
+        cap = self.scenario.review_round_cap
+        if cap is not None:
+            actions = min(actions, max(1, cap))
+        if self.scenario.refine_before_start:
+            actions = max(1, actions - 1)
         # a rework push needs a comment before it: the approval is the last action
         return actions, max(0, min(pushes, actions - 1))
 
@@ -1366,6 +1411,9 @@ class _Lab:
         yield admission
         self.backlog -= 1
         pr.started_at = env.now
+        if scenario.refine_before_start and self.refinement_hours > 0:
+            # the measured created → ready refinement, before the first review
+            yield env.timeout(self.refinement_hours)
         if self.unmeasured_hours > 0:
             # the measured residue: handover time no component names. It is a
             # balancing item, so it is carried at its mean (see _Lab.__init__)

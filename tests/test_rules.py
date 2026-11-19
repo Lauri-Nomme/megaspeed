@@ -43,6 +43,7 @@ class Fixture:
         self.as_of = as_of
         self.events: list[dict] = []
         self.objects: list[dict] = []
+        self.relations: list[tuple[str, str, str]] = []
         self.opened: dict[int, datetime] = {}
         self._count = 0
 
@@ -90,7 +91,7 @@ class Fixture:
         return self
 
     def event(self, number: int, activity: str, actor: str, hours: float,
-              **attributes) -> "Fixture":
+              people: tuple[str, ...] = (), **attributes) -> "Fixture":
         self._count += 1
         ts = self.opened[number] + timedelta(hours=hours)
         key = f"{REPO}#{number}:{self._count}"
@@ -106,6 +107,8 @@ class Fixture:
             "content_hash": hashlib.blake2b(key.encode(), digest_size=8).hexdigest(),
             "as_of": self.as_of,
         })
+        for person in people:
+            self.relations.append((key, "PERSON", f"PERSON:{person}"))
         return self
 
     # -- objects ------------------------------------------------------------ #
@@ -154,7 +157,7 @@ class Fixture:
         con = connect(path)
         try:
             ensure_schema(con)
-            write_events(con, self.events, [])
+            write_events(con, self.events, self.relations)
             write_objects(con, self.objects)
             write_run(con, {
                 "run_id": "fixture-rules",
@@ -315,6 +318,64 @@ class CycleTimeTests(StoreCase):
 # --------------------------------------------------------------------------- #
 # 3. reviewer_responsiveness
 # --------------------------------------------------------------------------- #
+class ResponseTimeTests(StoreCase):
+    """prd/42 M1: added as reviewer → first response, and the sentinel gate."""
+
+    def fixture(self) -> Fixture:
+        fx = Fixture()
+        # PR 1: two reviewers added; CaOs answers after 10 h, FrMo (sentinel)
+        # after 40 h. Every PR waits ~2.5 h for a peer and ~20 h for the gate.
+        fx.pr(1, "AaAa", state="merged", closed=T0 + timedelta(hours=60))
+        fx.event(1, "reviewer_changed", "AaAa", 0, change="added",
+                 people=("FrMo", "CaOs"))
+        fx.event(1, "comment_added", "CaOs", 8, severity="suggestion")
+        fx.event(1, "pr_approved", "CaOs", 10)
+        fx.event(1, "pr_approved", "FrMo", 40, sentinel=True)
+        fx.event(1, "pr_merged", "FrMo", 60)
+        # PR 2: the sentinel is asked and never answers; a peer answers in 4 h.
+        fx.pr(2, "BbBb", state="merged", closed=T0 + timedelta(hours=50))
+        fx.event(2, "reviewer_changed", "BbBb", 0, change="added",
+                 people=("FrMo", "XxXx"))
+        fx.event(2, "pr_approved", "XxXx", 4)
+        fx.event(2, "pr_merged", "BbBb", 50)
+        return fx
+
+    def test_response_medians_and_the_never_answered_count(self):
+        court = self.load(self.fixture())[0]
+        body = ballcourt.response_times(court)
+        people = {row["person"]: row for row in body["people"]}
+        self.assertEqual(people["CaOs"]["median_hours"], 8.0)
+        self.assertEqual(people["CaOs"]["n"], 1)
+        self.assertEqual(people["CaOs"]["never"], 0)
+        self.assertEqual(people["XxXx"]["median_hours"], 4.0)
+        self.assertEqual(people["FrMo"]["median_hours"], 40.0)
+        # asked twice, answered once: "slow" and "asleep" are different facts
+        self.assertEqual(people["FrMo"]["never"], 1)
+        self.assertEqual(people["FrMo"]["role"], "sentinel")
+        # the peer baseline is the median of the non-sentinel medians
+        self.assertEqual(body["reviewer_median_hours"], 6.0)
+        self.assertEqual(body["sentinels"], ["FrMo"])
+
+    def test_the_sentinel_lag_is_peer_approval_to_sentinel_approval(self):
+        court = self.load(self.fixture())[0]
+        body = ballcourt.response_times(court)
+        fr = next(row for row in body["people"] if row["person"] == "FrMo")
+        self.assertEqual(fr["sentinel_lag_n"], 1)
+        self.assertEqual(fr["sentinel_lag_median_hours"], 30.0)   # 10 → 40
+        self.assertIn("peer approval", body["sentinel_lag_basis"])
+
+    def test_the_queue_payload_carries_the_comparison(self):
+        court = self.load(self.fixture())[0]
+        body = ballcourt.queue_series(court, "person", rules.window_for(court, None))
+        self.assertIn("response", body)
+        self.assertEqual(body["response"]["reviewer_median_hours"], 6.0)
+        # the legend names the sentinel role without a real name (prd/02)
+        legend = ballcourt.person_legend(court)
+        roles = {row["person"]: row["role"] for row in legend["people"]}
+        self.assertEqual(roles["FrMo"], "sentinel")
+        self.assertIn("pseudonyms only", legend["note"])
+
+
 class ResponsivenessTests(StoreCase):
     def fixture(self) -> Fixture:
         fx = Fixture()
@@ -666,6 +727,8 @@ class StaleAndSentinelTailTests(StoreCase):
         self.assertEqual(suggestion["metric"], "stale_prs")
         self.assertEqual(suggestion["severity"], "critical")
         self.assertIn("platform#1", suggestion["evidence"]["examples"])
+        # prd/42 P8: the example carries the ticket key, so the view can link it
+        self.assertIn("ENG-1", suggestion["evidence"]["examples"])
 
     def test_a_done_ticket_with_an_open_pr_is_stale(self):
         fx = self.fixture()
@@ -928,6 +991,29 @@ class PrSizeTests(StoreCase):
             {1: 12, 2: 12, 3: 2, 4: 3, 5: 1},
         )
 
+    def test_size_vs_cycle_correlation_is_reported(self):
+        """prd/42 M8: the sliders' missing evidence — size vs cycle."""
+        fx = Fixture()
+        for number, commits, hours in ((1, 1, 10), (2, 2, 20), (3, 3, 30), (4, 4, 40)):
+            fx.pr(number, "AaAa", state="merged",
+                  closed=T0 + timedelta(hours=hours))
+            for _ in range(commits):
+                fx.commit(number)
+        court, _threads, sizes, _bots = self.load(fx)
+        body = rules.pr_size_distribution(
+            court, rules.window_for(court, None), sizes,
+        )
+        correlations = body["correlations"]
+        self.assertEqual(correlations["n"], 4)
+        self.assertEqual(correlations["commits"], 1.0)
+        self.assertIsNone(correlations["lines"])     # diff size not captured
+        self.assertIn("Pearson r", correlations["basis"])
+        # every closed row carries its canonical cycle (business hours)
+        self.assertEqual(
+            {row["number"]: row["cycle_hours"] for row in body["rows"]},
+            {1: 10.0, 2: 20.0, 3: 30.0, 4: 40.0},
+        )
+
     def test_the_line_distribution_matches_the_pr_attributes(self):
         fx = self.lines_fixture()            # changed lines: 500, 450, 50, 100
         court, _threads, sizes, _bots = self.load(fx)
@@ -1161,6 +1247,17 @@ class RankingTests(StoreCase):
                         "severity", "impact_hours"):
                 self.assertIn(key, suggestion)
             self.assertIn(suggestion["severity"], ("critical", "warning", "info"))
+
+    def test_severity_breaks_ties_in_the_rank(self):
+        """prd/42 P2: severity ≠ rank, but equal impact is ordered by severity."""
+        ordered = rules.rank([
+            {"id": "warn", "severity": "warning", "impact_score": 10.0,
+             "impact_hours": 10.0, "sample": 1},
+            {"id": "crit", "severity": "critical", "impact_score": 10.0,
+             "impact_hours": 10.0, "sample": 1},
+        ])
+        self.assertEqual([row["id"] for row in ordered], ["crit", "warn"])
+        self.assertEqual([row["rank"] for row in ordered], [1, 2])
 
     def test_confidence_ramps_with_sample_size(self):
         payload = self.insights(self.fixture())

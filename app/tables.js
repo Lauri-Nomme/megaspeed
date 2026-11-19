@@ -226,6 +226,60 @@ export function deliveryMarkdown(rows, meta, base = '') {
   return [...header, ...body].join('\n');
 }
 
+/**
+ * prd/42 M4: "Done in Jira, PR open" as a first-class list.
+ *
+ * The QA run could only find these three items in the raw store. The list
+ * names the ticket, the PR and who owes the next action, and calls out the
+ * stronger case: a PR opened *after* its ticket was closed.
+ */
+export function doneOpenMarkup(delivery, { base = '' } = {}) {
+  const done = delivery && delivery.done_open;
+  const rows = (done && done.rows) || [];
+  if (!done || !done.available) return '';
+  if (!rows.length) {
+    return `<section class="panel wide done-open-panel">
+      <div class="panel-head"><h2>Done in Jira, PR open</h2>
+        <span class="pill healthy">none</span></div>
+      <p class="panel-note">Every ticket marked Done in Jira has its code merged.</p>
+    </section>`;
+  }
+  const body = rows.map((row) => `<tr data-done-open="${esc(row.key)}">
+      <td class="c-id" data-label="ticket">${ticketLink(row.key, { base })}
+        <span class="mono id">#${esc(row.number)}</span>
+        <span class="repo">${esc(row.repo_short)}</span></td>
+      <td class="c-who" data-label="owes">${esc((row.waiting_on || []).join(' + ') || '—')}</td>
+      <td class="c-since mono" data-label="ticket closed">${esc(row.ticket_closed ? fmtAbsolute(Date.parse(row.ticket_closed)) : '—')}</td>
+      <td class="c-state" data-label="note">${
+        row.opened_after_close
+          ? `<span class="pill waiting" title="the PR was opened after Jira closed the ticket — the work cannot have been part of the delivered story">PR opened after the ticket closed${row.opened_after_close_hours ? ` (${esc(fmtHours(row.opened_after_close_hours))} later)` : ''}</span>`
+          : '<span class="pill neutral" title="Jira says Done while the code is still unmerged">unmerged</span>'}</td>
+    </tr>`).join('');
+  return `<section class="panel wide done-open-panel" id="done-open">
+    <div class="panel-head"><h2>Done in Jira, PR open</h2>
+      <span class="pill blocked">${done.count}</span>
+      <span class="muted">${done.opened_after_close
+        ? `${done.opened_after_close} PR${done.opened_after_close === 1 ? ' was' : 's were'} opened after the ticket closed`
+        : 'the code is unmerged'}</span></div>
+    <table class="table compact"><thead><tr>
+      <th class="c-id">ticket / PR</th><th class="c-who">who owes</th>
+      <th class="c-since">ticket closed</th><th class="c-state">note</th>
+    </tr></thead><tbody>${body}</tbody></table>
+    <p class="panel-note">${esc(done.note || '')}</p>
+  </section>`;
+}
+
+/** prd/42 P11: a tooltip for the two jargon labels the QA run flagged. */
+export function jargonTitle(term) {
+  const glossary = {
+    unobserved: 'no events since the snapshot — the tail is not measured, so the blocking graph excludes it',
+    ready: 'every reviewer has answered and only the merge click remains — nobody is reviewing',
+    'sentinel waited on ready': 'the PR was ready to merge and waited for the mandatory approver, not idly',
+    sentinel: 'the mandatory approver on (typically) every PR — a role, not a bot',
+  };
+  return glossary[String(term || '').toLowerCase()] || '';
+}
+
 /** The overview: counts first, then the rows that need attention. */
 export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue' }) {
   const counts = delivery ? delivery.counts : { open: 0, blocked: 0, oldest_waiting: 0 };
@@ -295,7 +349,7 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
         <div class="panel-head"><h2>Where waits accumulate</h2>
           <button type="button" class="link" data-go="blocking">Blocking map →</button></div>
         ${topBlocking.length ? `<table class="table compact"><tbody>${topBlocking.map((edge) => `
-          <tr><td class="c-who" data-label="handover"><span class="mono">${esc(edge.from)}</span> waited on
+          <tr title="${esc(edge.to === 'ready' ? jargonTitle('sentinel waited on ready') : '')}"><td class="c-who" data-label="handover"><span class="mono">${esc(edge.from)}</span> waited on
             <span class="mono">${esc(edge.to)}</span></td>
           <td class="c-dur num" data-label="wait">${esc(fmtHours(edge.hours))}</td></tr>`).join('')}</tbody></table>`
     : '<div class="empty-row">No measured handover in this window.</div>'}
@@ -306,12 +360,13 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
           <button type="button" class="link" data-go="queue">Queue view →</button></div>
         ${counted.length ? `<table class="table compact"><tbody>${counted.slice(0, 8).map((stream) => `
           <tr><td class="c-who" data-label=""><span class="mono">${esc(stream.id)}</span></td>
-            <td class="c-state" data-label="diagnosis">${pill(stream.summary.diagnosis, `≈ ${stream.summary.diagnosis} (queue wait)`)}</td>
+            <td class="c-state" data-label="diagnosis">${pill(stream.summary.diagnosis, `≈ ${stream.summary.diagnosis}`, 'queue wait, relative to the median wait in this window — not calendar utilisation')}</td>
             <td class="c-dur num" data-label="mean wait">≈${esc(fmtHours(stream.summary.mean_wait_hours))}</td></tr>`).join('')}</tbody></table>${
           counted.length > 8 ? `<p class="panel-note">showing the 8 longest of ${counted.length}</p>` : ''}`
     : '<div class="empty-row">No measured waits in this window.</div>'}
       </section>
-    </div>`;
+    </div>
+    ${doneOpenMarkup(delivery)}`;
 }
 
 /** Detail panel body for one item (over- + name + context + impact + facts). */

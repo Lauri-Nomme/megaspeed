@@ -125,9 +125,19 @@ function carriedOver(data, base) {
   const items = shown.map((row) => {
     const path = (row.sprints || []).join(' → ');
     const status = row.status ? ` ${row.status}` : '';
-    return `${ticketLink(row.key, { base })} <span class="muted mono">${esc(path + status)}</span>`;
+    // prd/42 M5: say where it went next, or that it never reappeared.
+    const destination = row.reappears === true
+      ? ` → S${row.destination_sprint}`
+      : row.reappears === false
+        ? ' → never re-committed'
+        : '';
+    return `${ticketLink(row.key, { base })} <span class="muted mono">${esc(path + status + destination)}</span>`;
   });
-  return `<p class="sprint-carry-list">committed but not done by the close: ${items.join(' · ')}${more}</p>`;
+  const destination = (carry.never_reappeared || 0)
+    ? ` · <b>${carry.never_reappeared}</b> never reappear in the next sprint`
+      + (carry.no_next_sprint ? ` (${carry.no_next_sprint} have no next sprint)` : '')
+    : '';
+  return `<p class="sprint-carry-list">committed but not done by the close: ${items.join(' · ')}${more}${destination}</p>`;
 }
 
 /** The sprint lens selection line: what is filtered and how to clear it. */
@@ -158,6 +168,7 @@ export function sprintStrip(data, { base = '', focus = null } = {}) {
     const selected = focus != null && String(focus) === String(sprint.sprint_id);
     const late = sprint.done_late || 0;
     const never = sprint.never_done || 0;
+    const added = sprint.added_after_start || 0;
     return `<button type="button" class="sprint-row${sprint.open ? ' open' : ''}${selected ? ' selected' : ''}"
         data-sprint-id="${esc(sprint.sprint_id)}"
         data-sprint-start="${Number.isFinite(start) ? start : ''}"
@@ -168,7 +179,8 @@ export function sprintStrip(data, { base = '', focus = null } = {}) {
       <span class="sprint-state">${esc(state)}</span>
       <span class="sprint-window mono">${esc(windowLabel(sprint))}</span>
       <span class="sprint-days num muted">${esc(days)}</span>
-      <span class="sprint-scope-count num">${sprint.story_count || 0} stor${(sprint.story_count || 0) === 1 ? 'y' : 'ies'} · ${sprint.points || 0} pts</span>
+      <span class="sprint-scope-count num">${sprint.story_count || 0} stor${(sprint.story_count || 0) === 1 ? 'y' : 'ies'} · ${sprint.points || 0} pts${
+        added ? ` · <span class="sprint-added" title="stories added after the sprint's start — not part of the commitment it was planned with">+${added} after start</span>` : ''}</span>
       <span class="sprint-done num" title="done by this sprint's close — not done by today">${
         sprint.done_by_end ?? sprint.done ?? 0} of ${sprint.story_count || 0} by end</span>
       ${late ? `<span class="sprint-late num" title="reached done after the sprint's close">${late} late</span>` : ''}

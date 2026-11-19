@@ -151,7 +151,8 @@ class Fixture:
         return self
 
     def pr_event(self, number: int, activity: str, actor: str, hours: float,
-                 tickets: tuple[str, ...] = (), **attributes) -> "Fixture":
+                 tickets: tuple[str, ...] = (), people: tuple[str, ...] = (),
+                 **attributes) -> "Fixture":
         self._count += 1
         event_key = f"{REPO}#{number}:{self._count}"
         self.events.append({
@@ -171,6 +172,17 @@ class Fixture:
         # ticket filter has to see these too (not only STORY-linked events)
         for ticket in tickets:
             self.relations.append((event_key, "TICKET", f"TICKET:{ticket}"))
+        for person in people:
+            self.relations.append((event_key, "PERSON", f"PERSON:{person}"))
+        return self
+
+    def thread(self, number: int, index: int, *, state: str = "open",
+               closed: datetime | None = None) -> "Fixture":
+        self._object(
+            "THREAD", f"THREAD:{REPO}#{number}:{index}", repo=REPO, pr_id=number,
+            state=state, created_at=self.opened[number], closed_at=closed,
+            attributes={"severity": "suggestion"},
+        )
         return self
 
     def write(self, path: Path) -> Path:
@@ -464,6 +476,165 @@ class TicketCycleTests(StoreCase):
 # --------------------------------------------------------------------------- #
 # the small adjacent fix: a note only explains an unavailable metric
 # --------------------------------------------------------------------------- #
+class BenchmarkTests(StoreCase):
+    """prd/42 M2: "73 h" is read against its cohort."""
+
+    def fixture(self) -> Fixture:
+        fx = Fixture()
+        # four stories, cycles 10 / 20 / 30 / 40 h, all 3 points
+        for index, (key, hours) in enumerate(
+            (("DEL-201", 10), ("DEL-202", 20), ("DEL-203", 30), ("DEL-204", 40))
+        ):
+            created = T0 + timedelta(days=index)
+            fx.story(key, created, points=3, state="done",
+                     closed=created + timedelta(hours=hours))
+            fx.pointed(key, created + timedelta(hours=1), 3)
+            fx.status(key, created + timedelta(hours=2), "in_progress")
+            fx.status(key, created + timedelta(hours=hours), "done",
+                      from_status="in_progress")
+        return fx
+
+    def test_the_cycle_is_ranked_against_the_cohort(self):
+        con, court, data = self.load(self.fixture())
+        try:
+            body = tickets.ticket(court, data, "DEL-203")
+        finally:
+            con.close()
+        benchmark = body["benchmark"]
+        self.assertTrue(benchmark["available"])
+        self.assertEqual(benchmark["rank"], 3)
+        self.assertEqual(benchmark["n"], 4)
+        self.assertEqual(benchmark["faster"], 2)
+        self.assertEqual(benchmark["median_hours"], 25.0)
+        self.assertEqual(benchmark["points"], 3)
+        self.assertEqual(benchmark["points_n"], 4)
+        self.assertEqual(benchmark["points_median_hours"], 25.0)
+        self.assertFalse(benchmark["censored"])
+
+    def test_a_faster_story_is_ranked_first(self):
+        con, court, data = self.load(self.fixture())
+        try:
+            body = tickets.ticket(court, data, "DEL-201")
+        finally:
+            con.close()
+        self.assertEqual(body["benchmark"]["rank"], 1)
+        self.assertEqual(body["benchmark"]["percentile"], 0.25)
+
+    def test_an_open_story_has_no_completed_cohort_rank(self):
+        fx = self.fixture()
+        fx.story("DEL-205", T0, points=3, state="open")
+        con, court, data = self.load(fx)
+        try:
+            body = tickets.ticket(court, data, "DEL-205")
+        finally:
+            con.close()
+        self.assertFalse(body["benchmark"]["available"])
+        self.assertIn("censored", body["benchmark"]["note"])
+
+
+class DoneButOpenTests(StoreCase):
+    """prd/42 M4: Done in Jira, PR open — with the opened-after-close case."""
+
+    def fixture(self) -> Fixture:
+        fx = Fixture()
+        fx.story("DEL-183", T0, points=3, state="done",
+                 closed=T0 + timedelta(hours=10))
+        fx.status("DEL-183", T0 + timedelta(hours=10), "done")
+        # the PR opened nine days after its ticket was closed
+        fx.pr(66, "BbBb", T0 + timedelta(days=9), tickets=("DEL-183",),
+              state="open", closed=None)
+        fx.pr_event(66, "reviewer_changed", "BbBb", 1, change="added",
+                    people=("RrRr",), tickets=("DEL-183",))
+        return fx
+
+    def test_the_list_names_the_ticket_who_owes_and_the_after_close_case(self):
+        con, court, data = self.load(self.fixture())
+        try:
+            delivery = ballcourt.delivery_list(
+                court, ballcourt.window_from_events(court, None),
+                done_tickets=jira.done_keys(data),
+            )
+            body = tickets.done_but_open(court, data, delivery)
+        finally:
+            con.close()
+        self.assertTrue(body["available"])
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["opened_after_close"], 1)
+        row = body["rows"][0]
+        self.assertEqual(row["key"], "DEL-183")
+        self.assertEqual(row["number"], 66)
+        self.assertTrue(row["opened_after_close"])
+        self.assertGreater(row["opened_after_close_hours"], 24 * 8)
+        self.assertEqual(row["waiting_on"], ["RrRr"])
+
+
+class PrDrawerFactsTests(StoreCase):
+    """prd/42 M6: the ticket payload carries the drawer's review facts."""
+
+    def fixture(self) -> Fixture:
+        fx = Fixture()
+        fx.story("DEL-210", T0, points=5, state="open")
+        fx.pr(210, "AaAa", T0 + timedelta(hours=1), tickets=("DEL-210",),
+              state="open", closed=None)
+        fx.pr_event(210, "reviewer_changed", "AaAa", 2, change="added",
+                    people=("RrRr", "SsSs"), tickets=("DEL-210",))
+        fx.pr_event(210, "pr_approved", "RrRr", 4, tickets=("DEL-210",))
+        fx.pr_event(210, "comment_added", "RrRr", 5, severity="suggestion",
+                    tickets=("DEL-210",))
+        fx.thread(210, 1, state="open")
+        fx.thread(210, 2, state="resolved", closed=T0 + timedelta(hours=6))
+        return fx
+
+    def test_the_pr_row_names_reviewers_approvals_threads_and_last_event(self):
+        con, court, data = self.load(self.fixture())
+        try:
+            threads = [
+                {"repo": REPO, "pr_id": 210, "closed_at": None},
+                {"repo": REPO, "pr_id": 210, "closed_at": T0},
+            ]
+            body = tickets.ticket(court, data, "DEL-210", threads=threads)
+        finally:
+            con.close()
+        pr = body["prs"][0]
+        self.assertEqual(pr["reviewers_total"], 2)
+        self.assertEqual(pr["reviewers_approved"], 1)
+        self.assertEqual(pr["reviewers_pending"], 1)
+        self.assertEqual(pr["approved"], ["RrRr"])
+        self.assertEqual(pr["waiting_on"], ["SsSs"])
+        self.assertEqual(pr["open_threads"], 1)
+        self.assertEqual(pr["last_event_activity"], "comment_added")
+        self.assertIsNotNone(pr["last_event"])
+
+
+class EpicTests(StoreCase):
+    """prd/42 P9: an epic says it is not a story, and lists its children."""
+
+    def fixture(self) -> Fixture:
+        fx = Fixture()
+        fx._object("EPIC", "EPIC:DEL-1", ticket_keys=["DEL-1"], state="open",
+                   created_at=T0, closed_at=None)
+        fx.story("DEL-220", T0, points=3, state="done",
+                 closed=T0 + timedelta(hours=20))
+        fx.status("DEL-220", T0 + timedelta(hours=20), "done")
+        # every PR carries its epic key, so DEL-1 has PRs even though it is not
+        # a story — the epic branch must win over "PR without a story".
+        fx.pr(1, "AaAa", T0, tickets=("DEL-1",), state="open", closed=None)
+        return fx
+
+    def test_the_epic_page_states_it_is_not_a_story(self):
+        con, court, data = self.load(self.fixture())
+        try:
+            body = tickets.ticket(court, data, "DEL-1")
+        finally:
+            con.close()
+        self.assertEqual(body["kind"], "epic")
+        self.assertFalse(body["available"])
+        self.assertIn("is an epic", body["answer"])
+        self.assertEqual(body["epic"]["story_count"], 1)
+        self.assertEqual(body["epic"]["stories"][0]["key"], "DEL-220")
+        self.assertEqual(body["segments"]["rows"], [])
+
+
 class NoteTests(StoreCase):
     def test_an_available_metric_carries_no_no_event_note(self):
         con, court, data = self.load()
@@ -621,6 +792,15 @@ class TicketApiTests(unittest.TestCase):
         self.assertTrue(row["stale"])
         self.assertIn("Done in Jira", " ".join(row["stale_reasons"]))
         self.assertEqual(body["counts"]["stale"], 1)
+        # prd/42 M4: the same fact is a first-class list, not only a stale pill.
+        self.assertIn("done_open", body)
+        self.assertGreaterEqual(body["done_open"]["count"], 1)
+        self.assertIn("DEL-167", [item["key"] for item in body["done_open"]["rows"]])
+        # prd/42 M6: the drawer's review facts travel on every delivery row.
+        self.assertIn("reviewers_total", row)
+        self.assertIn("waiting_on", row)
+        self.assertIn("last_event", row)
+        self.assertIn("open_threads", row)
         # prd/34 §2: the owner is named, never "review queue"
         self.assertEqual(row["waiting_on"], ["RrRr"])
         self.assertEqual(row["ball_label"], "RrRr")

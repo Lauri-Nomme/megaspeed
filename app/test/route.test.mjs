@@ -115,7 +115,14 @@ test('prd/37 §4: the sprint lens filters the story lanes and marks its band', (
   assert.match(main, /function focusSprint/);
   assert.match(main, /function clearSprintFocus/);
   assert.match(main, /data-sprint-clear/);
-  assert.match(main, /sprint: state\.sprint/);
+  assert.match(main, /sprint: usesSprint \? state\.sprint : null/);
+});
+
+test('prd/42 P10: a view that ignores the sprint lens does not keep it in the URL', () => {
+  const main = read('main.js');
+  assert.match(main, /const usesSprint = state\.page === 'timeline'/);
+  assert.match(main, /sprint: usesSprint \? state\.sprint : null/);
+  assert.match(main, /usesSprint \? sprintRange\(\) : \{ start: null, end: null \}/);
 });
 
 test('P-2: #ticket/KEY still resolves, alone and inside the new scheme', () => {

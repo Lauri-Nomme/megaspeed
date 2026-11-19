@@ -451,6 +451,38 @@ class SprintCarryOverTests(StoreCase):
         self.assertFalse(story_rows["ENG-3"]["in_sprint"])
 
 
+class SprintScopeCreepTests(StoreCase):
+    """prd/42 M5: scope added after the start, and where carry-over went."""
+
+    def test_added_after_start_is_counted_per_sprint(self):
+        payload = self.sprint_view()
+        # ENG-2 and ENG-3 were added to sprint 2 a day after it opened; ENG-1
+        # was added at the start, so it is not scope creep.
+        s2 = by_sprint(payload, 2)
+        self.assertEqual(sorted(s2["added_after_start_stories"]), ["ENG-2", "ENG-3"])
+        self.assertEqual(s2["added_after_start"], 2)
+        self.assertEqual(s2["added_after_start_share"], 1.0)   # 2 of 2
+        self.assertEqual(by_sprint(payload, 1)["added_after_start_stories"], ["ENG-5"])
+        self.assertEqual(by_sprint(payload, 3)["added_after_start_stories"], ["ENG-6"])
+
+    def test_carry_over_says_where_the_story_went(self):
+        payload = self.sprint_view()
+        carry = payload["carry_over"]
+        rows = {row["key"]: row for row in carry["rows"]}
+        # ENG-2 moved into sprint 2: the re-commit is the destination.
+        self.assertEqual(rows["ENG-2"]["destination_sprint"], 2)
+        self.assertTrue(rows["ENG-2"]["reappears"])
+        # ENG-3 missed sprint 2 and never appeared in sprint 3.
+        self.assertEqual(rows["ENG-3"]["destination_sprint"], 3)
+        self.assertFalse(rows["ENG-3"]["reappears"])
+        # ENG-5 missed sprint 1 and never appeared in sprint 2.
+        self.assertEqual(rows["ENG-5"]["destination_sprint"], 2)
+        self.assertFalse(rows["ENG-5"]["reappears"])
+        self.assertEqual(carry["reappeared"], 1)
+        self.assertEqual(carry["never_reappeared"], 2)
+        self.assertEqual(carry["no_next_sprint"], 0)
+
+
 # --------------------------------------------------------------------------- #
 # a store without the ticket layer
 # --------------------------------------------------------------------------- #

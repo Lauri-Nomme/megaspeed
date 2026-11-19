@@ -418,7 +418,7 @@ utilisation (ρ) and therefore queue; lead time and cycle time are reported **se
 
 ## 8. Closed vocabularies (taxonomy.py — the only labels that cross into the store)
 
-The pseudonymisation contract (§9) means every classification is a projection onto one of these finite
+The pseudonymisation contract (§10) means every classification is a projection onto one of these finite
 sets; "other" is the explicit "could not decide", never free text.
 
 | vocabulary | values |
@@ -438,7 +438,67 @@ sets; "other" is the explicit "could not decide", never free text.
 
 ---
 
-## 9. Data model & pseudonymisation (prd/02 — non-negotiable)
+## 9. Second-order metrics (prd/42)
+
+These are comparisons, not new units. Each names its cohort and its basis wherever it is shown.
+
+### Response time
+- **Definition**: the business hours from a person *being added as a reviewer* to their first response —
+  an approval, needs-work, unapproval or comment. A person asked twice and answering once has one sample
+  and one `never`; `never` is not a zero.
+- **Derivation**: `ballcourt.response_times` reads the `reviewer_changed` add events and the first
+  responder action by that person, priced on the responder's own calendar. The **sentinel lag** is
+  separate: the hours from the last peer approval to the sentinel approval (the precedence gate's wait,
+  not a response to being added).
+- **Purpose**: answer "who is the constraint" by response, next to the queue-wait ranking (which answers
+  "who holds the most wait"). The two are different metrics and are labelled as such.
+
+### Cohort benchmark
+- **Definition**: a story's rank among the store's **completed** story cycles: rank 1 is the *fastest*;
+  "13th of 87 fastest" means 12 stories were faster. The same-points median is the cohort of completed
+  stories with the same estimate.
+- **Derivation**: every story with created and done boundaries, business hours on the story's own
+  calendar. An open story is censored and has no completed rank (mixing the two changed the cohort from
+  87 to 100 and moved every rank).
+- **Purpose**: read a cycle ("73 h") against its cohort instead of in a vacuum.
+
+### Done in Jira, PR open
+- **Definition**: an *open* PR whose ticket has a final done boundary. `opened after the ticket closed`
+  is the stronger case: the PR was opened after Jira closed the ticket, so the work cannot have been part
+  of the delivered story.
+- **Derivation**: `tickets.done_but_open` joins open PRs to `jira.done_keys`; `waiting_on` is the delivery
+  row's holder set.
+- **Purpose**: the first-class list of finished work the team cannot deliver or count.
+
+### Scope added after start
+- **Definition**: a story added to a sprint after the sprint's measured start without the store's
+  `at_start` membership marker. It was not part of the commitment the sprint was planned with.
+- **Derivation**: `sprint_added` events compared with the band's start.
+- **Purpose**: separate "committed" from "planned", so a delivery share is not read as a broken promise
+  the team never made.
+
+### Carry-over destination
+- **Definition**: for a story committed to a closed sprint but not done by its close, the **next** sprint
+  (by band start) and whether the story reappeared in it. `never reappears` means it was silently
+  dropped, not re-committed.
+- **Derivation**: the story's membership list and the sprint bands' order.
+- **Purpose**: complete the carry-over fact — it is not only "how many", but "where did they go".
+
+### PR-size correlation
+- **Definition**: Pearson `r` between a PR's size (commits or changed lines) and its cycle, over **closed**
+  PRs. Review rounds are reported next to it because they explain the cycle far better in the QA data.
+- **Purpose**: keep "cap PRs" from being read as a proven lever when the data says size is weak.
+
+### Epic
+- **Definition**: a parent grouping of stories, not a work item. It has no created → done cycle; its
+  children do.
+- **Derivation**: `EPIC` objects and the stories whose `epic_key` names them.
+- **Purpose**: the epic page states it is not a story and lists the children, instead of rendering
+  "0/9 segments" as if the ticket were broken.
+
+---
+
+## 10. Data model & pseudonymisation (prd/02 — non-negotiable)
 
 - The store and every API response contain only **ticket keys, abbreviated actor pseudonyms, timestamps
   and enumerated closed-vocabulary labels**. No raw description, comment, diff, commit message, or

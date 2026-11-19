@@ -128,6 +128,9 @@ BUILD_RESULTS = frozenset({"success", "failed", "passed", "green", "red"})
 # activities that mean "a reviewer did something", i.e. the interval *before*
 # them was review time
 REVIEWER_ACTIONS = {"pr_approved", "pr_unapproved", "pr_needs_work", "reviewer_changed"}
+# prd/42 M1: a reviewer's *response* is any verdict or comment they leave — the
+# first thing they do after being added, not only an approval.
+RESPONSE_ACTIONS = {"pr_approved", "pr_needs_work", "pr_unapproved", "comment_added"}
 # activities that mean "the author did something"
 AUTHOR_ACTIONS = {"pr_pushed", "rebased"}
 TERMINAL = {"pr_merged", "pr_declined"}
@@ -1462,6 +1465,10 @@ def queue_series(
         "bucket_hours": bucket_hours,
         "buckets": buckets,
         "baseline_mean_wait_hours": round(baseline, 1),
+        # prd/42 M1: the comparative answer ("who is the constraint") needs a
+        # response-time column, not only a queue-wait ranking. It is computed
+        # from the same events/intervals and travels with the queue payload.
+        "response": response_times(bc, (start, end)),
         "streams": out,
         "totals": {
             "items": sum(s["summary"]["items"] for s in out),
@@ -1469,6 +1476,201 @@ def queue_series(
             "abandoned_hours": abandoned_hours,
             "streams": len(out),
         },
+    }
+
+
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return round(ordered[middle], 2)
+    return round((ordered[middle - 1] + ordered[middle]) / 2.0, 2)
+
+
+def _p90(values: list[float]) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = min(len(ordered) - 1, max(0, int(round(0.9 * (len(ordered) - 1)))))
+    return round(ordered[index], 2)
+
+
+def response_times(bc: BallCourt, window: tuple[datetime, datetime] | None = None) -> dict:
+    """prd/42 M1: how long each person takes to answer a review request.
+
+    For every ``reviewer_changed`` add event, the clock opens at the add and
+    stops at that person's first response (approval, needs-work, unapproval or
+    comment). A reviewer who never answered is counted as ``never`` — excluded
+    from the median, never silently treated as a zero. The sentinel's
+    peer→sentinel lag is reported separately: it is the *precedence* wait after
+    the last peer approval, not a response to being added.
+
+    The samples are business hours on **the responder's own calendar**
+    (concepts.md §1/§2), so a reviewer on vacation is not charged for the
+    hours the team worked.
+    """
+    start, end = window or (
+        min((i.start for i in bc.intervals), default=bc.snapshot), bc.snapshot
+    )
+    sentinels = set(bc.sentinels)
+    bots = set(bc.bots)
+    samples: dict[str, list[float]] = defaultdict(list)
+    never: dict[str, int] = defaultdict(int)
+    sentinel_lags: dict[str, list[float]] = defaultdict(list)
+    for state in bc.prs:
+        author = state.pr["actor"]
+        added: dict[str, datetime] = {}
+        answered: set[str] = set()
+        approvals: list[tuple[datetime, str]] = []
+        for event in state.events:
+            activity = event["activity"]
+            actor = event["actor"]
+            attrs = event.get("attributes") or {}
+            if activity == "reviewer_changed" and attrs.get("change") == "added":
+                for person in event.get("people") or ():
+                    if person and person != author and person not in bots:
+                        added.setdefault(person, event["_ts"])
+            if actor in bots or actor == author:
+                continue
+            responded = activity in RESPONSE_ACTIONS or (
+                activity == "reviewer_changed"
+                and attrs.get("change") == "reviewed"
+            )
+            if responded and actor in added and actor not in answered:
+                answered.add(actor)
+                if start <= added[actor] < end:
+                    samples[actor].append(
+                        bc.business_hours(actor, added[actor], event["_ts"])
+                    )
+            if activity == "pr_approved":
+                approvals.append((event["_ts"], actor))
+        for person in added:
+            if person not in answered:
+                never[person] += 1
+        # peer approval -> sentinel approval: the gate's own latency
+        for stamp, actor in approvals:
+            if actor not in sentinels:
+                continue
+            peers = [
+                peer_stamp for peer_stamp, peer in approvals
+                if peer not in sentinels and peer_stamp <= stamp
+            ]
+            if peers and start <= stamp < end:
+                sentinel_lags[actor].append(
+                    bc.business_hours(actor, max(peers), stamp)
+                )
+
+    people: list[dict] = []
+    for person in sorted(set(samples) | set(never) | set(sentinel_lags)):
+        if person in bots:
+            continue
+        values = samples.get(person, [])
+        lags = sentinel_lags.get(person, [])
+        people.append({
+            "person": person,
+            "role": "sentinel" if person in sentinels else "reviewer",
+            "n": len(values),
+            "median_hours": _median(values),
+            "mean_hours": round(sum(values) / len(values), 2) if values else None,
+            "p90_hours": _p90(values),
+            "max_hours": round(max(values), 2) if values else None,
+            "never": never.get(person, 0),
+            "sentinel_lag_n": len(lags),
+            "sentinel_lag_median_hours": _median(lags),
+            "sentinel_lag_p90_hours": _p90(lags),
+        })
+    people.sort(key=lambda row: (
+        -(row["median_hours"] if row["median_hours"] is not None else -1),
+        row["person"],
+    ))
+    reviewer_values = [
+        row["median_hours"] for row in people
+        if row["median_hours"] is not None and row["role"] != "sentinel"
+    ]
+    return {
+        "people": people,
+        "sentinels": sorted(sentinels),
+        "bots_excluded": sorted(bots),
+        "reviewer_median_hours": _median(reviewer_values),
+        "basis": (
+            "hours from 'added as reviewer' to that person's first response "
+            "(approval, needs-work, unapproval or comment), priced on the "
+            "responder's calendar; a reviewer who never answered is counted "
+            "under 'never', not as a zero"
+        ),
+        "sentinel_lag_basis": (
+            "hours from the last peer approval to the sentinel's approval; "
+            "the precedence gate's own wait, not a response to being added"
+        ),
+        "hours_mode": bc.hours_mode,
+    }
+
+
+def person_legend(bc: BallCourt, stories: list | None = None) -> dict:
+    """prd/42 M7: who is who, by role, without leaving the pseudonym contract.
+
+    The store holds no real names (prd/02), so the legend can only say *role*:
+    sentinel (mandatory approver), bot, author (opened PRs), reviewer
+    (approvals) and story owner (assigned Jira stories). That is enough to
+    answer "who is the sentinel" — the one person on every PR — without
+    identifying anybody.
+    """
+    authored: dict[str, int] = defaultdict(int)
+    approvals: dict[str, int] = defaultdict(int)
+    reviews: dict[str, int] = defaultdict(int)
+    for state in bc.prs:
+        author = state.pr["actor"]
+        if author not in bc.bots:
+            authored[author] += 1
+        for event in state.events:
+            actor = event["actor"]
+            if actor in bc.bots or actor == author:
+                continue
+            if event["activity"] == "pr_approved":
+                approvals[actor] += 1
+            if event["activity"] in RESPONSE_ACTIONS:
+                reviews[actor] += 1
+    owned: dict[str, int] = defaultdict(int)
+    for story in stories or ():
+        actor = getattr(story, "actor", None)
+        if actor:
+            owned[actor] += 1
+    everyone = set(authored) | set(approvals) | set(reviews) | set(owned) | set(bc.bots)
+    people = []
+    for person in sorted(everyone):
+        if person in bc.bots:
+            role = "bot"
+        elif person in bc.sentinels:
+            role = "sentinel"
+        elif owned.get(person) and not (authored.get(person) or approvals.get(person)):
+            role = "story owner"
+        elif authored.get(person):
+            role = "author"
+        else:
+            role = "reviewer"
+        people.append({
+            "person": person,
+            "role": role,
+            "sentinel": person in bc.sentinels,
+            "bot": person in bc.bots,
+            "prs_authored": authored.get(person, 0),
+            "approvals": approvals.get(person, 0),
+            "review_responses": reviews.get(person, 0),
+            "stories_owned": owned.get(person, 0),
+        })
+    people.sort(key=lambda row: (
+        {"sentinel": 0, "bot": 1, "story owner": 2, "author": 3, "reviewer": 4}[row["role"]],
+        -row["approvals"], row["person"],
+    ))
+    return {
+        "people": people,
+        "note": (
+            "roles, not names: the store holds pseudonyms only (prd/02). "
+            "sentinel = mandatory approver on every PR; bot = automation, never "
+            "a constraint; story owner = assigned Jira stories, not PRs"
+        ),
     }
 
 
@@ -1659,6 +1861,13 @@ def delivery_list(
             "reviewers_approved": len(approved),
             "phase": current.phase if current else "no events",
             "kind": kind,
+            # prd/42 M6: the drawer's "last event" is a fact, not a dash. The
+            # tail's start is the last handover event; its activity is `kind`.
+            "last_event": iso(tail.start) if tail is not None else None,
+            "last_event_activity": kind,
+            "last_event_actor": tail.by if tail is not None else None,
+            "ci": bool(latest.ci if latest is not None else False),
+            "rebasing": bool(current is not None and current.phase == "rebasing"),
             "waiting_since": iso(waiting_since),
             "waiting_hours": waiting_hours,
             "age_hours": age_hours,
