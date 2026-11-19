@@ -24,6 +24,7 @@ import {
 import {
   TABS, tabCounts, tabRows, deliveryTable, overviewMarkup, detailMarkup,
   impactSentence, entityMarkdown, deliveryMarkdown, reviewStateLine, matchesScope,
+  waitingLabel, weekLabel,
 } from '/tables.js';
 import { rulesMarkup, rulesStats, rulesMarkdown } from '/rules.js';
 import { sprintStrip } from '/sprints.js';
@@ -997,7 +998,7 @@ function renderDeliveryPage() {
     const filtered = filteredPages(state.scope).has('delivery');
     setHonesty(
       `${counts.all} open item${counts.all === 1 ? '' : 's'} in view · ` +
-      `${counts.blocked} blocked · ${counts.oldest} waiting over 3 days · ` +
+      `${counts.blocked} blocked · ${counts.oldest} waiting over a week (${weekLabel(data)}) · ` +
       `${data.counts.stale || 0} stale · ${data.counts.unobserved || 0} unobserved · ` +
       `impact = dependents × current wait (≈) · ` +
       (filtered ? `filtered to ${state.scope.label} (waiting on it)` : 'whole team'),
@@ -1010,9 +1011,12 @@ function renderDeliveryPage() {
 function scopedTabCounts(data) {
   if (!data) return { blocked: 0, oldest: 0, all: 0 };
   const rows = data.rows.filter((row) => matchesScopeRow(row));
+  // prd/41 B3: the same 40-business-hour week the payload states, never a
+  // second threshold local to this view.
+  const week = Number((data.counts && data.counts.waiting_week_hours) || 40);
   return {
     blocked: rows.filter((row) => row.blocked).length,
-    oldest: rows.filter((row) => !row.blocked && row.waiting_hours >= 72).length,
+    oldest: rows.filter((row) => !row.blocked && row.waiting_hours >= week).length,
     all: rows.length,
   };
 }
@@ -1048,7 +1052,7 @@ function renderDeliveryDetail() {
       ...(row.epic ? [['epic', row.epic]] : []),
       // prd/40: the three facts the old single ball label could not say
       ['state', reviewStateLine(row)],
-      ['waiting on', whoLabel(row.ball_label || row.ball)],
+      ['waiting on', waitingLabel(row)],
       ...(row.waiting_roles && Object.keys(row.waiting_roles).length
         ? [['holder roles', Object.entries(row.waiting_roles)
           .map(([person, role]) => `${person} (${role})`).join(', ')]]
@@ -1625,7 +1629,7 @@ function openDeliveryPrDrawer(row) {
       ['ticket', rowTicket(row) || '—'],
       ['author', row.author || '—'],
       ['state', row.state || 'open'],
-      ['waiting on', whoLabel(row.ball_label || row.ball)],
+      ['waiting on', waitingLabel(row)],
       ['waiting since', `${fmtStamp(Date.parse(row.waiting_since))} (${fmtHours(row.waiting_hours)})`],
       ['age', fmtHours(row.age_hours)],
       ['commits in log', String(row.commits ?? 0)],

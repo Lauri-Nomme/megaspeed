@@ -317,7 +317,11 @@ export class QueueChart {
       <div class="row"><span class="k">wip</span><span class="v">${stream.wip[index] ?? 0} waiting</span></div>
       <div class="row"><span class="k">arrived</span><span class="v">${stream.arrivals[index] ?? 0}</span></div>
       <div class="row"><span class="k">left</span><span class="v">${stream.completions[index] ?? 0}</span></div>
-      <div class="row"><span class="k">mean wait</span><span class="v">≈ ${esc(fmtHours(stream.summary.mean_wait_hours))}</span></div>`;
+      <div class="row"><span class="k">mean wait</span><span class="v">≈ ${esc(fmtHours(stream.summary.mean_wait_hours))}</span></div>
+      ${stream.role === 'person' && stream.summary.solo_hours != null
+        ? `<div class="row"><span class="k" title="the part of the total where this person was the only open ball — the marginal load; person-hours charge every concurrent holder">solo</span><span class="v">${esc(fmtHours(stream.summary.solo_hours))}${
+          stream.summary.solo_share != null ? ` · ${Math.round(stream.summary.solo_share * 100)}%` : ''}</span></div>`
+        : ''}`;
     this.tip.hidden = false;
     const stage = this.canvas.parentElement;
     const w = this.tip.offsetWidth || 300;

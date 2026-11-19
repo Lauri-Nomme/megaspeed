@@ -454,6 +454,59 @@ class ValidationTests(StoreCase):
 # --------------------------------------------------------------------------- #
 # 4. the policy knobs
 # --------------------------------------------------------------------------- #
+class VerdictTextTests(unittest.TestCase):
+    """prd/41 B7: the verdict sentence is generated from the signed deltas."""
+
+    @staticmethod
+    def compare(**overrides) -> dict:
+        def entry(baseline, scenario, higher_is_better=False):
+            return {
+                "baseline": baseline,
+                "scenario": scenario,
+                **simulation._delta(baseline, scenario, higher_is_better),
+            }
+
+        payload = {
+            "cycle_median_hours": entry(10.0, 9.07),
+            "cycle_p90_hours": entry(20.0, 17.26),
+            "flow_efficiency": entry(0.20, 0.21, True),
+            "throughput_work_per_day": entry(5.0, 4.58, True),
+            "throughput_per_day": entry(10.0, 9.89, True),
+            "lead_hours": entry(10.0, 9.07),
+        }
+        payload.update(overrides)
+        simulation._annotate(payload)
+        return payload
+
+    def test_a_falling_pr_count_is_not_called_higher(self):
+        compare = self.compare()
+        self.assertEqual(compare["throughput_per_day"]["percent"], -1.1)
+        text = compare["throughput_per_day"]["verdict"]
+        self.assertIn("1.1 % lower", text)
+        self.assertNotIn("higher", text)
+        self.assertIn("fewer PRs", text)
+
+    def test_a_rising_pr_count_says_higher(self):
+        compare = self.compare(
+            throughput_per_day={
+                "baseline": 10.0, "scenario": 11.0,
+                **simulation._delta(10.0, 11.0, True),
+            }
+        )
+        self.assertIn("10.0 % higher", compare["throughput_per_day"]["verdict"])
+
+    def test_the_mixed_verdict_does_not_repeat_delivered_work(self):
+        compare = self.compare()
+        # cycle 9.3 % shorter and delivered work 8.4 % less: a mixed result,
+        # said once — the old text appended "but delivered work 8.4 % less" to
+        # a sentence that already quoted it.
+        self.assertIn("cycle 9.3 % shorter", compare["verdict"])
+        self.assertIn("delivered work 8.4 % less", compare["verdict"])
+        self.assertEqual(compare["verdict"].count("delivered work"), 1)
+        self.assertNotIn("but delivered work", compare["verdict"])
+        self.assertEqual(compare["verdict_tone"], "warning")
+
+
 class ScenarioTests(StoreCase):
     def loaded(self) -> dict:
         """A store whose mandatory gate is genuinely loaded (ρ ≈ 0.75)."""

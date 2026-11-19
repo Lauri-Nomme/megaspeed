@@ -16,12 +16,43 @@ export const TABS = [
   { id: 'all', label: 'All' },
 ];
 
+/**
+ * "5 d = 40 h" — the one waiting-week threshold, from the payload (prd/41 B3).
+ *
+ * concepts.md §1: a working week is 5 d = 40 business hours. Every label that
+ * says "over a week" reads this, so the card, the header, the pill and the
+ * footer cannot drift apart.
+ */
+export function weekLabel(data) {
+  const hours = Number((data && data.counts && data.counts.waiting_week_hours) || 40);
+  const days = Number((data && data.counts && data.counts.waiting_week_days) || hours / 8);
+  return `${days} d = ${hours} h`;
+}
+
 export function tabRows(data, tab) {
   const rows = (data && data.rows) || [];
+  // prd/41 B3: one threshold — a working week is 40 business hours
+  // (concepts.md §1) — and the payload states it so no view invents its own.
+  const week = Number((data && data.counts && data.counts.waiting_week_hours) || 40);
   if (tab === 'blocked') return rows.filter((row) => row.blocked);
-  if (tab === 'oldest') return rows.filter((row) => !row.blocked && row.waiting_hours >= 72)
+  if (tab === 'oldest') return rows.filter((row) => !row.blocked && row.waiting_hours >= week)
     .sort((a, b) => b.waiting_hours - a.waiting_hours);
   return rows;
+}
+
+/**
+ * Who a row waits on, in words (prd/41 B6).
+ *
+ * When several people hold the ball the API keeps the role label (`review`) but
+ * names every holder in `waiting_on`; naming them beats "review queue" — #53's
+ * "waiting on CaOs" hid that the sentinel owed a verdict too.
+ */
+export function waitingLabel(row) {
+  if (!row) return '';
+  const label = row.ball_label || row.ball;
+  const people = (row.waiting_on || []).filter((person) => person && person !== row.author);
+  if (label === 'review' && people.length) return people.join(' + ');
+  return whoLabel(label);
 }
 
 /**
@@ -39,6 +70,12 @@ export function reviewStateLine(row) {
   }
   const pending = Number(row.reviewers_pending || 0);
   const total = Number(row.reviewers_total || 0);
+  const approved = Number(row.reviewers_approved || 0);
+  // prd/41 B6: "#53 is 0/2 approved" is the fact that matters when nobody has
+  // approved yet; the pending count then says both reviewers owe a verdict.
+  if (row.reviewers_approved != null && total > 0) {
+    parts.push(`${approved}/${total} approved`);
+  }
   if (pending > 0) parts.push(`${pending}/${total} reviewers pending`);
   else if (row.ball === 'ready' && total > 0) parts.push('all reviewers answered');
   if (row.ball === 'ready' && row.ready_since) {
@@ -124,7 +161,7 @@ export function deliveryTable(data, tab, { scope = null } = {}) {
       <td class="c-id" data-label="">${ticketLink(rowTicket(row), { cls: 'keys' }) || '<span class="keys">—</span>'}
         <span class="mono id">#${esc(row.number)}</span>
         <span class="repo">${esc(row.repo_short)}</span></td>
-      <td class="c-who" data-label="waiting on">${esc(whoLabel(row.ball_label || row.ball))}</td>
+      <td class="c-who" data-label="waiting on">${esc(waitingLabel(row))}</td>
       <td class="c-phase" data-label="phase"><span class="mono">${esc(row.phase)}</span></td>
       <td class="c-since mono" data-label="waiting since">${esc(fmtAbsolute(Date.parse(row.waiting_since)))}</td>
       <td class="c-dur num" data-label="waiting">${esc(fmtHours(row.waiting_hours))}</td>
@@ -184,7 +221,7 @@ export function deliveryMarkdown(rows, meta, base = '') {
   const body = rows.map((row) => {
     const key = rowTicket(row);
     const ticket = key ? `[${key}](${ticketHref(key, base)})` : '—';
-    return `| ${rowStateText(row)} | ${ticket} #${row.number} ${row.repo_short} | ${whoLabel(row.ball_label || row.ball)} | ${fmtAbsolute(Date.parse(row.waiting_since))} | ${fmtHours(row.waiting_hours)} | ${row.dependents ? `≈${fmtHours(row.impact_hours)}` : '—'} |`;
+    return `| ${rowStateText(row)} | ${ticket} #${row.number} ${row.repo_short} | ${waitingLabel(row)} | ${fmtAbsolute(Date.parse(row.waiting_since))} | ${fmtHours(row.waiting_hours)} | ${row.dependents ? `≈${fmtHours(row.impact_hours)}` : '—'} |`;
   });
   return [...header, ...body].join('\n');
 }
@@ -221,8 +258,8 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
         <span class="stat-k">blocked</span>
         <span class="stat-note">${counts.blocked ? 'waiting on a change, not on a person' : 'nothing blocked'}</span></div>
       <div class="stat"><span class="stat-n">${counts.oldest_waiting}</span>
-        <span class="stat-k">waiting over ${fmtHours(72).replace(' 0 h', '')}</span>
-        <span class="stat-note">of ${counts.open} open item${counts.open === 1 ? '' : 's'}${
+        <span class="stat-k">waiting over a week</span>
+        <span class="stat-note">${weekLabel(delivery)} · of ${counts.open} open item${counts.open === 1 ? '' : 's'}${
           counts.stale ? ` · ${counts.stale} stale` : ''}</span></div>
       <div class="stat"><span class="stat-n">≈${fmtHours(waitHours).replace(' ', ' ')}</span>
         <span class="stat-k">measured wait</span>
@@ -328,7 +365,7 @@ export function impactSentence(row) {
   const ticket = rowTicket(row);
   const dependents = row.dependents || 0;
   if (!dependents) {
-    return `Waiting ${fmtHours(row.waiting_hours)} on ${whoLabel(row.ball_label || row.ball)}; ` +
+    return `Waiting ${fmtHours(row.waiting_hours)} on ${waitingLabel(row)}; ` +
       `no other open PR shares ${ticket ? `ticket ${ticket}` : 'its ticket'}.`;
   }
   const plural = dependents === 1 ? '' : 's';
@@ -349,7 +386,7 @@ export function entityMarkdown(entity, hoursMode = 'wall-clock', base = '') {
       `## ${heading}`,
       '',
       `- status: ${row.blocked ? 'blocked' : row.phase}`,
-      `- waiting on: ${whoLabel(row.ball_label || row.ball)}`,
+      `- waiting on: ${waitingLabel(row)}`,
       `- waiting since: ${fmtAbsolute(Date.parse(row.waiting_since))} (${fmtHours(row.waiting_hours)})`,
       `- age: ${fmtHours(row.age_hours)}`,
       row.epic ? `- epic: ${row.epic}` : '',

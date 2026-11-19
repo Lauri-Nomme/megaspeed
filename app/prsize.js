@@ -131,7 +131,10 @@ function barsMarkup(series) {
 function seriesMarkup(kind, label, series, caps, sliderMax, { available = true } = {}) {
   const cap = caps[kind];
   const max = Math.max(sliderMax, cap);
-  const step = kind === 'commits' ? 1 : 10;
+  // prd/41 P5: a step of 1 keeps the slider on the cap it shows. With a
+  // min of 1 and a step of 10 the grid was 1, 11, … so the default 400 read
+  // 401 and round caps (100/150/200) could not be set at all.
+  const step = 1;
   const hint = kind === 'commits'
     ? 'a PR is large above this many commits'
     : 'a PR is large above this many changed lines';

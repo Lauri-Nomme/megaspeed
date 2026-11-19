@@ -206,3 +206,49 @@ test('an at-stake pool is counted once and says where', () => {
   assert.match(markdown, /at stake — counted once/);
   assert.match(markdown, /counted in #1/);
 });
+
+/* prd/41 B8: the headline names one sprint, so the drill-down is that sprint. */
+test('a sprint-scoped rule drills into the sprint its headline names', () => {
+  const metric = {
+    rows: [
+      { kind: 'story', key: 'DEL-155', tickets: ['DEL-155'], sprint_id: 2,
+        status: 'late', slip_hours: 128, points: 5, affected: true },
+      { kind: 'story', key: 'DEL-160', tickets: ['DEL-160'], sprint_id: 2,
+        status: 'never', slip_hours: null, points: 3, affected: false },
+      { kind: 'story', key: 'DEL-101', tickets: ['DEL-101'], sprint_id: 1,
+        status: 'late', slip_hours: 32, points: 2, affected: true },
+    ],
+  };
+  const scoped = suggestion({
+    id: 'sprint-on-time', metric: 'sprint_delivery', rank: 4, severity: 'critical',
+    title: 'S2 delivered 1 of 3 committed stories', evidence: { sprint: 'S2' },
+    scope: { kind: 'sprint', sprint: 2 },
+  });
+  const items = ruleItems(scoped, { sprint_delivery: metric });
+  assert.deepEqual(items.map((item) => item.key), ['DEL-155', 'DEL-160']);
+  assert.ok(items.every((item) => item.detail.includes('S2')));
+  // an unscoped rule still lists every row
+  const all = ruleItems({ ...scoped, scope: { kind: 'team' } },
+    { sprint_delivery: metric });
+  assert.equal(all.length, 3);
+});
+
+/* prd/41 B4(b): an assumed at-stake figure says so, not "measured". */
+test('an assumed at-stake figure is labelled an assumption', () => {
+  const assumed = suggestion({
+    id: 'jira-waiting-time', metric: 'waiting_time_decomposition', impact_hours: 1200,
+    evidence: {
+      segment: 'review rounds', segment_hours: 2400, share: 0.29,
+      impact_basis: 'assumption: half the largest segment\'s hours — not a measured saving',
+      impact_assumed: true,
+    },
+  });
+  const data = {
+    level: 'team', sample: { prs: 3, days: 30 }, hours_mode: 'business',
+    as_of: '2026-11-17T00:00:00Z', note: '', metrics: {},
+    suggestions: [assumed],
+  };
+  const html = rulesMarkup(data);
+  assert.match(html, /at stake <span class="muted">\(assumed\)<\/span>/);
+  assert.match(rulesMarkdown(data), /assumed, not measured/);
+});

@@ -32,6 +32,9 @@ Each entry: **Definition** (what it is) · **Derivation** (how it's computed fro
 - **Rationale (the correction):** "d = 24 h" is wrong — 24 business hours is 3 working days, not one,
   so `168 h → "7 d"` read as a week when it is actually 4 working weeks. `d = 8 h` makes `40 h = 5 d =
   one calendar week`, which is the unit people expect.
+- **Waiting week**: a working week is **5 d = 40 business hours**. It is the single threshold behind
+  every "waiting over a week" / "waiting 1w+" label (Overview card, row pill, list header, footer,
+  `counts.waiting_over_week`); a view may not invent its own.
 
 ### Person-hour
 - **Definition**: an hour of *one* person's business time (a `business_hours` span priced on that
@@ -139,14 +142,22 @@ Each entry: **Definition** (what it is) · **Derivation** (how it's computed fro
 - **Sentinel gate** (`sentinel_after_peers`, default on): the sentinel is a *precedence* constraint,
   not a peer. A sentinel's pending clock opens only after every peer reviewer has answered; until then
   the sentinel is neither charged nor blocking. Configurable off for teams whose sentinel reviews in
-  parallel with peers.
+  parallel with peers. "Answered" means **responded at least once**: a peer whose verdict was withdrawn
+  (a `walked_back` blocker) or staled by a push has had their turn, so the sentinel's clock opens and
+  both owe a verdict. A peer who has never responded at all keeps the gate closed.
+- **Who owes vs who is charged**: the gate defers *charging* (the person-hour projections and the
+  single named `ball_label`), never the answer to "who must act". The delivery row's `waiting_on`,
+  `reviewers_pending` and `reviewers_approved` count **every** reviewer with `status = none`, the
+  deferred sentinel included — so a PR nobody approved reads "0/2 approved, 2/2 pending" and names
+  both people.
 - **Attribution**: a person-level wait is attributed to **every holder** — the author while their debt
   stands, plus every pending reviewer — as *person-hours*, priced on **that person's own calendar**
   (a reviewer on vacation is not charged the hours someone else worked). A 10 h wait on two reviewers
   is 10 h for *each*, so the person-level total exceeds the wall-clock wait; role/queue level counts it
   once under `review` (or `ready`). `solo_hours` is the part of a person's total where they were the
-  *only* open ball. `ready` is its own state: the merge click is the author's, but nobody's review
-  wait.
+  *only* open ball: **read `solo_hours` as the marginal load and the total as the shared wait it came
+  from** — the payloads state this next to both numbers. `ready` is its own state: the merge click is
+  the author's, but nobody's review wait.
 - **Ex-post honesty**: a reviewer still pending when a PR merged was, provably, not required; those
   episodes are tagged `unrequired` (listed, not blamed) and excluded from the responsiveness median.
 - **Purpose**: every "waiting on …" / "where waits accumulate" / constraint answer. The owner must be
@@ -322,7 +333,9 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
 ### At stake
 - **Definition**: the wait-hours a change would eliminate, summed over the items it would unblock.
 - **Derivation**: per-item current wait × impact, summed. **It must not double-count** (an item may be
-  waiting on several people; its hours are attributed once, not once per blocker).
+  waiting on several people; its hours are attributed once, not once per blocker). A figure derived
+  from an assumption (e.g. "half the largest segment") is **labelled as an assumption** in the payload
+  and the UI — never presented as a measured saving.
 
 ### "Per story" vs aggregate
 - **Definition**: a *per-story* figure is a statistic (median/mean) over stories; an *aggregate* is the
@@ -341,6 +354,9 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
 - **Purpose**: the sprint lens answers "did S deliver what it committed", so "done" must be
   measured at S's close, and "0 carried over" must not hide the stories that finished late. *Fix
   target: "27 done" counted by today, not by S2's end (really 15/30).*
+- **Window**: a carry-over count is over the **stories created in the chosen timeframe** (the sprint
+  lens counts every story in the store). Both are correct for their scope, so the window travels with
+  the number — two views must not show different counts for "carried over" without stating it.
 
 ### Constraint ranking (delivery/queue)
 - **Definition**: open items ranked by who they wait on and the wait-hours that costs.

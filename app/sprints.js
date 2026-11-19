@@ -54,9 +54,14 @@ export function sprintScopeLine(data) {
   const scope = data.scope || {};
   const carry = data.carry_over || {};
   const stories = scope.stories || 0;
+  const window = data.window || {};
+  const days = Number(window.days);
+  // prd/41 B8: the carry-over count is the window's cohort; the bands are the
+  // store's sprints. Say which window the numbers are filtered to.
+  const windowNote = Number.isFinite(days) && days > 0 ? ` · created in ${days} d` : '';
   const bits = [
     `${data.count || 0} sprint${(data.count || 0) === 1 ? '' : 's'}`,
-    `${scope.in_sprint || 0} of ${stories} stories in a sprint`,
+    `${scope.in_sprint || 0} of ${stories} stories in a sprint${windowNote}`,
     `${scope.out_of_sprint || 0} out of scope`,
     `${carry.count || 0} carried over`,
   ];

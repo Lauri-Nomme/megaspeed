@@ -142,6 +142,22 @@ test('a store without diff size disables the line slider but keeps the cap', () 
   assert.match(html, /data-pr-size-cap-label="lines">400/);
 });
 
+test('prd/41 P5: the sliders land on the cap they show', () => {
+  // the old line slider had step 10 from a min of 1, so its grid was
+  // 1, 11, … and the default 400 rendered as 401; round caps were unreachable.
+  const html = prSizePanel(payload(), { caps: { commits: 10, lines: 150 } });
+  const line = html.match(/<input[^>]*data-pr-size="lines"[^>]*>/)[0];
+  assert.match(line, /step="1"/);
+  assert.match(line, /value="150"/);
+  const commit = html.match(/<input[^>]*data-pr-size="commits"[^>]*>/)[0];
+  assert.match(commit, /step="1"/);
+  assert.match(commit, /value="10"/);
+  for (const cap of [100, 150, 200]) {
+    const panel = prSizePanel(payload(), { caps: { commits: 10, lines: cap } });
+    assert.match(panel, new RegExp(`data-pr-size="lines"[^>]*value="${cap}"`));
+  }
+});
+
 test('the panel sits next to the size rule, or after the list', () => {
   const data = {
     level: 'team',

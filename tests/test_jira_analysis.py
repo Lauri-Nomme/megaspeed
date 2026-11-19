@@ -350,6 +350,51 @@ class WaitingTimeTests(StoreCase):
         payload = self.payload(balanced_fixture())
         self.assertIsNone(by_id(payload, "jira-waiting-time"))
 
+    def test_two_segments_within_a_point_are_a_stated_tie(self):
+        """prd/41 B4(a): "the largest segment" is not a ranking when it ties."""
+        fx = Fixture()
+        fx.sprint(1, T0, end=T0 + timedelta(days=14), closed=T0 + timedelta(days=14))
+        fx.story("ENG-1", T0, points=3, state="done", closed=T0 + timedelta(hours=120))
+        fx.pointed("ENG-1", T0 + timedelta(hours=30), 3)          # created_ready 30
+        fx.add_to_sprint("ENG-1", T0 + timedelta(hours=40), 1)    # ready_sprint 10
+        fx.status("ENG-1", T0 + timedelta(hours=50), "in_progress")
+        fx.status("ENG-1", T0 + timedelta(hours=120), "done", from_status="in_progress")
+        fx.pr(1, "AaAa", T0 + timedelta(hours=60), closed=T0 + timedelta(hours=110))
+        fx.pr_event(1, "comment_added", "RrRr", 10, severity="suggestion")  # +70
+        fx.pr_event(1, "pr_approved", "RrRr", 40)                           # +100
+        fx.pr_event(1, "pr_merged", "RrRr", 50)                             # +110
+        payload = self.payload(fx)
+        metric = payload["metrics"]["waiting_time_decomposition"]
+        self.assertEqual(metric["largest_hours"], 30.0)
+        self.assertEqual(metric["runner_up_hours"], 30.0)
+        self.assertTrue(metric["tied"])
+        self.assertLessEqual(metric["tie_points"], metric["tie_threshold_points"])
+        suggestion = by_id(payload, "jira-waiting-time")
+        self.assertIsNotNone(suggestion)
+        self.assertIn("statistically tied", suggestion["suggestion"])
+        self.assertIn("tied with", suggestion["title"])
+        self.assertTrue(suggestion["evidence"]["tied"])
+        self.assertEqual(suggestion["evidence"]["runner_up_share"], 0.25)
+
+    def test_the_at_stake_figure_is_labelled_an_assumption(self):
+        """prd/41 B4(b): half the largest segment is an assumption, not a saving."""
+        fx = Fixture()
+        fx.sprint(1, T0, end=T0 + timedelta(days=14))
+        fx.story("ENG-1", T0, state="done", closed=T0 + timedelta(hours=80))
+        fx.pointed("ENG-1", T0 + timedelta(hours=5), 3)
+        fx.add_to_sprint("ENG-1", T0 + timedelta(hours=5), 1)
+        fx.status("ENG-1", T0 + timedelta(hours=55), "in_progress")
+        fx.status("ENG-1", T0 + timedelta(hours=80), "done", from_status="in_progress")
+        fx.pr(1, "AaAa", T0 + timedelta(hours=60), closed=T0 + timedelta(hours=75))
+        fx.pr_event(1, "pr_approved", "RrRr", 5)
+        fx.pr_event(1, "pr_merged", "RrRr", 15)
+        suggestion = by_id(self.payload(fx), "jira-waiting-time")
+        self.assertTrue(suggestion["evidence"]["impact_assumed"])
+        self.assertTrue(
+            suggestion["evidence"]["impact_basis"].startswith("assumption")
+        )
+        self.assertIn("not a measured saving", suggestion["evidence"]["impact_basis"])
+
     def test_missing_boundaries_are_counted_not_guessed(self):
         fx = Fixture()
         # no pointed event and no PR: four segments have no boundary
@@ -479,6 +524,21 @@ class CarryOverTests(StoreCase):
         self.assertEqual(suggestion["evidence"]["never"], 1)
         self.assertEqual(suggestion["evidence"]["sprints"], 1)
 
+    def test_the_rule_states_the_window_it_counts(self):
+        """prd/41 B8: the sprint lens (27/20/90) and the rule (24/18/75) differ
+        only by window; the rule says which cohort it counted."""
+        payload = self.payload(self.fixture(), days=90)
+        suggestion = by_id(payload, "jira-carry-over")
+        self.assertIsNotNone(suggestion)
+        metric = payload["metrics"]["carry_over"]
+        self.assertIsNotNone(metric["window"]["start"])
+        self.assertIsNotNone(metric["window"]["end"])
+        # the window is clamped to the data, and the rule quotes the clamped one
+        days = metric["window"]["days"]
+        self.assertEqual(suggestion["evidence"]["window_days"], days)
+        self.assertIn(f"created in the {days}-day window", suggestion["suggestion"])
+        self.assertIn("sprint lens counts every story", suggestion["suggestion"])
+
     def test_no_carry_over_means_no_rule(self):
         fx = Fixture()
         fx.sprint(1, T0, end=T0 + timedelta(days=14))
@@ -543,6 +603,33 @@ class SprintDeliveryTests(StoreCase):
         self.assertEqual(suggestion["impact_hours"], 48.0)
         self.assertEqual(suggestion["evidence"]["done_by_end"], 1)
         self.assertEqual(suggestion["evidence"]["target_share"], 0.8)
+        # prd/41 B8: the headline names S1, so the drill-down is S1's items
+        self.assertEqual(suggestion["scope"], {"kind": "sprint", "sprint": 1})
+
+    def test_the_drill_down_matches_the_headline_sprint(self):
+        """prd/41 B8: rule 04 said "S1 …" but listed S1 + S2's 3 items."""
+        fx = self.fixture()
+        fx.sprint(2, T0 + timedelta(days=15),
+                  end=T0 + timedelta(days=29), closed=T0 + timedelta(days=29))
+        fx.story("ENG-4", T0 + timedelta(days=15), points=2)
+        fx.add_to_sprint("ENG-4", T0 + timedelta(days=15), 2, at_start=True)
+        payload = self.payload(fx)
+        metric = payload["metrics"]["sprint_delivery"]
+        suggestion = by_id(payload, "sprint-on-time")
+        self.assertIsNotNone(suggestion)
+        self.assertEqual(
+            suggestion["scope"],
+            {"kind": "sprint", "sprint": metric["worst"]["sprint_id"]},
+        )
+        # the metric keeps every closed sprint's rows; the rule scopes them
+        self.assertGreaterEqual(
+            len({row["sprint_id"] for row in metric["rows"]}), 2
+        )
+        scoped = [
+            row for row in metric["rows"]
+            if row["sprint_id"] == suggestion["scope"]["sprint"]
+        ]
+        self.assertLess(len(scoped), len(metric["rows"]))
 
     def test_an_active_sprint_has_no_verdict_yet(self):
         fx = Fixture()

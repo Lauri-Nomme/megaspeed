@@ -62,3 +62,40 @@ test('the detail panel and markdown name the story key and keep the epic separat
   assert.match(markdown, /## \[DEL-197\]\(#ticket\/DEL-197\) #52 delivery-web/);
   assert.match(markdown, /- epic: DEL-1/);
 });
+
+/* prd/41 B3: one waiting-week threshold (40 business hours) everywhere. */
+test('the oldest tab and the week label read the payload threshold', async () => {
+  const { tabRows, weekLabel, reviewStateLine, waitingLabel } = await import('../tables.js');
+  const data = {
+    counts: { open: 5, oldest_waiting: 3, waiting_over_week: 3,
+      waiting_week_hours: 40, waiting_week_days: 5 },
+    rows: [
+      openRow({ object_id: 'PR:a#1', number: 1, waiting_hours: 168 }),
+      openRow({ object_id: 'PR:a#2', number: 2, waiting_hours: 152 }),
+      openRow({ object_id: 'PR:a#3', number: 3, waiting_hours: 132 }),
+      openRow({ object_id: 'PR:a#4', number: 4, waiting_hours: 20 }),
+      openRow({ object_id: 'PR:a#5', number: 5, waiting_hours: 16 }),
+    ],
+  };
+  assert.equal(weekLabel(data), '5 d = 40 h');
+  assert.deepEqual(tabRows(data, 'oldest').map((row) => row.number), [1, 2, 3]);
+  // a row just past the 40 h week is "waiting 1w+", never at 168 h
+  const justOver = openRow({ waiting_hours: 41 });
+  assert.equal(tabRows({ rows: [justOver], counts: data.counts }, 'oldest').length, 1);
+});
+
+/* prd/41 B6: #53 is 0/2 approved, and both reviewers owe a verdict. */
+test('the state line says 0/2 approved and names every pending reviewer', async () => {
+  const { reviewStateLine, waitingLabel } = await import('../tables.js');
+  const row = openRow({
+    ball: 'review', ball_label: 'review', waiting_on: ['CaOs', 'FrMo'],
+    reviewers_total: 2, reviewers_pending: 2, reviewers_approved: 0,
+  });
+  assert.equal(reviewStateLine(row), '0/2 approved · 2/2 reviewers pending');
+  assert.equal(waitingLabel(row), 'CaOs + FrMo');
+  // a single named holder keeps its name
+  assert.equal(waitingLabel(openRow({ ball_label: 'FrMo', waiting_on: ['FrMo'] })), 'FrMo');
+  // the author-debt label is not a reviewer list
+  assert.equal(waitingLabel(openRow({ ball: 'author', ball_label: 'author',
+    waiting_on: ['BoFe', 'FrMo'] })), 'author');
+});

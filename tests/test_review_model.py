@@ -112,6 +112,38 @@ class Store:
                    people=(person,), change="added", sentinel=True)
         return self
 
+    def thread(self, number: int, outcome: str,
+               comment_type: str = "blocker") -> "Store":
+        """Give the event just added a THREAD object with its closed outcome.
+
+        prd/41 B6: a mandatory blocker whose thread was ``walked_back`` is a
+        withdrawn objection, and the ball-court reads that from the THREAD
+        object the comment event links to.
+        """
+        key = self.events[-1]["event_key"]
+        object_id = f"THREAD:{REPO}#{number}:{self._count}"
+        self.objects.append({
+            "object_type": "THREAD",
+            "object_id": object_id,
+            "repo": REPO,
+            "pr_id": number,
+            "ticket_keys": [],
+            "actor": None,
+            "state": "resolved",
+            "created_at": self.events[-1]["ts"],
+            "closed_at": None,
+            "head_commit": None,
+            "message_class": None,
+            "attributes": {
+                "severity": "mandatory",
+                "anchor_class": "file",
+                "comment_type": comment_type,
+                "thread_outcome": outcome,
+            },
+        })
+        self.relations.append((key, "THREAD", object_id))
+        return self
+
     # -- materialise -------------------------------------------------------- #
     def write(self, path: Path) -> Path:
         con = connect(path)
@@ -523,6 +555,101 @@ class SentinelGateTests(Case):
         self.assertTrue(metric["sentinel_after_peers"])
         self.assertEqual(metric["n"], 1)
         self.assertEqual(metric["median_hours"], 3.0)
+
+
+# --------------------------------------------------------------------------- #
+# prd/41 B6 — a withdrawn blocker is a pending verdict, not an answer
+# --------------------------------------------------------------------------- #
+class WithdrawnBlockerTests(Case):
+    def store(self) -> Store:
+        store = Store()
+        store.pr(1, "AuAu")
+        store.roster(1, "RArA")
+        store.sentinel(1, "FrMo")
+        store.event(1, "comment_added", "RArA", 1, severity="mandatory")
+        store.thread(1, "walked_back")       # the reviewer withdrew it
+        store.event(1, "pr_pushed", "AuAu", 2, push_class="content")
+        return store
+
+    def test_a_walked_back_blocker_puts_nobody_in_debt(self):
+        court = self.load(self.store())
+        after_comment = next(
+            interval for interval in court.intervals
+            if interval.start == T0 + timedelta(hours=1)
+        )
+        self.assertFalse(after_comment.author_open)
+        self.assertIn("RArA", after_comment.pending_all)
+
+    def test_the_delivery_row_says_zero_of_two_approved_and_both_pending(self):
+        court = self.load(self.store())
+        row = ballcourt.delivery_list(court)["rows"][0]
+        self.assertEqual(row["reviewers_total"], 2)
+        self.assertEqual(row["reviewers_approved"], 0)
+        self.assertEqual(row["reviewers_pending"], 2)
+        # both owe a verdict — chasing the peer alone will not close it
+        self.assertEqual(row["waiting_on"], ["FrMo", "RArA"])
+        self.assertEqual(
+            row["waiting_roles"], {"FrMo": "sentinel", "RArA": "review"}
+        )
+
+
+# --------------------------------------------------------------------------- #
+# prd/41 B3 — one waiting-week threshold (40 business hours)
+# --------------------------------------------------------------------------- #
+class WaitingWeekTests(Case):
+    def test_one_week_is_forty_business_hours_everywhere(self):
+        store = Store()
+        span = (AS_OF - T0).total_seconds() / 3600.0
+        for number, wait in ((1, 168.0), (2, 152.0), (3, 132.0),
+                             (4, 20.0), (5, 16.0)):
+            store.pr(number, "AuAu")
+            store.roster(number, "RArA", hours=span - wait)
+        delivery = ballcourt.delivery_list(self.load(store))
+        counts = delivery["counts"]
+        self.assertEqual(counts["waiting_week_hours"], 40.0)
+        self.assertEqual(counts["waiting_week_days"], 5.0)
+        # three items are past a week, and the same three are "oldest waiting":
+        # the card, the pill, the header and the footer read one threshold
+        self.assertEqual(counts["waiting_over_week"], 3)
+        self.assertEqual(counts["oldest_waiting"], 3)
+        over = sorted(
+            row["number"] for row in delivery["rows"]
+            if row["waiting_hours"] >= counts["waiting_week_hours"]
+        )
+        self.assertEqual(over, [1, 2, 3])
+
+
+# --------------------------------------------------------------------------- #
+# prd/41 P4 — solo hours are the marginal person-level load
+# --------------------------------------------------------------------------- #
+class SoloLoadTests(Case):
+    def store(self) -> Store:
+        store = Store()
+        store.pr(1, "AuAu")
+        store.roster(1, "RArA", "RBrB")
+        store.event(1, "pr_approved", "RArA", 2)    # RBrB alone from t2
+        store.event(1, "comment_added", "RArA", 10, severity="suggestion")
+        return store
+
+    def test_the_blocking_graph_exposes_solo_next_to_the_total(self):
+        court = self.load(self.store())
+        graph = ballcourt.blocking_graph(court, level="person")
+        self.assertIn("solo", graph["hours_note"])
+        self.assertIn("shared wait", graph["hours_note"])
+        node = next(node for node in graph["nodes"] if node["id"] == "RBrB")
+        self.assertEqual(node["hours"], 10.0)        # t0 → snapshot (12 h)
+        self.assertEqual(node["solo_hours"], 8.0)    # t2 → snapshot
+        self.assertEqual(node["solo_share"], round(8.0 / 10.0, 4))
+
+    def test_the_queue_stream_exposes_solo_next_to_the_total(self):
+        court = self.load(self.store())
+        queues = ballcourt.queue_series(court, level="person")
+        self.assertIn("solo", queues["hours_note"])
+        stream = next(item for item in queues["streams"] if item["id"] == "RBrB")
+        self.assertLessEqual(
+            stream["summary"]["solo_hours"], stream["summary"]["hours"]
+        )
+        self.assertIsNotNone(stream["summary"]["solo_share"])
 
 
 # --------------------------------------------------------------------------- #
