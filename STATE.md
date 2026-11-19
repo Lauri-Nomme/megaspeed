@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **896** (`tests/`) + **96** (`scrape/tests`) + **180** (node `app/test`) green.
+Tests: **936** (`tests/`) + **96** (`scrape/tests`) + **219** (node `app/test`) green.
 
 ## Scrape (airgapped) — full value, reliable
 
@@ -90,17 +90,19 @@ Tests: **896** (`tests/`) + **96** (`scrape/tests`) + **180** (node `app/test`) 
 3. **Perf long-tail** (deliberately deferred): classification content-hash run-level memo, per-list-page
    fetch batching, `/api/queues` bucket cap for huge windows — see `docs/review-performance.md`.
 
-## Open fix backlog (from the exploratory test, `docs/QA-exploratory.md`)
+## Exploratory QA — findings fixed and re-verified
 
-Terminology is pinned in **`docs/concepts.md`** (units, actors, lifecycle, metrics). The 25 findings
-are classified into five PRDs, ready to implement:
+Terminology is pinned in **`docs/concepts.md`**. The exploratory test (`docs/QA-exploratory.md`, 25
+findings) was classified into PRDs and implemented: prd/34 (bots/sentinel/scope), prd/35 (d=8 h),
+prd/36 (lifecycle labels, reopens, 9/9, per-story), prd/37 (sprint done-by-end, additive at-stake,
+impact-sorted drill-downs, stale-PR/sentinel-tail/sprint-on-time rules), prd/38 (clickable PR rows,
+ticket search, landing, drawer, sources), prd/39 (PR-size histogram + sliders).
 
-- **prd/34** actor & constraint — bots out of person aggregates, sentinel named, scope semantics.
-- **prd/35** one time unit — "d" = 24 business hours everywhere; calendar days labelled as such.
-- **prd/36** lifecycle honesty — `created→ready` label, idle-gap honesty, reopens, "9/9", per-story.
-- **prd/37** sprint/rules/policy — done-by-end, additive at-stake, impact-sorted drill-downs, new
-  stale-PR / sentinel-tail / sprint-on-time rules.
-- **prd/38** navigation & papercuts — clickable PR rows, ticket search, landing view, drawer, sources.
+A **fresh adversarial QA** (`docs/QA-fresh.md`, same three questions, no prior findings) confirmed
+~20 of 25 fixed, then a second-order pass landed: prd/41 (abandoned zombie PRs, threshold/footer
+counts, tied-segment + "at stake (assumed)", #53 0/2 pending, policy verdict signs, sprint drill-down
+scope, solo-hours) and prd/42 (response-time comparison, done-but-open list, ticket benchmark, PR-drawer
+completeness, size-vs-cycle, policy knobs, sprint scope-creep). Comparison: `docs/QA-comparison.md`.
 
 ## Important
 
