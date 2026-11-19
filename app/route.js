@@ -76,12 +76,20 @@ function normalizeView(view) {
  * optional, so a caller can encode only what it knows.
  */
 export function serializeRoute({
-  tenant = null, view = null, ticket = null, timeframe = null, scope = null, theme = null,
+  tenant = null, view = null, ticket = null, timeframe = null, scope = null,
+  sprint = null, from = null, to = null, theme = null,
 } = {}) {
   const params = new URLSearchParams();
   if (tenant) params.set('tenant', String(tenant));
   if (view) params.set('view', String(view));
   if (timeframe) params.set('tf', String(timeframe));
+  // prd/37 §4: the sprint lens is a filter with a range — both go in the URL so
+  // a copied link lands on the same sprint, the same stories and the same window.
+  if (sprint != null && sprint !== '') params.set('sprint', String(sprint));
+  if (from != null && to != null) {
+    params.set('from', String(from));
+    params.set('to', String(to));
+  }
   // `all` is explicit: a link must reproduce "everything", not inherit the
   // recipient's stored person scope.
   if (scope && scope.kind) params.set('scope', scopeParam(scope));
@@ -107,6 +115,10 @@ export function parseRoute(search = '', hash = '') {
     ticket,
     timeframe: params.get('tf') || null,
     scope: parseScope(params.get('scope')),
+    // an id, not free text: anything else means "no sprint lens"
+    sprint: /^\d+$/.test(params.get('sprint') || '') ? Number(params.get('sprint')) : null,
+    from: /^\d+$/.test(params.get('from') || '') ? Number(params.get('from')) : null,
+    to: /^\d+$/.test(params.get('to') || '') ? Number(params.get('to')) : null,
     // null means "no opinion": keep the stored preference (dark by default).
     theme: normalizeTheme(params.get('theme')),
   };

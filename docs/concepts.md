@@ -332,10 +332,15 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
 ### Sprint "done" / scope / carry-over
 - **Definition**: a story is *done in sprint S* if it reached `done` **by S's end** (not "by now").
   Scope-in = committed at S start; scope-out = never committed or removed to backlog; *carried over* =
-  committed to >1 sprint.
+  committed to a **closed** sprint but not done by its close — it finished late, or is still open. An
+  explicit `sprint_added` re-add into a second sprint is reported separately (`explicit_readd`), never
+  as the only carry-over.
 - **Derivation**: `sprint_added`/`sprint_removed` + the `done` boundary, compared to S's start/end.
+  Each story's sprint outcome is one of `by_end`, `late`, `never`; carry-over's wait is the business
+  hours from the first missed close to `done` (or the snapshot while still open).
 - **Purpose**: the sprint lens answers "did S deliver what it committed", so "done" must be
-  measured at S's close. *Fix target: "27 done" counted by today, not by S2's end (really 15/30).*
+  measured at S's close, and "0 carried over" must not hide the stories that finished late. *Fix
+  target: "27 done" counted by today, not by S2's end (really 15/30).*
 
 ### Constraint ranking (delivery/queue)
 - **Definition**: open items ranked by who they wait on and the wait-hours that costs.
@@ -364,7 +369,10 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
 | **PR size** | PRs over the size caps | >10 commits or >400 changed lines |
 | **point churn** | stories re-pointed after work started | `pointed` events after `started` |
 | **worklog cross-check** | logged hours vs active hours (and the log delay) | worklogs ÷ active hours; `log_delay_bucket` = created−started gap |
-| **carry-over** | stories committed to >1 sprint | §Sprint carry-over |
+| **carry-over** | stories committed to a closed sprint but not done by its close | §Sprint carry-over |
+| **stale PR** | PRs open past N business days, or ticket Done with the PR open | open age > 5 business days, or `done` ticket + open PR |
+| **sentinel tail** | items whose only holder is the sentinel, past a threshold | sole-holder episode > 24 business hours |
+| **sprint on-time** | done-by-end ÷ committed, per closed sprint | §Sprint "done" |
 | **cycle-time censoring** | the merged-only median vs the censored Kaplan–Meier | survival metric, surfaced next to the median |
 
 Each metric that measures items reports them (`metrics.<name>.rows`) so the drill-down lists the actual

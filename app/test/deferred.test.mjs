@@ -90,7 +90,7 @@ test('B19: rule stats agree in number', () => {
 });
 
 test('B19: a fixed target takes no ≈, an estimate still does', () => {
-  assert.equal(evidenceValue('target_hours', 72), '3 d 0 h');
+  assert.equal(evidenceValue('target_hours', 72), '9 d 0 h');  // d = 8 business hours (prd/35)
   assert.doesNotMatch(evidenceValue('target_hours', 72), /≈/);
   assert.match(evidenceValue('hours_per_round', 59), /≈/);
 });
@@ -135,7 +135,7 @@ test('B16: the Markdown heading never says "(person)" over team rules', () => {
   };
   const markdown = rulesMarkdown(data);
   assert.match(markdown, /\(team — no person-level signal in this window\)/);
-  assert.match(markdown, /1 PR opened over 1 day/);
+  assert.match(markdown, /1 PR opened over 1 calendar day/);
   assert.doesNotMatch(markdown, /1 PRs/);
 });
 

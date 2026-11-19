@@ -623,6 +623,138 @@ class SentinelQueueTests(StoreCase):
 
 
 # --------------------------------------------------------------------------- #
+# 8b. the prd/37 rules: stale PRs and the sentinel tail
+# --------------------------------------------------------------------------- #
+class StaleAndSentinelTailTests(StoreCase):
+    def fixture(self) -> Fixture:
+        fx = Fixture()
+        # PR 1: open since T0 (55 calendar days) — far past 5 business days
+        fx.pr(1, "AaAa", tickets=("ENG-1",))
+        # PR 2: open for 10 h — healthy, not stale
+        fx.pr(2, "AaAa", opened=AS_OF - timedelta(hours=10), tickets=("ENG-2",))
+        # PR 3: the peer answered, then the sentinel was the only holder for
+        # ~98 h — the sole-holder tail the rule names
+        fx.pr(3, "AaAa", opened=AS_OF - timedelta(hours=100), tickets=("ENG-3",))
+        # the sentinel asked for a change, the author answered it, and the
+        # sentinel has not re-reviewed since: the sentinel is the only holder
+        fx.event(3, "pr_needs_work", "FrMo", 1, sentinel=True)
+        fx.event(3, "comment_added", "AaAa", 2, severity="suggestion")
+        return fx
+
+    def test_stale_prs_are_flagged_and_priced(self):
+        metric = self.metric(self.fixture(), "stale_prs")
+        self.assertEqual(metric["stale_prs"], 2)          # #1 and #3
+        self.assertEqual(metric["open_prs"], 3)
+        self.assertEqual(metric["limit_days"], 5.0)
+        self.assertEqual(metric["over_age"], 2)
+        # the worst (oldest) item is first: prd/37 §3
+        self.assertEqual(metric["rows"][0]["id"], "platform#1")
+        self.assertTrue(metric["rows"][0]["affected"])
+        self.assertGreater(metric["hours"], 0)
+        suggestion = by_id(self.insights(self.fixture()), "stale-prs")
+        self.assertIsNotNone(suggestion)
+        self.assertEqual(suggestion["metric"], "stale_prs")
+        self.assertEqual(suggestion["severity"], "critical")
+        self.assertIn("platform#1", suggestion["evidence"]["examples"])
+
+    def test_a_done_ticket_with_an_open_pr_is_stale(self):
+        fx = self.fixture()
+        fx.write(self.path)
+        court = fx.court(self.path)
+        window = rules.window_for(court, None)
+        metric = rules.stale_prs(court, window, done_tickets={"ENG-2"})
+        row = next(row for row in metric["rows"] if row["id"] == "platform#2")
+        # the ticket is Done but the PR is open: the whole current wait is
+        # finished work that was never delivered
+        self.assertTrue(row["ticket_done"])
+        self.assertTrue(row["affected"])
+        self.assertGreater(row["hours"], 0)
+        self.assertIn("Done in Jira", " ".join(row["reasons"]))
+
+    def test_the_sentinel_tail_is_the_sole_holder_past_the_threshold(self):
+        metric = self.metric(self.fixture(), "sentinel_tail")
+        self.assertTrue(metric["available"])
+        self.assertEqual(metric["sentinels"], ["FrMo"])
+        self.assertEqual(metric["tail_items"], 1)
+        self.assertEqual(metric["rows"][0]["id"], "platform#3")
+        self.assertEqual(metric["rows"][0]["person"], "FrMo")
+        self.assertGreater(metric["rows"][0]["hours"], rules.SENTINEL_TAIL_HOURS)
+        suggestion = by_id(self.insights(self.fixture()), "sentinel-tail")
+        self.assertIsNotNone(suggestion)
+        self.assertEqual(suggestion["metric"], "sentinel_tail")
+        self.assertIn("waiting only on FrMo", suggestion["title"])
+        self.assertEqual(suggestion["severity"], "critical")   # 98 h ≥ 3 × 24
+
+
+# --------------------------------------------------------------------------- #
+# 8c. at-stake additivity and impact-sorted drill-downs (prd/37 §2/§3)
+# --------------------------------------------------------------------------- #
+class AtStakeTests(unittest.TestCase):
+    def suggestion(self, sid, impact, sample, scope=None, metric=None):
+        return {
+            "id": sid,
+            "metric": metric or sid.replace("-", "_"),
+            "impact_hours": impact,
+            "sample": sample,
+            "scope": scope or {"kind": "team"},
+            "rank": 1,
+        }
+
+    def test_a_subset_rule_is_not_added_to_its_parent(self):
+        suggestions = [
+            self.suggestion("rework-loops", 100.0, 10),
+            self.suggestion("rebase-waste", 40.0, 3),      # ⊂ rework-loops
+            self.suggestion("flow-efficiency", 160.0, 10),
+            self.suggestion("jira-carry-over", 70.0, 20),
+            self.suggestion("sprint-on-time", 70.0, 20),
+        ]
+        at_stake = rules.attribute_at_stake(suggestions)
+        # the PR-wait pool is counted at its broadest estimate (160), not
+        # 100 + 40 + 160; the sprint pool once (70), not 140
+        self.assertEqual(at_stake["hours"], 230.0)
+        attributed = {
+            s["id"]: s["at_stake"]["attributed_hours"] for s in suggestions
+        }
+        self.assertEqual(sum(attributed.values()), at_stake["hours"])
+        self.assertEqual(attributed["rebase-waste"], 40.0)      # most specific
+        # the pool is filled to its broadest estimate (160), most specific first
+        self.assertEqual(attributed["rework-loops"], 100.0)
+        self.assertEqual(attributed["flow-efficiency"], 20.0)
+        self.assertEqual(attributed["sprint-on-time"], 0.0)
+        self.assertEqual(attributed["jira-carry-over"], 70.0)
+        # a fully-absorbed rule points at the rule that owns its pool
+        absorbed = next(s for s in suggestions if s["id"] == "sprint-on-time")
+        self.assertEqual(absorbed["at_stake"]["attributed_to"], "jira-carry-over")
+        self.assertGreater(at_stake["overlap_hours"], 0)
+
+    def test_person_rules_are_counted_before_the_team_rule(self):
+        suggestions = [
+            self.suggestion("reviewer-AaAa", 30.0, 5,
+                            {"kind": "person", "person": "AaAa"}),
+            self.suggestion("reviewer-BbBb", 20.0, 5,
+                            {"kind": "person", "person": "BbBb"}),
+            self.suggestion("reviewer-spread", 100.0, 20),
+        ]
+        at_stake = rules.attribute_at_stake(suggestions)
+        attributed = {s["id"]: s["at_stake"]["attributed_hours"] for s in suggestions}
+        self.assertEqual(attributed["reviewer-AaAa"], 30.0)
+        self.assertEqual(attributed["reviewer-BbBb"], 20.0)
+        self.assertEqual(attributed["reviewer-spread"], 50.0)   # the remainder
+        self.assertEqual(at_stake["hours"], 100.0)
+
+    def test_the_drill_down_is_impact_sorted(self):
+        rows = [
+            {"id": "platform#1", "hours": 3.0, "affected": False},
+            {"id": "platform#2", "hours": 90.0, "affected": True},
+            {"id": "platform#3", "hours": 30.0, "affected": True},
+        ]
+        ordered = rules._drill_order(rows)
+        # worst wait first, never by key — prd/37 §3
+        self.assertEqual([row["id"] for row in ordered],
+                         ["platform#2", "platform#3", "platform#1"])
+
+
+# --------------------------------------------------------------------------- #
 # 9. pr_size
 # --------------------------------------------------------------------------- #
 class PrSizeTests(StoreCase):
@@ -1140,7 +1272,11 @@ class InsightsApiTests(unittest.TestCase):
     def test_days_filters_the_cohort(self):
         body = get("/api/insights", tenant="del", days=1).json()
         self.assertEqual(body["sample"]["prs"], 0)
-        self.assertEqual(body["suggestions"], [])
+        # prd/37: the stale-PR rule is a *snapshot* fact (what is open now),
+        # not a cohort metric, so it survives a one-day window; every cohort
+        # rule is gone.
+        ids = {suggestion["id"] for suggestion in body["suggestions"]}
+        self.assertEqual(ids - {"stale-prs"}, set())
 
     def test_a_suggestion_expands_into_its_linked_items(self):
         """prd/26 P5: the payload carries the rows the Rules page expands."""

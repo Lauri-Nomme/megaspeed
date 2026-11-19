@@ -335,13 +335,24 @@ def _sprint_id(event: dict) -> int | None:
     return jira.event_sprint_id(event)
 
 
-def _sprint_rows(data: jira.JiraData, story: jira.Story | None) -> dict:
+def _sprint_rows(court, data: jira.JiraData, story: jira.Story | None) -> dict:
+    """The ticket's sprint memberships with their done-by-end outcome (prd/37).
+
+    ``carried_over`` is the lens definition, not the multi-sprint re-add: the
+    story missed the close of a **closed** sprint it was committed to (finished
+    late, or still open). Each membership says which of the three it was, so the
+    ticket chip and the sprint strip cannot disagree.
+    """
     if story is None:
-        return {"memberships": [], "carried_over": False, "sprints_involved": 0}
+        return {
+            "memberships": [], "carried_over": False, "sprints_involved": 0,
+            "late": 0, "never": 0,
+        }
     by_id = {
         sprint["id"]: sprint for sprint in data.sprints.values()
         if sprint.get("id") is not None
     }
+    done = jira._done_at(story)
     rows: dict[int, dict] = {}
     order: list[int] = []
     for event in story.of("sprint_added"):
@@ -350,6 +361,19 @@ def _sprint_rows(data: jira.JiraData, story: jira.Story | None) -> dict:
             continue
         if sid not in rows:
             meta = by_id.get(sid) or {}
+            boundary = jira.sprint_boundary(meta, court)
+            closed = jira.sprint_closed(meta)
+            if boundary is None:
+                outcome = "unknown"
+            elif done is None:
+                outcome = "never"
+            elif done <= boundary:
+                outcome = "by_end"
+            else:
+                outcome = "late"
+            slip = 0.0
+            if outcome == "late" and done is not None and boundary is not None:
+                slip = round(court.business_hours(story.actor, boundary, done), 2)
             rows[sid] = {
                 "sprint_id": sid,
                 "object_id": meta.get("object_id"),
@@ -360,6 +384,10 @@ def _sprint_rows(data: jira.JiraData, story: jira.Story | None) -> dict:
                 "added": None,
                 "removed": None,
                 "at_start": False,
+                "closed": closed,
+                "outcome": outcome,
+                "done_by_end": outcome == "by_end",
+                "slip_hours": slip,
             }
             order.append(sid)
         if rows[sid]["added"] is None:
@@ -370,10 +398,18 @@ def _sprint_rows(data: jira.JiraData, story: jira.Story | None) -> dict:
         if sid in rows and rows[sid]["removed"] is None:
             rows[sid]["removed"] = _iso(event["_ts"])
     memberships = [rows[sid] for sid in order]
+    carried = [
+        row for row in memberships
+        if row["closed"] and row["outcome"] in ("late", "never")
+    ]
     return {
         "memberships": memberships,
-        "carried_over": len(order) > 1,
+        "carried_over": bool(carried),
         "sprints_involved": len(order),
+        "late": sum(1 for row in carried if row["outcome"] == "late"),
+        "never": sum(1 for row in carried if row["outcome"] == "never"),
+        "missed_sprints": [row["sprint_id"] for row in carried],
+        "explicit_readd": len(order) > 1,
     }
 
 
@@ -608,7 +644,7 @@ def ticket(
     # folding it into "done".
     segments = _segments(court, cycle, verification=jira.uses_verification(data))
     prs = _pr_rows(court, states)
-    sprints = _sprint_rows(data, story)
+    sprints = _sprint_rows(court, data, story)
     worklog_rows, worklog = _worklogs(story, prs)
     events = _events(story)
     answer, answer_kind = _answer(wanted, story, segments, prs)

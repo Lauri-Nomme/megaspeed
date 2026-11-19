@@ -151,7 +151,21 @@ function drillItem(row, suggestion, base = '') {
   } else if (metric === 'carry_over') {
     value = (row.sprints || []).length
       ? `sprints ${row.sprints.join(' → ')}` : 'no sprint';
-    detail = row.points == null ? '' : `${row.points} points`;
+    detail = [
+      row.status ? `${row.status}${row.done_at ? ` · done ${row.done_at.slice(0, 10)}` : ''}` : '',
+      row.points == null ? '' : `${row.points} points`,
+    ].filter(Boolean).join(' · ');
+  } else if (metric === 'sprint_delivery') {
+    value = row.status === 'late'
+      ? fmtHours(row.slip_hours)
+      : 'still open';
+    detail = `S${row.sprint_id} · ${row.status}${row.points == null ? '' : ` · ${row.points} points`}`;
+  } else if (metric === 'sentinel_tail') {
+    value = fmtHours(row.hours);
+    detail = `only ${row.person || 'sentinel'} · since ${String(row.waiting_since || '').slice(0, 10)}`;
+  } else if (metric === 'stale_prs') {
+    value = row.age_business_days == null ? fmtHours(row.age_hours) : `${row.age_business_days} business days`;
+    detail = (row.reasons || []).join(' · ');
   } else if (metric === 'point_churn') {
     value = `${row.events ?? 0} re-point${row.events === 1 ? '' : 's'}`;
     detail = row.points == null ? '' : `${row.points} points`;
@@ -193,9 +207,62 @@ export function ruleItems(suggestion, metrics = {}, base = '') {
     // a person-scoped rule drills into *that person's* items, not the team's
     rows = rows.filter((row) => row.person === scope.person);
   }
-  // affected first, keeping each metric's own order inside the two groups
-  rows = rows.slice().sort((a, b) => Number(Boolean(b.affected)) - Number(Boolean(a.affected)));
+  // prd/37 §3: "affected first" must be literally true — sort by the wait
+  // hours the row carries (the impact), not by key. A metric's own order is
+  // the tie-break.
+  rows = rows
+    .map((row, index) => ({ row, index }))
+    .sort((a, b) => (
+      impactOf(b.row, suggestion.metric) - impactOf(a.row, suggestion.metric)
+      || a.index - b.index
+    ))
+    .map((entry) => entry.row);
   return rows.map((row) => drillItem(row, suggestion, base)).filter((item) => item.label);
+}
+
+/**
+ * The impact (wait-hours) a drill-down row carries, whatever its metric.
+ *
+ * prd/37 §3: the drill-down is sorted by this number, so "affected first" is
+ * the worst item, not row 15 of 85. A metric that measures a count (rounds,
+ * commits, re-points) uses that count; a row with no number sorts last.
+ */
+export function impactOf(row, metric) {
+  if (!row || typeof row !== 'object') return 0;
+  const pick = (...keys) => {
+    for (const key of keys) {
+      const value = Number(row[key]);
+      if (Number.isFinite(value)) return value;
+    }
+    return null;
+  };
+  const byMetric = {
+    time_to_first_review: () => pick('first_review_hours'),
+    cycle_time: () => pick('hours'),
+    survival: () => pick('hours'),
+    flow_efficiency: () => pick('waiting_hours', 'elapsed_hours'),
+    reviewer_responsiveness: () => pick('hours'),
+    sentinel_queue: () => pick('hours'),
+    sentinel_tail: () => pick('hours'),
+    vacation_blocking: () => pick('hours'),
+    stale_prs: () => pick('hours', 'age_hours'),
+    rework_loops: () => pick('rounds'),
+    rebase_waste: () => pick('unapprovals'),
+    conformance: () => pick('rounds'),
+    comment_tax: () => pick('wasted', 'rounds'),
+    pr_size: () => pick('commits'),
+    stacked_cascade: () => pick('re_review_hours'),
+    waiting_time_decomposition: () => pick('largest_hours'),
+    carry_over: () => pick('wait_hours', 'slip_hours'),
+    sprint_delivery: () => pick('slip_hours'),
+    point_churn: () => pick('events'),
+    worklog_cross_check: () => pick('logged_hours'),
+    jira_conformance: () => pick('violations'),
+  };
+  const value = (byMetric[metric] || (() => pick(
+    'hours', 'wait_hours', 'slip_hours', 'age_hours', 'first_review_hours',
+  )))();
+  return value == null ? 0 : value;
 }
 
 function drillMarkup(suggestion, metrics, base) {
@@ -205,7 +272,9 @@ function drillMarkup(suggestion, metrics, base) {
   const affected = items.filter((item) => item.affected).length;
   const count = `${items.length} item${items.length === 1 ? '' : 's'}`;
   const hint = [
-    affected ? `${affected} affected first` : '',
+    affected ? `${affected} affected` : '',
+    // prd/37 §3: the rows are sorted by the wait they carry, worst first
+    'worst wait first',
     'every item, each a link',
   ].filter(Boolean).join(' · ');
   const rows = shown.map((item) => {
@@ -238,11 +307,31 @@ function drillMarkup(suggestion, metrics, base) {
   </details>`;
 }
 
+/**
+ * prd/37 §2: rules that price the same hours share a cost pool. The headline
+ * counts a pool once; a rule that is fully absorbed by a more specific one
+ * says where its hours were counted, so a reader cannot add the list up twice.
+ */
+export function stakeNote(suggestion) {
+  const stake = suggestion && suggestion.at_stake;
+  if (!stake || stake.pool_rules < 2) return '';
+  // the rule whose estimate *is* the pool ceiling is the broadest lens: it says
+  // the pool is counted once, rather than "counted in" a narrower rule.
+  if (stake.hours >= stake.pool_hours) {
+    return `<span class="rule-stake-note" title="the headline counts this pool once, at ${esc(fmtImpact(stake.pool_hours))}">pool ${esc(fmtImpact(stake.pool_hours))}</span>`;
+  }
+  if (stake.attributed_to) {
+    return `<span class="rule-stake-note" title="this rule prices part of the ${esc(stake.pool)} pool; the headline counts that pool once">counted in #${esc(stake.attributed_to_rank ?? '–')}</span>`;
+  }
+  return '';
+}
+
 export function ruleRow(suggestion, { base = '', metrics = {} } = {}) {
   const severity = SEVERITY_LABEL[suggestion.severity] || 'info';
   const facts = evidenceItems(suggestion.evidence);
   const person = suggestion.scope && suggestion.scope.kind === 'person'
     ? suggestion.scope.person : null;
+  const note = stakeNote(suggestion);
   return `
     <article class="rule sev-${esc(severity)}" data-rule="${esc(suggestion.id)}">
       <div class="rule-rank mono" aria-hidden="true">${String(suggestion.rank).padStart(2, '0')}</div>
@@ -252,7 +341,8 @@ export function ruleRow(suggestion, { base = '', metrics = {} } = {}) {
           <span class="rule-metric mono">${esc(suggestion.metric)}</span>
           ${person ? `<span class="rule-scope mono" title="pseudonym — the store holds no raw names">${esc(person)}</span>` : ''}
           <span class="grow"></span>
-          <span class="rule-impact num" title="estimated hours removed by this rule (impact × confidence ${esc(suggestion.confidence)})">${fmtImpact(suggestion.impact_hours)} at stake</span>
+          <span class="rule-impact num" title="estimated hours removed by this rule (impact × confidence ${esc(suggestion.confidence)}); the headline counts each cost pool once">${fmtImpact(suggestion.impact_hours)} at stake</span>
+          ${note}
         </div>
         <h2 class="rule-title">${esc(suggestion.title)}</h2>
         <p class="rule-action">${esc(suggestion.suggestion)}</p>
@@ -268,7 +358,12 @@ export function ruleRow(suggestion, { base = '', metrics = {} } = {}) {
 export function rulesStats(data) {
   const suggestions = (data && data.suggestions) || [];
   const critical = suggestions.filter((s) => s.severity === 'critical').length;
-  const impact = suggestions.reduce((sum, s) => sum + (Number(s.impact_hours) || 0), 0);
+  const stake = (data && data.at_stake) || null;
+  // prd/37 §2: the additive headline — never the sum of the per-rule estimates
+  const impact = stake && stake.hours != null
+    ? Number(stake.hours) || 0
+    : suggestions.reduce((sum, s) => sum + (Number(s.impact_hours) || 0), 0);
+  const overlap = stake && stake.overlap_hours ? Number(stake.overlap_hours) : 0;
   const sample = (data && data.sample) || {};
   const rules = suggestions.length;
   const prs = sample.prs ?? 0;
@@ -277,10 +372,13 @@ export function rulesStats(data) {
   const stories = (data && data.jira && data.jira.available) ? (sample.stories ?? 0) : null;
   return `<span class="stat-inline"><b>${rules}</b> rule${rules === 1 ? '' : 's'}</span>
     <span class="stat-inline"><b class="${critical ? 'attention' : ''}">${critical}</b> critical</span>
-    <span class="stat-inline"><b>${fmtImpact(impact)}</b> at stake</span>
+    <span class="stat-inline" title="${esc(overlap
+      ? `counted once: ${fmtImpact(overlap)} of overlapping rule estimates is not added again`
+      : 'each at-stake hour is attributed to one rule')}"><b>${fmtImpact(impact)}</b> at stake${
+      overlap ? ` <span class="muted">(counted once)</span>` : ''}</span>
     <span class="stat-inline"><b>${prs}</b> PR${prs === 1 ? '' : 's'}${
       stories === null ? '' : ` · <b>${stories}</b> stor${stories === 1 ? 'y' : 'ies'}`} ·
-      <b>${sample.days ?? 0}</b> d</span>`;
+      <b>${sample.days ?? 0}</b> calendar day${sample.days === 1 ? '' : 's'}</span>`;
 }
 
 /* B16: the `people` level is not a no-op toggle. When the engine has no
@@ -303,8 +401,8 @@ export function rulesMarkup(data, { base = '' } = {}) {
       ${note ? `<p>${esc(note)}</p>` : ''}
       <p>No rule crosses its threshold in this window.</p>
       <p class="muted">That is a result, not a missing screen: first review under 24 h, cycle
-        time under 3 d, two review rounds or fewer, no lost approvals. Widen the timeframe or
-        switch to people to check the per-person rules.</p>
+        time under 9 d (72 business hours), two review rounds or fewer, no lost approvals.
+        Widen the timeframe or switch to people to check the per-person rules.</p>
     </div>`;
   }
   return `${note ? `<p class="rules-note">${esc(note)}</p>` : ''}
@@ -325,21 +423,29 @@ export function rulesMarkdown(data, base = '') {
     `# Rules — what should we change first? (${level})`,
     '',
     `_${data.sample.prs} PR${data.sample.prs === 1 ? '' : 's'} opened over ` +
-      `${data.sample.days} day${data.sample.days === 1 ? '' : 's'} · ` +
+      `${data.sample.days} calendar day${data.sample.days === 1 ? '' : 's'} · ` +
       `${data.hours_mode === 'business' ? 'business hours' : 'wall-clock hours'} · ` +
       `snapshot ${data.as_of}_`,
     '',
   ];
   if (note) lines.push(`_${note}_`, '');
+  const stake = data.at_stake || null;
+  if (stake) {
+    lines.push(`_${fmtImpact(stake.hours)} at stake — counted once across ` +
+      `${(stake.pools || []).length} cost pool${(stake.pools || []).length === 1 ? '' : 's'}; ` +
+      `${fmtImpact(stake.overlap_hours)} of overlapping estimates is not added._`, '');
+  }
   for (const suggestion of data.suggestions) {
     const facts = evidenceItems(suggestion.evidence)
       .map((fact) => `${fact.label} ${markdownLinkTickets(fact.value, base)}`).join(' · ');
+    const shared = suggestion.at_stake && suggestion.at_stake.attributed_to
+      ? ` — counted in #${suggestion.at_stake.attributed_to_rank}` : '';
     lines.push(
       `## ${suggestion.rank}. ${suggestion.title}`,
       '',
       `- severity: ${suggestion.severity}`,
       `- metric: ${suggestion.metric}`,
-      `- impact: ${fmtImpact(suggestion.impact_hours)} (confidence ${suggestion.confidence})`,
+      `- impact: ${fmtImpact(suggestion.impact_hours)} (confidence ${suggestion.confidence})${shared}`,
       `- rule: ${suggestion.suggestion}`,
       `- evidence: ${facts}`,
     );

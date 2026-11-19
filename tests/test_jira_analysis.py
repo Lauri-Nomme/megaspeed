@@ -411,61 +411,148 @@ class WaitingTimeTests(StoreCase):
 # 2. carry-over (prd/21 §2)
 # --------------------------------------------------------------------------- #
 class CarryOverTests(StoreCase):
+    """prd/37 §1: carry-over is "committed but not done by the sprint's close".
+
+    The old definition counted only an explicit re-add into a second sprint, so
+    a story that finished *late* (or never) while still attached to the sprint
+    it missed was invisible — the "0 carried over" that hid the late stories.
+    """
+
     def fixture(self) -> Fixture:
         fx = Fixture()
+        # sprint 1 closes at T0 + 14 d; sprint 2 is closed too (no end recorded,
+        # so its boundary is the snapshot)
         fx.sprint(1, T0, end=T0 + timedelta(days=14), closed=T0 + timedelta(days=14))
         fx.sprint(2, T0 + timedelta(days=14), end=T0 + timedelta(days=28))
-        # ENG-1 was in sprint 1 from the start, then moved to sprint 2
-        fx.story("ENG-1", T0)
+        # ENG-1: committed to sprint 1, reached done two days after its close
+        fx.story("ENG-1", T0, state="done", closed=T0 + timedelta(days=16))
         fx.add_to_sprint("ENG-1", T0, 1, at_start=True)
-        fx.add_to_sprint("ENG-1", T0 + timedelta(days=14), 2)
         fx.status("ENG-1", T0 + timedelta(days=15), "in_progress")
-        # ENG-2 was only ever in sprint 1
-        fx.story("ENG-2", T0)
+        fx.status("ENG-1", T0 + timedelta(days=16), "done", from_status="in_progress")
+        # ENG-2: committed to sprint 1, done before the close — not carried
+        fx.story("ENG-2", T0, state="done", closed=T0 + timedelta(days=10))
         fx.add_to_sprint("ENG-2", T0, 1, at_start=True)
         fx.status("ENG-2", T0 + timedelta(days=1), "in_progress")
-        # ENG-3 was removed from sprint 1 and re-added to the same sprint
+        fx.status("ENG-2", T0 + timedelta(days=10), "done", from_status="in_progress")
+        # ENG-3: committed to sprint 1, never done — carried (never)
         fx.story("ENG-3", T0)
         fx.add_to_sprint("ENG-3", T0, 1, at_start=True)
         fx.add_to_sprint("ENG-3", T0 + timedelta(days=3), 1)
-        # ENG-4 never entered a sprint
+        # ENG-4: never in a sprint
         fx.story("ENG-4", T0)
         return fx
 
-    def test_carry_over_counts_distinct_sprints(self):
+    def test_carry_over_is_committed_but_not_done_by_the_close(self):
         metric = self.metric(self.fixture(), "carry_over")
         self.assertTrue(metric["available"])
         self.assertEqual(metric["stories"], 4)
         self.assertEqual(metric["stories_in_a_sprint"], 3)
-        self.assertEqual(metric["carried_over"], 1)
-        self.assertEqual([row["key"] for row in metric["rows"]], ["ENG-1"])
-        self.assertEqual(metric["rows"][0]["sprints"], [1, 2])
-        self.assertEqual(metric["share"], round(1 / 3, 4))
+        # ENG-1 finished late, ENG-3 never finished; ENG-2 made the close
+        self.assertEqual(metric["carried_over"], 2)
+        self.assertEqual(metric["late"], 1)
+        self.assertEqual(metric["never"], 1)
+        self.assertEqual(
+            sorted(row["key"] for row in metric["rows"]), ["ENG-1", "ENG-3"]
+        )
+        self.assertEqual(metric["share"], round(2 / 3, 4))
+        # an explicit re-add into the same sprint is not a second sprint, and is
+        # reported as context only
         self.assertEqual(metric["readded_same_sprint"], 1)
-        self.assertEqual(metric["sprints_involved"], 2)
-        # first sprint_added (T0) → first in-progress (T0 + 15 d) = 360 h
-        self.assertEqual(metric["rows"][0]["wait_hours"], 360.0)
+        self.assertEqual(metric["explicit_readds"], 0)
+        # slip: sprint 1 close → done (2 days = 48 wall-clock hours, no calendar)
+        eng1 = next(row for row in metric["rows"] if row["key"] == "ENG-1")
+        self.assertEqual(eng1["status"], "late")
+        self.assertEqual(eng1["wait_hours"], 48.0)
+        self.assertEqual(eng1["missed_sprints"], [1])
 
     def test_emits_the_carry_over_template(self):
         payload = self.payload(self.fixture())
         suggestion = by_id(payload, "jira-carry-over")
         self.assertIsNotNone(suggestion)
-        self.assertEqual(suggestion["title"], "1 story carried over between sprints")
-        self.assertEqual(suggestion["severity"], "critical")   # 1 of 3 stories ≥ 25%
-        self.assertEqual(suggestion["impact_hours"], 360.0)
-        self.assertEqual(suggestion["evidence"]["carried_over"], 1)
-        self.assertEqual(suggestion["evidence"]["sprints"], 2)
+        self.assertEqual(
+            suggestion["title"],
+            "2 stories committed but not done by their sprint's close",
+        )
+        self.assertEqual(suggestion["severity"], "critical")   # 2 of 3 ≥ 25%
+        self.assertEqual(suggestion["evidence"]["carried_over"], 2)
+        self.assertEqual(suggestion["evidence"]["late"], 1)
+        self.assertEqual(suggestion["evidence"]["never"], 1)
+        self.assertEqual(suggestion["evidence"]["sprints"], 1)
 
     def test_no_carry_over_means_no_rule(self):
         fx = Fixture()
         fx.sprint(1, T0, end=T0 + timedelta(days=14))
-        fx.story("ENG-1", T0)
+        # the story is done before the sprint closes: the plan held
+        fx.story("ENG-1", T0, state="done", closed=T0 + timedelta(days=10))
         fx.add_to_sprint("ENG-1", T0, 1, at_start=True)
+        fx.status("ENG-1", T0 + timedelta(days=1), "in_progress")
+        fx.status("ENG-1", T0 + timedelta(days=10), "done", from_status="in_progress")
         payload = self.payload(fx)
         metric = payload["metrics"]["carry_over"]
         self.assertTrue(metric["available"])
         self.assertEqual(metric["carried_over"], 0)
         self.assertIsNone(by_id(payload, "jira-carry-over"))
+
+
+# --------------------------------------------------------------------------- #
+# 2c. sprint on-time delivery (prd/37 §1)
+# --------------------------------------------------------------------------- #
+class SprintDeliveryTests(StoreCase):
+    def fixture(self) -> Fixture:
+        fx = Fixture()
+        fx.sprint(1, T0, end=T0 + timedelta(days=14), closed=T0 + timedelta(days=14))
+        # ENG-1 done before the close; ENG-2 finished late; ENG-3 never done
+        fx.story("ENG-1", T0, points=3, state="done", closed=T0 + timedelta(days=10))
+        fx.add_to_sprint("ENG-1", T0, 1, at_start=True)
+        fx.status("ENG-1", T0 + timedelta(days=1), "in_progress")
+        fx.status("ENG-1", T0 + timedelta(days=10), "done", from_status="in_progress")
+        fx.story("ENG-2", T0, points=5, state="done", closed=T0 + timedelta(days=16))
+        fx.add_to_sprint("ENG-2", T0, 1, at_start=True)
+        fx.status("ENG-2", T0 + timedelta(days=15), "in_progress")
+        fx.status("ENG-2", T0 + timedelta(days=16), "done", from_status="in_progress")
+        fx.story("ENG-3", T0, points=2)
+        fx.add_to_sprint("ENG-3", T0, 1, at_start=True)
+        return fx
+
+    def test_done_by_end_late_and_never_are_three_outcomes(self):
+        metric = self.metric(self.fixture(), "sprint_delivery")
+        self.assertTrue(metric["available"])
+        self.assertEqual(metric["closed_sprints"], 1)
+        self.assertEqual(metric["done_by_end"], 1)
+        self.assertEqual(metric["done_late"], 1)
+        self.assertEqual(metric["never_done"], 1)
+        self.assertEqual(metric["worst"]["sprint_id"], 1)
+        self.assertEqual(metric["worst"]["done_share"], round(1 / 3, 4))
+        # the late story's slip is measured from the close, not from "today"
+        self.assertEqual(metric["late_hours"], 48.0)
+        self.assertEqual([row["key"] for row in metric["rows"]],
+                         ["ENG-2", "ENG-3"])
+        self.assertEqual(metric["rows"][0]["status"], "late")
+
+    def test_emits_the_on_time_delivery_rule(self):
+        payload = self.payload(self.fixture())
+        suggestion = by_id(payload, "sprint-on-time")
+        self.assertIsNotNone(suggestion)
+        self.assertEqual(suggestion["metric"], "sprint_delivery")
+        self.assertEqual(
+            suggestion["title"],
+            "S1 delivered 1 of 3 committed stories (33%) by its close — "
+            "1 finished late, 1 still open",
+        )
+        self.assertEqual(suggestion["severity"], "critical")
+        self.assertEqual(suggestion["impact_hours"], 48.0)
+        self.assertEqual(suggestion["evidence"]["done_by_end"], 1)
+        self.assertEqual(suggestion["evidence"]["target_share"], 0.8)
+
+    def test_an_active_sprint_has_no_verdict_yet(self):
+        fx = Fixture()
+        fx.sprint(1, T0, state="active")
+        fx.story("ENG-1", T0)
+        fx.add_to_sprint("ENG-1", T0, 1, at_start=True)
+        payload = self.payload(fx)
+        metric = payload["metrics"]["sprint_delivery"]
+        self.assertFalse(metric["available"])
+        self.assertIsNone(by_id(payload, "sprint-on-time"))
 
 
 # --------------------------------------------------------------------------- #

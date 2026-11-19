@@ -194,7 +194,7 @@ export function prTable(payload) {
   return `<table class="table ticket-prs">${head}<tbody>${body}</tbody></table>`;
 }
 
-/** Sprint membership: which sprint, when, and whether it was carried over. */
+/** Sprint membership: which sprint, when, and the done-by-end outcome (prd/37). */
 export function sprintStrip(payload) {
   const sprints = (payload && payload.sprints) || {};
   const memberships = sprints.memberships || [];
@@ -202,15 +202,27 @@ export function sprintStrip(payload) {
     return '<p class="empty-row">No sprint membership event names this ticket, so the store cannot say which sprint committed it.</p>';
   }
   const carried = sprints.carried_over
-    ? `<span class="pill warning" title="added to more than one sprint — the plan was not honest">carried over</span>`
+    ? `<span class="pill warning" title="committed to a closed sprint but not done by its close — the plan slipped">carried over${
+      sprints.late ? ` · ${sprints.late} late` : ''}${
+      sprints.never ? ` · ${sprints.never} open` : ''}</span>`
     : '';
-  const chips = memberships.map((sprint) => `
+  const OUTCOME = {
+    by_end: ['healthy', 'done by end'],
+    late: ['warning', 'finished late'],
+    never: ['waiting', 'still open'],
+    unknown: ['neutral', 'no sprint close'],
+  };
+  const chips = memberships.map((sprint) => {
+    const [kind, label] = OUTCOME[sprint.outcome] || OUTCOME.unknown;
+    return `
     <span class="sprint-chip" title="sprint ${esc(sprint.sprint_id)}${sprint.object_id ? ` · ${esc(sprint.object_id)}` : ''}">
       <b class="mono">#${esc(sprint.sprint_id)}</b>
       <span class="mono muted">${esc(shortStamp(sprint.start))} → ${esc(shortStamp(sprint.end || sprint.planned_end))}</span>
+      <span class="pill ${kind}">${esc(label)}</span>
       <span class="pill neutral">${esc(sprint.state || 'unknown')}</span>
       <span class="muted">added ${esc(shortStamp(sprint.added))}${sprint.removed ? ` · removed ${esc(shortStamp(sprint.removed))}` : ''}</span>
-    </span>`).join('');
+    </span>`;
+  }).join('');
   return `<div class="sprint-strip">${carried}${chips}</div>`;
 }
 
@@ -288,6 +300,24 @@ export function ticketStats(payload) {
     ${largest ? `<span class="stat-inline">most in <b>${esc(largest)}</b> (${pct(segments.largest_share)})</span>` : ''}`;
 }
 
+/**
+ * prd/35 §2: state the clock once, where the numbers are.
+ *
+ * Timestamps are UTC; every duration is business hours on the team's calendar
+ * (Tallinn by default), so a 0 h span between two UTC stamps an hour apart is
+ * an evening or a weekend, not a bug.
+ */
+export function clockNote(payload) {
+  if (!payload) return '';
+  if (payload.hours_mode === 'business') {
+    return 'timestamps are UTC · durations are business hours on the team calendar' +
+      (payload.assumption ? ` (${payload.assumption})` : '') +
+      ' — a 0 h span can be an evening, a weekend or a holiday';
+  }
+  return 'timestamps are UTC · no working-hours calendar is configured, so durations ' +
+    'are wall-clock hours';
+}
+
 /** The whole page body. `base` is the page URL used by copied Markdown links. */
 export function ticketMarkup(payload, { base = '' } = {}) {
   if (!payload) return '<p class="empty-row">Loading the ticket…</p>';
@@ -321,6 +351,7 @@ export function ticketMarkup(payload, { base = '' } = {}) {
         : 'no STORY object')}</p>
       ${endPills ? `<p class="context">${endPills}</p>` : ''}
       <p class="context muted">${esc(context)}</p>
+      <p class="clock-note" id="ticket-clock">${esc(clockNote(payload))}</p>
     </div>
     <p class="impact ticket-answer" id="ticket-answer" data-kind="${esc(payload.answer_kind || '')}">${esc(payload.answer || '')}</p>
     <div class="ticket-grid">
@@ -359,7 +390,7 @@ export function ticketMarkdown(payload, base = '') {
     `> ${payload.answer || ''}`,
     '',
     `_${payload.hours_mode === 'business' ? 'business hours' : 'wall-clock hours'} · ` +
-      `snapshot ${payload.snapshot || '—'} · [open in the app](${ticketHref(key, base)})_`,
+      `timestamps UTC · snapshot ${payload.snapshot || '—'} · [open in the app](${ticketHref(key, base)})_`,
     ...(payload.reopened
       ? ['', `**reopened** ×${payload.reopen_count || 1} — created→first done ` +
         `${segmentHours(segments.cycle_first_done_hours)}, created→final done ` +

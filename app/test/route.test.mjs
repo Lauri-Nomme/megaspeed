@@ -81,6 +81,43 @@ test('P-2: the URL round-trips tenant + view + ticket', () => {
   assert.equal(ticketRoute.ticket, 'DEL-167');
 });
 
+test('prd/37 §4: the sprint lens round-trips id + range', () => {
+  const from = Date.parse('2026-09-11T09:00:00Z');
+  const to = Date.parse('2026-10-07T16:00:00Z');
+  const href = serializeRoute({
+    tenant: 'del-combined', view: 'timeline', sprint: 2, from, to,
+  });
+  assert.equal(
+    href,
+    `?tenant=del-combined&view=timeline&sprint=2&from=${from}&to=${to}`,
+  );
+  const { search, hash } = split(href);
+  const parsed = parseRoute(search, hash);
+  assert.equal(parsed.sprint, 2);
+  assert.equal(parsed.from, from);
+  assert.equal(parsed.to, to);
+  // no sprint means no range parameters, so old links stay byte-identical
+  assert.equal(serializeRoute({ view: 'timeline' }), '?view=timeline');
+  // an id that is not a number is ignored, never trusted as free text
+  assert.equal(parseRoute('?sprint=two', '').sprint, null);
+  assert.equal(parseRoute('?sprint=2&from=abc&to=def', '').from, null);
+});
+
+test('prd/37 §4: the sprint lens filters the story lanes and marks its band', () => {
+  const timeline = read('timeline.js');
+  assert.match(timeline, /setSprintFocus/);
+  assert.match(timeline, /sprintFocusKeys/);
+  // the story lane list is filtered by the selected sprint's keys
+  assert.match(timeline, /\.filter\(\(group\) => !focus \|\| focus\.has\(group\.story\)\)/);
+  // the band is marked (and the others recede)
+  assert.match(timeline, /canvas-band-focus/);
+  const main = read('main.js');
+  assert.match(main, /function focusSprint/);
+  assert.match(main, /function clearSprintFocus/);
+  assert.match(main, /data-sprint-clear/);
+  assert.match(main, /sprint: state\.sprint/);
+});
+
 test('P-2: #ticket/KEY still resolves, alone and inside the new scheme', () => {
   assert.equal(ticketFromHash('#ticket/DEL-167'), 'DEL-167');
   assert.equal(ticketFromHash('#ticket/'), null);
@@ -100,7 +137,8 @@ test('P-2: #ticket/KEY still resolves, alone and inside the new scheme', () => {
 
 test('P-2: unknown or absent parameters are ignored, not trusted', () => {
   assert.deepEqual(parseRoute('', ''), {
-    tenant: null, view: null, ticket: null, timeframe: null, scope: null, theme: null,
+    tenant: null, view: null, ticket: null, timeframe: null, scope: null,
+    sprint: null, from: null, to: null, theme: null,
   });
   assert.equal(parseRoute('?view=bogus', '').view, null);
   assert.equal(parseRoute('?tenant=del', '').view, null);

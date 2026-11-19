@@ -231,12 +231,17 @@ def _confidence(n: int) -> float:
     return round(max(0.05, min(1.0, max(0, n) / CONFIDENCE_SAMPLE)), 2)
 
 
+#: concepts.md §1 (prd/35): one `d` is 8 business hours — one working day,
+#: never 24 h and never a calendar day. Every rendered duration divides by it.
+BUSINESS_HOURS_PER_DAY = 8.0
+
+
 def _human_hours(hours: float | None) -> str:
-    """Plain-language duration for titles: "41 h", "3.4 d"."""
+    """Plain-language duration for titles: "41 h", "3.4 d" (d = 8 business hours)."""
     if hours is None:
         return "—"
-    if hours >= 48:
-        return f"{round(hours / 24.0, 1):g} d"
+    if hours >= 2 * BUSINESS_HOURS_PER_DAY:
+        return f"{round(hours / BUSINESS_HOURS_PER_DAY, 1):g} d"
     return f"{round(hours, 1):g} h"
 
 
@@ -319,14 +324,17 @@ def _pr_row(pr: dict, **extra) -> dict:
 
 
 def _drill_order(rows: list[dict]) -> list[dict]:
-    """Affected items first, then the largest number, then a stable identity.
+    """Impact first: wait-hours descending, then affected, then a stable identity.
 
-    The drill-down shows the *whole* list (prd/26 P5), so the order has to put
-    the items the rule is about on top without hiding the rest.
+    concepts.md §6 / prd/37 §3: a drill-down is "the items behind the number",
+    and the worst item must be the first row — sorted by the wait it carries,
+    never by key. ``affected`` breaks ties in favour of the items the rule is
+    about, so a metric that mixes in unaffected context rows still leads with
+    the evidence.
     """
     rows.sort(key=lambda row: (
+        -float(row.get("hours") or row.get("wait_hours") or row.get("slip_hours") or 0.0),
         not row.get("affected", False),
-        -float(row.get("hours") or 0.0),
         str(row.get("id") or row.get("key") or row.get("object_id") or ""),
     ))
     return rows
@@ -1611,6 +1619,157 @@ def vacation_blocking(court: ballcourt.BallCourt, window) -> dict:
     }
 
 
+def stale_prs(court: ballcourt.BallCourt, window,
+              done_tickets: set[str] | None = None) -> dict:
+    """The stale/zombie-PR signal, priced (prd/34 §5, prd/37 §6).
+
+    Reuses ``ballcourt.delivery_list`` so the rule and the delivery list quote
+    the *same* fact: a PR is stale when it has been open longer than
+    ``STALE_BUSINESS_DAYS`` business days (8 h each, concepts.md §1), or when
+    its ticket is already Done in Jira while the PR is open. The second reason
+    is finished work that was never delivered, so its whole current wait is
+    recoverable; the first prices only the age past the limit.
+    """
+    limit_days = ballcourt.STALE_BUSINESS_DAYS
+    limit_hours = limit_days * ballcourt.BUSINESS_HOURS_PER_DAY
+    delivery = ballcourt.delivery_list(
+        court, window, stale_business_days=limit_days, done_tickets=done_tickets,
+    )
+    rows: list[dict] = []
+    for row in delivery["rows"]:
+        reasons = list(row.get("stale_reasons") or ())
+        ticket_done = any("Done in Jira" in reason for reason in reasons)
+        age_hours = float(row.get("age_hours") or 0.0)
+        waiting_hours = float(row.get("waiting_hours") or 0.0)
+        age_excess = max(0.0, age_hours - limit_hours)
+        impact = max(age_excess, waiting_hours) if ticket_done else age_excess
+        rows.append({
+            "kind": "pr",
+            "object_id": row["object_id"],
+            "repo": row["repo"],
+            "number": row["number"],
+            "id": row["id"],
+            "tickets": list(row.get("tickets") or ()),
+            "state": row["state"],
+            "hours": round(impact, 2),
+            "age_hours": round(age_hours, 2),
+            "age_business_days": row.get("age_business_days"),
+            "waiting_hours": round(waiting_hours, 2),
+            "limit_days": limit_days,
+            "ticket_done": ticket_done,
+            "reasons": reasons,
+            "affected": bool(row.get("stale")),
+        })
+    stale = [row for row in rows if row["affected"]]
+    over_age = sum(1 for row in stale if row["age_business_days"] > limit_days)
+    ticket_done_open = sum(1 for row in stale if row["ticket_done"])
+    oldest = max((row["age_hours"] for row in stale), default=None)
+    return {
+        "available": True,
+        "open_prs": len(rows),
+        "stale_prs": len(stale),
+        "over_age": over_age,
+        "ticket_done_open": ticket_done_open,
+        "limit_days": limit_days,
+        "limit_hours": limit_hours,
+        "oldest_age_hours": oldest,
+        "hours": round(sum(row["hours"] for row in stale), 2),
+        "rows": _drill_order(rows),
+        "note": (
+            f"stale = open longer than {limit_days:g} business days (8 h each) "
+            "or the ticket is Done in Jira while the PR is open; hours = the "
+            "age past the limit, or the current wait when the ticket is Done"
+        ),
+    }
+
+
+#: prd/37 §6: an item waiting *only* on the sentinel past this many business
+#: hours is the sentinel-tail the rule names (24 h = 3 working days).
+SENTINEL_TAIL_HOURS = 24.0
+
+
+def sentinel_tail(court: ballcourt.BallCourt, window) -> dict:
+    """Open items waiting **only** on the sentinel, past a stated threshold.
+
+    ``sentinel_queue`` prices every wait the mandatory approver caused;
+    this metric isolates the tail where the sentinel is the *sole* holder —
+    no peer reviewer pending, no author debt — so the fix is unambiguous
+    (another sentinel, or a rotation) and no reviewer is charged for it.
+    """
+    sentinels = set(court.sentinels)
+    if not sentinels:
+        return {
+            "available": False,
+            "sentinels": [],
+            "threshold_hours": SENTINEL_TAIL_HOURS,
+            "n": 0,
+            "tail_items": 0,
+            "hours": 0.0,
+            "excess_hours": 0.0,
+            "median_hours": None,
+            "p90_hours": None,
+            "longest_hours": None,
+            "rows": [],
+        }
+    pr_meta = {state.pr["object_id"]: state.pr for state in court.prs}
+    by_pr: dict[str, list] = defaultdict(list)
+    for interval in court.intervals:
+        by_pr[interval.object_id].append(interval)
+    rows: list[dict] = []
+    for object_id, intervals in by_pr.items():
+        pr = pr_meta.get(object_id)
+        if pr is None or pr["closed_ts"] is not None:
+            continue
+        intervals.sort(key=lambda interval: interval.start)
+        tail: list = []
+        for interval in reversed(intervals):
+            holders = [person for person in interval.person_holders]
+            if (
+                len(holders) == 1
+                and holders[0] in sentinels
+                and not interval.author_open
+            ):
+                tail.append(interval)
+            else:
+                break
+        if not tail:
+            continue
+        person = tail[0].person_holders[0]
+        hours = sum(interval.hours_for(person) for interval in tail)
+        since = tail[-1].start
+        rows.append(_pr_row(
+            pr,
+            person=person,
+            hours=round(hours, 2),
+            waiting_since=iso(since),
+            threshold_hours=SENTINEL_TAIL_HOURS,
+            affected=hours > SENTINEL_TAIL_HOURS,
+        ))
+    rows = _drill_order(rows)
+    tail_rows = [row for row in rows if row["affected"]]
+    waits = [row["hours"] for row in rows]
+    return {
+        "available": True,
+        "sentinels": sorted(sentinels),
+        "threshold_hours": SENTINEL_TAIL_HOURS,
+        "n": len(rows),
+        "tail_items": len(tail_rows),
+        "hours": round(sum(row["hours"] for row in tail_rows), 2),
+        "excess_hours": round(
+            sum(row["hours"] - SENTINEL_TAIL_HOURS for row in tail_rows), 2
+        ),
+        "median_hours": _median(waits),
+        "p90_hours": _p90(waits),
+        "longest_hours": round(max(waits), 2) if waits else None,
+        "rows": rows,
+        "note": (
+            "an item is in the sentinel tail when the sentinel is its only "
+            "human holder (no peer reviewer pending, no author debt) and that "
+            f"wait exceeds {SENTINEL_TAIL_HOURS:g} business hours"
+        ),
+    }
+
+
 def metrics(court: ballcourt.BallCourt, threads: list[dict], window,
             sizes: dict[str, dict] | None = None,
             jira: jira_analysis.JiraData | None = None) -> dict:
@@ -1621,6 +1780,7 @@ def metrics(court: ballcourt.BallCourt, threads: list[dict], window,
     note, so "the ticket layer is missing" is a stated result rather than a
     silent zero.
     """
+    done_tickets = jira_analysis.done_keys(jira) if jira is not None else set()
     return {
         "time_to_first_review": time_to_first_review(court, window),
         "cycle_time": cycle_time(court, window),
@@ -1632,6 +1792,9 @@ def metrics(court: ballcourt.BallCourt, threads: list[dict], window,
         "comment_tax": comment_tax(court, threads, window),
         "conformance": conformance(court, window),
         "sentinel_queue": sentinel_queue(court, window),
+        # prd/37 §6: the two rules the data wanted on top of the signals
+        "sentinel_tail": sentinel_tail(court, window),
+        "stale_prs": stale_prs(court, window, done_tickets),
         "pr_size": pr_size(court, window, sizes),
         "vacation_blocking": vacation_blocking(court, window),
         "stacked_cascade": stack_analysis.metrics(court, window),
@@ -1734,7 +1897,8 @@ def templates(
         severity = "critical" if cyc["median_hours"] >= 7 * 24 else "warning"
         out.append(_suggestion(
             "cycle-time", "cycle_time",
-            f"Cycle time is {_human_hours(cyc['median_hours'])} median (target < 3 d)",
+            f"Cycle time is {_human_hours(cyc['median_hours'])} median "
+            f"(target < {_human_hours(TARGET_CYCLE_HOURS)})",
             {
                 "median_hours": cyc["median_hours"],
                 "p90_hours": cyc["p90_hours"],
@@ -1828,7 +1992,7 @@ def templates(
         out.append(_suggestion(
             "time-to-merge", "survival",
             f"Time to merge is {_human_hours(sv['median_hours'])} median with open "
-            "and declined PRs censored in (target < 3 d)",
+            f"and declined PRs censored in (target < {_human_hours(TARGET_CYCLE_HOURS)})",
             {
                 "survival_median_hours": sv["median_hours"],
                 "merged_only_median_hours": sv["merged_only_median_hours"],
@@ -1866,7 +2030,8 @@ def templates(
         out.append(_suggestion(
             "cycle-time-censoring", "survival",
             f"The merged-only median "
-            f"({_human_hours(sv['merged_only_median_hours'])}) meets 3 d, but "
+            f"({_human_hours(sv['merged_only_median_hours'])}) meets "
+            f"{_human_hours(TARGET_CYCLE_HOURS)}, but "
             f"{_count(over, 'open PR')} already waited past it",
             {
                 "merged_only_median_hours": sv["merged_only_median_hours"],
@@ -2085,6 +2250,46 @@ def templates(
             "warning", cf["excess_rounds"] * round_hours, cf["n"],
         ))
 
+    # 7b. stale_prs (prd/34 §5 signal, prd/37 §6 rule) — zombie PRs.
+    # The delivery list already flags them; this is the ranked "what to change"
+    # version, priced by the age past the limit (or the whole wait when the
+    # ticket is already Done and only the merge is missing).
+    sp = m["stale_prs"]
+    if sp["stale_prs"] > 0:
+        oldest = sp["oldest_age_hours"] or 0.0
+        severity = (
+            "critical"
+            if sp["ticket_done_open"] > 0 or oldest >= 2 * sp["limit_hours"]
+            else "warning"
+        )
+        reasons = []
+        if sp["over_age"]:
+            reasons.append(f"{sp['over_age']} open past {sp['limit_days']:g} business days")
+        if sp["ticket_done_open"]:
+            reasons.append(f"{sp['ticket_done_open']} with the ticket already Done")
+        examples = ", ".join(
+            row["id"] for row in sp["rows"] if row["affected"]
+        )
+        out.append(_suggestion(
+            "stale-prs", "stale_prs",
+            f"{_count(sp['stale_prs'], 'stale PR')} — " + " and ".join(reasons),
+            {
+                "stale_prs": sp["stale_prs"],
+                "open_prs": sp["open_prs"],
+                "over_age": sp["over_age"],
+                "ticket_done_open": sp["ticket_done_open"],
+                "limit_days": sp["limit_days"],
+                "oldest_age_hours": oldest,
+                "recoverable_hours": sp["hours"],
+                "examples": examples,
+            },
+            "Close, land, or decline stale PRs in the weekly review: a PR open "
+            "longer than a working week is a wait with no end, and one whose "
+            "ticket is already Done is finished work the team cannot deliver or "
+            "count. Both cost cycle time every day they stay open.",
+            severity, sp["hours"], max(sp["stale_prs"], 1),
+        ))
+
     # 8. sentinel_queue — only when role data exists.
     sq = m["sentinel_queue"]
     if sq["available"] and sq["median_hours"] is not None and sq["median_hours"] > TARGET_FIRST_REVIEW_HOURS:
@@ -2102,6 +2307,39 @@ def templates(
             "Rotate or add sentinels: the mandatory approval is the longest single wait, "
             "so one more sentinel shortens the tail of every PR that needs one.",
             severity, (sq["median_hours"] - TARGET_FIRST_REVIEW_HOURS) * sq["n"], sq["n"],
+        ))
+
+    # 8b. sentinel_tail (prd/37 §6) — the items waiting *only* on the sentinel.
+    # The queue rule prices the median; this one names the stuck tail where the
+    # sentinel is the sole holder, so the fix (another sentinel / a rotation)
+    # cannot be confused with "review is slow".
+    st = m["sentinel_tail"]
+    if st["available"] and st["tail_items"] > 0:
+        longest = st["longest_hours"] or 0.0
+        severity = "critical" if longest >= 3 * SENTINEL_TAIL_HOURS else "warning"
+        names = ", ".join(st["sentinels"])
+        out.append(_suggestion(
+            "sentinel-tail", "sentinel_tail",
+            f"{_count(st['tail_items'], 'item')} waiting only on "
+            f"{names} for up to {_human_hours(longest)} (threshold "
+            f"{_human_hours(SENTINEL_TAIL_HOURS)})",
+            {
+                "sentinels": len(st["sentinels"]),
+                "tail_items": st["tail_items"],
+                "open_items_waiting_on_a_sentinel": st["n"],
+                "hours": st["hours"],
+                "excess_hours": st["excess_hours"],
+                "median_hours": st["median_hours"],
+                "longest_hours": longest,
+                "threshold_hours": st["threshold_hours"],
+                "person": names,
+            },
+            "Add a second sentinel or a rotation: these items have no other "
+            "holder, so nobody else can move them. A mandatory approval that "
+            "sits on one person past a day of work is capacity, not latency — "
+            "another approver shortens every one of them at once.",
+            severity, st["excess_hours"], st["tail_items"],
+            scope={"kind": "role", "role": "sentinel"},
         ))
 
     # 9. pr_size — commits (+ diff size when captured) vs review latency.
@@ -2296,13 +2534,16 @@ def templates(
         )
         out.append(_suggestion(
             "jira-carry-over", "carry_over",
-            f"{carried} stor{'y' if carried == 1 else 'ies'} carried over "
-            "between sprints",
+            f"{carried} stor{'y' if carried == 1 else 'ies'} committed but not "
+            "done by their sprint's close",
             {
                 "carried_over": carried,
+                "late": co["late"],
+                "never": co["never"],
                 "stories_in_a_sprint": co["stories_in_a_sprint"],
                 "share": co["share"],
                 "sprints": co["sprints_involved"],
+                "late_hours": co["late_hours"],
                 "wait_hours": co["wait_hours"],
                 "median_wait_hours": co["median_wait_hours"],
                 "target_share": co["target_share"],
@@ -2310,11 +2551,12 @@ def templates(
                 "examples": ", ".join(row["key"] for row in co["rows"][:5]),
             },
             "Plan from a refined backlog and finish what you commit: a story "
-            "carried into a second sprint takes capacity from the next plan "
-            "twice. Split the story until it fits one sprint, and leave it in "
-            "the backlog until it does — a carry-over is a commitment the "
-            "team already knew it would break.",
-            severity, co["wait_hours"], co["stories_in_a_sprint"] or carried,
+            "that misses its sprint's close is late (it still cost the slip) "
+            "or still open (it takes capacity from the next plan). Split the "
+            "story until it fits one sprint, and leave it in the backlog until "
+            "it does — a carry-over is a commitment the team already knew it "
+            "would break.",
+            severity, co["late_hours"], co["stories_in_a_sprint"] or carried,
         ))
 
     # 13. point_churn — the estimate moved after the work started.
@@ -2478,12 +2720,222 @@ def templates(
             severity, violations * rc["hours"], jc["stories_started"] or 1,
         ))
 
+    # 16. sprint on-time delivery (prd/37 §1) — did the sprint deliver what it
+    # committed, measured at its close (concepts.md §6)? This is the rule the
+    # sprint chip quotes: done-by-end, not done-by-now.
+    sd = m["sprint_delivery"]
+    worst = sd.get("worst") if sd.get("available") else None
+    if worst is not None and worst["done_share"] < sd["target_share"]:
+        committed = worst["stories"]
+        delivered = worst["done_by_end"]
+        late = worst["done_late"]
+        share = worst["done_share"]
+        severity = (
+            "critical"
+            if share < 0.6 or late >= 5
+            else "warning"
+        )
+        never = worst["never_done"]
+        title = (
+            f"S{worst['sprint_id']} delivered {delivered} of {committed} "
+            f"committed stories ({round(share * 100)}%) by its close"
+        )
+        if late:
+            title += f" — {late} finished late"
+        if never:
+            title += f", {never} still open"
+        out.append(_suggestion(
+            "sprint-on-time", "sprint_delivery",
+            title,
+            {
+                "sprint": f"S{worst['sprint_id']}",
+                "stories": committed,
+                "points": worst["points"],
+                "done_by_end": delivered,
+                "done_late": late,
+                "never_done": never,
+                "done_share": share,
+                "target_share": sd["target_share"],
+                "late_hours": worst["late_hours"],
+                "closed_sprints": sd["closed_sprints"],
+                "measured_sprints": sd["measured_sprints"],
+                "on_time_sprints": sd["on_time_sprints"],
+            },
+            "Size the sprint to what the team finishes, not what it starts: "
+            "measure scope at the close (done by end, not done by now) and "
+            "carry the unfinished stories back to the backlog instead of "
+            "silently re-committing them. A sprint that closes at "
+            f"{round(share * 100)}% teaches the team to distrust every plan it "
+            "makes.",
+            severity, sd["late_hours"], committed,
+        ))
+
     return out
 
 
 # --------------------------------------------------------------------------- #
 # the ranked list
 # --------------------------------------------------------------------------- #
+#: prd/37 §2 (concepts.md §6 "At stake"): rules in one **cost pool** price the
+#: same hours. A pool's total is the broadest estimate in it, allocated from the
+#: most specific rule outwards, so a subset rule (rebase-waste ⊂ rework-loops)
+#: owns its hours and the broader rule only the remainder. The headline sums the
+#: pools — each hour lands on exactly one rule.
+#:
+#: ``(pool, specificity)``; lower specificity is the narrower rule.
+STAKE_RULES = {
+    # PR-level waiting: every one of these prices the same PR hours
+    "rebase-waste": ("pr_wait", 1),
+    "conformance-unapproved": ("pr_wait", 2),
+    "sentinel-tail": ("pr_wait", 3),
+    "pr-size": ("pr_wait", 4),
+    "review-tail": ("pr_wait", 5),
+    "conformance-rounds": ("pr_wait", 6),
+    "rework-loops": ("pr_wait", 7),
+    "comment-tax": ("pr_wait", 8),
+    "stale-prs": ("pr_wait", 9),
+    "cycle-time-censoring": ("pr_wait", 10),
+    "vacation-blocking": ("pr_wait", 11),
+    "stacked-cascade": ("pr_wait", 12),
+    "sentinel-queue": ("pr_wait", 13),
+    "review-sla": ("pr_wait", 14),
+    "reviewer-spread": ("pr_wait", 15),
+    "cycle-time": ("pr_wait", 16),
+    "time-to-merge": ("pr_wait", 17),
+    "flow-efficiency": ("pr_wait", 18),
+    # the ticket layer's own cycle (a different unit of account: story segments)
+    "jira-waiting-time": ("ticket_wait", 20),
+    # the sprint plan's slip
+    "jira-carry-over": ("sprint_late", 1),
+    "sprint-on-time": ("sprint_late", 2),
+    # refinement effort
+    "jira-point-churn": ("refinement", 1),
+    "jira-conformance": ("refinement", 2),
+    # the log is not evidence of when work happened (zero impact, kept separate)
+    "jira-worklog-noise": ("worklog", 1),
+    "jira-worklog-mismatch": ("worklog", 2),
+}
+
+
+def _stake_rule(sid: str) -> tuple[str, int]:
+    """``(pool, specificity)`` for a rule id; unknown rules are their own pool."""
+    if sid.startswith("reviewer-"):
+        return "pr_wait", 3
+    if sid.startswith("vacation-"):
+        return "pr_wait", 11
+    return STAKE_RULES.get(sid, (f"rule:{sid}", 1))
+
+
+def attribute_at_stake(suggestions: list[dict]) -> dict:
+    """Attribute every at-stake hour to exactly one rule (prd/37 §2).
+
+    A cost pool is a set of rules that price the same hours. Its total is the
+    **broadest** estimate in the pool (never the sum), allocated from the most
+    specific rule outwards: a subset rule keeps its own hours, and the broader
+    rule is credited only with the remainder. So ``rebase-waste`` is not added
+    on top of ``rework-loops``, and the headline is the sum of the pools — not
+    of the rule estimates.
+
+    Each suggestion keeps its measured ``hours`` and gets an ``at_stake`` block:
+    ``attributed_hours`` (what the headline counts for it) and ``attributed_to``
+    (the broader rule that owns the remainder, or ``None``).
+    """
+    for suggestion in suggestions:
+        pool, specificity = _stake_rule(suggestion["id"])
+        scope = suggestion.get("scope") or {}
+        # a person-scoped rule is narrower than the team rule in the same pool
+        if scope.get("kind") == "person":
+            specificity = max(1, specificity - 2)
+        suggestion["at_stake"] = {
+            "pool": pool,
+            "specificity": specificity,
+            "hours": suggestion["impact_hours"],
+            "attributed_hours": 0.0,
+            "attributed_to": None,
+        }
+    pools: dict[str, list[dict]] = defaultdict(list)
+    for suggestion in suggestions:
+        pools[suggestion["at_stake"]["pool"]].append(suggestion)
+
+    summary: list[dict] = []
+    for pool, group in sorted(pools.items()):
+        ceiling = round(max(s["impact_hours"] for s in group), 1)
+        ordered = sorted(
+            group,
+            key=lambda s: (
+                s["at_stake"]["specificity"], s["sample"], -s["impact_hours"], s["id"]
+            ),
+        )
+        remaining = ceiling
+        for suggestion in ordered:
+            if remaining <= 0:
+                break
+            attributed = round(min(suggestion["impact_hours"], remaining), 1)
+            suggestion["at_stake"]["attributed_hours"] = attributed
+            remaining = round(remaining - attributed, 1)
+        # the rule that owns the pool is the one the headline counts most of
+        # (ties go to the broadest estimate); every fully-absorbed rule points
+        # there, so "counted in #N" is never a dead end.
+        owner = max(
+            ordered,
+            key=lambda s: (
+                s["at_stake"]["attributed_hours"],
+                s["impact_hours"],
+                -s["at_stake"]["specificity"],
+            ),
+        )
+        for suggestion in ordered:
+            if suggestion["at_stake"]["attributed_hours"] <= 0:
+                suggestion["at_stake"]["attributed_to"] = owner["id"]
+        pool_total = round(sum(s["at_stake"]["attributed_hours"] for s in ordered), 1)
+        for suggestion in ordered:
+            suggestion["at_stake"]["pool_hours"] = pool_total
+            suggestion["at_stake"]["pool_rules"] = len(ordered)
+            if suggestion["at_stake"]["attributed_to"]:
+                suggestion["at_stake"]["attributed_to_rank"] = owner.get("rank")
+        total = pool_total
+        summary.append({
+            "pool": pool,
+            "hours": total,
+            "ceiling_hours": ceiling,
+            "owner": owner["id"],
+            "owner_rank": owner.get("rank"),
+            "rules": [
+                {
+                    "id": suggestion["id"],
+                    "rank": suggestion.get("rank"),
+                    "hours": suggestion["impact_hours"],
+                    "attributed_hours": suggestion["at_stake"]["attributed_hours"],
+                }
+                for suggestion in sorted(
+                    ordered,
+                    key=lambda s: (-s["at_stake"]["attributed_hours"],
+                                   s.get("rank") or 999),
+                )
+            ],
+        })
+
+    own_total = round(sum(s["impact_hours"] for s in suggestions), 1)
+    total = round(sum(row["hours"] for row in summary), 1)
+    return {
+        "hours": total,
+        "rules": len(suggestions),
+        "attributed_rules": sum(
+            1 for s in suggestions if s["at_stake"]["attributed_hours"] > 0
+        ),
+        "overlap_hours": round(max(0.0, own_total - total), 1),
+        "pools": summary,
+        "note": (
+            "each at-stake hour is attributed once: a pool of rules that price "
+            "the same hours is counted at its broadest estimate, allocated from "
+            "the most specific rule outwards (a subset rule such as "
+            "rebase-waste is not added to rework-loops). Per-rule estimates "
+            "still show the hours that rule measured; the headline does not "
+            "add them twice"
+        ),
+    }
+
+
 def rank(suggestions: list[dict]) -> list[dict]:
     """Order by impact × confidence, then severity, then a stable id."""
     ordered = sorted(
@@ -2510,6 +2962,8 @@ def insights(
     computed = metrics(court, threads, window, sizes, jira)
     round_hours = computed["review_cost"]["hours_per_round"]
     suggestions = rank(templates(computed, level, round_hours, bots))
+    # prd/37 §2: the headline total counts each cost pool once (most specific).
+    at_stake = attribute_at_stake(suggestions)
     days = round(max(0.0, (end - start).total_seconds()) / 86400.0, 1)
     return {
         "ok": True,
@@ -2568,6 +3022,9 @@ def insights(
         },
         "metrics": computed,
         "suggestions": suggestions,
+        # prd/37 §2: the additive headline (sums each cost pool once) next to
+        # the per-rule estimates, so the total is auditable.
+        "at_stake": at_stake,
         "note": (
             "impact_hours estimates the wait the rule would remove, in "
             f"{court.hours_mode} hours, using the measured review-round cost in "
@@ -2576,6 +3033,9 @@ def insights(
             "ticket waits with the same calendar and report "
             "available: false when the store has no ticket layer. The stacked-PR "
             "rule (prd/22) derives the stack DAG from ref digests -- never branch "
-            "names -- and reports available: false when the store predates them."
+            "names -- and reports available: false when the store predates them. "
+            "prd/37: at_stake.hours is additive -- each cost pool is counted once, "
+            "allocated from its most specific rule, so the per-rule estimates are "
+            "not meant to be summed; at_stake.pools shows the allocation."
         ),
     }
