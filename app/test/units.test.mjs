@@ -12,6 +12,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
 
 import { DAY, HOUR, fmtCalendarDuration, fmtHours } from '../format.js';
 import { deliveryTable, detailMarkup } from '../tables.js';
@@ -80,4 +81,29 @@ test('the ticket page states the clock where the numbers are', () => {
   });
   assert.match(html, /id="ticket-clock"/);
   assert.match(html, /timestamps are UTC/);
+});
+
+/* prd/45 conformance (JS half; the Python half is tests/test_conformance.py).
+ * A business day comes from format.js, and a duration string is built by the
+ * shared formatters — never an ad-hoc `hours / 24` or `hours / 8`. */
+test('no view divides a duration by 24 or 8 outside the shared formatter', () => {
+  const root = new URL('../', import.meta.url);
+  const offenders = [];
+  for (const file of readdirSync(root).filter((name) => name.endsWith('.js'))) {
+    if (file === 'format.js') continue;   // the one legal place
+    const text = readFileSync(new URL(file, root), 'utf8');
+    text.split('\n').forEach((line, index) => {
+      if (/[*/]\s+(?:24|8)(?:\.0)?\b(?!-)/.test(line)) {
+        offenders.push(`${file}:${index + 1}: ${line.trim()}`);
+      }
+    });
+  }
+  assert.deepEqual(offenders, [], `ad-hoc /8 or /24 in the UI:\n${offenders.join('\n')}`);
+});
+
+test('a calendar-day label comes from fmtCalendarDuration, never "d"', () => {
+  const sprints = readFileSync(new URL('../sprints.js', import.meta.url), 'utf8');
+  // the sprint-scope window is `(end - start) / 86400`; it must say calendar days
+  assert.doesNotMatch(sprints, /created in \$\{days\} d/);
+  assert.match(sprints, /created in \$\{days\} calendar days/);
 });

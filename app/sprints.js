@@ -60,7 +60,10 @@ export function sprintScopeLine(data) {
   const days = Number(window.days);
   // prd/41 B8: the carry-over count is the window's cohort; the bands are the
   // store's sprints. Say which window the numbers are filtered to.
-  const windowNote = Number.isFinite(days) && days > 0 ? ` · created in ${days} d` : '';
+  // concepts.md §1: `d` is a business day, so a wall-clock window length must
+  // say "calendar days" explicitly (this number is `(end - start) / 86400`).
+  const windowNote = Number.isFinite(days) && days > 0
+    ? ` · created in ${days} calendar days` : '';
   const bits = [
     `${data.count || 0} sprint${(data.count || 0) === 1 ? '' : 's'}`,
     `${scope.in_sprint || 0} of ${stories} stories in a sprint${windowNote}`,

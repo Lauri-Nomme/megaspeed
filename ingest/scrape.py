@@ -627,6 +627,20 @@ def collect(
                     _note_placements(reducer.key_filter, pr, stats)
                     # activities are fetched only for PRs that survived the filter
                     pr.activities = list(client.iter_activities(project, repo, pr.id))
+                    # prd/44 DES-2: the commit's CI build is a separate DC
+                    # resource. One request for the head commit; a forge
+                    # without the module (404) is "no CI data", never a
+                    # skipped PR.
+                    head_sha = (pr.pr.get("fromRef") or {}).get("latestCommit")
+                    if head_sha:
+                        try:
+                            pr.build_statuses = [
+                                {**record, "commitId": head_sha}
+                                for record in client.build_statuses(head_sha)
+                                if isinstance(record, dict)
+                            ]
+                        except BitbucketError:
+                            pr.build_statuses = []
                     if push_classifier is not None:
                         # prd/16: classify the rescopes from the local git cache
                         # before the reduction turns them into pr_pushed events.

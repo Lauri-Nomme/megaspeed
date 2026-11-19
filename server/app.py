@@ -784,6 +784,8 @@ def _ticket_payload(con, tenant: str, path: Path, key: str) -> dict | None:
     )
     if payload is not None:
         payload["tenant"] = tenant
+        # prd/44 DES-5: the ticket's business-hour segments name their calendar.
+        payload["calendar_id"] = bundle.court.calendar_id
     with _ticket_lock:
         if len(_ticket_cache) >= TICKET_CACHE_SIZE:
             _ticket_cache.clear()
@@ -943,17 +945,19 @@ def _calendar_for(tenant: str) -> tuple[object | None, str | None]:
 
 
 def _calendar_brief(tenant: str) -> dict:
-    """Enough calendar for a label: mode, timezone, window, counts, sources."""
+    """Enough calendar for a label: id, mode, timezone, window, counts, sources."""
     calendar, error = _calendar_for(tenant)
     if calendar is None:
         return {
             "hours_mode": "wall-clock",
+            "calendar_id": "none",
             "error": error,
             "sources": [str(CALENDAR_CONFIG)],
         }
     summary = calendar.summary()
     return {
         "hours_mode": summary["hours_mode"],
+        "calendar_id": summary["calendar_id"],
         "timezone": summary["timezone"],
         "working_hours": summary["working_hours"],
         "weekdays": summary["weekdays"],
@@ -1033,7 +1037,10 @@ def blocking(request: Request):
         with store_conn(path) as con:
             court = _ballcourt(con, tenant, path)
             window = analyse.window_from_events(court, _days(days))
-            return analyse.blocking_graph(court, level, window)
+            payload = analyse.blocking_graph(court, level, window)
+            # prd/44 DES-5: which calendar priced these hours (re-derivable).
+            payload["calendar_id"] = court.calendar_id
+            return payload
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
 
@@ -1065,6 +1072,8 @@ def queues(request: Request):
             payload["legend"] = analyse.person_legend(
                 court, bundle.jira(con).stories,
             )
+            # prd/44 DES-5: the calendar identity travels with the hours.
+            payload["calendar_id"] = court.calendar_id
             return payload
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
@@ -1113,6 +1122,8 @@ def delivery(request: Request):
                 open_threads[pair] = open_threads.get(pair, 0) + 1
             for row in payload.get("rows") or ():
                 row["open_threads"] = open_threads.get((row["repo"], row["number"]), 0)
+            # prd/44 DES-5: the calendar identity travels with the hours.
+            payload["calendar_id"] = court.calendar_id
             return payload
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
@@ -1225,6 +1236,7 @@ def insights(request: Request):
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
     payload["tenant"] = tenant
+    payload["calendar_id"] = court.calendar_id
     return payload
 
 
@@ -1295,6 +1307,7 @@ def _pr_size_payload(con, tenant: str, path: Path, caps: dict) -> dict:
         "tenant": tenant,
         "as_of": pstore.iso(court.snapshot),
         "hours_mode": court.hours_mode,
+        "calendar_id": court.calendar_id,
         "assumption": court.assumption,
         "window": {
             "start": pstore.iso(start),
@@ -1350,6 +1363,7 @@ def sprints(request: Request):
         "tenant": tenant,
         "as_of": pstore.iso(court.snapshot),
         "hours_mode": court.hours_mode,
+        "calendar_id": court.calendar_id,
         "assumption": court.assumption,
         **court.calendar_warning(),
         "jira": jira.summary(),
@@ -1440,6 +1454,7 @@ def simulate(request: Request):
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
     payload["tenant"] = tenant
+    payload["calendar_id"] = court.calendar_id
     payload["params"] = {
         "days": days, "seed": seed, "replications": replications,
         "tolerance": tolerance,

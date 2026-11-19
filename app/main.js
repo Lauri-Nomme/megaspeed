@@ -944,15 +944,12 @@ function renderPhaseLegend() {
     const swatch = phase === 'unobserved'
       ? `<i class="hatch" style="--c:${PHASE[phase].color}"></i>`
       : `<i style="background:${PHASE[phase].color}"></i>`;
-    // "closed" is an end cap, not usually a duration; say which it is
     // prd/35: the timeline's phases are elapsed wall-clock, so they say
-    // "calendar" and never reuse the business-hour `d`.
-    const short = (hours) => (hours >= 24
-      ? fmtCalendarHours(hours)
-      : `${Math.max(1, Math.round(hours))} h`);
+    // "calendar" and never reuse the business-hour `d`. One shared formatter,
+    // never an ad-hoc `${hours} h` (the conformance test enforces it).
     const value = phase === 'closed'
-      ? (zero ? 'end cap' : short(entry.hours))
-      : (zero ? '0' : short(entry.hours));
+      ? (zero ? 'end cap' : fmtCalendarHours(entry.hours))
+      : (zero ? '0' : fmtCalendarHours(entry.hours));
     const title = `${PHASE[phase].hint}${entry ? ` — ${fmtCalendarHours(entry.hours)} elapsed in this window` : ''}`;
     return `<span class="${zero ? 'zero' : ''}" title="${esc(title)}">
       ${swatch}${esc(PHASE[phase].label)}
@@ -3071,7 +3068,9 @@ document.addEventListener('keydown', (event) => {
 
 async function copyMarkdown(entity) {
   const hoursMode = (state.delivery && state.delivery.hours_mode) || 'wall-clock';
-  await copyText(entity ? entityMarkdown(entity, hoursMode, appBase()) : '');
+  // prd/44 DES-5: the calendar fingerprint makes the copied number re-derivable
+  const calendarId = (state.delivery && state.delivery.calendar_id) || '';
+  await copyText(entity ? entityMarkdown(entity, hoursMode, appBase(), calendarId) : '');
 }
 
 async function copyText(text) {

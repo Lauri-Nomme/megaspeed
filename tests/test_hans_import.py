@@ -729,7 +729,7 @@ class Golden10Tests(unittest.TestCase):
         self.assertEqual(self.report["prs_dropped"], 0)
         self.assertEqual(self.report["counts"]["prs"], 10)
         self.assertEqual(self.report["requests_by_kind"],
-                         {"activities": 10, "commits": 10, "list": 1})
+                         {"activities": 10, "build-status": 10, "commits": 10, "list": 1})
 
     def test_object_counts(self):
         counts = dict(self.con.execute(

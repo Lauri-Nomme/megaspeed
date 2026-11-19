@@ -54,3 +54,19 @@ Long scrapes (huge projects) must report progress to **stderr**, by default ever
   **early (on the list: title + branch + description)**, not just at store time.
 - Correctness is unchanged: the tgz + import + `--verify` contract are identical; only *which*
   requests are made changes.
+- **Build status (prd/44 DES-2)**: each kept PR costs **one** extra request,
+  `/rest/build-status/1.0/commits/{head}` — the only source of the `build_status` events that make
+  prd/40's `ci` flag live. A forge without the module (404) is treated as "no CI data", not a
+  failure; the request is counted as `build-status` in `requests_by_kind`.
+
+---
+
+## Not implemented / accepted gap (prd/44 DES-4)
+
+- **"The scrape's request budget"** covers **REST traffic only** (`requests` /
+  `requests_by_kind`). The git cache traffic (clone/fetch/patch-id/range-diff for
+  `push_class`, diff size and thread anchors) is issued by a separate process and
+  is not counted in the budget/progress line (NFR-6). A scrape that looks
+  affordable by the REST counter can still be expensive in git fetches.
+
+Tracking: [`docs/review-adversarial.md`](../docs/review-adversarial.md) → **NFR-6**, **DES-4**.

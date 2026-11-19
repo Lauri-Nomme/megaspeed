@@ -28,3 +28,16 @@ action rebuilds it on merge to `main` **only when the scraper component changed*
 - CI builds on a scrape-path change and skips on an app-only change.
 - End-to-end: scrape bb-lab-b `DEL` → tgz, then import the tgz → store (131 PRs / 1316 events,
   `--verify` OK), proving the artifact runs in a "no-repo, no-venv" way.
+
+---
+
+## Not implemented / accepted gap (prd/44 DES-4)
+
+- **"A self-contained build artifact"** holds for the **PyInstaller `--onefile`**
+  path only. The documented zipapp fallback ships *source* (interpreter still
+  required) and silently omits some modules (`store` / `importer` / `live`), so
+  it is a different artifact with different behaviour — not the self-contained
+  binary this PRD describes. `scrape/build.sh` selects PyInstaller when it is
+  installed; the zipapp is a degraded fallback, not an equivalent.
+
+Tracking: [`docs/review-adversarial.md`](../docs/review-adversarial.md) → **DES-4**.

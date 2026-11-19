@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS objects (
     repo           VARCHAR,
     pr_id          BIGINT,
     ticket_keys    VARCHAR[],                 -- matched keys only (never raw refs)
-    actor          VARCHAR,                   -- author/assignee pseudonym
+    actor          VARCHAR,                   -- per-type role: PR/COMMIT author, THREAD resolver, PERSON self, PRREV pusher (see store.ACTOR_ROLE_BY_TYPE)
     state          VARCHAR,                   -- per-type closed state (see store.py)
     created_at     TIMESTAMP,
     closed_at      TIMESTAMP,

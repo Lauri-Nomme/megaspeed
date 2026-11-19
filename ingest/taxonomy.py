@@ -111,6 +111,13 @@ THREAD_INTENT = frozenset({"acted", "rejected", "withdrawn", "unclear"})
 # How a question got answered: a reply comment, or the thread being resolved.
 ANSWER_SOURCE = frozenset({"reply", "resolution"})
 PUSH_CLASS = frozenset({"content", "pure_rebase", "rebase_conflict", "other"})
+# What a commit's CI build reported, projected onto a closed set. DC's
+# build-status API says SUCCESSFUL/FAILED/INPROGRESS; the ingest normalises it,
+# and ``ballcourt`` reads ``success``/``failed`` as "the build finished" (the
+# ``ci`` flag clears) and ``in_progress``/``other`` as "still running". A build
+# is never exclusive with a review (concepts.md §2), so this is a flag, not a
+# ball.
+BUILD_RESULT = frozenset({"success", "failed", "in_progress", "other"})
 ANCHOR_CLASS = frozenset({"file", "general"})
 THREAD_STATE = frozenset({"open", "resolved"})
 CHANGE = frozenset({"added", "removed", "reviewed"})
@@ -186,6 +193,7 @@ ATTRIBUTE_SPEC: dict[str, Any] = {
     "phase": QUESTION_PHASE,
     "severity": SEVERITY,
     "push_class": PUSH_CLASS,
+    "result": BUILD_RESULT,
     "anchor_class": ANCHOR_CLASS,
     "thread_state": THREAD_STATE,
     "answer_source": ANSWER_SOURCE,
@@ -281,6 +289,10 @@ PR_ACTIVITY_MAP = {
     "DECLINED": "pr_declined",
     "UPDATED": "reviewer_changed",
     "REVIEWED": "reviewer_changed",
+    # A commit's CI build (the DC build-status resource, normalised by the
+    # scrape): sets/clears the prd/40 ``ci`` flag. Kept in the map so a forge
+    # that reports it inline is mapped, never ignored as an unknown action.
+    "BUILD_STATUS": "build_status",
 }
 
 

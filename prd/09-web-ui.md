@@ -82,3 +82,16 @@ screen at once.
 | Queue / time-series | **uPlot** (canvas) | tiny, ultra-fast time-series; the correct default over ECharts for the snappy brief |
 | Simulation | Python **SimPy** behind the API | reuses the existing model; UI only configures + renders |
 | Zero-server fallback | **DuckDB-WASM** + static Parquet | fully local single-user option, no API at all |
+
+---
+
+## Not implemented / accepted gap (prd/44 DES-4)
+
+- **"Read-only over the pseudonymised store; no write path from the UI"** is true
+  of the *analysis* API (every read is a projection of the store), but the
+  local harness exposes `/api/eval`, which runs arbitrary JavaScript in a
+  trusted browser (`app/harness` / the Playwright bridge). It is loopback-only
+  and token-gated, but it is a code-execution path, so the absolute "cannot
+  leak" claim in the table above is stronger than the implementation.
+
+Tracking: [`docs/review-adversarial.md`](../docs/review-adversarial.md) → **SEC-2**, **DES-4**.

@@ -311,7 +311,9 @@ class CycleTimeTests(StoreCase):
     def test_emits_a_cycle_time_rule(self):
         suggestion = by_id(self.insights(self.fixture()), "cycle-time")
         self.assertIsNotNone(suggestion)
-        self.assertEqual(suggestion["severity"], "warning")
+        # concepts.md §1: the "week" gate is 40 business hours (5 d), not 168 h
+        # (7 × 24). An 80 h median is two working weeks, so it is critical.
+        self.assertEqual(suggestion["severity"], "critical")
         self.assertEqual(suggestion["impact_hours"], 32.0)   # (80 − 72) × 4
         self.assertEqual(suggestion["evidence"]["merged_prs"], 4)
 

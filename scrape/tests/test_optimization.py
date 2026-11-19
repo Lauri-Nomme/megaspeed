@@ -53,6 +53,8 @@ NO_CUTOFF = 24 * 365
 
 def _kind(path: str) -> str:
     """Classify a request path independently of the code under test."""
+    if path.startswith("/rest/build-status/"):
+        return "build-status"
     match = _PR_PATH.search(path)
     assert match, f"unexpected path {path}"
     if match.group(1) is None:
@@ -217,7 +219,7 @@ class HugeProjectTests(unittest.TestCase):
         )
         # 500 PRs / 100 per page = 5 cheap list requests -- and nothing else but
         # the commits + activities of the 10 ticketed PRs.
-        self.assertEqual(transport.kinds(), Counter({"list": 5, "commits": 10, "activities": 10}))
+        self.assertEqual(transport.kinds(), Counter({"list": 5, "commits": 10, "activities": 10, "build-status": 10}))
         self.assertEqual(transport.touched_prs(), set(MATCHING))
 
     def test_requests_are_newest_first_and_paged_at_100(self):
@@ -241,7 +243,7 @@ class HugeProjectTests(unittest.TestCase):
         report, transport = self.run_scrape(bundle)
         self.assertEqual(report["prs_kept"], 1)
         self.assertEqual(report["keys_by_placement"].get("description"), 1)
-        self.assertEqual(transport.kinds(), Counter({"list": 1, "commits": 1, "activities": 1}))
+        self.assertEqual(transport.kinds(), Counter({"list": 1, "commits": 1, "activities": 1, "build-status": 1}))
         tickets = {
             o["object_id"] for o in read_bundle(self.out).objects if o["object_type"] == "TICKET"
         }
@@ -252,7 +254,7 @@ class HugeProjectTests(unittest.TestCase):
         self.assertEqual(report["prs_kept"], len(MATCHING))
         self.assertEqual(
             transport.kinds(),
-            Counter({"list": 5, "detail": 10, "commits": 10, "activities": 10}),
+            Counter({"list": 5, "detail": 10, "commits": 10, "activities": 10, "build-status": 10}),
         )
         self.assertEqual(transport.touched_prs(), set(MATCHING))
 
@@ -264,7 +266,7 @@ class HugeProjectTests(unittest.TestCase):
         self.assertEqual(report["prs_dropped"], HUGE - len(MATCHING))
         self.assertEqual(transport.kinds()["commits"], HUGE)  # commits for all 500
         self.assertEqual(transport.kinds()["activities"], len(MATCHING))
-        self.assertEqual(len(transport.paths), 5 + HUGE + len(MATCHING))
+        self.assertEqual(len(transport.paths), 5 + HUGE + 2 * len(MATCHING))
 
         # ... and the emitted rows are the same as the pre-filtered run's
         self.cfg.prefilter = True
@@ -299,7 +301,7 @@ class HugeProjectTests(unittest.TestCase):
         self.assertEqual(report["prs_skipped_watermark"], 1)
         self.assertEqual(report["prs_kept"], 1)
         self.assertEqual(transport.touched_prs(), {10})
-        self.assertEqual(transport.kinds(), Counter({"list": 2, "commits": 1, "activities": 1}))
+        self.assertEqual(transport.kinds(), Counter({"list": 2, "commits": 1, "activities": 1, "build-status": 1}))
         self.assertEqual(report["early_stopped"], ["DEL/huge"])
         self.assertEqual({event["pr_id"] for event in read_bundle(self.out).events}, {10})
 
@@ -426,7 +428,7 @@ class HugeProjectTests(unittest.TestCase):
             updated_minute=lambda pr_id: 10_000 if pr_id == 301 else pr_id,
         )
         report, transport = self.run_scrape(fresh)
-        self.assertEqual(transport.kinds(), Counter({"list": 2, "commits": 1, "activities": 1}))
+        self.assertEqual(transport.kinds(), Counter({"list": 2, "commits": 1, "activities": 1, "build-status": 1}))
         self.assertEqual(transport.touched_prs(), {301})
         self.assertEqual(report["prs_kept"], 1)
         self.assertEqual(report["early_stopped"], ["DEL/huge"])

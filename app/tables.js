@@ -6,7 +6,7 @@
  * are mono/tabular, state is a tinted pill, and zero is never red.
  */
 
-import { fmtAbsolute, fmtHours, esc, whoLabel } from './format.js';
+import { fmtAbsolute, fmtHours, esc, whoLabel, BUSINESS_HOURS_PER_DAY } from './format.js';
 import { isTicketKey, rowTicket, ticketHref, ticketLink } from './tickets.js';
 import { streamIsQueue } from './scope.js';
 
@@ -25,7 +25,8 @@ export const TABS = [
  */
 export function weekLabel(data) {
   const hours = Number((data && data.counts && data.counts.waiting_week_hours) || 40);
-  const days = Number((data && data.counts && data.counts.waiting_week_days) || hours / 8);
+  const days = Number((data && data.counts && data.counts.waiting_week_days) ||
+    hours / BUSINESS_HOURS_PER_DAY);
   return `${days} d = ${hours} h`;
 }
 
@@ -436,7 +437,7 @@ export function impactSentence(row) {
     `so ≈${fmtHours(row.impact_hours)} of downstream wait accumulate behind it.`;
 }
 
-export function entityMarkdown(entity, hoursMode = 'wall-clock', base = '') {
+export function entityMarkdown(entity, hoursMode = 'wall-clock', base = '', calendarId = '') {
   if (entity.row) {
     const row = entity.row;
     const key = rowTicket(row);
@@ -455,7 +456,8 @@ export function entityMarkdown(entity, hoursMode = 'wall-clock', base = '') {
       '',
       '_' + (hoursMode === 'business'
         ? 'business hours (tenant working-hours calendar)'
-        : 'wall-clock hours; no working-hours calendar configured') + '_',
+        : 'wall-clock hours; no working-hours calendar configured') +
+        (calendarId ? ` · calendar ${calendarId}` : '') + '_',
     ].filter(Boolean).join('\n');
   }
   const pr = entity.pr;

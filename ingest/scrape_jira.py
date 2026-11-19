@@ -115,6 +115,14 @@ from .timeutil import iso, iso_precise, to_naive_utc, utcnow
 
 ISSUE_STATE_FILE = "jira_issues.json"
 ISSUE_STATE_SCHEMA_VERSION = 1
+SPRINT_STATE_FILE = "jira_sprints.json"
+SPRINT_STATE_SCHEMA_VERSION = 1
+#: How far back from the issue watermark a closed sprint is still re-checked,
+#: and how many recent closed sprints are always kept in the walk (prd/44
+#: NFR-2). Membership of an older, closed sprint cannot change once its
+#: ``completeDate`` stops moving.
+SPRINT_WATERMARK_DAYS = 30
+SPRINT_CLOSED_KEEP = 6
 #: The Jira issue types that become objects. Sub-tasks are dropped: their parent
 #: carries the estimate and the status that matter.
 ISSUE_TYPES = ("Epic", "Story", "Bug", "Task")
@@ -188,6 +196,119 @@ class JiraIssueState:
 
 # --------------------------------------------------------------------------- #
 # reduction
+# --------------------------------------------------------------------------- #
+class JiraSprintState:
+    """Per-sprint membership cursor (``jira_sprints.json``, prd/44 NFR-2).
+
+    The Jira side used to walk **every** sprint's membership on **every** run:
+    one ``/sprint/{id}/issue`` request per sprint, forever, even though a closed
+    sprint's membership cannot change once its ``completeDate`` is final. This
+    cache stores, per sprint id: the metadata that decides freshness
+    (``state`` / ``start_date`` / ``complete_date``) and the issue keys the walk
+    read. A later run re-reads membership only for an open sprint or one whose
+    ``completeDate`` moved; everything else is replayed from here.
+    """
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+        self.sources: dict[str, dict[str, dict]] = {}
+        if self.path.exists():
+            try:
+                payload = json.loads(self.path.read_text())
+            except (json.JSONDecodeError, OSError):
+                payload = {}
+            if payload.get("schema_version") in (None, SPRINT_STATE_SCHEMA_VERSION):
+                self.sources = {
+                    str(source): dict(entries or {})
+                    for source, entries in (payload.get("sources") or {}).items()
+                }
+
+    def get(self, source: str, sprint_id: int) -> dict | None:
+        return (self.sources.get(source) or {}).get(str(int(sprint_id)))
+
+    def entries(self, source: str) -> dict[str, dict]:
+        return dict(self.sources.get(source) or {})
+
+    def record(self, source: str, sprint: dict, keys: list[str]) -> None:
+        self.sources.setdefault(source, {})[str(int(sprint["id"]))] = {
+            "state": str(sprint.get("state") or "").strip().lower(),
+            "start_date": sprint.get("startDate"),
+            "complete_date": sprint.get("completeDate"),
+            "membership": sorted({str(key) for key in keys if key}),
+            "scraped_at": iso(utcnow()),
+        }
+
+    def save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(
+            json.dumps(
+                {
+                    "_comment": (
+                        "Scraper-side per-sprint membership cursor: a closed"
+                        " sprint is re-read only when its completeDate moves."
+                        " Local state, never transferred."
+                    ),
+                    "schema_version": SPRINT_STATE_SCHEMA_VERSION,
+                    "sources": self.sources,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        )
+
+
+def _sprint_membership_candidates(
+    sprints: list[dict], cached: dict[str, dict], *,
+    watermark: datetime | None, bootstrap: bool,
+) -> list[dict]:
+    """The sprints whose membership this run must actually read (prd/44 NFR-2).
+
+    Rules, in order:
+    * a sprint never seen before is read on the **bootstrap** run (the first
+      run has nothing to replay); on a later run an old closed sprint outside
+      the watermark window and the last K is not walked;
+    * an active/future sprint is read (its membership is still moving);
+    * a closed sprint is read when its ``completeDate`` moved;
+    * otherwise it is replayed from the cache — the fix for the O(all sprints)
+      walk that even an incremental run paid before this cursor.
+
+    ``watermark`` is the issue cursor; ``watermark - SPRINT_WATERMARK_DAYS`` and
+    the last ``SPRINT_CLOSED_KEEP`` closed sprints bound the walk from the
+    sprint side too.
+    """
+    closed = sorted(
+        (sprint for sprint in sprints
+         if str(sprint.get("state") or "").lower() == "closed"),
+        key=lambda sprint: str(sprint.get("startDate") or ""),
+    )
+    recent_closed = {str(int(sprint["id"])) for sprint in closed[-SPRINT_CLOSED_KEEP:]}
+    cutoff = (
+        (watermark - timedelta(days=SPRINT_WATERMARK_DAYS)).isoformat()
+        if watermark is not None else None
+    )
+    out: list[dict] = []
+    for sprint in sprints:
+        sid = str(int(sprint["id"]))
+        entry = cached.get(sid)
+        state = str(sprint.get("state") or "").strip().lower()
+        if bootstrap:
+            out.append(sprint)
+            continue
+        if entry is None:
+            if (state in ("active", "future") or sid in recent_closed
+                    or cutoff is None
+                    or str(sprint.get("startDate") or "") >= cutoff):
+                out.append(sprint)
+            continue
+        if state in ("active", "future"):
+            out.append(sprint)
+            continue
+        if sprint.get("completeDate") != entry.get("complete_date"):
+            out.append(sprint)
+    return out
+
+
 # --------------------------------------------------------------------------- #
 @dataclass
 class JiraCollected:
@@ -300,6 +421,7 @@ def collect(
     identity: IdentityTable | None = None,
     state: ScrapeState | None = None,
     issue_state: JiraIssueState | None = None,
+    sprint_state: JiraSprintState | None = None,
     full: bool = False,
     progress: ProgressReporter | None = None,
     projects: tuple[str, ...] | None = None,
@@ -405,17 +527,38 @@ def collect(
     out.status_map = dict(sorted(cfg.jira_status_map.items()))
 
     # -- sprints + membership (agile API) --------------------------------
+    # prd/44 NFR-2: a closed sprint's membership cannot change once its
+    # completeDate is final, so this cursor is what keeps an incremental run
+    # from paying one membership request per sprint, forever.
     sprints: list[tuple[str, dict]] = []
     memberships: dict[str, set[int]] = {}
+    sprints_previous = None if full else (state.watermark(source) if state else None)
+    sprints_cached = {} if sprint_state is None else sprint_state.entries(source)
+    sprints_bootstrap = bool(full or not sprints_cached)
     for project in project_list:
         board = cfg.jira_board or client.scrum_board(project)
         if board is None:
             continue
         out.boards[project] = board
-        for sprint in client.sprints(board):
+        board_sprints = list(client.sprints(board))
+        for sprint in board_sprints:
             sprints.append((project, sprint))
+        walk = {
+            int(sprint["id"]) for sprint in _sprint_membership_candidates(
+                board_sprints, sprints_cached,
+                watermark=sprints_previous, bootstrap=sprints_bootstrap,
+            )
+        }
+        for sprint in board_sprints:
             sid = int(sprint["id"])
-            for key in client.sprint_issue_keys(sid):
+            cached_entry = sprints_cached.get(str(sid)) or {}
+            if sprint_state is not None and sid not in walk:
+                keys = list(cached_entry.get("membership") or [])
+            else:
+                keys = list(client.sprint_issue_keys(sid))
+                if sprint_state is not None:
+                    sprint_state.record(source, sprint, keys)
+            for key in keys:
                 memberships.setdefault(key, set()).add(sid)
     out.sprint_count = len(sprints)
 
@@ -438,7 +581,7 @@ def collect(
     reducer.prime([], sprints)
 
     # -- issues ----------------------------------------------------------
-    previous = None if full else (state.watermark(source) if state else None)
+    previous = sprints_previous
     cutoff = previous - timedelta(hours=overlap_hours) if previous else None
     prior = {} if full else (issue_state.entries(source) if issue_state else {})
     # An explicit key set -- from MEGASPEED_TICKET_KEYS (prd/18) or resolved from
@@ -854,6 +997,7 @@ def scrape(
     state_dir = Path(state_dir).expanduser() if state_dir else default_state_dir(out)
     state = ScrapeState(state_dir / STATE_FILE)
     issue_state = JiraIssueState(state_dir / ISSUE_STATE_FILE)
+    sprint_state = JiraSprintState(state_dir / SPRINT_STATE_FILE)
     ident_path = Path(identity_path).expanduser() if identity_path else state_dir / IDENTITY_FILE
     reporter = progress if progress is not None else ProgressReporter(
         interval=DEFAULT_PROGRESS_INTERVAL
@@ -947,6 +1091,7 @@ def scrape(
             relations=collected_now.relations,
         )
         issue_state.save()
+        sprint_state.save()
         state.record(
             source, watermark_now, collected_now.run_id, out, repos={},
             complete=False, resumed=collected_now.resumed, count_run=False,
@@ -962,6 +1107,7 @@ def scrape(
         identity=IdentityTable(ident_path),
         state=state,
         issue_state=issue_state,
+        sprint_state=sprint_state,
         full=full,
         progress=reporter,
         projects=projects,
@@ -998,6 +1144,7 @@ def scrape(
     )
 
     issue_state.save()
+    sprint_state.save()
     state.record(source, watermark, collected.run_id, out, repos={},
                  complete=True, resumed=collected.resumed)
     state.save()
@@ -1015,6 +1162,7 @@ def scrape(
         "bundle_sha256": written["sha256"],
         "state_dir": str(state_dir),
         "issue_state": str(state_dir / ISSUE_STATE_FILE),
+        "sprint_state": str(state_dir / SPRINT_STATE_FILE),
         "identity_map": str(ident_path),
         "checkpoint_spool": str(spool.directory),
         "watermark": iso(watermark),

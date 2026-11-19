@@ -173,3 +173,20 @@ Because the analysis LLM only ever sees keys + pseudonyms + closed labels, we
 can use a **fully open-source model** for the interesting reasoning (who blocks
 whom, what to change) without shipping anyone's prose anywhere. The part that
 needs the prose is tiny, local, cheap, and constrained to produce labels.
+
+---
+
+## Not implemented / accepted gap (prd/44 DES-4)
+
+This PRD still reads partly as a promise. What is **not** implemented, and the
+finding that recorded it:
+
+- **"Attempting to insert free text is a build/test failure"** is enforced as a
+  **shape** rule at write/verify time (`store.verify`: no whitespace, closed
+  vocabularies), not by a pre-write type system or a compile-time DDL failure.
+  A crafted free-text value that happens to contain no whitespace and matches a
+  token shape could reach a column until `--verify` runs (SEC-1). The
+  defence-in-depth allowlist + canary still apply; the *build-failure* wording
+  overstates the mechanism.
+
+Tracking: [`docs/review-adversarial.md`](../docs/review-adversarial.md) → **SEC-1**, **DES-4**.

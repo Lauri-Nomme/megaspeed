@@ -217,6 +217,27 @@ Each entry: **Definition** (what it is) · **Derivation** (how it's computed fro
   tenant-scoped (`?tenant=`).
 - **Purpose**: the unit of isolation — one team/environment per tenant, so analyses never mix.
 
+### `objects.actor` — one column, several roles
+- **Definition**: `actor` is the pseudonym associated with an object **in that type's role**, not a
+  single "who did it" predicate. The source of truth is `ingest.store.ACTOR_ROLE_BY_TYPE`:
+
+  | object type | `actor` means |
+  |---|---|
+  | `PR` | author (the PR's owner) |
+  | `COMMIT` | git author |
+  | `THREAD` | **resolver** (who closed it, never who opened it) |
+  | `PERSON` | self (the row *is* the pseudonym) |
+  | `PRREV` | pusher of that revision |
+  | `STORY` / `EPIC` | owner (assignee, falling back to reporter) |
+  | `TICKET` / `SPRINT` | none — a key dimension / a planning window |
+
+- **Generic query**: `GET /api/objects?actor=LaNo` returns **all** of the above as one set — PRs they
+  authored, commits they authored, threads they resolved, their PERSON row and revisions they pushed.
+  Read it as "objects this person is the actor of in that type's role", never as "authored by" or
+  "worked on". A view that wants one relation must pass `type=` as well; "who posts BS comments" is
+  the thread's **openers** (`comment_added.actor` on the event log), not `THREAD.actor`.
+- **Purpose**: stops the same filter from being read as one meaning across types (prd/44 DES-6).
+
 ---
 
 ## 4. Workflow stages
@@ -285,6 +306,8 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
   priority label*: `ready` (§2) is a state, not a phase, so "all approved, not merged" still reads
   `review` here — read the interval's `ready`/`ball` fields to separate merge latency from review wait.
   CI is a flag too, never exclusive: a reviewer pending during a build keeps the `review` phase.
+  When the phase *is* `ci` (a build running and nobody holding the ball), the blocking graph carries
+  the wait under a synthetic `CI` node — the CI queue is a real, named bottleneck, not invisible.
 - **Derivation**: `analysis/ballcourt.py` `PHASE_ORDER`, from commits/events per interval.
 - **Purpose**: the timeline's coloured bars and the ball-in-court attribution. `unobserved` is *not* a
   real phase and is excluded from the blocking graph — but its tails (a PR with no recent events, e.g.
@@ -444,6 +467,7 @@ sets; "other" is the explicit "could not decide", never free text.
 | comment type | blocker, suggestion, question, nit, out_of_scope, optimization |
 | thread outcome | acted_on, rejected, walked_back, unresolved |
 | push class | content, pure_rebase, rebase_conflict, other |
+| build result | success, failed, in_progress, other (`build_status`; `success`/`failed` clear the `ci` flag) |
 | unapprove cause | push, manual |
 | object state | open, merged, declined |
 | actor kind | bot, human |
@@ -528,3 +552,9 @@ These are comparisons, not new units. Each names its cohort and its basis wherev
   definition here (or amend this file first).
 - A view that presents a number must use the **name** from this file for that number. If two views show
   different numbers under the same name, one of them is a bug.
+- **This file is enforced, not just referenced.** `tests/test_conformance.py` is the conformance test
+  (prd/45): it fails when a business duration divides by 24 (a day is `BUSINESS_HOURS_PER_DAY`), when a
+  duration string is built outside the shared formatters (`app/format.js` `fmtDuration` /
+  `fmtCalendarDuration`, `analysis/rules.py` `_human_hours`), or when a stale segment/status label
+  reappears. The JS half of the same guard lives in `app/test/units.test.mjs`. Amend this file *and*
+  that test together.

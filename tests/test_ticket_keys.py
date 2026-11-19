@@ -105,6 +105,8 @@ def _bundle(*pairs: tuple[int, str | None]) -> dict:
 
 
 def _kind(path: str) -> str:
+    if path.startswith("/rest/build-status/"):
+        return "build-status"
     match = _PR_PATH.search(path)
     assert match, f"unexpected path {path}"
     if match.group(1) is None:
@@ -391,7 +393,9 @@ class ScrapePrefilterTests(unittest.TestCase):
         self.assertEqual(report["prs_kept"], 2)
         self.assertEqual(report["prs_dropped"], 2)
         # The list is cheap; only the two in-set PRs cost commits + activities.
-        self.assertEqual(transport.kinds(), Counter({"list": 1, "commits": 2, "activities": 2}))
+        self.assertEqual(transport.kinds(), Counter({
+            "list": 1, "commits": 2, "activities": 2, "build-status": 2,
+        }))
         self.assertEqual(transport.touched_prs(), {1, 2})
 
         bundle = read_bundle(self.out)

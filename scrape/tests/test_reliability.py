@@ -50,6 +50,8 @@ _PR_PATH = re.compile(r"/pull-requests(?:/(\d+)(?:/(activities|commits))?)?$")
 
 
 def _kind(path: str) -> str:
+    if path.startswith("/rest/build-status/"):
+        return "build-status"
     match = _PR_PATH.search(path)
     assert match, f"unexpected path {path}"
     if match.group(1) is None:

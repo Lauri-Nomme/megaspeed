@@ -38,6 +38,12 @@ _SUBRESOURCE = re.compile(
 
 CLOSED_STATES = frozenset({"MERGED", "DECLINED"})
 
+#: DC's commit build-status resource (prd/44 DES-2). It is *not* part of the PR
+#: activity stream; the scrape reads it for the PR's head commit so the prd/40
+#: ``ci`` flag has a producer. A server without the module 404s, which the
+#: scrape treats as "no CI data", never as a failed PR.
+BUILD_STATUS_API = "/rest/build-status/1.0"
+
 
 @dataclass
 class PullRequest:
@@ -46,6 +52,9 @@ class PullRequest:
     pr: dict
     commits: list[dict] = field(default_factory=list)
     activities: list[dict] = field(default_factory=list)
+    #: Raw commit build-status records (DC ``/rest/build-status/1.0``), each
+    #: annotated with ``commitId``. Empty = no CI data (not "no CI ran").
+    build_statuses: list[dict] = field(default_factory=list)
 
     @property
     def id(self) -> int:
@@ -182,6 +191,16 @@ class BitbucketClient:
     def iter_commits(self, project: str, repo: str, pr_id: int) -> Iterator[dict]:
         path = f"{API}/projects/{project}/repos/{repo}/pull-requests/{pr_id}/commits"
         yield from self._pages(path, kind="commits")
+
+    def build_statuses(self, commit_id: str) -> list[dict]:
+        """The build statuses DC recorded for one commit (prd/44 DES-2).
+
+        States are normalised by the reducer (``SUCCESSFUL``/``FAILED``/
+        ``INPROGRESS`` -> ``taxonomy.BUILD_RESULT``); each record carries
+        ``dateAdded``, so a started/finished pair becomes two events.
+        """
+        path = f"{BUILD_STATUS_API}/commits/{commit_id}"
+        return list(self._pages(path, kind="build-status"))
 
     # -- composite -------------------------------------------------------
     def pull_requests(

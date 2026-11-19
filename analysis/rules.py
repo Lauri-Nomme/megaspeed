@@ -291,8 +291,12 @@ def default_size_caps() -> dict:
 
 
 #: concepts.md §1 (prd/35): one `d` is 8 business hours — one working day,
-#: never 24 h and never a calendar day. Every rendered duration divides by it.
-BUSINESS_HOURS_PER_DAY = 8.0
+#: never 24 h and never a calendar day. One definition (`ballcourt`), re-exported
+#: here for the rule formatter; never a second literal.
+BUSINESS_HOURS_PER_DAY = ballcourt.BUSINESS_HOURS_PER_DAY
+#: concepts.md §1: a working week is 5 d = 40 business hours. The one threshold
+#: behind every "waiting over a week" label and the critical-severity gate.
+WAITING_WEEK_HOURS = ballcourt.WAITING_WEEK_HOURS
 
 
 def _human_hours(hours: float | None) -> str:
@@ -2183,7 +2187,7 @@ def templates(
     # 2. cycle_time / time_to_merge.
     cyc = m["cycle_time"]
     if cyc["median_hours"] is not None and cyc["median_hours"] > TARGET_CYCLE_HOURS:
-        severity = "critical" if cyc["median_hours"] >= 7 * 24 else "warning"
+        severity = "critical" if cyc["median_hours"] >= WAITING_WEEK_HOURS else "warning"
         out.append(_suggestion(
             "cycle-time", "cycle_time",
             f"Cycle time is {_human_hours(cyc['median_hours'])} median "
@@ -2277,7 +2281,7 @@ def templates(
     # 2c. survival / time-to-merge — the censoring-aware estimate (prd/05, goal 7).
     sv = m["survival"]
     if sv["median_hours"] is not None and sv["median_hours"] > TARGET_CYCLE_HOURS:
-        severity = "critical" if sv["median_hours"] >= 7 * 24 else "warning"
+        severity = "critical" if sv["median_hours"] >= WAITING_WEEK_HOURS else "warning"
         out.append(_suggestion(
             "time-to-merge", "survival",
             f"Time to merge is {_human_hours(sv['median_hours'])} median with open "

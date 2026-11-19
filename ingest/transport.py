@@ -30,6 +30,9 @@ _PR_PATH = re.compile(
     r"^" + API + r"/projects/(?P<proj>[^/]+)/repos/(?P<repo>[^/]+)/pull-requests"
     r"(?:/(?P<pr>\d+))?(?:/(?P<sub>activities|commits))?$"
 )
+_BUILD_STATUS_PATH = re.compile(
+    r"^/rest/build-status/1\.0/commits/(?P<sha>[0-9a-f]{7,40})$"
+)
 
 
 class BitbucketError(RuntimeError):
@@ -67,6 +70,14 @@ class FixtureTransport:
 
     def get(self, path: str, params: dict | None = None) -> dict:
         params = params or {}
+        # prd/44 DES-2: commit build statuses are a separate DC resource. The
+        # fixture bundle may carry ``build_statuses`` keyed by commit sha; an
+        # absent key is an empty page (the corpora have no CI data).
+        match = _BUILD_STATUS_PATH.match(path)
+        if match:
+            values = (self.bundle.get("build_statuses") or {}).get(match["sha"], [])
+            return _page(list(values), int(params.get("start", 0)),
+                         int(params.get("limit", 25)))
         match = _PR_PATH.match(path)
         if not match:
             raise BitbucketError(f"fixture has no route for {path}")

@@ -433,7 +433,9 @@ class SurvivalTests(StoreCase):
         suggestion = by_id(payload, "time-to-merge")
         self.assertIsNotNone(suggestion)
         self.assertEqual(suggestion["metric"], "survival")
-        self.assertEqual(suggestion["severity"], "warning")
+        # concepts.md §1: the "week" gate is 40 business hours, so a 100 h
+        # median is critical (it used to compare against 7 × 24 = 168 h).
+        self.assertEqual(suggestion["severity"], "critical")
         self.assertEqual(suggestion["evidence"]["survival_median_hours"], 100.0)
         self.assertEqual(suggestion["evidence"]["merged_only_median_hours"], 80.0)
         self.assertEqual(suggestion["evidence"]["open_censored_prs"], 1)

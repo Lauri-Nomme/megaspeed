@@ -20,7 +20,7 @@ from pathlib import Path
 from ingest import jira_fixtures, taxonomy
 from ingest.bundle import BUNDLE_DIR, EVENTS, MANIFEST, OBJECTS, SUMS, read_bundle
 from ingest.config import Config
-from ingest.scrape_jira import ISSUE_STATE_FILE, JiraIssueState, scrape
+from ingest.scrape_jira import ISSUE_STATE_FILE, SPRINT_STATE_FILE, JiraIssueState, scrape
 from ingest.taxonomy import EVENT_KEY_RE
 from ingest.transport import FixtureJiraTransport
 
@@ -125,7 +125,7 @@ class JiraBundleTests(unittest.TestCase):
         self.assertGreater(state.done_count("jira-fixture"), 0)
         self.assertEqual(
             sorted(p.name for p in self.state_dir.iterdir()),
-            ["identity.json", ISSUE_STATE_FILE, "watermark.json"],
+            ["identity.json", ISSUE_STATE_FILE, SPRINT_STATE_FILE, "watermark.json"],
         )
 
     def test_the_bundle_is_deterministic_for_the_same_fixture(self):

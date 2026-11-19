@@ -367,6 +367,7 @@ export function provenanceLine(data) {
   const parts = [
     data.provenance || 'calibration unavailable',
     `${mode}`,
+    data.calendar_id ? `calendar ${data.calendar_id}` : null,
     spread.replications ? `${spread.replications} replications` : null,
     data.seed != null ? `seed ${data.seed}` : null,
     'every predicted number is an estimate (≈)',
@@ -426,6 +427,7 @@ export function policyMarkdown(data) {
     '# Policy lab — what should we change first?',
     '',
     `_${data.provenance} · ${data.hours_mode === 'business' ? 'business hours' : 'wall-clock hours'} · ` +
+      `${data.calendar_id ? `calendar ${data.calendar_id} · ` : ''}` +
       `baseline ${gate.status || 'unknown'} (${signed(gate.percent_off)} vs measured)_`,
     '',
     '| metric | baseline | scenario | Δ | verdict |',

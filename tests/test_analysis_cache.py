@@ -368,6 +368,9 @@ class AnalysisBundleTests(unittest.TestCase):
         tenant_dir = self.dir / "del"
         tenant_dir.mkdir(exist_ok=True)
         calendar = tenant_dir / "calendar.yaml"
+        first_id = get("/api/delivery", tenant="del").json()["calendar_id"]
+        self.assertNotEqual(first_id, "none")
+        self.forget_everything()          # the read above warmed the bundle
         with self.spies() as (load_jira, load_court, _):
             self.assertEqual(self.ticket(KEYS[0]).status, 200)
             self.assertEqual(load_jira.call_count, 1)
@@ -383,6 +386,12 @@ class AnalysisBundleTests(unittest.TestCase):
                 self.assertEqual(reply.status, 200, reply.body)
                 self.assertEqual(load_jira.call_count, 2)
                 self.assertEqual(load_court.call_count, 2)
+                # prd/44 DES-5: the fingerprint changed with the config, and the
+                # same id is on the payload and /api/health.
+                self.assertNotEqual(reply.json()["calendar_id"], first_id)
+                health = get("/api/health", tenant="del")
+                self.assertEqual(health.body and health.json()["calendar"]["calendar_id"],
+                                 reply.json()["calendar_id"])
             finally:
                 calendar.unlink()
 
@@ -423,6 +432,8 @@ class AnalysisBundleTests(unittest.TestCase):
             for key in KEYS[:3]:
                 expected = tickets.ticket(court, data, key)
                 expected["tenant"] = "del"
+                # prd/44 DES-5: the endpoint adds the calendar fingerprint
+                expected["calendar_id"] = court.calendar_id
                 reply = self.ticket(key)
                 self.assertEqual(reply.status, 200, reply.body)
                 self.assertEqual(reply.json(), expected)

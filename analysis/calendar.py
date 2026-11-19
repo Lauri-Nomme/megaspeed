@@ -33,6 +33,8 @@ store, and never a raw name — a person is a pseudonym in both places.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
@@ -195,6 +197,41 @@ class Calendar:
                     f"timezone {self.timezone!r} is not a known IANA timezone"
                 ) from None
 
+    # -- identity ----------------------------------------------------------- #
+    def calendar_id(self) -> str:
+        """A short fingerprint of the *merged* calendar (prd/44 DES-5).
+
+        The calendar is a third input to every business-hours number, next to
+        the store and the classifier. A saved report, a "Copy as Markdown" or an
+        exported chart names this id, so the figure can be re-derived after a
+        vacation/holiday edit — and a changed id is the proof that the edit was
+        material. It hashes the semantic config only (never file paths), so a
+        move/rename of the same calendar does not move a number's identity.
+        """
+        payload = {
+            "timezone": self.timezone,
+            "default_window": list(self.default_window) if self.default_window else None,
+            "weekdays": sorted(self.weekdays),
+            "overrides": {
+                person: list(window) if window else None
+                for person, window in sorted(self.overrides.items())
+            },
+            "dated_holidays": [
+                [day.isoformat(), entry.kind, entry.name]
+                for day, entry in sorted(self.dated_holidays.items())
+            ],
+            "recurring_holidays": [
+                [f"{month:02d}-{day:02d}", entry.kind, entry.name]
+                for (month, day), entry in sorted(self.recurring_holidays.items())
+            ],
+            "vacations": {
+                person: [[start.isoformat(), end.isoformat()] for start, end in ranges]
+                for person, ranges in sorted(self.vacations.items())
+            },
+        }
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(encoded).hexdigest()[:12]
+
     # -- queries ------------------------------------------------------------ #
     @property
     def hours_mode(self) -> str:
@@ -299,6 +336,7 @@ class Calendar:
         """The effective calendar, for ``GET /api/calendar``."""
         return {
             "hours_mode": self.hours_mode,
+            "calendar_id": self.calendar_id(),
             "timezone": self.timezone,
             "weekdays": sorted(self.weekdays),
             "working_hours": {"default": _fmt_window(self.default_window)},

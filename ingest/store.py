@@ -24,9 +24,9 @@ from .config import DEFAULT_KEY_SHAPE, DEFAULT_TICKET_PROJECTS
 from .timeutil import iso, to_naive_utc, utcnow  # re-exported for existing importers
 
 __all__ = [
-    "ALLOWED", "CANARY", "connect", "ensure_schema", "iso", "list_events",
-    "list_objects", "object_shape_problems", "summary", "to_naive_utc", "utcnow",
-    "verify", "write_events", "write_objects", "write_run",
+    "ACTOR_ROLE_BY_TYPE", "ALLOWED", "CANARY", "connect", "ensure_schema", "iso",
+    "list_events", "list_objects", "object_shape_problems", "summary",
+    "to_naive_utc", "utcnow", "verify", "write_events", "write_objects", "write_run",
 ]
 
 SCHEMA_SQL = Path(__file__).with_name("schema.sql")
@@ -34,6 +34,24 @@ SCHEMA_SQL = Path(__file__).with_name("schema.sql")
 # Pseudonym shape: two initials (prd/02) plus an optional numeric collision
 # suffix, or a synthetic actor (prd/03: CI, calendar, bot:<name>).
 ACTOR_RE = r"^(?:[A-Z][a-z]?[A-Z][a-z]?\d*|system|CI|calendar|bot:[A-Za-z0-9_.-]+)$"
+#: What ``objects.actor`` *means* per object type (prd/44 DES-6). One column,
+#: several roles: a generic ``/api/objects?actor=LaNo`` therefore returns
+#: "PRs they authored, commits they authored, threads they resolved, their own
+#: PERSON row and revisions they pushed" — not one relation. Read this map
+#: before treating the filter as a single "by/for" predicate; a view that wants
+#: one relation must also filter ``object_type``. ``None`` = the type carries
+#: no actor (a TICKET is a dimension; a SPRINT is a planning window).
+ACTOR_ROLE_BY_TYPE = {
+    "PR": "author",        # the PR's owner (holds the ball while working)
+    "COMMIT": "author",    # the commit's git author
+    "THREAD": "resolver",  # who resolved the thread (not who opened it)
+    "PERSON": "self",      # the row *is* the pseudonym
+    "PRREV": "pusher",     # the actor who pushed this revision
+    "STORY": "owner",      # assignee, falling back to reporter
+    "EPIC": "owner",       # assignee, falling back to reporter
+    "TICKET": None,        # a key dimension, never an actor
+    "SPRINT": None,        # a planning window, never an actor
+}
 # content_hash is a blake2b digest (digest_size=8) in hex, nothing else.
 CONTENT_HASH_RE = r"^[0-9a-f]{16}$"
 REPO_RE = r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"

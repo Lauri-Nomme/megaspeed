@@ -33,6 +33,26 @@ from .pseudonym import IdentityTable
 from .timeutil import to_naive_utc
 
 SYSTEM_ACTOR = "system"
+#: The synthetic CI actor (store ``ACTOR_RE`` allows ``CI``). ``build_status``
+#: events are the commit's build, not a person: the ball-court treats it as a
+#: flag, never a holder (concepts.md §2, prd/40 S4).
+CI_ACTOR = "CI"
+
+_CI_SUCCESS = frozenset({"successful", "success", "passed", "green", "ok"})
+_CI_FAILED = frozenset({"failed", "failure", "red", "error"})
+_CI_RUNNING = frozenset({"inprogress", "in_progress", "running", "pending", "queued"})
+
+
+def build_result(state: str | None) -> str:
+    """A forge's build state -> the closed ``taxonomy.BUILD_RESULT`` set."""
+    value = str(state or "").strip().lower().replace("-", "_")
+    if value in _CI_SUCCESS:
+        return "success"
+    if value in _CI_FAILED:
+        return "failed"
+    if value in _CI_RUNNING:
+        return "in_progress"
+    return "other"
 
 _MESSAGE_RULES = [
     (re.compile(r"^revert\b", re.I), "revert"),
@@ -224,6 +244,8 @@ class Stats:
     questions_answered: int = 0
     #: Bot notices that were never sent to the classifier (prd/16).
     bot_comments_skipped: int = 0
+    #: Commit build-status records turned into events (prd/44 DES-2).
+    build_statuses: int = 0
     watermark: datetime | None = None
     activities_by_action: dict[str, int] = field(default_factory=dict)
 
@@ -254,6 +276,9 @@ class Reducer:
         self.sentinels = set(cfg.sentinel_slugs)
         self.bot_slugs = {str(s).strip().lower() for s in cfg.bot_slugs if str(s).strip()}
         self.actor_kinds: dict[str, str] = {}
+        # CI is not a human: the synthetic build actor is a bot for every
+        # aggregate that reads ``actor_kind`` (concepts.md §2).
+        self.actor_kinds[CI_ACTOR] = "bot"
         #: prd/16: the labels for *this PR's* texts, classified in one bounded
         #: batch by :meth:`_classify_batch` and keyed by content digest. Cleared
         #: at the end of every ``reduce`` so no raw prose is retained.
@@ -318,6 +343,7 @@ class Reducer:
         ticket_objects = [f"TICKET:{k}" for k in keys]
 
         commits = self._collect_commits(pr)
+        commit_ids = {str(commit["id"]) for commit in commits if commit.get("id")}
         head = (pr.pr.get("fromRef") or {}).get("latestCommit") or (commits[-1]["id"] if commits else None)
         author = self._actor((pr.pr.get("author") or {}).get("user") or {}, stats)
         created = _ts(pr.pr.get("createdDate"), self.as_of)
@@ -574,8 +600,39 @@ class Reducer:
                 self._event(stats, pr, natural, ts, "pr_declined", actor,
                             [pr_object_id, *ticket_objects], {}, activity)
 
+            elif action == "BUILD_STATUS":
+                # A forge that reports the build inline (the DC build-status
+                # resource is the usual source, fetched as ``pr.build_statuses``
+                # below). Same closed result label either way.
+                commit = activity.get("commit") or {}
+                record = activity.get("buildStatus") or activity.get("build") or activity
+                self._build_status(
+                    stats, pr, natural, ts, record, commit_ids,
+                    [pr_object_id, *ticket_objects],
+                    commit_id=str(commit.get("id") or record.get("commitId") or ""),
+                )
+
             # Unknown actions are ignored on purpose: the vocabulary is closed,
             # so an unknown label is a taxonomy task, never a free-text fallback.
+
+        # -- commit build statuses -> build_status events -------------------
+        # prd/44 DES-2: DC reports CI on its own build-status resource, not in
+        # the PR activity stream. The scrape attaches those records per commit;
+        # each one is a build_status event, so the prd/40 ``ci`` flag is live
+        # and the CI queue reaches the blocking graph. A build is never
+        # exclusive with a review (concepts.md §2 S4).
+        for index, record in enumerate(pr.build_statuses or (), start=1):
+            if not isinstance(record, dict):
+                continue
+            ts_raw = record.get("dateAdded") or record.get("createdDate")
+            if not ts_raw:
+                continue
+            ts = _ts(ts_raw)
+            self._build_status(
+                stats, pr, f"build:{index}", ts, record, commit_ids,
+                [pr_object_id, *ticket_objects],
+                commit_id=str(record.get("commitId") or record.get("commit") or ""),
+            )
 
         for thread_id, entry in sorted(threads.items()):
             resolver = entry.get("resolver") or {}
@@ -805,6 +862,24 @@ class Reducer:
             {"phase": entry["phase"], "answer_source": source},
             {"thread": str(entry.get("cid"))},
         )
+
+    def _build_status(self, stats: Stats, pr: PullRequest, natural: str,
+                      ts: datetime, record: dict, commit_ids: set[str],
+                      objects: list[str], *, commit_id: str = "") -> None:
+        """One commit build-status record -> one ``build_status`` event (prd/44).
+
+        The state is normalised to the closed ``BUILD_RESULT`` set; the actor is
+        the synthetic ``CI`` (a bot, never a person), and the COMMIT object is
+        linked only when the store actually has it (no dangling relation).
+        """
+        result = build_result(record.get("state") or record.get("result")
+                              or record.get("status"))
+        target = list(objects)
+        if commit_id and commit_id in commit_ids:
+            target.append(f"COMMIT:{commit_id}")
+        self._event(stats, pr, natural, ts, "build_status", CI_ACTOR,
+                    target, {"result": result}, record)
+        stats.build_statuses += 1
 
     def _push(self, stats: Stats, pr: PullRequest, natural: str, ts: datetime, activity: dict,
               actor: str, pr_object_id: str, ticket_objects: list[str], push_index: int) -> None:

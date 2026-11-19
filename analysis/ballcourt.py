@@ -412,6 +412,15 @@ class BallCourt:
         return "business" if self.calendar is not None else "wall-clock"
 
     @property
+    def calendar_id(self) -> str:
+        """Short fingerprint of the calendar that priced this payload (prd/44).
+
+        ``none`` when there is no calendar (wall-clock hours have no config to
+        fingerprint), so every payload carries the same shape either way.
+        """
+        return self.calendar.calendar_id() if self.calendar is not None else "none"
+
+    @property
     def assumption(self) -> str:
         if self.calendar is not None:
             return self.calendar.describe()
@@ -1143,13 +1152,19 @@ def blocking_graph(bc: BallCourt, level: str = "queue", window: tuple[datetime, 
             targets = interval.holders
         else:
             targets = (waited_on,) if waited_on else ()
+        # prd/44 DES-2: a build running with nobody holding the ball is the CI
+        # queue, not review wait. The CI node is a real inbound wait ("the
+        # author waited on CI for N h"), so the graph can finally show it.
+        ci_wait = level == "queue" and interval.phase == "ci"
+        if ci_wait:
+            targets = (CI,)
         if not targets:
             continue
         # concepts.md §2: a bot handover is not a person handover. The wait it
         # ends still belongs to the human side, so attribute the edge to the
         # PR's author when that is a human; a bot-authored PR has no person
         # source and contributes no person-level edge.
-        handed_by = interval.by
+        handed_by = interval.author if ci_wait else interval.by
         if handed_by in bc.bots:
             handed_by = interval.author if interval.author not in bc.bots else None
         if handed_by is None:
@@ -1351,6 +1366,11 @@ def queue_series(
         # the queue level keeps one wait per PR under the role/queue name.
         if level == "person":
             people = interval.holders
+        elif interval.phase == "ci":
+            # prd/44 DES-2: CI running with nobody holding the ball is its own
+            # queue. It is never exclusive with a review (concepts.md §2), but
+            # when the phase *is* ci no person owns the wait.
+            people = (CI,)
         else:
             people = (interval.waited_on,) if interval.waited_on else ()
         for person in people:
@@ -1396,7 +1416,11 @@ def queue_series(
             running += diff[b]
             wip[b] = running
 
-    days = span_hours / 24.0
+    # The window length is a *calendar* span (it is reported as such, `days`);
+    # the queue rate is per *business* day (concepts.md §1), so it divides by
+    # BUSINESS_HOURS_PER_DAY, never 24. The two are separate on purpose.
+    calendar_days = (end - start).total_seconds() / 86400.0
+    business_days = span_hours / BUSINESS_HOURS_PER_DAY
     # global mean wait, for a relative diagnosis that works on any data size
     all_hours = [i.hours for i in measured]
     baseline = sorted(all_hours)[len(all_hours) // 2] if all_hours else 0.0
@@ -1407,7 +1431,7 @@ def queue_series(
         mean_wip = sum(entry["wip"]) / max(1, len(entry["wip"]))
         queue_length = entry["hours"] / service_hours
         served = len(entry.get("served") or ())
-        per_day = served / days if days else 0.0
+        per_day = served / business_days if business_days else 0.0
         if mean_hours > baseline * 1.25 and queue_length >= 1.0:
             diagnosis = "overloaded"
         elif mean_hours > baseline * 1.25:
@@ -1470,7 +1494,7 @@ def queue_series(
             "wait-hours count each wait once, under the role/queue that held it"
         ),
         "window": {
-            "start": iso(start), "end": iso(end), "days": round(days, 1),
+            "start": iso(start), "end": iso(end), "days": round(calendar_days, 1),
             "service_hours": round(service_hours, 1),
         },
         "bucket_hours": bucket_hours,
