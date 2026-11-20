@@ -115,6 +115,44 @@ SEGMENT_BOUNDS: dict[str, tuple[str, str]] = {
 }
 
 
+def segment_bounds_for(
+    cycle: "Cycle", key: str,
+) -> tuple[datetime | None, datetime | None, datetime | None, datetime | None]:
+    """The ordered and the raw boundaries of one segment (prd/46 §1).
+
+    ``(t1, t2, raw1, raw2)``: the ordered pair prices the segment, the raw pair
+    names an inversion. One reader, so the ticket rows and the cohort benchmark
+    measure the same span.
+    """
+    left, right = SEGMENT_BOUNDS[key]
+    raw1 = cycle.boundaries.get(left)
+    raw2 = cycle.boundaries.get(right)
+    return (
+        (cycle.segment_bounds.get(left) or raw1),
+        (cycle.segment_bounds.get(right) or raw2),
+        raw1,
+        raw2,
+    )
+
+
+def segment_hours(
+    court: ballcourt.BallCourt, cycle: "Cycle", key: str,
+) -> float | None:
+    """Business hours of one segment; ``None`` when a boundary is missing.
+
+    The single segment-hours derivation: the ticket bar, its cohort median and
+    the decomposition all call this, so "review rounds" cannot mean one span on
+    the page and another in the benchmark. An out-of-order pair (raw right
+    before raw left) is an empty segment — the quirk is named separately.
+    """
+    t1, t2, raw1, raw2 = segment_bounds_for(cycle, key)
+    if t1 is None or t2 is None:
+        return None
+    if raw1 is not None and raw2 is not None and raw2 < raw1:
+        return 0.0
+    return round(court.business_hours(cycle.person, t1, t2), 2)
+
+
 def segment_keys(boundaries: dict, *, verification: bool = False) -> tuple[str, ...]:
     """The segment order for one story (or one store).
 
@@ -519,6 +557,60 @@ def scope_to_repo(data: JiraData, repo: str) -> JiraData:
         stories=stories,
         events=sum(len(story.events) for story in stories),
     )
+
+
+def story_cycle_cohort(
+    court: ballcourt.BallCourt, data: JiraData | None,
+) -> list[dict]:
+    """Completed stories' ``created → done`` hours, with their points (prd/57).
+
+    This is the cohort a ticket's own cycle is read against (concepts.md §9
+    "Cohort benchmark" / prd/42 M2) and the one the benchmark contrast quotes:
+    an open story is censored, so it is not in the cohort. The cycle is priced
+    on the assignee's calendar — the same basis ``tickets._segment_rows`` and
+    ``jira.waiting_time_decomposition`` use.
+    """
+    if data is None:
+        return []
+    rows: list[dict] = []
+    for story in data.stories:
+        cycle = _cycle(story)
+        begin = cycle.boundaries.get("created")
+        done = cycle.boundaries.get("done")
+        if begin is None or done is None or done <= begin:
+            continue
+        rows.append({
+            "key": story.key,
+            "hours": round(court.business_hours(story.actor, begin, done), 2),
+            "points": story.points,
+        })
+    return rows
+
+
+def segment_cohort(
+    court: ballcourt.BallCourt, data: JiraData | None,
+) -> dict[str, list[float]]:
+    """Per-segment hours over completed stories — each segment's own cohort.
+
+    One sample per completed story per segment, measured by
+    :func:`segment_hours` (the same ordered boundaries the ticket bar draws), so
+    a segment's median and the ticket's own hours are the same quantity.
+    """
+    if data is None:
+        return {}
+    verification = uses_verification(data)
+    out: dict[str, list[float]] = defaultdict(list)
+    for story in data.stories:
+        cycle = _cycle(story)
+        begin = cycle.boundaries.get("created")
+        done = cycle.boundaries.get("done")
+        if begin is None or done is None or done <= begin:
+            continue
+        for key in segment_keys(cycle.boundaries, verification=verification):
+            hours = segment_hours(court, cycle, key)
+            if hours is not None:
+                out[key].append(hours)
+    return dict(out)
 
 
 def story_for(data: JiraData | None, key: str) -> Story | None:

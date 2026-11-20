@@ -78,7 +78,7 @@ test('prd/25: the ticket page is a route, and keys are links everywhere', () => 
   assert.match(main, /async function openTicket/);
   assert.match(main, /ticketFromHash/);
   assert.match(main, /data-ticket/);
-  assert.match(main, /ticketMarkup\(state\.ticket, \{ base: appBase\(\) \}\)/);
+  assert.match(main, /ticketMarkup\(state\.ticket, \{ base: appBase\(\), benchmark: state\.benchmark \}\)/);
   assert.match(read('index.html'), /id="page-ticket"/);
   assert.match(read('index.html'), /<option value="story">stories<\/option>/);
   const timeline = read('timeline.js');

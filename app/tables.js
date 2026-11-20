@@ -7,6 +7,7 @@
  */
 
 import { fmtAbsolute, fmtHours, esc, whoLabel, BUSINESS_HOURS_PER_DAY } from './format.js';
+import { benchmarkInline, benchmarkText } from './benchmark.js';
 import { isTicketKey, rowTicket, ticketHref, ticketLink } from './tickets.js';
 import { streamIsQueue, repoLabel } from './scope.js';
 import { legendMarkup } from './queues.js';
@@ -133,7 +134,7 @@ export function impactCell(row) {
   return `<span class="num">≈${esc(fmtHours(row.impact_hours))}</span>`;
 }
 
-export function deliveryTable(data, tab, { scope = null } = {}) {
+export function deliveryTable(data, tab, { scope = null, benchmark = true } = {}) {
   const rows = tabRows(data, tab).filter((row) => !scope || matchesScope(row, scope));
   if (!rows.length) {
     // B11: an empty tab is a result, not a refusal. `Blocked 0` says so.
@@ -166,7 +167,8 @@ export function deliveryTable(data, tab, { scope = null } = {}) {
       <td class="c-who" data-label="waiting on">${esc(waitingLabel(row))}</td>
       <td class="c-phase" data-label="phase"><span class="mono">${esc(row.phase)}</span></td>
       <td class="c-since mono" data-label="waiting since">${esc(fmtAbsolute(Date.parse(row.waiting_since)))}</td>
-      <td class="c-dur num" data-label="waiting">${esc(fmtHours(row.waiting_hours))}</td>
+      <td class="c-dur num" data-label="waiting">${esc(fmtHours(row.waiting_hours))}${
+        benchmarkInline(row.wait_benchmark, { enabled: benchmark })}</td>
       <td class="c-impact num" data-label="impact">${impactCell(row)}</td>
     </tr>`).join('');
   return `<table class="table delivery">${head}<tbody>${body}</tbody></table>
@@ -259,7 +261,7 @@ export function deliveryMarkdown(rows, meta, base = '') {
   const body = rows.map((row) => {
     const key = rowTicket(row);
     const ticket = key ? `[${key}](${ticketHref(key, base)})` : '—';
-    return `| ${rowStateText(row)} | ${ticket} #${row.number} ${row.repo_short} | ${waitingLabel(row)} | ${fmtAbsolute(Date.parse(row.waiting_since))} | ${fmtHours(row.waiting_hours)} | ${row.dependents ? `≈${fmtHours(row.impact_hours)}` : '—'} |`;
+    return `| ${rowStateText(row)} | ${ticket} #${row.number} ${row.repo_short} | ${waitingLabel(row)} | ${fmtAbsolute(Date.parse(row.waiting_since))} | ${fmtHours(row.waiting_hours)}${benchmarkText(row.wait_benchmark) ? ` (${benchmarkText(row.wait_benchmark)})` : ''} | ${row.dependents ? `≈${fmtHours(row.impact_hours)}` : '—'} |`;
   });
   return [...header, ...body].join('\n');
 }
@@ -598,7 +600,7 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
 }
 
 /** Detail panel body for one item (over- + name + context + impact + facts). */
-export function detailMarkup(entity, { base = '' } = {}) {
+export function detailMarkup(entity, { base = '', benchmark = true } = {}) {
   const pr = entity.pr;
   const row = entity.row || null;
   const overline = entity.overline || 'PULL REQUEST';
@@ -626,8 +628,9 @@ export function detailMarkup(entity, { base = '' } = {}) {
     </div>
     ${entity.impact ? `<p class="impact">${esc(entity.impact)}</p>` : ''}
     ${entity.clockNote ? `<p class="clock-note">${esc(entity.clockNote)}</p>` : ''}
-    <dl class="facts">${facts.map(([factKey, value]) => `
-      <dt>${esc(factKey)}</dt><dd class="mono">${factValue(value)}</dd>`).join('')}
+    <dl class="facts">${facts.map(([factKey, value, contrast]) => `
+      <dt>${esc(factKey)}</dt><dd class="mono">${factValue(value)}${
+        benchmarkInline(contrast, { enabled: benchmark })}</dd>`).join('')}
     </dl>
     ${entity.children && entity.children.length ? `
       <div class="children"><span class="overline">Related</span>

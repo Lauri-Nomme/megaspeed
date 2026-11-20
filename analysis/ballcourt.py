@@ -92,6 +92,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
 from ingest.store import iso, to_naive_utc
+from analysis import benchmark
 from analysis.calendar import Calendar
 
 ASSUMPTION = "wall-clock hours (no working-hours calendar configured)"
@@ -1799,8 +1800,24 @@ def response_times(bc: BallCourt, window: tuple[datetime, datetime] | None = Non
         row["median_hours"] for row in people
         if row["median_hours"] is not None and row["role"] != "sentinel"
     ]
+    # prd/57: a person's median response is read against the cohort of every
+    # reviewer answer; a median built from fewer than BENCHMARK_MIN_N samples is
+    # suppressed rather than compared.
+    response_values = [
+        hours for values in samples.values() for hours in values
+    ]
+    response_block = benchmark.stats(
+        response_values, basis=RESPONSE_BENCHMARK_BASIS,
+    )
+    for row in people:
+        row["response_benchmark"] = benchmark.contrast(
+            row["median_hours"], response_values,
+            basis=RESPONSE_BENCHMARK_BASIS, item_n=row["n"],
+        )
     return {
         "people": people,
+        # prd/57: the cohort the per-person response multiples quote.
+        "response_benchmark": response_block,
         # prd/46 §2: the canonical sentinel-wait number. Every other surface
         # either quotes this block or labels its own clock as a different metric.
         "sentinel_wait": sentinel_wait,
@@ -1898,6 +1915,66 @@ def person_legend(bc: BallCourt, stories: list | None = None) -> dict:
             "sentinel = mandatory approver on every PR; bot = automation, never "
             "a constraint; story owner = assigned Jira stories, not PRs"
         ),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# benchmark cohorts (prd/57): the same durations, against their own population
+# --------------------------------------------------------------------------- #
+PHASE_BENCHMARK_BASIS = "median hours in the same PR phase over merged PRs"
+PR_CYCLE_BASIS = "median created → merged hours over merged PRs"
+WAIT_BENCHMARK_BASIS = "median current wait over the window cohort (open PRs)"
+RESPONSE_BENCHMARK_BASIS = (
+    "median response over every reviewer answer in the window "
+    "(the sentinel's clock opens at the last peer answer)"
+)
+
+
+def phase_cohort(bc: "BallCourt") -> dict[str, list[float]]:
+    """``phase -> [hours]``: one sample per merged PR per phase.
+
+    The PR drawer's phases are business-hour spans from the same interval
+    timeline; their cohort is the same span over **merged** PRs (prd/57), so "in
+    review 2 d 3 h" is read against how long review normally takes, not against
+    every PR's unrelated phase mix.
+    """
+    out: dict[str, list[float]] = defaultdict(list)
+    for state in bc.prs:
+        pr = state.pr
+        if pr.get("state") != "merged" or pr.get("closed_ts") is None:
+            continue
+        spans: dict[str, float] = defaultdict(float)
+        for interval in state.intervals:
+            if interval.hours > 0:
+                spans[interval.phase] += interval.hours
+        for phase, hours in spans.items():
+            out[phase].append(round(hours, 2))
+    return dict(out)
+
+
+def pr_cycle_cohort(bc: "BallCourt") -> list[float]:
+    """Merged PRs' ``created → merged`` hours, on the author's own calendar.
+
+    The same clock the ticket's PR rows and the cycle metric use, so a PR's
+    cycle can be read against the merge cohort (prd/57).
+    """
+    values: list[float] = []
+    for state in bc.prs:
+        pr = state.pr
+        if pr.get("state") != "merged" or pr.get("closed_ts") is None:
+            continue
+        opened, closed = pr.get("created_ts"), pr.get("closed_ts")
+        if opened is None or closed is None or closed <= opened:
+            continue
+        values.append(round(bc.business_hours(pr["actor"], opened, closed), 2))
+    return values
+
+
+def phase_benchmarks(bc: "BallCourt") -> dict[str, dict]:
+    """Per-phase cohort medians (the block a drawer reads by phase name)."""
+    return {
+        phase: benchmark.stats(values, basis=PHASE_BENCHMARK_BASIS)
+        for phase, values in phase_cohort(bc).items()
     }
 
 
@@ -2153,6 +2230,21 @@ def delivery_list(
         })
 
     rows.sort(key=lambda r: (-r["blocked"], -r["impact_hours"], -r["waiting_hours"]))
+    # prd/57: every row's wait is read against the window cohort's median.
+    wait_cohort = [
+        row["waiting_hours"] for row in rows
+        if row.get("in_window") and row.get("waiting_hours") is not None
+    ] or [row["waiting_hours"] for row in rows if row.get("waiting_hours") is not None]
+    phases = phase_cohort(bc)
+    for row in rows:
+        row["wait_benchmark"] = benchmark.contrast(
+            row["waiting_hours"], wait_cohort, basis=WAIT_BENCHMARK_BASIS,
+        )
+        row["phase_benchmarks"] = {
+            phase: benchmark.contrast(hours, phases.get(phase, ()),
+                                      basis=PHASE_BENCHMARK_BASIS)
+            for phase, hours in (row.get("phase_hours") or {}).items()
+        }
     blocked = [r for r in rows if r["blocked"]]
     # prd/41 B3: one threshold — a working week is 40 business hours
     # (concepts.md §1) — behind every "waiting over a week" label.
@@ -2193,6 +2285,11 @@ def delivery_list(
             "excludes that tail, so the row stays here rather than disappearing"
         ),
         "window": {"start": iso(start), "end": iso(end)},
+        # prd/57: the cohort the per-row `wait_benchmark` multiples quote.
+        "wait_benchmark": benchmark.stats(
+            wait_cohort, basis=WAIT_BENCHMARK_BASIS,
+        ),
+        "phase_benchmarks": phase_benchmarks(bc),
         "counts": {
             "open": len(rows),
             "blocked": len(blocked),

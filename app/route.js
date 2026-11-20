@@ -24,7 +24,7 @@ import { THEMES, normalizeTheme } from './theme.js';
 /** The views the router knows (mirrors PAGES in main.js). */
 export const ROUTE_VIEWS = [
   'overview', 'delivery', 'timeline', 'ticket',
-  'blocking', 'queue', 'rules', 'policy', 'sources',
+  'blocking', 'queue', 'trend', 'rules', 'policy', 'sources',
 ];
 
 /** The closed set of scope kinds (scope.js owns the behaviour). */

@@ -17,6 +17,7 @@ import { fmtAbsolute, fmtHours, esc } from './format.js';
 import { PHASE } from './timeline.js';
 import { ticketHref } from './tickets.js';
 import { color, onPalette } from './theme.js';
+import { benchmarkInline, benchmarkText } from './benchmark.js';
 
 /* The PR-gantt vocabulary (PHASE) covers waiting / active / review / closed;
  * the five story-only segments extend it with their own hues, in lifecycle
@@ -75,7 +76,7 @@ function shortStamp(iso) {
 }
 
 /** The segment bar: one block per segment, absent blocks are hatched. */
-export function segmentBar(payload) {
+export function segmentBar(payload, { benchmark = true } = {}) {
   const segments = (payload && payload.segments) || {};
   const rows = segments.rows || [];
   if (!rows.length) {
@@ -94,7 +95,12 @@ export function segmentBar(payload) {
         text: 'not measured',
       };
     }
+    // prd/57: the segment's hours and its cohort median travel together — the
+    // median uses the same business-hour renderer, so "20 h" and "median 10 h"
+    // cannot be read on two different clocks.
+    const contrast = benchmark ? benchmarkText(row.benchmark, { format: segmentHours }) : '';
     const title = `${row.label} — ${segmentHours(row.hours)}` +
+      (contrast ? ` (${contrast})` : '') +
       ` (${pct(row.share)} of the measured cycle, ${pct(row.efficiency)} active)` +
       (row.no_pr_open_hours > 0
         ? ` · ${segmentHours(row.no_pr_open_hours)} with no PR open` : '') +
@@ -117,7 +123,8 @@ export function segmentBar(payload) {
   const legend = `<div class="ticket-seg-legend">${rows.map((row) => {
     const phase = segmentPhase(row.key);
     const value = row.available
-      ? `<b>${esc(segmentHours(row.hours))}</b> <span class="muted">${pct(row.share)}</span>`
+      ? `<b>${esc(segmentHours(row.hours))}</b> <span class="muted">${pct(row.share)}</span>${
+        benchmarkInline(row.benchmark, { enabled: benchmark, format: segmentHours })}`
       : `<span class="muted">not measured</span>`;
     const swatch = row.available
       ? `<i style="background:${phase.color}"></i>`
@@ -163,7 +170,7 @@ export function prPhaseBar(pr) {
 }
 
 /** The ticket's PRs: state, cycle, review rounds, push classes, censoring. */
-export function prTable(payload) {
+export function prTable(payload, { benchmark = true } = {}) {
   const prs = (payload && payload.prs) || [];
   if (!prs.length) {
     return `<p class="empty-row">No PR names this ticket in the store${
@@ -193,7 +200,8 @@ export function prTable(payload) {
         <span class="repo">${esc(String(pr.repo || '').split('/').pop())}</span></td>
       <td class="c-state" data-label="state">${state}</td>
       <td class="c-since mono" data-label="opened">${esc(stamp(pr.opened))}</td>
-      <td class="c-dur num" data-label="cycle">${esc(segmentHours(pr.cycle_hours))}</td>
+      <td class="c-dur num" data-label="cycle">${esc(segmentHours(pr.cycle_hours))}${
+        benchmarkInline(pr.cycle_benchmark, { enabled: benchmark, format: segmentHours })}</td>
       <td class="c-rounds num" data-label="rounds">${esc(pr.review_rounds)}</td>
       <td class="c-push mono" data-label="push classes">${classes}</td>
       <td class="c-bar" data-label="lifecycle">${prPhaseBar(pr)}</td>
@@ -295,7 +303,7 @@ export function eventsList(payload, { limit = 40 } = {}) {
 }
 
 /** The stats strip: counts before content (prd/10 §11). */
-export function ticketStats(payload) {
+export function ticketStats(payload, { benchmark = true } = {}) {
   if (!payload) return '';
   if (payload.kind === 'epic') {
     const epic = payload.epic || {};
@@ -311,7 +319,7 @@ export function ticketStats(payload) {
   const total = (segments.rows || []).length;
   const reopened = payload.reopened || segments.reopened;
   return `<span class="stat-inline"><b>${cycle == null ? '–' : esc(segmentHours(cycle))}</b> cycle</span>
-    ${benchmarkLine(payload)}
+    ${benchmarkLine(payload, { benchmark })}
     <span class="stat-inline"><b>${segments.measured ?? 0}</b>/${total} segments</span>
     <span class="stat-inline"><b>${payload.pr_count ?? 0}</b> PR${payload.pr_count === 1 ? '' : 's'}</span>
     ${story.points != null ? `<span class="stat-inline"><b>${esc(story.points)}</b> points</span>` : ''}
@@ -327,9 +335,9 @@ export function ticketStats(payload) {
  * ("is this slow for an 8?"), and a censored story says so rather than
  * implying a finished cycle.
  */
-export function benchmarkLine(payload) {
-  const benchmark = payload && payload.benchmark;
-  if (!benchmark || !benchmark.available) return '';
+export function benchmarkLine(payload, { benchmark = true } = {}) {
+  const benchmarkData = payload && payload.benchmark;
+  if (!benchmarkData || !benchmarkData.available) return '';
   const ordinal = (n) => {
     const mod = n % 100;
     if (mod >= 11 && mod <= 13) return `${n}th`;
@@ -337,19 +345,26 @@ export function benchmarkLine(payload) {
   };
   // prd/46 §6: rank n of n is the slowest story, not an "87th fastest" —
   // name the fact rather than a rank that reads as praise.
-  const position = benchmark.rank === benchmark.n
-    ? `slowest of ${benchmark.n}`
-    : `${ordinal(benchmark.rank)} fastest of ${benchmark.n}`;
+  const position = benchmarkData.rank === benchmarkData.n
+    ? `slowest of ${benchmarkData.n}`
+    : `${ordinal(benchmarkData.rank)} fastest of ${benchmarkData.n}`;
+  const contrast = benchmark
+    ? benchmarkText(benchmarkData.contrast, { format: segmentHours })
+    : '';
   const parts = [
     position,
-    benchmark.median_hours == null ? '' : `median ${segmentHours(benchmark.median_hours)}`,
-    benchmark.points_median_hours == null || benchmark.points == null
+    // prd/57: when the contrast is on it already carries "median …"; otherwise
+    // the plain median still answers "how does this compare".
+    contrast || (benchmarkData.median_hours == null
       ? ''
-      : `${benchmark.points}-pt median ${segmentHours(benchmark.points_median_hours)}`,
+      : `median ${segmentHours(benchmarkData.median_hours)}`),
+    benchmarkData.points_median_hours == null || benchmarkData.points == null
+      ? ''
+      : `${benchmarkData.points}-pt median ${segmentHours(benchmarkData.points_median_hours)}`,
   ].filter(Boolean);
-  const title = `${benchmark.basis || ''}${benchmark.censored
+  const title = `${benchmarkData.basis || ''}${benchmarkData.censored
     ? ' · this story is still open, so its cycle is right-censored at the snapshot' : ''}`;
-  return `<span class="stat-inline benchmark" data-benchmark-rank="${benchmark.rank}"
+  return `<span class="stat-inline benchmark" data-benchmark-rank="${benchmarkData.rank}"
       title="${esc(title)}">${esc(parts.join(' · '))}</span>`;
 }
 
@@ -378,7 +393,7 @@ export function clockNote(payload) {
  * a broken ticket. The epic page now says what it is, lists the child stories
  * with their own cycles, and links each one — a doorway, not a dead end.
  */
-export function epicMarkup(payload, { base = '' } = {}) {
+export function epicMarkup(payload, { base = '', benchmark = true } = {}) {
   const epic = payload.epic || {};
   const children = epic.stories || [];
   const rows = children.map((story) => `<tr>
@@ -387,7 +402,8 @@ export function epicMarkup(payload, { base = '' } = {}) {
         : `<span class="mono">${esc(story.key)}</span>`}</td>
       <td class="c-state" data-label="state"><span class="pill ${story.censored ? 'waiting' : 'healthy'}">${esc(story.state || 'unknown')}${story.censored ? ' · open' : ''}</span></td>
       <td class="c-dur num" data-label="points">${story.points == null ? '—' : esc(story.points)}</td>
-      <td class="c-dur num" data-label="cycle">${story.cycle_hours == null ? '—' : esc(segmentHours(story.cycle_hours))}</td>
+      <td class="c-dur num" data-label="cycle">${story.cycle_hours == null ? '—' : esc(segmentHours(story.cycle_hours))}${
+        benchmarkInline(story.cycle_benchmark, { enabled: benchmark, format: segmentHours })}</td>
     </tr>`).join('');
   return `
     <div class="ticket-head">
@@ -422,9 +438,9 @@ export function openPrState(pr) {
 }
 
 /** The whole page body. `base` is the page URL used by copied Markdown links. */
-export function ticketMarkup(payload, { base = '' } = {}) {
+export function ticketMarkup(payload, { base = '', benchmark = true } = {}) {
   if (!payload) return '<p class="empty-row">Loading the ticket…</p>';
-  if (payload.kind === 'epic') return epicMarkup(payload, { base });
+  if (payload.kind === 'epic') return epicMarkup(payload, { base, benchmark });
   const story = payload.story;
   const segments = payload.segments || {};
   const key = payload.key || '';
@@ -461,7 +477,7 @@ export function ticketMarkup(payload, { base = '' } = {}) {
     <div class="ticket-grid">
       <section class="ticket-panel wide">
         <h2 class="policy-h">cycle · ${(segments.rows || []).length} segments</h2>
-        ${segmentBar(payload)}
+        ${segmentBar(payload, { benchmark })}
         ${boundaryChips(payload)}
         <p class="panel-note">${esc(segments.heuristic || '')}${segments.hours_mode === 'business' ? '' : ' · wall-clock hours (no calendar configured)'}</p>
       </section>
@@ -474,7 +490,7 @@ export function ticketMarkup(payload, { base = '' } = {}) {
     </div>
     <section class="ticket-panel">
       <h2 class="policy-h">pull requests · ${payload.pr_count ?? 0}</h2>
-      ${prTable(payload)}
+      ${prTable(payload, { benchmark })}
     </section>
     <section class="ticket-panel">
       <h2 class="policy-h">ticket events · ${payload.event_count ?? 0}</h2>
@@ -508,7 +524,9 @@ export function ticketMarkdown(payload, base = '') {
     '| segment | hours | share | active |',
     '| --- | --- | --- | --- |',
     ...(segments.rows || []).map((row) => `| ${row.label} | ${
-      row.available ? segmentHours(row.hours) : 'not measured'} | ${
+      row.available ? segmentHours(row.hours) : 'not measured'}${
+      row.available && benchmarkText(row.benchmark, { format: segmentHours })
+        ? ` (${benchmarkText(row.benchmark, { format: segmentHours })})` : ''} | ${
       row.available ? pct(row.share) : '—'} | ${
       row.available ? pct(row.efficiency) : '—'} |`),
     '',
@@ -519,7 +537,9 @@ export function ticketMarkdown(payload, base = '') {
     `## pull requests (${payload.pr_count || 0})`,
     '',
     ...(payload.prs || []).map((pr) => `- #${pr.number} ${pr.repo} · ${pr.state}` +
-      `${pr.censored ? ' (right-censored)' : ''} · ${segmentHours(pr.cycle_hours)} · ` +
+      `${pr.censored ? ' (right-censored)' : ''} · ${segmentHours(pr.cycle_hours)}` +
+      `${benchmarkText(pr.cycle_benchmark, { format: segmentHours })
+        ? ` (${benchmarkText(pr.cycle_benchmark, { format: segmentHours })})` : ''} · ` +
       `${pr.review_rounds} review round${pr.review_rounds === 1 ? '' : 's'} · ` +
       `pushes ${Object.entries(pr.push_classes || {}).map(([name, n]) => `${name}×${n}`).join(', ') || 'none'}`),
     '',
