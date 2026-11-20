@@ -443,7 +443,7 @@ class StackedCascadeRuleTests(StoreCase):
         self.assertEqual(suggestion["impact_hours"], 14.0)
         self.assertIn("2 stacked PRs", suggestion["title"])
         self.assertIn("2 rebases", suggestion["title"])
-        self.assertIn("14 h", suggestion["title"])
+        self.assertIn("1 d 6 h", suggestion["title"])
         self.assertIn("bottom-up", suggestion["suggestion"])
         self.assertIn("depth", suggestion["suggestion"])
         evidence = suggestion["evidence"]

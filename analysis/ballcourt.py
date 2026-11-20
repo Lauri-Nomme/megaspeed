@@ -1928,9 +1928,9 @@ def delivery_list(
     for object_id, state in states.items():
         spans: dict[str, float] = defaultdict(float)
         for interval in state.intervals:
-            if interval.measured and interval.hours > 0:
-                # sum the same 2-decimal hours the ticket payload reports, so
-                # the two drawers cannot differ by a rounding minute
+            if interval.hours > 0:
+                # prd/55 §7: include the unobserved tail, so the drawer's phase
+                # list sums to the PR's cycle instead of hiding the 21-day wait.
                 spans[interval.phase] += round(interval.hours, 2)
         phase_hours[object_id] = {
             phase: round(hours, 2) for phase, hours in spans.items()
@@ -2040,6 +2040,23 @@ def delivery_list(
                 f"ticket {', '.join(done_keys)} is Done in Jira but this PR is open"
             )
         unobserved = bool(tail is not None and tail.phase == SNAPSHOT_PHASE)
+        # prd/55 §4: the phase derives from the ball, never from the interval
+        # that just ended. #53's last measured phase was `active` (the author's
+        # final push) while two reviewers held the ball for 21 days; the list
+        # called it active and "waiting on author: no" on the same row.
+        latest = tail if tail is not None else current
+        if latest is not None and latest.pending_all:
+            phase_now = "review"
+        elif latest is not None and latest.ci and not latest.author_open:
+            phase_now = "ci"
+        elif latest is not None and (latest.author_open or latest.ball == "author"):
+            phase_now = latest.phase if latest.phase in ("active", "rebasing") else (
+                current.phase if current is not None else "active"
+            )
+        elif latest is not None and latest.ball == READY:
+            phase_now = "review"
+        else:
+            phase_now = current.phase if current else "no events"
         rows.append({
             "object_id": object_id,
             "id": f"{pr['repo'].split('/')[-1]}#{pr['pr_id']}",
@@ -2067,7 +2084,8 @@ def delivery_list(
             "reviewers_total": len(roster),
             "reviewers_pending": len(pending),
             "reviewers_approved": len(approved),
-            "phase": current.phase if current else "no events",
+            "phase": phase_now,
+            "last_phase": current.phase if current else "no events",
             "kind": kind,
             # prd/43 §5: the drawer's "last event" names the *raw* activity the
             # ticket view also quotes (``comment_added``, not ``author_reply``),

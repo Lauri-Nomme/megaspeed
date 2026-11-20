@@ -48,6 +48,11 @@ export function sprintBands(data) {
       adopted: sprint.adopted ?? null,
       pointsShare: sprint.points_share ?? null,
       lateHours: sprint.late_hours || 0,
+      // prd/55 §5: a long sprint's delivery share is not comparable
+      days: sprint.days ?? null,
+      plannedDays: sprint.planned_days ?? null,
+      lengthOutlier: Boolean(sprint.length_outlier),
+      lengthNote: sprint.length_note || null,
       carriedIn: sprint.carried_in || [],
       carriedOut: sprint.carried_out || [],
     }))
@@ -101,6 +106,8 @@ export function sprintOutcomeLine(sprint) {
   if (late) parts.push(`${late} late`);
   if (unmerged) parts.push(`${unmerged} Done in Jira · PR unmerged`);
   if (never) parts.push(`${never} still open`);
+  // prd/55 §5: the length outlier is part of the verdict, not a footnote
+  if (sprint.length_outlier && sprint.length_note) parts.push(sprint.length_note);
   return parts.join(' · ');
 }
 
@@ -180,7 +187,11 @@ export function sprintStrip(data, { base = '', focus = null } = {}) {
       ? `<span class="sprint-plan" title="the plan is not the band: an active sprint's band ends at the snapshot">plan ${esc(sprint.planned_end)}</span>`
       : '';
     const state = sprint.state || (sprint.open ? 'active' : 'closed');
-    const days = sprint.days == null ? '' : `${sprint.days} calendar days`;
+    const planned = sprint.planned_days ?? sprint.plannedDays;
+    const outlier = Boolean(sprint.length_outlier ?? sprint.lengthOutlier);
+    const days = outlier && planned != null
+      ? `${planned} calendar days planned · outlier`
+      : (sprint.days == null ? '' : `${sprint.days} calendar days`);
     const selected = focus != null && String(focus) === String(sprint.sprint_id);
     const late = sprint.done_late || 0;
     const never = sprint.never_done || 0;
@@ -198,6 +209,7 @@ export function sprintStrip(data, { base = '', focus = null } = {}) {
       <span class="sprint-state">${esc(state)}</span>
       <span class="sprint-window mono">${esc(windowLabel(sprint))}</span>
       <span class="sprint-days num muted">${esc(days)}</span>
+      ${outlier ? `<span class="sprint-length-flag" title="${esc(sprint.length_note || 'a sprint whose planned length is an outlier')}">length outlier</span>` : ''}
       <span class="sprint-scope-count num">${sprint.story_count || 0} stor${(sprint.story_count || 0) === 1 ? 'y' : 'ies'} · ${sprint.points || 0} pts${
         committed != null ? ` · <span class="sprint-committed" title="stories in the sprint when it started — the commitment it was planned with">${committed} committed at start</span>` : ''}${
         adopted ? ` · <span class="sprint-added" title="stories added after the sprint's start — adopted scope, not the plan it was committed to">${adopted} adopted</span>` : ''}</span>

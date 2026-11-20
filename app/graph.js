@@ -17,6 +17,65 @@ import { fmtHours, esc, rgba } from './format.js';
 import { touchAxis } from './mobile.js';
 import { color, onPalette, rgbOf } from './theme.js';
 
+/** The map as readable text (prd/56 §3): every node and edge, no hover needed.
+ *
+ * The canvas is a picture; this is the same data as a table. Durations go
+ * through `fmtHours`, so a node shows "168 d 4 h", never "1348h". The special
+ * edges are named in words: "sentinel waited on ready" is really "PRs waited
+ * for merge after approval".
+ */
+export function edgeSentence(edge) {
+  const from = String(edge.from || '');
+  const to = String(edge.to || '');
+  if (to === 'ready') return 'PRs waited for merge after approval';
+  if (from === 'author' && to === 'review') return 'PRs waited on peer review';
+  if (to === 'sentinel') return `PRs waited on the sentinel (${from})`;
+  if (from === 'review' && to === 'author') return 'PRs went back to the author';
+  return `${from} waited on ${to}`;
+}
+
+export function blockingText(data, lensId = 'hours') {
+  if (!data || !(data.nodes || []).length) {
+    return '<p class="empty-row">No measured handover in this window.</p>';
+  }
+  const lens = LENSES[lensId] || LENSES.hours;
+  const nodes = [...(data.nodes || [])]
+    .sort((a, b) => (Number(b.hours) || 0) - (Number(a.hours) || 0));
+  const edges = [...(data.edges || [])]
+    .sort((a, b) => (Number(b.hours) || 0) - (Number(a.hours) || 0));
+  const nodeRows = nodes.map((node) => `<tr>
+      <td class="mono">${esc(node.id)}</td>
+      <td>${esc(node.kind === 'person' ? (node.role || 'person') : `${node.kind} queue`)}</td>
+      <td class="num mono">${esc(fmtHours(node.hours))}</td>
+      <td class="num mono">${esc(String(node.count ?? '–'))}</td>
+      <td class="num mono">${esc(fmtHours(node.out_hours))}</td>
+      <td class="num mono">${esc(String(node.wip_now ?? '–'))}</td>
+      <td class="num mono">${esc(lensText(lens, lens.value(node)))}</td>
+    </tr>`).join('');
+  const edgeRows = edges.map((edge) => `<tr>
+      <td>${esc(edgeSentence(edge))}</td>
+      <td class="mono muted">${esc(edge.from)} → ${esc(edge.to)}</td>
+      <td class="num mono">${esc(fmtHours(edge.hours))}</td>
+      <td class="num mono">${esc(String(edge.count ?? '–'))}</td>
+      <td class="num mono">${edge.mean_hours == null ? '–' : esc(fmtHours(edge.mean_hours))}</td>
+    </tr>`).join('');
+  return `<details class="blocking-text" open>
+    <summary>text view — ${nodes.length} node${nodes.length === 1 ? '' : 's'} · ${edges.length} edge${edges.length === 1 ? '' : 's'}</summary>
+    <div class="blocking-text-grid">
+      <table class="table compact"><thead><tr>
+        <th>node</th><th>kind</th><th class="num">waited on</th><th class="num">waits</th>
+        <th class="num">waits on others</th><th class="num">WIP now</th>
+        <th class="num">${esc(lens.label)}</th>
+      </tr></thead><tbody>${nodeRows}</tbody></table>
+      <table class="table compact"><thead><tr>
+        <th>handover</th><th>edge</th><th class="num">wait</th><th class="num">waits</th>
+        <th class="num">mean</th>
+      </tr></thead><tbody>${edgeRows}</tbody></table>
+    </div>
+    <p class="panel-note">Durations are business hours (1 d = 8 h). Edge means “the left side waited on the right side”; person-hours charge every concurrent holder, so they are not the sentinel's response time.</p>
+  </details>`;
+}
+
 function lensText(lens, value) {
   if (lens.unit === 'h') return fmtHours(value);
   if (lens.unit === 'h/d') return `${(Number(value) || 0).toFixed(1)} h/d`;
@@ -460,7 +519,7 @@ export class BlockingMap {
       ctx.fillText(node.id, p.x, p.y - 1);
       ctx.font = '500 10px "JetBrains Mono", ui-monospace, monospace';
       ctx.fillStyle = dimmed ? C.faintest : C.muted;
-      ctx.fillText(`${lens.value(node).toFixed(lens.unit === 'h/d' ? 1 : 0)}${lens.unit}`, p.x, p.y + radius + 13);
+      ctx.fillText(lensText(lens, lens.value(node)), p.x, p.y + radius + 13);
 
       this.hits.push({ kind: 'node', node, x: p.x, y: p.y, r: radius + 6 });
     });
@@ -538,7 +597,8 @@ export class BlockingMap {
     } else {
       const edge = hit.edge;
       this.tip.innerHTML = `
-        <div class="row"><span class="act">${esc(edge.from)} → ${esc(edge.to)}</span></div>
+        <div class="row"><span class="act">${esc(edgeSentence(edge))}</span></div>
+        <div class="row"><span class="k">edge</span><span class="v mono">${esc(edge.from)} → ${esc(edge.to)}</span></div>
         <div class="row"><span class="k">waited</span><span class="v">${fmtHours(edge.hours)}</span></div>
         <div class="row"><span class="k">waits</span><span class="v">${edge.count} · ${edge.prs} PRs</span></div>
         <div class="row"><span class="k">mean</span><span class="v">${fmtHours(edge.mean_hours)}</span></div>`;

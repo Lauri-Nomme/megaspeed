@@ -1935,7 +1935,7 @@ export class Timeline {
         <div class="row"><span class="k">queue</span><span class="v">${esc(hit.queue)}</span></div>
         <div class="row"><span class="k">pr</span><span class="v">${pr.ticket ? `${esc(pr.ticket)} ` : ''}#${esc(pr.number)} ${esc(pr.repo)}</span></div>
         <div class="row"><span class="k">window</span><span class="v">${esc(fmtStamp(seg.from))}<br>${esc(fmtStamp(seg.to))}</span></div>
-        <div class="row"><span class="k">basis</span><span class="v">${esc(PHASE[seg.phase].hint)}</span></div>`;
+        <div class="row"><span class="k">basis</span><span class="v">${esc(PHASE[seg.phase].hint)} · calendar time (wall clock)</span></div>`;
     } else if (hit.kind === 'label') {
       this.tip.innerHTML = `
         <div class="row"><span class="act mono">${esc(hit.ticket)}</span>
@@ -1949,6 +1949,8 @@ export class Timeline {
         <div class="row"><span class="k">band</span><span class="v">${esc(fmtStamp(sprint.start))}<br>${esc(fmtStamp(sprint.end))}${sprint.open ? ' · at the snapshot' : ''}</span></div>
         ${sprint.active && Number.isFinite(sprint.plannedEnd)
           ? `<div class="row"><span class="k">plan</span><span class="v">ends ${esc(fmtStamp(sprint.plannedEnd))} — dashed line, not measured</span></div>` : ''}
+        ${sprint.lengthOutlier && sprint.lengthNote
+          ? `<div class="row"><span class="k">length</span><span class="v">${esc(sprint.lengthNote)}</span></div>` : ''}
         <div class="row"><span class="k">scope</span><span class="v">${sprint.stories} stor${sprint.stories === 1 ? 'y' : 'ies'} · ${sprint.points} points</span></div>
         <div class="row"><span class="k">by end</span><span class="v">${sprint.doneByEnd} done by end${sprint.doneLate ? ` · ${sprint.doneLate} late` : ''}${sprint.neverDone ? ` · ${sprint.neverDone} still open` : ''}</span></div>
         ${sprint.doneLate && sprint.lateHours ? `<div class="row"><span class="k">slip</span><span class="v">${esc(fmtHours(sprint.lateHours))} after the close</span></div>` : ''}
@@ -1989,7 +1991,7 @@ export class Timeline {
         <div class="row"><span class="k">ticket</span><span class="v">${esc(pr.ticket) || '—'}</span></div>
         ${pr.epic ? `<div class="row"><span class="k">epic</span><span class="v">${esc(pr.epic)}</span></div>` : ''}
         <div class="row"><span class="k">author</span><span class="v">${esc(pr.actor)}</span></div>
-        <div class="row"><span class="k">cycle</span><span class="v">${esc(fmtCalendarDuration(total))}</span></div>
+        <div class="row"><span class="k">cycle</span><span class="v">${esc(fmtCalendarDuration(total))} <span class="muted">calendar time</span></span></div>
         ${measured.map(([phase, ms]) => `<div class="row"><span class="k">${esc(PHASE[phase].label)}</span>
           <span class="v" style="color:${PHASE[phase].color}">${esc(fmtCalendarDuration(ms))}</span></div>`).join('')}
         ${unobserved ? `<div class="row"><span class="k">no events</span><span class="v" style="color:${PHASE.unobserved.color}">${esc(fmtCalendarDuration(unobserved))} · not measured</span></div>` : ''}`;

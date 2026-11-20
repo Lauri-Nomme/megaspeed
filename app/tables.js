@@ -168,7 +168,8 @@ export function deliveryTable(data, tab, { scope = null } = {}) {
       <td class="c-dur num" data-label="waiting">${esc(fmtHours(row.waiting_hours))}</td>
       <td class="c-impact num" data-label="impact">${impactCell(row)}</td>
     </tr>`).join('');
-  return `<table class="table delivery">${head}<tbody>${body}</tbody></table>`;
+  return `<table class="table delivery">${head}<tbody>${body}</tbody></table>
+    <p class="panel-note">unobserved = no events since the snapshot: the blocking map excludes that tail, so the row stays here rather than disappearing. A duration is business hours on the team calendar; 1 d = 8 h.</p>`;
 }
 
 export function matchesScope(row, scope) {
@@ -210,6 +211,29 @@ export function matchesScope(row, scope) {
   return true;
 }
 
+/**
+ * prd/56 §2: the people a pivot menu can scope to.
+ *
+ * The holder is the useful pivot ("Scope to FrMo"), not only the author
+ * ("ErLi"): the row's wait is on the holder. Several holders yield several
+ * entries, author last, each deduplicated. Pure, so the menu's contents are
+ * testable without a DOM.
+ */
+export function scopeTargets(entity) {
+  if (!entity) return [];
+  const row = entity.row || null;
+  const author = entity.author || (entity.pr && entity.pr.actor) || (row && row.author);
+  const holders = row
+    ? [...(row.waiting_on || []), row.ball_label]
+      .filter((person) => person && person !== row.ball && person !== author)
+    : [];
+  const people = [...new Set(holders)];
+  const targets = people.map((person) => ({ person, label: `Scope to ${person}`, holder: true }));
+  if (author) targets.push({ person: author, label: `Scope to ${author}`, holder: false });
+  return targets;
+}
+
+/** The delivery list as Markdown: the same rows and wording as the table. */
 export function deliveryMarkdown(rows, meta, base = '') {
   const header = [
     `# Delivery list — ${rows.length} open item${rows.length === 1 ? '' : 's'}`,
@@ -234,9 +258,15 @@ export function deliveryMarkdown(rows, meta, base = '') {
  * names the ticket, the PR and who owes the next action, and calls out the
  * stronger case: a PR opened *after* its ticket was closed.
  */
-export function doneOpenMarkup(delivery, { base = '' } = {}) {
+export function doneOpenMarkup(delivery, { base = '', scope = null } = {}) {
   const done = delivery && delivery.done_open;
-  const rows = (done && done.rows) || [];
+  let rows = (done && done.rows) || [];
+  if (scope && scope.kind !== 'all') {
+    const value = String(scope.value || '').toLowerCase();
+    rows = rows.filter((row) => (scope.kind === 'ticket'
+      ? String(row.key || '').toLowerCase() === value
+      : (row.waiting_on || []).some((person) => String(person).toLowerCase() === value)));
+  }
   if (!done || !done.available) return '';
   if (!rows.length) {
     return `<section class="panel wide done-open-panel">
@@ -275,15 +305,28 @@ export function jargonTitle(term) {
   const glossary = {
     unobserved: 'no events since the snapshot — the tail is not measured, so the blocking graph excludes it',
     ready: 'every reviewer has answered and only the merge click remains — nobody is reviewing',
-    'sentinel waited on ready': 'the PR was ready to merge and waited for the mandatory approver, not idly',
+    'sentinel waited on ready': 'the PRs were ready to merge and waited for the merge click, not for a reviewer',
     sentinel: 'the mandatory approver on (typically) every PR — a role, not a bot',
   };
   return glossary[String(term || '').toLowerCase()] || '';
 }
 
 /** The overview: counts first, then the rows that need attention. */
-export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue' }) {
-  const counts = delivery ? delivery.counts : { open: 0, blocked: 0, oldest_waiting: 0 };
+export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue', scope = null }) {
+  const scoped = Boolean(scope && scope.kind !== 'all');
+  const allRows = (delivery && delivery.rows) || [];
+  // prd/56 §4: a person/role/ticket scope really does narrow this view, so the
+  // tiles and the attention list are derived from the scoped rows — not from
+  // the whole team while the banner claims the opposite.
+  const rowsForScope = scoped ? allRows.filter((row) => matchesScope(row, scope)) : allRows;
+  const week = Number((delivery && delivery.counts && delivery.counts.waiting_week_hours) || 40);
+  const counts = delivery ? {
+    open: rowsForScope.length,
+    blocked: rowsForScope.filter((row) => row.blocked).length,
+    oldest_waiting: rowsForScope.filter((row) => !row.blocked && row.waiting_hours >= week).length,
+    stale: rowsForScope.filter((row) => row.stale).length,
+    all: rowsForScope.length,
+  } : { open: 0, blocked: 0, oldest_waiting: 0 };
   const streams = (queues && queues.streams) || [];
   // B17: the API response says which level it answered at; never call people
   // "queues" because another page happened to leave that level selected.
@@ -295,14 +338,28 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
   // stream (`review`, `author`, …) is a queue even when the API level says
   // "person", so it must not inflate "N overloaded people" (QA #10).
   const counted = people ? streams.filter((stream) => !streamIsQueue(stream)) : streams;
-  const overloaded = counted.filter((s) => s.summary.diagnosis === 'overloaded');
-  const slow = counted.filter((s) => s.summary.diagnosis === 'slow');
-  const topBlocking = (blocking && blocking.edges ? blocking.edges.slice(0, 3) : []);
+  // prd/56 §4: the queue diagnosis follows the scope too (one person, or one
+  // role queue), instead of showing the whole team under a scoped banner.
+  const scopedStreams = scoped
+    ? counted.filter((stream) => String(stream.id) === String(scope.value))
+    : counted;
+  const overloaded = scopedStreams.filter((s) => s.summary.diagnosis === 'overloaded');
+  const slow = scopedStreams.filter((s) => s.summary.diagnosis === 'slow');
+  const allBlocking = (blocking && blocking.edges ? blocking.edges : []);
+  const scopeValue = scoped ? String(scope.value || '').toLowerCase() : '';
+  const topBlocking = (scoped && scope.kind !== 'ticket'
+    ? allBlocking.filter((edge) => String(edge.from || '').toLowerCase() === scopeValue
+      || String(edge.to || '').toLowerCase() === scopeValue)
+    : allBlocking).slice(0, 3);
   const waitHours = blocking && blocking.totals ? blocking.totals.hours : 0;
   // prd/38 #25: the list is the actionable subset, not the whole table, so when
   // it is truncated say how many are left instead of silently showing six.
-  const attention = delivery ? tabRows(delivery, 'blocked').concat(
-    tabRows(delivery, 'oldest').filter((row) => !row.blocked),
+  const attention = delivery ? tabRows(delivery, 'blocked').filter(
+    (row) => !scoped || matchesScope(row, scope),
+  ).concat(
+    tabRows(delivery, 'oldest').filter(
+      (row) => !row.blocked && (!scoped || matchesScope(row, scope)),
+    ),
   ) : [];
   const rows = attention.slice(0, 6);
   const hidden = Math.max(0, attention.length - rows.length);
@@ -310,7 +367,7 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
   // prd/43 §4: "longest mean wait" is the longest *person's* mean wait, not the
   // first stream's. The synthetic `review` stream used to head the list and the
   // tile read 22.6 h while every person below it waited ≤ 1 d 3 h.
-  const longest = counted.reduce(
+  const longest = scopedStreams.reduce(
     (best, stream) => Math.max(best, Number(stream.summary.mean_wait_hours) || 0), 0,
   );
   return `
@@ -356,8 +413,11 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
         <div class="panel-head"><h2>Where waits accumulate</h2>
           <button type="button" class="link" data-go="blocking">Blocking map →</button></div>
         ${topBlocking.length ? `<table class="table compact"><tbody>${topBlocking.map((edge) => `
-          <tr title="${esc(edge.to === 'ready' ? jargonTitle('sentinel waited on ready') : '')}"><td class="c-who" data-label="handover"><span class="mono">${esc(edge.from)}</span> waited on
-            <span class="mono">${esc(edge.to)}</span></td>
+          <tr title="${esc(edge.to === 'ready' ? jargonTitle('sentinel waited on ready') : '')}"><td class="c-who" data-label="handover">${
+            edge.to === 'ready'
+              ? '<span>PRs waited for merge after approval</span>'
+              : `<span class="mono">${esc(edge.from)}</span> waited on <span class="mono">${esc(edge.to)}</span>`
+          }</td>
           <td class="c-dur num" data-label="wait">${esc(fmtHours(edge.hours))}</td></tr>`).join('')}</tbody></table>`
     : '<div class="empty-row">No measured handover in this window.</div>'}
         <p class="panel-note">${esc((blocking && blocking.assumption) || '')}</p>
@@ -365,16 +425,16 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
       <section class="panel">
         <div class="panel-head"><h2>${people ? 'People diagnosis' : 'Queue diagnosis'}</h2>
           <button type="button" class="link" data-go="queue">Queue view →</button></div>
-        ${counted.length ? `<table class="table compact"><tbody>${counted.slice(0, 8).map((stream) => `
+        ${scopedStreams.length ? `<table class="table compact"><tbody>${scopedStreams.slice(0, 8).map((stream) => `
           <tr><td class="c-who" data-label=""><span class="mono">${esc(stream.id)}</span></td>
             <td class="c-state" data-label="diagnosis">${pill(stream.summary.diagnosis, `≈ ${stream.summary.diagnosis}`, 'queue wait (person-hours from added as reviewer → answer, the peer phase included) relative to the median — not calendar utilisation and not the sentinel gate wait')}</td>
             <td class="c-dur num" data-label="mean wait">≈${esc(fmtHours(stream.summary.mean_wait_hours))}</td></tr>`).join('')}</tbody></table>${
-          counted.length > 8 ? `<p class="panel-note">showing the 8 longest of ${counted.length}</p>` : ''}${
+          scopedStreams.length > 8 ? `<p class="panel-note">showing the 8 longest of ${scopedStreams.length}</p>` : ''}${
           people ? '<p class="panel-note">mean wait here is person-hours from “added as reviewer” to the answer — a different metric from the sentinel wait (Queue → response time: last peer answer → first response).</p>' : ''}`
-    : '<div class="empty-row">No measured waits in this window.</div>'}
+    : `<div class="empty-row">No measured waits${scoped ? ` for scope ${esc(scope.label)}` : ''}.</div>`}
       </section>
     </div>
-    ${doneOpenMarkup(delivery)}`;
+    ${doneOpenMarkup(delivery, { scope })}`;
 }
 
 /** Detail panel body for one item (over- + name + context + impact + facts). */

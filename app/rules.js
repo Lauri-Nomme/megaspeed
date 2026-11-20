@@ -39,8 +39,18 @@ export function evidenceLabel(key) {
     rounds_cycle_correlation: 'rounds ↔ cycle r',
     rounds_cycle_n: 'merged PRs',
     hours_per_extra_round: 'per extra round',
+    // prd/55 §3: the median states its cohort
+    median_rounds_merged: 'median rounds (merged PRs)',
+    median_rounds_all: 'median rounds (all PRs)',
   }[key];
   if (cap) return cap;
+  // prd/55 §5: the sprint-length flag is evidence next to the delivery share.
+  const sprint = {
+    sprint_length_days: 'sprint length (calendar days)',
+    sprint_length_outlier: 'length an outlier',
+    sprint_length_note: 'length flag',
+  }[key];
+  if (sprint) return sprint;
   // prd/22: the stack evidence reads as prose, not as snake_case.
   const stacked = {
     re_review_hours: 're-review',
@@ -420,8 +430,16 @@ export function rulesStats(data) {
     : suggestions.reduce((sum, s) => sum + (Number(s.impact_hours) || 0), 0);
   const overlap = stake && stake.overlap_hours ? Number(stake.overlap_hours) : 0;
   const sample = (data && data.sample) || {};
+  const dataset = (data && data.dataset) || {};
   const rules = suggestions.length;
   const prs = sample.prs ?? 0;
+  const datasetPrs = dataset.prs ?? null;
+  const outside = dataset.prs_outside_window ?? 0;
+  // prd/55 §6: "124 of 131 PRs" — the window is not the dataset, and the header
+  // must not let the dataset census stand for the cohort it dropped.
+  const prsLabel = datasetPrs != null && outside
+    ? `<b>${prs}</b> of ${datasetPrs} PRs (${outside} opened before the window)`
+    : `<b>${prs}</b> PR${prs === 1 ? '' : 's'}`;
   // prd/21: the ticket cohort travels next to the PR cohort; a store without the
   // Jira ingest shows no story count rather than a misleading zero.
   const stories = (data && data.jira && data.jira.available) ? (sample.stories ?? 0) : null;
@@ -431,9 +449,10 @@ export function rulesStats(data) {
       ? `counted once: ${fmtImpact(overlap)} of overlapping rule estimates is not added again`
       : 'each at-stake hour is attributed to one rule')}"><b>${fmtImpact(impact)}</b> at stake${
       overlap ? ` <span class="muted">(counted once)</span>` : ''}</span>
-    <span class="stat-inline"><b>${prs}</b> PR${prs === 1 ? '' : 's'}${
+    <span class="stat-inline">${prsLabel}${
       stories === null ? '' : ` · <b>${stories}</b> stor${stories === 1 ? 'y' : 'ies'}`} ·
-      <b>${sample.days ?? 0}</b> calendar day${sample.days === 1 ? '' : 's'}</span>`;
+      <b>${sample.days ?? 0}</b> of ${dataset.days ?? '–'} calendar days${
+      outside ? ` <span class="muted">(window)</span>` : ''}</span>`;
 }
 
 /* B16: the `people` level is not a no-op toggle. When the engine has no
@@ -488,12 +507,17 @@ export function rulesMarkdown(data, base = '') {
   const level = data.level === 'person'
     ? (personRules ? 'person' : 'team — no person-level signal in this window')
     : (data.level || 'team');
+  const dataset = data.dataset || {};
+  const outside = dataset.prs_outside_window || 0;
   const lines = [
     `# Rules — what should we change first? (${level})`,
     '',
-    `_${data.sample.prs} PR${data.sample.prs === 1 ? '' : 's'} opened over ` +
-      `${data.sample.days} calendar day${data.sample.days === 1 ? '' : 's'} · ` +
-      `${data.hours_mode === 'business' ? 'business hours' : 'wall-clock hours'} · ` +
+    `_${data.sample.prs}${outside ? ` of ${dataset.prs}` : ''} PR` +
+      `${data.sample.prs === 1 && !outside ? '' : 's'} opened over ` +
+      `${data.sample.days} calendar day${data.sample.days === 1 ? '' : 's'}` +
+      (outside ? ` of a ${dataset.days}-day dataset — ${outside} PR${outside === 1 ? '' : 's'} ` +
+        'opened before the window and is not in the cohort' : '') + ` · ` +
+      `${data.hours_mode === 'business' ? 'business hours (1 d = 8 h)' : 'wall-clock hours'} · ` +
       `snapshot ${data.as_of}_`,
     '',
   ];

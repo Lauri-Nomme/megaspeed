@@ -15,7 +15,7 @@
  */
 
 import { Timeline, ACTIVITY_ORDER, ACTIVITY_COLOR, PHASE, PHASE_ORDER } from '/timeline.js';
-import { BlockingMap, LENSES } from '/graph.js';
+import { BlockingMap, LENSES, blockingText } from '/graph.js';
 import { QueueChart } from '/queues.js';
 import { legendMarkup, responseTable } from '/queues.js';
 import {
@@ -25,7 +25,7 @@ import {
 import {
   TABS, tabCounts, tabRows, deliveryTable, overviewMarkup, detailMarkup,
   impactSentence, entityMarkdown, deliveryMarkdown, reviewStateLine, matchesScope,
-  waitingLabel, weekLabel,
+  waitingLabel, weekLabel, scopeTargets,
 } from '/tables.js';
 import { rulesMarkup, rulesStats, rulesMarkdown } from '/rules.js';
 import { sprintStrip } from '/sprints.js';
@@ -181,6 +181,10 @@ const timeline = new Timeline({
     if (stats.aggregated) bits.push(`aggregated into ${fmtBucket(stats.bucketMs)} buckets — zoom in for individual events`);
     if (stats.openPrs) bits.push(`${stats.openPrs} PRs still open are right-censored at the snapshot time`);
     bits.push(`${stats.visible} of ${stats.total} events in view`);
+    // prd/56 §6: the canvas is a wall-clock gantt; the header's clock is
+    // business hours. Say which is which instead of showing "calendar days"
+    // lifecycles under a "business hours" chip.
+    bits.push('canvas spans are calendar time (wall clock); table durations are business hours (1 d = 8 h)');
     if (state.eventCapped) {
       bits.push(`only the newest ${fmtCompact(state.events.length)} of ${fmtCompact(state.eventTotal)} events are loaded`);
     }
@@ -1397,6 +1401,10 @@ function renderBlockingPage() {
     );
   }
   renderBlockingStats();
+  // prd/56 §3: the same graph as text, so the numbers are readable without
+  // hovering the canvas (and waits render as "d h", never "1348h").
+  const view = $('blocking-view');
+  if (view) view.innerHTML = blockingText(data, state.lens);
 }
 
 function renderBlockingStats() {
@@ -1624,13 +1632,16 @@ function renderOverviewPage() {
     queues: state.queues,
     blocking: state.blocking,
     queueLevel: state.queueLevel,
+    scope: state.scope,
   });
-  // B7: the overview is a whole-team summary; say so instead of inheriting a
-  // disclosure about a different view.
+  // B7 + prd/56 §4: the overview really does narrow under a scope, so its
+  // disclosure says which scope rather than claiming it shows the whole team.
   const counts = state.delivery ? state.delivery.counts : null;
   setHonesty(counts
     ? `${counts.open} open items · ${counts.blocked} blocked · ` +
-      `whole team in the window${state.scope.kind === 'all' ? '' : ' — the overview is not scope-filtered'}`
+      (state.scope.kind === 'all'
+        ? 'whole team in the window'
+        : `scoped to ${state.scope.kind} ${state.scope.label} — tiles and rows are filtered to it`)
     : '');
 }
 
@@ -1733,6 +1744,14 @@ function openPrDrawer(pr, row = null) {
         : 'no roster in the store'],
       ['approvals', (row.approved || []).join(', ') || 'none'],
       ['waiting on', waitingLabel(row) || '—'],
+      // prd/56 §1: the drawer says how long *this* wait has run, not only where
+      // the PR is now. The current wait starts when the last event handed the
+      // ball over; it is priced in business hours like every other duration.
+      ['waiting since', row.waiting_since
+        ? `${fmtStamp(Date.parse(row.waiting_since))} (${fmtHours(row.waiting_hours)})`
+        : '—'],
+      ['waiting', row.waiting_hours == null ? '—' : fmtHours(row.waiting_hours)],
+      ['phase', row.phase || '—'],
       ['open threads', String(row.open_threads ?? 0)],
       ['last event', row.last_event || row.waiting_since
         ? `${fmtStamp(Date.parse(row.last_event || row.waiting_since))} · ${row.last_event_activity || row.kind || ''}`
@@ -1755,11 +1774,15 @@ function openPrDrawer(pr, row = null) {
         : 'events observed through the last event'],
     ] : []),
     ...["waiting", "active", "review", "ci", "rebasing", "unobserved"].map((phase) => [
-      phase === 'unobserved' ? 'unobserved' : PHASE[phase].label,
+      phase === 'unobserved'
+        ? 'unobserved (no events since the snapshot)'
+        : PHASE[phase].label,
       phaseHours
         ? (phaseHours[phase] != null ? fmtHours(phaseHours[phase]) : '—')
         : (totals.get(phase) ? fmtCalendarDuration(totals.get(phase)) : '—'),
     ]),
+    ...(phaseHours ? [['phase total', fmtHours(Object.values(phaseHours).reduce(
+      (sum, value) => sum + (Number(value) || 0), 0))]] : []),
   ];
   openDrawer({
     overline: 'PULL REQUEST',
@@ -1798,24 +1821,31 @@ function openTicketPrDrawer(pr) {
   const key = state.ticketKey;
   const phases = new Map();
   for (const interval of pr.intervals || []) {
-    if (!interval.measured) continue;
     const hours = Number(interval.hours) || 0;
     if (hours <= 0) continue;
+    // prd/55 §7: the unobserved tail is a real span; include it so the phase
+    // list sums to the PR's cycle instead of stopping at the last event.
     phases.set(interval.phase, (phases.get(interval.phase) || 0) + hours);
   }
+  const phaseTotal = [...phases.values()].reduce((sum, value) => sum + value, 0);
   const classes = Object.entries(pr.push_classes || {})
     .map(([name, count]) => `${name} ×${count}`).join(' · ') || '—';
   const facts = [
     ['ticket', key || '—'],
     ['author', pr.author || '—'],
     ['state', `${pr.state}${pr.censored ? ' · right-censored' : ''}`],
-    ['cycle', pr.cycle_hours == null ? '—' : fmtHours(pr.cycle_hours)],
+    // prd/55 §7: the phase total is the cycle the phase list sums to.
+    ['cycle (sum of phases)', phaseTotal ? fmtHours(phaseTotal) : '—'],
     // prd/42 M6: the review facts the ticket payload now carries.
     ['reviewers', pr.reviewers_total
       ? `${pr.reviewers_approved || 0}/${pr.reviewers_total} approved · ${pr.reviewers_pending || 0} pending`
       : 'no roster in the store'],
     ['approvals', (pr.approved || []).join(', ') || 'none'],
     ['waiting on', (pr.waiting_on || []).join(' + ') || 'nobody'],
+    ['waiting since', pr.waiting_since
+      ? `${fmtStamp(Date.parse(pr.waiting_since))} (${fmtHours(pr.waiting_hours)})`
+      : '—'],
+    ['waiting', pr.waiting_hours == null ? '—' : fmtHours(pr.waiting_hours)],
     ['open threads', String(pr.open_threads ?? 0)],
     ['last event', pr.last_event
       ? `${fmtStamp(Date.parse(pr.last_event))} · ${pr.last_event_activity || ''}`
@@ -1830,9 +1860,12 @@ function openTicketPrDrawer(pr) {
       ? `${fmtStamp(Date.parse(pr.last_event))} · ${pr.phase}`
       : 'events observed through the last event'],
     ...['waiting', 'active', 'review', 'ci', 'rebasing', 'unobserved'].map((phase) => [
-      phase === 'unobserved' ? 'unobserved' : PHASE[phase].label,
+      phase === 'unobserved'
+        ? 'unobserved (no events since the snapshot)'
+        : PHASE[phase].label,
       phases.get(phase) ? fmtHours(phases.get(phase)) : '—',
     ]),
+    ['phase total', phaseTotal ? fmtHours(phaseTotal) : '—'],
   ];
   openDrawer({
     overline: 'PULL REQUEST',
@@ -1913,22 +1946,27 @@ function closeDrawer() {
 function openMenu(x, y, entity, label) {
   const menu = $('menu');
   state.menuEntity = entity;
-  const author = entity && (entity.author || (entity.pr && entity.pr.actor) || (entity.row && entity.row.author));
+  // prd/56 §2: "Scope to" must offer the *holder* (the person the item waits
+  // on), not only its author. On #53 the useful pivot is FrMo/CaOs, never the
+  // author — and a row with several holders offers each, never a made-up role.
   const items = [
-    author ? ['person', `Scope to ${author}`] : null,
+    ...scopeTargets(entity).map((target) => ['person', target.label, target.person]),
     ['timeline', 'Open in timeline'],
     ['copy', 'Copy as Markdown'],
     ['sep', ''],
     ['clear', 'Clear scope · whole team'],
   ].filter(Boolean);
-  menu.innerHTML = `<div class="menu-head">${esc(label || 'pivot')}</div>` + items.map(([action, text]) =>
+  menu.innerHTML = `<div class="menu-head">${esc(label || 'pivot')}</div>` + items.map(([action, text, person]) =>
     action === 'sep' ? '<div class="sep"></div>'
-      : `<button type="button" data-menu="${action}">${esc(text)}</button>`).join('');
+      : `<button type="button" data-menu="${action}"${
+        person ? ` data-person="${esc(person)}"` : ''}>${esc(text)}</button>`).join('');
   menu.hidden = false;
   const width = menu.offsetWidth || 232;
   const height = menu.offsetHeight || 140;
-  menu.style.left = `${Math.min(x, window.innerWidth - width - 8)}px`;
-  menu.style.top = `${Math.min(y, window.innerHeight - height - 8)}px`;
+  // prd/56 §2: the menu is `position: fixed` (style.css .menu) and opens at the
+  // pointer, clamped so it never leaves the viewport.
+  menu.style.left = `${Math.max(8, Math.min(x, window.innerWidth - width - 8))}px`;
+  menu.style.top = `${Math.max(8, Math.min(y, window.innerHeight - height - 8))}px`;
   const first = menu.querySelector('button');
   if (first) first.focus();
 }
@@ -2223,14 +2261,14 @@ function renderProvenance() {
   const capped = state.objectCapped ? ` · objects capped at ${state.objects.length}` : '';
   $('provenance').textContent =
     `${meta.tenant ? `${meta.tenant} · ` : ''}` +
-    `Snapshot from ${snapshotAge()}: ${meta.events} events, ${meta.prs} PRs, ${meta.commits} commits · ` +
+    `Snapshot from ${snapshotAge()}: ${meta.events} events, ${meta.prs} PRs in the dataset, ${meta.commits} commits · ` +
     `${meta.source || 'unknown source'}, ${meta.prs_dropped} PRs without a ticket key dropped${capped}`;
   $('nav-count').textContent = `${meta.events} events · ${meta.prs} PRs`;
   const calendar = meta.calendar || {};
   const basis = $('timebasis');
   if (basis) {
     const business = calendar.hours_mode === 'business';
-    basis.textContent = business ? 'business hours' : 'wall-clock hours';
+    basis.textContent = business ? 'business hours · 1 d = 8 h' : 'wall-clock hours';
     basis.title = business
       ? `prd/19: ${calendar.assumption || 'business hours'}` +
         ` (${calendar.overrides || 0} overrides, ${calendar.vacations || 0} vacations)`
@@ -3005,8 +3043,9 @@ document.addEventListener('click', async (event) => {
     if (action === 'copy') await copyMarkdown(entity);
     else if (action === 'clear') { setScope('all', 'all'); await showPage('timeline'); }
     else if (action === 'person' && entity) {
-      const author = entity.author || (entity.pr && entity.pr.actor) || (entity.row && entity.row.author);
-      if (author) setScope('person', author);
+      const person = menuItem.dataset.person
+        || entity.author || (entity.pr && entity.pr.actor) || (entity.row && entity.row.author);
+      if (person) setScope('person', person);
     } else if (action === 'timeline') {
       await showPage('timeline');
     }

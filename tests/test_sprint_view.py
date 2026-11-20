@@ -312,6 +312,22 @@ class SprintBandTests(StoreCase):
         self.assertEqual(ghost["state"], "closed")
         self.assertEqual(payload["active"], 3)
 
+    def test_a_long_sprint_is_flagged_as_a_length_outlier(self):
+        """prd/55 §5: a 40-day sprint is not comparable with 14-day siblings."""
+        fx = fixture()
+        fx.sprint(4, datetime(2026, 2, 6, 9, 0), planned_end="2026-03-18",
+                  state="active")
+        fx.story("ENG-8", datetime(2026, 2, 6, 9, 0), points=2)
+        fx.add_to_sprint("ENG-8", datetime(2026, 2, 6, 10, 0), 4)
+        payload = self.sprint_view(fx)
+        long_sprint = by_sprint(payload, 4)
+        self.assertEqual(long_sprint["planned_days"], 40.3)
+        self.assertTrue(long_sprint["length_outlier"])
+        self.assertIn("not comparable", long_sprint["length_note"])
+        # the ordinary sprints are not flagged
+        for sid in (1, 2, 3):
+            self.assertFalse(by_sprint(payload, sid)["length_outlier"])
+
     def test_a_sprint_without_an_object_is_reported_without_a_band(self):
         fx = fixture()
         fx.story("ENG-7", T0, points=1)

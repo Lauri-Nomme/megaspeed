@@ -19,15 +19,15 @@ import { rowTicket } from './tickets.js';
 export const ROLE_QUEUES = ['author', 'review', 'ready', 'sentinel', 'CI', 'calendar'];
 
 /** Pages that narrow their rows/series when a scope is active. */
-const PERSON_PAGES = ['timeline', 'delivery', 'queue'];
+const PERSON_PAGES = ['timeline', 'delivery', 'queue', 'overview'];
 const ROLE_PAGES = {
-  author: ['delivery', 'queue'],
-  review: ['delivery', 'queue'],
+  author: ['delivery', 'queue', 'overview'],
+  review: ['delivery', 'queue', 'overview'],
   // prd/34 §3: a PR waiting only on the sentinel must show under
   // `role:sentinel` on the delivery list too, not only in the queue chart.
-  sentinel: ['delivery', 'queue'],
-  ci: ['queue'],
-  calendar: ['queue'],
+  sentinel: ['delivery', 'queue', 'overview'],
+  ci: ['queue', 'overview'],
+  calendar: ['queue', 'overview'],
 };
 
 export const VIEW_NAMES = {
@@ -44,7 +44,7 @@ export const VIEW_NAMES = {
  * to the author. A ticket scope narrows the two views that can answer "where
  * did this ticket's time go": the timeline (its events) and the delivery list
  * (the open PRs that name it). */
-const TICKET_PAGES = ['timeline', 'delivery'];
+const TICKET_PAGES = ['timeline', 'delivery', 'overview'];
 
 export function isRoleQueue(id) {
   const value = String(id ?? '').toLowerCase();
@@ -142,6 +142,7 @@ export function scopeMeaning(scope, pageId) {
   if (scope.kind === 'ticket') {
     if (pageId === 'delivery') return `the open PRs that name ${scope.value}`;
     if (pageId === 'timeline') return `events for ${scope.value} and its PRs`;
+    if (pageId === 'overview') return `the open PRs and people waiting on ${scope.value}`;
     return `ticket ${scope.value}`;
   }
   if (scope.kind === 'person') {
@@ -149,6 +150,7 @@ export function scopeMeaning(scope, pageId) {
     // event log, so there the person scope filters *activity by* them.
     if (pageId === 'delivery' || pageId === 'queue') return `waiting on ${scope.value}`;
     if (pageId === 'timeline') return `events by ${scope.value}`;
+    if (pageId === 'overview') return `items waiting on ${scope.value}`;
     return `person ${scope.value}`;
   }
   return `the ${scope.value} queue`;
