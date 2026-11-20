@@ -28,6 +28,10 @@
     <button type="button" class="nav-toggle" id="nav-toggle" aria-label="views"
             aria-controls="sidebar" aria-expanded="false" title="views">☰</button>
     <span class="brand">megaspeed</span>
+    <!-- prd/48: Back is *history* (where was I). It pops one in-app entry and
+         is disabled at the first one; it never leaves the app. -->
+    <button type="button" class="history-back" id="history-back" aria-label="back"
+            title="back — this is the first step in this app" disabled>←</button>
     <div class="ctx-row">
       <div class="tenant" id="tenant-switcher">
         <button type="button" class="tenant-pill" id="tenant-button" aria-haspopup="menu"
@@ -69,6 +73,14 @@
     </div>
     <span class="status" id="status" role="status">connecting</span>
   </header>
+
+  <!-- prd/48: the YAH ("You Are Here") bar — the location path, under the top
+       bar. Distinct from the Back button above: that is history, this is
+       where. Filled by renderYah(); every level but the current is a jump. -->
+  <div class="yah" id="yah" role="navigation" aria-label="you are here">
+    <span class="yah-k" aria-hidden="true">you are here</span>
+    <div class="yah-path" id="yah-path"></div>
+  </div>
 
   <div class="body">
     <nav class="sidebar" id="sidebar" aria-label="views">
