@@ -52,13 +52,15 @@ test('a person node drills down to the person level, a role node to queues', () 
   });
 });
 
-test('a person scope filters timeline, delivery and queue — and the banner says so', () => {
+test('a person scope filters timeline, delivery, queue and overview — and the banner says so', () => {
+  // prd/56 §4: the overview really does narrow under a person scope (its
+  // attention list and diagnosis tile are filtered), so it is listed.
   assert.deepEqual([...filteredPages({ kind: 'person', value: 'AlNg' })].sort(),
-    ['delivery', 'queue', 'timeline']);
+    ['delivery', 'overview', 'queue', 'timeline']);
   const onQueue = scopeBanner({ kind: 'person', value: 'AlNg' }, 'queue');
   assert.match(onQueue, /this view \(queue view\) is filtered to it/);
-  assert.match(onQueue, /filtered: timeline, delivery list and queue view/);
-  assert.match(onQueue, /not filtered: overview, blocking map, rules and sources/);
+  assert.match(onQueue, /filtered: timeline, delivery list, queue view and overview/);
+  assert.match(onQueue, /not filtered: blocking map, rules and sources/);
   // the old lie: the banner claimed the queue series shows everything
   assert.doesNotMatch(onQueue, /not filtered: [^·]*queue/);
 });
@@ -66,18 +68,18 @@ test('a person scope filters timeline, delivery and queue — and the banner say
 test('on a view that is not filtered the banner says that first', () => {
   const onBlocking = scopeBanner({ kind: 'person', value: 'AlNg' }, 'blocking');
   assert.match(onBlocking, /this view \(blocking map\) is not filtered/);
-  assert.match(onBlocking, /filtered: timeline, delivery list and queue view/);
+  assert.match(onBlocking, /filtered: timeline, delivery list, queue view and overview/);
   assert.match(onBlocking, /waits are measured over the whole log/);
 });
 
 test('a queue/role scope never claims the timeline is filtered', () => {
   const banner = scopeBanner({ kind: 'role', value: 'author' }, 'timeline');
   assert.match(banner, /this view \(timeline\) is not filtered/);
-  assert.match(banner, /filtered: delivery list and queue view/);
+  assert.match(banner, /filtered: delivery list, queue view and overview/);
   // prd/34 §3: role:sentinel applies to the delivery list too, so a PR waiting
   // only on the sentinel shows up there as well as in the queue chart.
   assert.deepEqual([...filteredPages({ kind: 'role', value: 'sentinel' })].sort(),
-    ['delivery', 'queue']);
+    ['delivery', 'overview', 'queue']);
 });
 
 test('no scope means no banner', () => {

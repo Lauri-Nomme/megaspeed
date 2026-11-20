@@ -665,6 +665,74 @@ class PrDrawerFactsTests(StoreCase):
         self.assertIsNotNone(pr["last_event"])
 
 
+class OpenStoryHeadlineTests(StoreCase):
+    """prd/55 §1: an open story's headline states the unmeasured share and the
+    open PR's wait — not only the measured segment ("created → ready 35 %")."""
+
+    def fixture(self) -> Fixture:
+        fx = Fixture()
+        fx.story("DEL-176", T0, points=5, state="open")
+        fx.pointed("DEL-176", T0 + timedelta(hours=2), 5)
+        fx.status("DEL-176", T0 + timedelta(hours=4), "in_progress")
+        fx.pr(60, "AaAa", T0 + timedelta(hours=20),
+              tickets=("DEL-176",), state="open", closed=None)
+        fx.pr_event(60, "reviewer_changed", "AaAa", 1, change="added",
+                    people=("RrRr", "FrMo"), tickets=("DEL-176",))
+        fx.pr_event(60, "comment_added", "RrRr", 3, severity="suggestion",
+                    tickets=("DEL-176",))
+        fx.pr_event(60, "pr_approved", "RrRr", 5, tickets=("DEL-176",))
+        return fx
+
+    def test_the_headline_states_the_unmeasured_share_and_the_pr_wait(self):
+        con, court, data = self.load(self.fixture())
+        try:
+            payload = tickets.ticket(court, data, "DEL-176")
+        finally:
+            con.close()
+        answer = payload["answer"]
+        self.assertEqual(payload["answer_kind"], "partial")
+        # the share of the cycle no segment can measure is stated first
+        self.assertIn("unmeasured", answer)
+        self.assertRegex(answer, r"\d+ % unmeasured")
+        # and the missing part is named: the open PR, its wait and its holder
+        self.assertIn("PR #60", answer)
+        self.assertIn("waiting", answer)
+        self.assertIn("on FrMo", answer)
+        # the approval position rides with it (prd/55 §1 + §11)
+        self.assertIn("1/2 approved", answer)
+        self.assertEqual(payload["open_prs"][0]["waiting_on"], ["FrMo"])
+        self.assertGreater(payload["open_prs"][0]["waiting_hours"], 0)
+        self.assertEqual(payload["open_prs"][0]["reviewers_approved"], 1)
+
+    def test_the_pr_row_phase_follows_the_ball_not_the_last_push(self):
+        con, court, data = self.load(self.fixture())
+        try:
+            payload = tickets.ticket(court, data, "DEL-176")
+        finally:
+            con.close()
+        pr = payload["prs"][0]
+        # the last measured interval ends with the author's push, but the
+        # pending sentinel holds the ball: the phase is review (prd/55 §4)
+        self.assertEqual(pr["phase_now"], "review")
+        self.assertGreater(pr["waiting_hours"], 0)
+        # the phase list tiles the cycle, unobserved tail included (prd/56 §1)
+        self.assertIn("unobserved", pr["phase_hours"])
+        self.assertAlmostEqual(
+            pr["phase_total_hours"], pr["cycle_hours"], places=1
+        )
+
+    def test_a_done_ticket_names_the_open_prs_wait_in_the_headline(self):
+        con, court, data = self.load()
+        try:
+            payload = tickets.ticket(court, data, "DEL-167")
+        finally:
+            con.close()
+        self.assertEqual(payload["end_state"], "done_with_open_pr")
+        self.assertIn("PR #53", payload["answer"])
+        self.assertIn("waiting", payload["answer"])
+        self.assertGreater(payload["open_prs"][0]["waiting_hours"], 0)
+
+
 class EpicTests(StoreCase):
     """prd/42 P9: an epic says it is not a story, and lists its children."""
 

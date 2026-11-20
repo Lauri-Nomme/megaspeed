@@ -213,6 +213,26 @@ def _pearson(xs: list[float], ys: list[float]) -> float | None:
     return round(cov / math.sqrt(var_x * var_y), 3)
 
 
+def human_hours(hours: float | None) -> str:
+    """A duration in the same rendering every view uses ("3 d 2 h").
+
+    concepts.md §1: ``d = 8 business hours``; the hours part is the remainder
+    after whole working days, never a rounded decimal. This is the Python twin
+    of ``app/format.js`` ``fmtHours`` so a rule title and the metric block it
+    quotes cannot show "3.4 d" and "3 d 2 h" for the same number.
+    """
+    if hours is None:
+        return "—"
+    minutes = round(float(hours) * 60)
+    if minutes < 60:
+        return f"{minutes} min"
+    whole, rest_minutes = divmod(minutes, 60)
+    if whole < int(BUSINESS_HOURS_PER_DAY):
+        return f"{whole} h" + (f" {rest_minutes} min" if rest_minutes else "")
+    days, rest = divmod(whole, int(BUSINESS_HOURS_PER_DAY))
+    return f"{days} d {rest} h"
+
+
 def _note(data: "JiraData", empty: str, available: bool = False) -> str | None:
     """Why a metric is unavailable: the store's own reason, else the local one.
 
@@ -1532,6 +1552,11 @@ def sprint_delivery(
             "start": iso(sprint["start"]) if sprint.get("start") else None,
             "end": iso(boundary["end"]) if boundary["end"] else None,
             "planned_end": sprint.get("planned_end"),
+            # prd/55 §5: the sprint-length flag travels with the delivery row,
+            # so its "N of M by end" cannot be read beside a normal sprint's.
+            "planned_days": None,
+            "length_outlier": False,
+            "length_note": None,
             "stories": committed,
             "points": sum(points.values()),
             "done_by_end": delivered,
@@ -1561,6 +1586,7 @@ def sprint_delivery(
             "measured": committed >= SPRINT_MIN_STORIES,
         }
         sprints.append(sprint_row)
+    _flag_sprint_lengths(sprints)
     # the drill-down is one row per (story, sprint), worst slip first
     rows.sort(key=lambda row: (
         -(row.get("slip_hours") or 0.0), row["key"], row["sprint_id"]
@@ -1603,6 +1629,70 @@ def sprint_delivery(
 # --------------------------------------------------------------------------- #
 # 2b. the sprint lens (prd/26 P6)
 # --------------------------------------------------------------------------- #
+def _sprint_datetime(value) -> datetime | None:
+    """Parse a sprint timestamp (ISO string with ``Z`` or a date-only plan)."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    text = str(value)
+    try:
+        if len(text) == 10:
+            parsed = datetime.fromisoformat(text)
+            return parsed.replace(hour=16)
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).replace(
+            tzinfo=None
+        )
+    except ValueError:
+        return None
+
+
+def _flag_sprint_lengths(rows: list[dict]) -> None:
+    """Mark a sprint whose planned length is an outlier (prd/55 §5).
+
+    The comparison is the *plan* (start → planned_end), not the measured band:
+    an active sprint's band stops at the snapshot, so its measured days would
+    understate a long plan. A row with no plan keeps ``planned_days: None`` and
+    is simply not compared.
+    """
+    for row in rows:
+        start = _sprint_datetime(row.get("start"))
+        planned = _sprint_datetime(row.get("planned_end"))
+        if start is not None and planned is not None and planned > start:
+            row["planned_days"] = round(
+                (planned - start).total_seconds() / 86400.0, 1
+            )
+        else:
+            row["planned_days"] = None
+    lengths = [
+        row["planned_days"] for row in rows
+        if row.get("planned_days") is not None
+    ]
+    for row in rows:
+        days = row.get("planned_days")
+        others = sorted(
+            value for value in lengths if value is not None and value != days
+        ) if len(lengths) > 1 else []
+        # compare against the median of the *other* sprints, so one long sprint
+        # cannot drag the baseline it is measured against
+        if len(others) >= 2:
+            middle = len(others) // 2
+            median = (
+                others[middle] if len(others) % 2
+                else round((others[middle - 1] + others[middle]) / 2.0, 1)
+            )
+            if median > 0 and days is not None and days >= 1.5 * median and days - median >= 5:
+                row["length_outlier"] = True
+                row["length_note"] = (
+                    f"planned {days:g} calendar days vs "
+                    f"{others[0]:g}–{others[-1]:g} for the other sprints — "
+                    "its delivery share is not comparable"
+                )
+                continue
+        row["length_outlier"] = False
+        row["length_note"] = None
+
+
 def _membership(story: Story) -> dict:
     """One story's sprint membership: the sprints, the current one, the marks.
 
@@ -1708,6 +1798,12 @@ def sprints(
                 round((band_end - band_start).total_seconds() / 86400.0, 1)
                 if band_start and band_end and band_end > band_start else None
             ),
+            # prd/55 §5: a sprint whose planned length is an outlier makes
+            # "25 of 30" incomparable with its neighbours. The plan is
+            # start → planned_end; the band may stop at the snapshot.
+            "planned_days": None,
+            "length_outlier": False,
+            "length_note": None,
             "stories": [],
             "current_stories": [],
             "carried_in": [],
@@ -1852,6 +1948,12 @@ def sprints(
         row["on_time"] = committed > 0 and row["done_by_end"] == committed
         row["late_hours"] = round(row["late_hours"], 2)
         bands.append(row)
+
+    # prd/55 §5: flag a sprint whose length is an outlier against its siblings.
+    # S3 plans 51 calendar days while S1/S2 planned 24–26; without the flag its
+    # "25 of 30 by end" reads as comparable delivery. One definition, carried by
+    # both the sprint lens and the on-time rule.
+    _flag_sprint_lengths(bands)
 
     # -- scope over the window's cohort -------------------------------------
     # "in a sprint" is the *current* commitment: a story pulled back to the

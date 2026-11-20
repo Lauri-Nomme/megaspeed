@@ -13,7 +13,7 @@
  * every string here is testable with `node --test`.
  */
 
-import { fmtAbsolute, esc } from './format.js';
+import { fmtAbsolute, fmtHours, esc } from './format.js';
 import { PHASE } from './timeline.js';
 import { ticketHref } from './tickets.js';
 import { color, onPalette } from './theme.js';
@@ -407,6 +407,20 @@ export function epicMarkup(payload, { base = '' } = {}) {
     </section>`;
 }
 
+/** The open PR's current wait + approval position, for a chip or an export. */
+export function openPrState(pr) {
+  if (!pr) return '';
+  const bits = [];
+  if (pr.reviewers_total) {
+    bits.push(`${pr.reviewers_approved || 0}/${pr.reviewers_total} approved`);
+  }
+  if (pr.waiting_hours != null) {
+    const who = (pr.waiting_on || []).join(' + ') || 'nobody';
+    bits.push(`waiting ${fmtHours(pr.waiting_hours)} on ${who}`);
+  }
+  return bits.length ? bits.join(' · ') : 'right-censored';
+}
+
 /** The whole page body. `base` is the page URL used by copied Markdown links. */
 export function ticketMarkup(payload, { base = '' } = {}) {
   if (!payload) return '<p class="empty-row">Loading the ticket…</p>';
@@ -430,7 +444,7 @@ export function ticketMarkup(payload, { base = '' } = {}) {
   const endPills = [
     reopened ? `<span class="pill warning" title="the story moved out of done and back">reopened${
       payload.reopen_count ? ` ×${esc(payload.reopen_count)}` : ''}</span>` : '',
-    ...openPrs.map((pr) => `<span class="pill waiting" title="still open at the snapshot — right-censored">PR #${esc(pr.number)} open · right-censored</span>`),
+    ...openPrs.map((pr) => `<span class="pill waiting" title="still open at the snapshot — right-censored">PR #${esc(pr.number)} open · ${esc(openPrState(pr))}</span>`),
   ].filter(Boolean).join(' ');
   return `
     <div class="ticket-head">
@@ -487,7 +501,8 @@ export function ticketMarkdown(payload, base = '') {
         `${segmentHours(segments.cycle_hours)}`]
       : []),
     ...((payload.open_prs || []).length
-      ? ['', `**still open:** ${(payload.open_prs || []).map((pr) => `#${pr.number} (right-censored)`).join(', ')}`]
+      ? ['', `**still open:** ${(payload.open_prs || []).map((pr) =>
+        `#${pr.number} (right-censored) — ${openPrState(pr)}`).join('; ')}`]
       : []),
     '',
     '| segment | hours | share | active |',

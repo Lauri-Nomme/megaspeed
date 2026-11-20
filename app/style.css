@@ -601,6 +601,37 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
   margin: 6px 8px; font-size: 11.5px; color: var(--text-secondary); line-height: 1.5;
 }
 
+/* Pivot menu (prd/56 §2): fixed at the pointer, above the page, never reflowed
+ * into the document. Before this rule the element was an unstyled block at the
+ * end of <main>, so a right-click appeared at the bottom-left. */
+.menu {
+  position: fixed; z-index: 60;
+  min-width: 208px; padding: 4px;
+  background: var(--popover-bg);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-popover);
+  box-shadow: var(--shadow-popover);
+}
+.menu[hidden] { display: none; }
+.menu-head {
+  padding: 5px 8px 6px; font-size: 10px; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--text-tertiary);
+  border-bottom: 1px solid var(--border-hairline); margin-bottom: 4px;
+}
+.menu button {
+  display: block; width: 100%; padding: 6px 8px;
+  background: transparent; border: 0; border-radius: var(--radius-control);
+  text-align: left; font-size: 12px; color: var(--text-primary); white-space: nowrap;
+}
+.menu button:hover, .menu button:focus-visible { background: var(--bg-hover); }
+.menu .sep { height: 1px; margin: 4px 6px; background: var(--border-hairline); }
+.sprint-length-flag {
+  font-size: 10px; padding: 1px 5px; border-radius: 999px;
+  color: var(--warning-fg, var(--text-primary));
+  background: var(--warning-tint, var(--bg-control));
+  border: 1px solid var(--border-control);
+}
+
 /* --- sidebar ----------------------------------------------------------- */
 .sidebar {
   width: 180px;
@@ -895,6 +926,20 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 #timeline { cursor: crosshair; }
 #timeline.dragging { cursor: grabbing; }
 .blocking-stage { height: clamp(420px, 62vh, 720px); }
+/* prd/56 §3: the blocking map's text twin — readable without hover. */
+.blocking-view { margin: 8px 0 0; }
+.blocking-text > summary {
+  cursor: pointer; font-size: 11px; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--text-secondary);
+}
+.blocking-text-grid {
+  display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px; margin-top: 6px;
+}
+.blocking-text-grid table { font-size: 11.5px; }
+@media (max-width: 1100px) {
+  .blocking-text-grid { grid-template-columns: minmax(0, 1fr); }
+}
 .queue-stage { min-height: 200px; }
 
 /* prd/33 §3: the timeline is a virtual list. The stage is one viewport tall,

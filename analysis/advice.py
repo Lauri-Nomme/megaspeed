@@ -35,6 +35,11 @@ POLICIES = (
         "label": "refine before start",
         "scenario": {"refine_before_start": True},
         "rules": ("jira-waiting-time", "jira-conformance"),
+        # prd/55 §2: the same rule id measures whichever segment is largest. The
+        # refinement result may only ride the card whose evidence *is* the
+        # created → ready segment; on `All` that rule can be a review-rounds
+        # card, and the +81 % refinement note must not ride it.
+        "metric_scope": {"jira-waiting-time": {"segment_key": "created_ready"}},
         # the lab prices refinement as work on the PR clock; it cannot see the
         # ticket-level wait the rule is about (prd/43 §1's suggested copy).
         "caveat": (
@@ -264,19 +269,21 @@ def attach(suggestions: list[dict], cross_check: dict | None) -> None:
         if entry is None:
             continue
         for rule_id in policy["rules"]:
-            by_rule[rule_id] = entry
+            by_rule[rule_id] = {**entry, "metric_scope": (
+                policy.get("metric_scope") or {}
+            ).get(rule_id)}
     for suggestion in suggestions:
         entry = by_rule.get(suggestion.get("id"))
         if entry is None:
             continue
-        # prd/46 §3: the refinement policy bears only on the advice that says
-        # "refine first" — the same rule id measures whichever segment is
-        # largest, and on `All` that can be review rounds. Attaching the
-        # refinement result to a review-rounds card was the QA's exact find.
-        if suggestion.get("id") == "jira-waiting-time":
-            segment = (suggestion.get("evidence") or {}).get("segment_key")
-            if segment != "created_ready":
-                continue
+        # prd/46 §3 / prd/55 §2: attach the note only to the metric it models.
+        # The refinement policy bears only on the advice that says "refine
+        # first"; attaching it to a review-rounds card (the same rule id on
+        # `All`) was the QA's exact find.
+        metric_scope = entry.get("metric_scope") or {}
+        evidence = suggestion.get("evidence") or {}
+        if any(evidence.get(key) != value for key, value in metric_scope.items()):
+            continue
         suggestion["policy_lab"] = {
             "policy": entry["id"],
             "label": entry["label"],
@@ -284,6 +291,12 @@ def attach(suggestions: list[dict], cross_check: dict | None) -> None:
             "delivered_percent": entry["delivered_percent"],
             "contradiction": entry["contradiction"],
             "supports": entry["supports"],
+            # name the metric the note models, so a reader can see why it is here
+            "applies_to": (
+                "the created → ready segment"
+                if metric_scope.get("segment_key") == "created_ready"
+                else suggestion.get("metric")
+            ),
             # prd/46 §3: name the banner's own best scenario on the rule it
             # comes from, so the #1 and the banner cannot disagree.
             "best": entry["id"] == best_id,

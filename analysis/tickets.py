@@ -94,6 +94,28 @@ def _pr_states(court: ballcourt.BallCourt | None, key: str) -> list:
     ]
 
 
+def _ball_phase(latest) -> str:
+    """The PR's current phase label, derived from the ball (prd/55 §4).
+
+    ``latest.phase`` names the interval that just *ended*; it can be ``active``
+    because the author pushed last while the reviewers have held the ball ever
+    since. The state vector is the truth: pending reviewers make it ``review``
+    (``ready`` is a state, not a phase — concepts.md §5), and only an author
+    with no reviewer pending is ``active``.
+    """
+    if latest is None:
+        return "no events"
+    if latest.ci and not latest.author_open and not latest.pending_all:
+        return "ci"
+    if latest.pending_all:
+        return "review"
+    if latest.author_open or latest.ball == "author":
+        return "active"
+    if latest.ball == ballcourt.READY or latest.ready:
+        return "review"
+    return latest.phase
+
+
 def _pr_rows(court: ballcourt.BallCourt, states: list) -> list[dict]:
     rows: list[dict] = []
     for state in states:
@@ -143,14 +165,38 @@ def _pr_rows(court: ballcourt.BallCourt, states: list) -> list[dict]:
                 and pr["actor"] not in court.bots else set()
             )
         )
+        # prd/55 §1/§7: the drawer and the headline must be able to state the
+        # *current* wait, not only the measured phases. The wait opens when the
+        # last interval handed the ball over and ends at the snapshot while the
+        # PR is open; it is priced on the one holder's calendar when there is
+        # exactly one (concepts.md §1/§2), else on the team calendar.
         last_event = state.events[-1] if state.events else None
+        opened = pr["created_ts"]
+        closed = pr["closed_ts"]
+        end = closed or court.snapshot
+        waiting_since = (
+            latest.start if latest is not None and closed is None else None
+        )
+        waiting_hours = None
+        if waiting_since is not None and end is not None and end >= waiting_since:
+            holder = latest.owner if latest is not None else None
+            waiting_hours = round(
+                court.business_hours(holder, waiting_since, end), 2
+            )
+        # prd/55 §7: the phase list must tile the PR's whole span. The
+        # unobserved tail is a real span (not a measured phase) and is included
+        # here so "in review 2 d + unobserved —" cannot hide 21 waiting days.
+        phase_hours: dict[str, float] = {}
+        for interval in state.intervals:
+            if interval.hours <= 0:
+                continue
+            phase_hours[interval.phase] = round(
+                phase_hours.get(interval.phase, 0.0) + round(interval.hours, 2), 2
+            )
         active = round(sum(
             interval["hours"] for interval in intervals
             if interval["measured"] and interval["phase"] in ACTIVE_PHASES
         ), 2)
-        opened = pr["created_ts"]
-        closed = pr["closed_ts"]
-        end = closed or court.snapshot
         cycle = (
             round(court.business_hours(pr["actor"], opened, end), 2)
             if opened is not None and end is not None and end > opened else 0.0
@@ -181,9 +227,18 @@ def _pr_rows(court: ballcourt.BallCourt, states: list) -> list[dict]:
             "reviewers_pending": len(latest.pending_all if latest is not None else ()),
             "approved": list(latest.approved if latest is not None else ()),
             "waiting_on": waiting_on,
+            "waiting_since": _iso(waiting_since),
+            "waiting_hours": waiting_hours,
             "author_open": bool(latest.author_open if latest is not None else False),
             "ci": bool(latest.ci if latest is not None else False),
             "phase": latest.phase if latest is not None else "no events",
+            # prd/55 §4: the phase comes from the ball, not from whatever the
+            # last measured interval happened to end with. A PR whose pending
+            # reviewers hold the ball is `review`, never `active` just because
+            # the author's last push opened the interval.
+            "phase_now": _ball_phase(latest),
+            "phase_hours": phase_hours,
+            "phase_total_hours": round(sum(phase_hours.values()), 2),
             "last_event": _iso(last_event["_ts"]) if last_event is not None else None,
             "last_event_activity": last_event["activity"] if last_event is not None else None,
             "last_event_actor": last_event["actor"] if last_event is not None else None,
@@ -841,6 +896,31 @@ def _quirk_note(segments: dict) -> str:
     )
 
 
+def _open_pr_state(open_prs: list[dict]) -> str:
+    """The open PRs' current wait and approval state, in one clause (prd/55 §1).
+
+    A ticket headline that stops at "created → ready 35 %" hides the fact that
+    most of the cycle is *unmeasured* and that the missing part is one PR
+    waiting on a named person. This is the clause that names it:
+    ``PR #60 (1/2 approved · waiting 16 d 3 h on FrMo)``.
+    """
+    parts = []
+    for pr in open_prs:
+        bits = []
+        approved = pr.get("reviewers_approved")
+        total = pr.get("reviewers_total")
+        if total:
+            bits.append(f"{approved or 0}/{total} approved")
+        if pr.get("waiting_hours") is not None:
+            who = " + ".join(pr.get("waiting_on") or []) or "nobody"
+            bits.append(
+                f"waiting {jira.human_hours(pr['waiting_hours'])} on {who}"
+            )
+        detail = f" ({' · '.join(bits)})" if bits else ""
+        parts.append(f"PR #{pr['number']}{detail}")
+    return " · ".join(parts)
+
+
 def _answer(
     key: str,
     story: jira.Story | None,
@@ -870,7 +950,24 @@ def _answer(
     # left to read as a finding ("most of the cycle in sprint → in progress").
     quirk_note = _quirk_note(segments)
     # prd/36 §3: the end state is stated, and an open PR is disclosed rather
-    # than left to a table row.
+    # than left to a table row. prd/55 §1: the headline also states how much of
+    # the cycle is *unmeasured* and what the open PR is waiting on — "the 6 of 9
+    # segments ... created → ready 35 %" alone is a misleading answer for an
+    # open story whose missing 66 % is one PR parked with a named reviewer.
+    explained = segments.get("explained_share")
+    unmeasured = (
+        round(100 * (1.0 - float(explained)))
+        if explained is not None and float(explained) < 1.0 else 0
+    )
+    pr_state = _open_pr_state(open_prs) if open_prs else ""
+    censor_note = ""
+    if censored and unmeasured:
+        censor_note = f"{unmeasured} % unmeasured"
+        if pr_state:
+            censor_note += f" · {pr_state}"
+        censor_note += ". "
+    elif pr_state:
+        censor_note = f"{pr_state}. "
     prefix = ""
     if open_prs and not censored:
         numbers = ", ".join(f"#{pr['number']}" for pr in open_prs)
@@ -878,9 +975,15 @@ def _answer(
             f"Done in Jira, but PR {numbers} is still open (right-censored); "
             "the cycle is measured to the ticket's done, not to that PR. "
         )
+        if censor_note:
+            prefix += censor_note
     elif open_prs and censored:
         numbers = ", ".join(f"#{pr['number']}" for pr in open_prs)
         prefix = f"Still open in Jira, with PR {numbers} open too (right-censored). "
+        if censor_note:
+            prefix += censor_note
+    elif censored and unmeasured:
+        prefix = f"{unmeasured} % of the cycle is unmeasured. "
     if story is None:
         if prs:
             plural = "s" if len(prs) != 1 else ""
@@ -1053,6 +1156,14 @@ def ticket(
             "opened": pr["opened"],
             "censored_at": pr["censored_at"],
             "cycle_hours": pr["cycle_hours"],
+            # prd/55 §1/§11: the ticket headline and its Markdown export state
+            # the open PR's wait and approval position, not only that it exists.
+            "waiting_on": list(pr.get("waiting_on") or ()),
+            "waiting_since": pr.get("waiting_since"),
+            "waiting_hours": pr.get("waiting_hours"),
+            "reviewers_approved": pr.get("reviewers_approved"),
+            "reviewers_total": pr.get("reviewers_total"),
+            "reviewers_pending": pr.get("reviewers_pending"),
         }
         for pr in prs if pr.get("censored")
     ]

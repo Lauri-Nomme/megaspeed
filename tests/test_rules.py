@@ -632,6 +632,38 @@ class ReworkLoopTests(StoreCase):
         self.assertNotIn("cap them at 3", suggestion["title"])
         self.assertIn("Cap review rounds at 2", suggestion["suggestion"])
 
+    def test_the_median_states_its_cohort_merged_vs_all(self):
+        """prd/55 §3: "median rounds 1" counted open PRs; merged is 2."""
+        metric = self.metric(self.fixture(), "rework_loops")
+        # all four fixture PRs: 2, 1, 0, 4 → median 1.5
+        self.assertEqual(metric["median_rounds_all"], 1.5)
+        # only PR1 merged: 2 rounds → median 2
+        self.assertEqual(metric["median_rounds_merged"], 2.0)
+        suggestion = by_id(self.insights(self.fixture()), "round-cap")
+        self.assertEqual(suggestion["evidence"]["median_rounds_merged"], 2.0)
+        self.assertEqual(suggestion["evidence"]["median_rounds_all"], 1.5)
+
+    def test_the_round_price_uses_one_basis(self):
+        """prd/55 §3: the target line and the card quote the same hours."""
+        fx = Fixture()
+        for number, (rounds, cycle) in enumerate(
+            ((0, 20), (1, 30), (1, 34), (2, 45), (2, 52), (3, 70)), start=1
+        ):
+            fx.pr(number, "AaAa", state="merged", closed=T0 + timedelta(hours=cycle))
+            fx.event(number, "comment_added", "RrRr", 1, severity="suggestion")
+            for index in range(rounds):
+                fx.event(number, "pr_pushed", "AaAa", 2 + index * 3,
+                         push_class="content")
+            fx.event(number, "pr_approved", "RrRr", cycle - 1)
+            fx.event(number, "pr_merged", "RrRr", cycle)
+        payload = self.insights(fx)
+        suggestion = by_id(payload, "round-cap")
+        self.assertAlmostEqual(
+            payload["targets"]["hours_per_round"],
+            suggestion["evidence"]["hours_per_extra_round"], places=2,
+        )
+        self.assertIn("regression", payload["targets"]["hours_per_round_basis"])
+
     def test_the_round_cap_rule_carries_the_correlation_and_the_lab(self):
         """prd/43 §1: r ≈ 0.6, and the lab's round-cap is the best scenario.
 
@@ -974,12 +1006,16 @@ class OnePrOneSetOfNumbersTests(StoreCase):
         state = court.prs[0]
         expected = {}
         for interval in state.intervals:
-            if interval.measured and interval.hours > 0:
+            if interval.hours > 0:
                 expected[interval.phase] = round(
                     expected.get(interval.phase, 0.0) + round(interval.hours, 2), 2
                 )
         self.assertEqual(row["phase_hours"], expected)
         self.assertGreater(row["phase_hours"].get("review", 0), 0)
+        # prd/55 §7: the phases (unobserved tail included) tile the whole span.
+        self.assertAlmostEqual(
+            sum(row["phase_hours"].values()), row["age_hours"], places=1
+        )
         # the raw last event, not the derived `kind` — the ticket drawer labels
         # the same event `comment_added`, and the list must not say
         # `author_reply` for it.
@@ -1065,6 +1101,12 @@ class PolicyLabCrossCheckTests(unittest.TestCase):
         self.assertNotIn("policy_lab", suggestions[0])
         self.assertTrue(suggestions[1]["policy_lab"]["contradiction"])
         self.assertIn("+82 % cycle", suggestions[1]["policy_lab"]["note"])
+        # prd/55 §2: the note names the metric it models, so the card can show
+        # why the refinement result is attached there and not elsewhere.
+        self.assertEqual(
+            suggestions[1]["policy_lab"]["applies_to"],
+            "the created → ready segment",
+        )
 
     def test_a_contradicted_rule_is_ranked_below_the_supported_lever(self):
         """prd/46 §3: the #1 must agree with the banner's own best scenario."""

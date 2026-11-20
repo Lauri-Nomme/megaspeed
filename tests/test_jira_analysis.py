@@ -690,6 +690,16 @@ class SprintDeliveryTests(StoreCase):
         # prd/41 B8: the headline names S1, so the drill-down is S1's items
         self.assertEqual(suggestion["scope"], {"kind": "sprint", "sprint": 1})
 
+    def test_a_closed_sprint_outside_the_window_is_not_listed(self):
+        """prd/55 §6: a 1-week window must not show S1's six-week-old close."""
+        payload = self.payload(self.fixture(), days=7)
+        self.assertIsNone(by_id(payload, "sprint-on-time"))
+        # the metric still measures it; the rule simply does not present it
+        self.assertTrue(payload["metrics"]["sprint_delivery"]["available"])
+        self.assertEqual(payload["sample"]["prs"],
+                         payload["dataset"]["prs_in_window"])
+        self.assertGreaterEqual(payload["dataset"]["prs_outside_window"], 0)
+
     def test_committed_is_the_scope_at_the_sprint_start(self):
         """prd/46 §4: a story added mid-sprint was adopted, not committed."""
         fx = Fixture()
@@ -867,7 +877,9 @@ class WorklogTests(StoreCase):
         suggestion = by_id(payload, "jira-worklog-mismatch")
         self.assertIsNotNone(suggestion)
         self.assertEqual(
-            suggestion["title"], "Logged hours differ from active PR time by 0.4×"
+            suggestion["title"],
+            "Logged hours are 40 % of active PR time (0.4×) — the team logs "
+            "about 60 % less than the PRs show",
         )
         self.assertEqual(suggestion["severity"], "warning")
         self.assertEqual(suggestion["evidence"]["ratio"], 0.4)
@@ -881,7 +893,9 @@ class WorklogTests(StoreCase):
         suggestion = by_id(payload, "jira-worklog-mismatch")
         self.assertIsNotNone(suggestion)
         self.assertEqual(
-            suggestion["title"], "Logged hours differ from active PR time by 0.4×"
+            suggestion["title"],
+            "Logged hours are 40 % of active PR time (0.4×) — the team logs "
+            "about 60 % less than the PRs show",
         )
         self.assertEqual(suggestion["severity"], "warning")
         self.assertEqual(suggestion["evidence"]["ratio"], 0.4)

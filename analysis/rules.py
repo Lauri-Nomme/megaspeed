@@ -305,12 +305,13 @@ WAITING_WEEK_HOURS = ballcourt.WAITING_WEEK_HOURS
 
 
 def _human_hours(hours: float | None) -> str:
-    """Plain-language duration for titles: "41 h", "3.4 d" (d = 8 business hours)."""
-    if hours is None:
-        return "—"
-    if hours >= 2 * BUSINESS_HOURS_PER_DAY:
-        return f"{round(hours / BUSINESS_HOURS_PER_DAY, 1):g} d"
-    return f"{round(hours, 1):g} h"
+    """Plain-language duration for titles: "41 h", "3 d 2 h" (d = 8 business hours).
+
+    prd/55 §3: one rendering for one number — this delegates to the shared
+    ``jira.human_hours`` (the Python twin of ``fmtHours``), so a rule title can
+    never say "3.4 d" where the metric block says "3 d 2 h".
+    """
+    return jira_analysis.human_hours(hours)
 
 
 def _push_class(event: dict) -> str:
@@ -423,16 +424,64 @@ def _first_review(state) -> dict | None:
     )
 
 
-def round_cost_hours(court: ballcourt.BallCourt, window: tuple[datetime, datetime]) -> float:
-    """What one extra review round costs, in elapsed hours.
+def _merged_round_pairs(court: ballcourt.BallCourt, window) -> list[tuple[float, float]]:
+    """(rounds, cycle hours) for merged PRs in the window with a cycle."""
+    pairs: list[tuple[float, float]] = []
+    for state in cohort(court, window):
+        pr = state.pr
+        if pr["closed_ts"] is None or pr["state"] != "merged":
+            continue
+        pushes, unapprovals = _rounds(state)
+        rounds = len(pushes) + len(unapprovals)
+        if pr["closed_ts"] <= pr["created_ts"]:
+            continue
+        pairs.append((
+            float(rounds),
+            _span_hours(court, None, pr["created_ts"], pr["closed_ts"]),
+        ))
+    return pairs
 
-    A rejected thread or a lost approval sends the PR back through review *and*
-    back to the author. The cheapest honest estimate from this store is the
-    median per-round share of a PR's measured cycle (``cycle ÷ its rounds``);
-    when no PR has closed yet it falls back to the median review-ball wait, then
-    to a stated default. The basis is reported next to the number.
+
+def _slope(pairs: list[tuple[float, float]]) -> float | None:
+    if len(pairs) < 3:
+        return None
+    xs = [x for x, _ in pairs]
+    ys = [y for _, y in pairs]
+    mean_x = sum(xs) / len(xs)
+    mean_y = sum(ys) / len(ys)
+    variance = sum((value - mean_x) ** 2 for value in xs)
+    if variance <= 0:
+        return None
+    return round(
+        sum((x - mean_x) * (y - mean_y) for x, y in pairs) / variance, 2
+    )
+
+
+ROUND_COST_BASIS = "median PR cycle time ÷ its review rounds"
+ROUND_SLOPE_BASIS = (
+    "marginal hours per extra round (regression over merged PRs) — the same "
+    "basis as 'each extra round adds' on the round-cap rule"
+)
+
+
+def review_cost(court: ballcourt.BallCourt, window) -> dict:
+    """One price for a review round, on one basis (prd/55 §3).
+
+    The Rules page used to quote two numbers for the same concept: the target
+    line's "one review round ≈ 1 d 6 h" (median cycle ÷ its rounds) and the
+    round-cap card's "each extra round adds ≈ 6 h" (the regression slope). The
+    slope is the number the rule actually ranks on, so it is the number the
+    target line quotes too; the median-per-round figure remains the fallback
+    when there are too few merged PRs for a slope.
     """
-    start, end = window
+    pairs = _merged_round_pairs(court, window)
+    slope = _slope(pairs)
+    if slope is not None and slope > 0:
+        return {
+            "hours_per_round": max(1.0, slope),
+            "basis": ROUND_SLOPE_BASIS,
+            "n": len(pairs),
+        }
     per_round: list[float] = []
     for state in cohort(court, window):
         pr = state.pr
@@ -446,15 +495,26 @@ def round_cost_hours(court: ballcourt.BallCourt, window: tuple[datetime, datetim
             _span_hours(court, None, pr["created_ts"], pr["closed_ts"]) / rounds
         )
     if per_round:
-        return max(1.0, _median(per_round) or DEFAULT_ROUND_HOURS)
+        return {
+            "hours_per_round": max(1.0, _median(per_round) or DEFAULT_ROUND_HOURS),
+            "basis": ROUND_COST_BASIS,
+            "n": len(per_round),
+        }
+    start, end = window
     waits = [
         i.hours for i in court.intervals
         if i.ball == ballcourt.REVIEW and _overlap(i, start, end)
     ]
-    return max(1.0, _median(waits) or DEFAULT_ROUND_HOURS)
+    return {
+        "hours_per_round": max(1.0, _median(waits) or DEFAULT_ROUND_HOURS),
+        "basis": "median review-queue wait (no closed PR with rounds yet)",
+        "n": len(waits),
+    }
 
 
-ROUND_COST_BASIS = "median PR cycle time ÷ its review rounds"
+def round_cost_hours(court: ballcourt.BallCourt, window: tuple[datetime, datetime]) -> float:
+    """What one review round costs, in elapsed hours (one basis, see above)."""
+    return review_cost(court, window)["hours_per_round"]
 
 
 # --------------------------------------------------------------------------- #
@@ -1195,12 +1255,14 @@ def rework_loops(court: ballcourt.BallCourt, window) -> dict:
     # and a declined one is not delivered work (same cohort as pr_size's r).
     pairs: list[tuple[int, float]] = []
     cycle_by_rounds: dict[int, list[float]] = defaultdict(list)
+    merged_rounds: list[int] = []
     for state in cohort(court, window):
         pushes, unapprovals = _rounds(state)
         count = len(pushes) + len(unapprovals)
         rounds.append(count)
         pr = state.pr
         if pr["state"] == "merged" and pr["closed_ts"] is not None:
+            merged_rounds.append(count)
             cycle = _span_hours(court, None, pr["created_ts"], pr["closed_ts"])
             pairs.append((count, cycle))
             cycle_by_rounds[count].append(cycle)
@@ -1250,6 +1312,15 @@ def rework_loops(court: ballcourt.BallCourt, window) -> dict:
         "total_rounds": sum(rounds),
         "mean_rounds": round(sum(rounds) / len(rounds), 2) if rounds else None,
         "median_rounds": _median([float(r) for r in rounds]),
+        # prd/55 §3: the headline "median rounds 1" counted open/declined PRs
+        # while the r and the slope are merged-only; the merged median is 2.
+        # Both travel with an explicit basis, and the rule quotes the merged one.
+        "median_rounds_merged": _median([float(r) for r in merged_rounds]),
+        "median_rounds_all": _median([float(r) for r in rounds]),
+        "rounds_median_basis": (
+            "median over merged PRs (the same cohort as r and the slope); "
+            "median_rounds_all includes open and declined PRs"
+        ),
         "p90_rounds": _p90([float(r) for r in rounds]),
         # prd/46 §3: the advice target is the lab's best-scenario cap (2); the
         # conformance threshold (3) is reported next to it, never instead of it.
@@ -1947,6 +2018,11 @@ def stale_prs(court: ballcourt.BallCourt, window,
     over_age = sum(1 for row in stale if row["age_business_days"] > limit_days)
     ticket_done_open = sum(1 for row in stale if row["ticket_done"])
     oldest = max((row["age_hours"] for row in stale), default=None)
+    created = {state.pr["object_id"]: state.pr["created_ts"] for state in court.prs}
+    stale_created = [
+        created[row["object_id"]] for row in stale
+        if created.get(row["object_id"]) is not None
+    ]
     return {
         "available": True,
         "open_prs": len(rows),
@@ -1956,6 +2032,9 @@ def stale_prs(court: ballcourt.BallCourt, window,
         "limit_days": limit_days,
         "limit_hours": limit_hours,
         "oldest_age_hours": oldest,
+        # prd/55 §6: when every stale item was opened before the window, the
+        # rule's cohort is outside it and a 1-week view must not present it.
+        "cohort_end": iso(max(stale_created)) if stale_created else None,
         "hours": round(sum(row["hours"] for row in stale), 2),
         "rows": _drill_order(rows),
         "note": (
@@ -1999,6 +2078,7 @@ def sentinel_tail(court: ballcourt.BallCourt, window) -> dict:
     for interval in court.intervals:
         by_pr[interval.object_id].append(interval)
     rows: list[dict] = []
+    since_values: list[datetime] = []
     for object_id, intervals in by_pr.items():
         pr = pr_meta.get(object_id)
         if pr is None or pr["closed_ts"] is not None:
@@ -2020,6 +2100,7 @@ def sentinel_tail(court: ballcourt.BallCourt, window) -> dict:
         person = tail[0].person_holders[0]
         hours = sum(interval.hours_for(person) for interval in tail)
         since = tail[-1].start
+        since_values.append(since)
         rows.append(_pr_row(
             pr,
             person=person,
@@ -2044,6 +2125,9 @@ def sentinel_tail(court: ballcourt.BallCourt, window) -> dict:
         "median_hours": _median(waits),
         "p90_hours": _p90(waits),
         "longest_hours": round(max(waits), 2) if waits else None,
+        # prd/55 §6: the tail's cohort is when the wait started; if every tail
+        # item began waiting before the window, a 1-week view omits the rule.
+        "cohort_end": iso(max(since_values)) if since_values else None,
         "rows": rows,
         "note": (
             "an item is in the sentinel tail when the sentinel is its only "
@@ -2082,7 +2166,7 @@ def metrics(court: ballcourt.BallCourt, threads: list[dict], window,
         "pr_size": pr_size(court, window, sizes, caps=caps),
         "vacation_blocking": vacation_blocking(court, window),
         "stacked_cascade": stack_analysis.metrics(court, window),
-        "review_cost": {"hours_per_round": round_cost_hours(court, window)},
+        "review_cost": review_cost(court, window),
         # prd/21: the ticket layer. Keys are distinct from the PR-level ones so
         # a reader can never confuse "merged with no approval" (conformance)
         # with "started before refinement" (jira_conformance).
@@ -2126,11 +2210,39 @@ def _suggestion(
     }
 
 
+def _iso_dt(value) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(
+            tzinfo=None
+        )
+    except ValueError:
+        return None
+
+
+def _cohort_in_window(cohort_end, window) -> bool:
+    """Does a rule's cohort reach into the analysis window? (prd/55 §6)
+
+    A sprint card describes the stories a *closed* sprint committed. At a 1-week
+    timeframe, S2 closed six weeks before the window: listing "S2 delivered
+    50 %" answers a question the window does not ask. A cohort that ended
+    before the window starts is therefore not listed.
+    """
+    if window is None:
+        return True
+    end = _iso_dt(cohort_end)
+    return end is None or end >= window[0]
+
+
 def templates(
     m: dict,
     level: str = "team",
     round_hours: float = DEFAULT_ROUND_HOURS,
     bots: set[str] | None = None,
+    window: tuple[datetime, datetime] | None = None,
 ) -> list[dict]:
     """Metric values -> concrete rules (threshold + severity + impact)."""
     bots = bots or set()
@@ -2440,7 +2552,11 @@ def templates(
             title,
             {
                 "prs": rw["n"],
-                "median_rounds": rw["median_rounds"],
+                # prd/55 §3: the card states the basis of the median. The
+                # merged median is the cohort r/slope use; the all-PR median is
+                # shown beside it rather than silently replacing it.
+                "median_rounds_merged": rw.get("median_rounds_merged"),
+                "median_rounds_all": rw.get("median_rounds_all"),
                 "p90_rounds": rw["p90_rounds"],
                 "prs_over_target": rw["prs_over_target"],
                 "excess_rounds": rw["excess_rounds"],
@@ -2581,7 +2697,7 @@ def templates(
     # version, priced by the age past the limit (or the whole wait when the
     # ticket is already Done and only the merge is missing).
     sp = m["stale_prs"]
-    if sp["stale_prs"] > 0:
+    if sp["stale_prs"] > 0 and _cohort_in_window(sp.get("cohort_end"), window):
         oldest = sp["oldest_age_hours"] or 0.0
         severity = (
             "critical"
@@ -2650,7 +2766,9 @@ def templates(
     # sentinel is the sole holder, so the fix (another sentinel / a rotation)
     # cannot be confused with "review is slow".
     st = m["sentinel_tail"]
-    if st["available"] and st["tail_items"] > 0:
+    if st["available"] and st["tail_items"] > 0 and _cohort_in_window(
+        st.get("cohort_end"), window
+    ):
         longest = st["longest_hours"] or 0.0
         severity = "critical" if longest >= 3 * SENTINEL_TAIL_HOURS else "warning"
         names = ", ".join(st["sentinels"])
@@ -2921,11 +3039,11 @@ def templates(
         # prd/41 B8: the sprint lens counts every story in the store; this rule
         # counts the stories created in the chosen timeframe. Both numbers are
         # right for their scope, so the scope is stated with the number.
-        window = co.get("window") or {}
+        cohort_window = co.get("window") or {}
         scope_note = (
-            f" (stories created in the {window.get('days')}-day window; the "
+            f" (stories created in the {cohort_window.get('days')}-day window; the "
             "sprint lens counts every story in the store)"
-            if window.get("days") is not None else ""
+            if cohort_window.get("days") is not None else ""
         )
         out.append(_suggestion(
             "jira-carry-over", "carry_over",
@@ -2943,9 +3061,9 @@ def templates(
                 "median_wait_hours": co["median_wait_hours"],
                 "target_share": co["target_share"],
                 # prd/41 B8: the window this count is filtered to
-                "window_days": window.get("days"),
-                "window_start": window.get("start"),
-                "window_end": window.get("end"),
+                "window_days": cohort_window.get("days"),
+                "window_start": cohort_window.get("start"),
+                "window_end": cohort_window.get("end"),
                 # prd/25: ticket keys in evidence are doorways to the detail page
                 "examples": ", ".join(row["key"] for row in co["rows"][:5]),
             },
@@ -2955,9 +3073,9 @@ def templates(
             "story until it fits one sprint, and leave it in the backlog until "
             "it does — a carry-over is a commitment the team already knew it "
             "would break."
-            + (f" This count is the stories created in the {window.get('days')}"
+            + (f" This count is the stories created in the {cohort_window.get('days')}"
                "-day window; the sprint lens counts every story in the store, "
-               "so it can be larger." if window.get("days") is not None else ""),
+               "so it can be larger." if cohort_window.get("days") is not None else ""),
             severity, co["late_hours"], co["stories_in_a_sprint"] or carried,
         ))
 
@@ -3022,8 +3140,16 @@ def templates(
                     "Logged hours don't track story points "
                     f"(r = {correlation:g})"
                 )
+            elif ratio is not None and ratio < 1:
+                # prd/56 §6: "0.49× less" is ambiguous (49 % as much? 51 %
+                # less?). State the share directly.
+                title = (
+                    f"Logged hours are {round(ratio * 100)} % of active PR time "
+                    f"({ratio:g}×) — the team logs about "
+                    f"{round((1 - ratio) * 100)} % less than the PRs show"
+                )
             else:
-                title = f"Logged hours differ from active PR time by {ratio:g}×"
+                title = f"Logged hours are {ratio:g}× the active PR time"
             evidence = {
                 "worklogs": wc["worklogs"],
                 "stories_with_worklogs": wc["stories_with_worklogs"],
@@ -3128,6 +3254,10 @@ def templates(
     # sprint chip quotes: done-by-end, not done-by-now.
     sd = m["sprint_delivery"]
     worst = sd.get("worst") if sd.get("available") else None
+    if worst is not None and not _cohort_in_window(worst.get("end"), window):
+        # prd/55 §6: the sprint closed before the chosen window. Its cards are
+        # not this window's evidence, so they are not listed.
+        worst = None
     if worst is not None and worst["done_share"] < sd["target_share"]:
         committed = worst["stories"]
         delivered = worst["done_by_end"]
@@ -3164,6 +3294,13 @@ def templates(
             title += f", {unmerged} Done in Jira with an unmerged PR"
         if never:
             title += f", {never} still open"
+        if worst.get("length_outlier"):
+            # prd/55 §5: S3's 50-day plan is not S1/S2's 24–26, so its share is
+            # not a like-for-like delivery number.
+            title += (
+                f" — a {worst.get('planned_days'):g}-day sprint, not comparable "
+                "with its 24–26-day neighbours"
+            )
         out.append(_suggestion(
             "sprint-on-time", "sprint_delivery",
             title,
@@ -3189,6 +3326,14 @@ def templates(
                 "closed_sprints": sd["closed_sprints"],
                 "measured_sprints": sd["measured_sprints"],
                 "on_time_sprints": sd["on_time_sprints"],
+                # prd/55 §5: the length flag is evidence only when it is one.
+                "sprint_length_days": (
+                    worst.get("planned_days") if worst.get("length_outlier") else None
+                ),
+                "sprint_length_outlier": True if worst.get("length_outlier") else None,
+                "sprint_length_note": (
+                    worst.get("length_note") if worst.get("length_outlier") else None
+                ),
             },
             "Size the sprint to what the team finishes, not what it starts: "
             "measure scope at the close (done by end, not done by now) and "
@@ -3426,7 +3571,7 @@ def insights(
     chosen_caps = size_caps(caps)
     computed = metrics(court, threads, window, sizes, jira, caps=chosen_caps)
     round_hours = computed["review_cost"]["hours_per_round"]
-    suggestions = rank(templates(computed, level, round_hours, bots))
+    suggestions = rank(templates(computed, level, round_hours, bots, window=window))
     # prd/43 §1: the lab's verdict travels with the rule it bears on.
     cross_check = policy_lab if policy_lab is not None else advice.unavailable(
         "the policy lab was not run for this request"
@@ -3439,6 +3584,16 @@ def insights(
     # prd/37 §2: the headline total counts each cost pool once (most specific).
     at_stake = attribute_at_stake(suggestions)
     days = round(max(0.0, (end - start).total_seconds()) / 86400.0, 1)
+    # prd/55 §6: the window is not the dataset. The default 1q window is 90
+    # days on a 103.6-day store, so 7 PRs are outside it; the header must say
+    # "124 of 131", never let the dataset census (131) stand for the cohort.
+    dataset_start = window_for(court, None, jira)[0]
+    dataset_prs = len(court.prs)
+    in_window = len(cohort(court, window))
+    dataset_days = (
+        round(max(0.0, (court.snapshot - dataset_start).total_seconds()) / 86400.0, 1)
+        if dataset_start is not None else days
+    )
     return {
         "ok": True,
         "generated_at": iso(generated_at or utcnow()),
@@ -3453,8 +3608,19 @@ def insights(
         # a store without the Jira ingest says so instead of reporting zeroes.
         "jira": computed["jira"],
         "window": {"start": iso(start), "end": iso(end), "days": days},
+        # prd/55 §6: the window-vs-dataset fact, so no view claims the dataset's
+        # PR count as the cohort's (or silently drops the difference).
+        "dataset": {
+            "prs": dataset_prs,
+            "prs_in_window": in_window,
+            "prs_outside_window": max(0, dataset_prs - in_window),
+            "days": dataset_days,
+            "window_days": days,
+            "start": iso(dataset_start) if dataset_start is not None else None,
+            "end": iso(court.snapshot),
+        },
         "sample": {
-            "prs": len(cohort(court, window)),
+            "prs": in_window,
             "days": days,
             "merged": computed["cycle_time"]["n"],
             # product review #5: open PRs cannot contribute a cycle time; the
@@ -3486,7 +3652,9 @@ def insights(
             "flow_efficiency": TARGET_FLOW_EFFICIENCY,
             "flow_efficiency_touch_hours": TOUCH_HOURS,
             "hours_per_round": round_hours,
-            "hours_per_round_basis": ROUND_COST_BASIS,
+            "hours_per_round_basis": computed["review_cost"].get(
+                "basis", ROUND_COST_BASIS
+            ),
             # prd/22: the stack-depth cap the advice names
             "max_stack_depth": stack_analysis.MAX_STACK_DEPTH,
             # prd/21 targets, stated rather than hidden
