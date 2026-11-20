@@ -336,11 +336,12 @@ class ResponseTimeTests(StoreCase):
         fx.event(1, "pr_approved", "FrMo", 40, sentinel=True)
         fx.event(1, "pr_merged", "FrMo", 60)
         # PR 2: the sentinel is asked and never answers; a peer answers in 4 h.
-        fx.pr(2, "BbBb", state="merged", closed=T0 + timedelta(hours=50))
+        # The PR is still open: a merged/declined PR was never the sentinel's
+        # turn (prd/46 §2), so it must not inflate "never answered".
+        fx.pr(2, "BbBb", state="open")
         fx.event(2, "reviewer_changed", "BbBb", 0, change="added",
                  people=("FrMo", "XxXx"))
         fx.event(2, "pr_approved", "XxXx", 4)
-        fx.event(2, "pr_merged", "BbBb", 50)
         return fx
 
     def test_response_medians_and_the_never_answered_count(self):
@@ -360,6 +361,43 @@ class ResponseTimeTests(StoreCase):
         # the peer baseline is the median of the non-sentinel medians
         self.assertEqual(body["reviewer_median_hours"], 6.0)
         self.assertEqual(body["sentinels"], ["FrMo"])
+
+    def test_never_only_counts_requests_that_were_actually_owed(self):
+        """prd/46 §2: the old 24 was 16 closed PRs + 8 gates that never opened."""
+        fx = Fixture()
+        # merged without the sentinel answering: ex post not required
+        fx.pr(1, "AaAa", state="merged", closed=T0 + timedelta(hours=20))
+        fx.event(1, "reviewer_changed", "AaAa", 0, change="added",
+                 people=("FrMo", "CaOs"))
+        fx.event(1, "pr_approved", "CaOs", 4)
+        fx.event(1, "pr_merged", "CaOs", 20)
+        # open, but the peer never answered, so the sentinel's gate never opened
+        fx.pr(2, "BbBb", state="open")
+        fx.event(2, "reviewer_changed", "BbBb", 0, change="added",
+                 people=("FrMo", "DaKo"))
+        # open and the gate opened: this one is a real never-answered
+        fx.pr(3, "CcCc", state="open")
+        fx.event(3, "reviewer_changed", "CcCc", 0, change="added",
+                 people=("FrMo", "ErLi"))
+        fx.event(3, "pr_approved", "ErLi", 3)
+        # declare the sentinel role (the store records it on the sentinel's own
+        # event; a global role, so one declaration is enough)
+        fx.pr(4, "DdDd", state="open")
+        fx.event(4, "reviewer_changed", "FrMo", 0, change="removed",
+                 sentinel=True)
+        body = ballcourt.response_times(self.load(fx)[0])
+        fr = next(row for row in body["people"] if row["person"] == "FrMo")
+        self.assertEqual(fr["never"], 1)
+        self.assertEqual(body["never_excluded"], {
+            "closed_prs": 1, "gate_not_open": 1,
+        })
+        self.assertGreater(fr["never_oldest_hours"], 0)
+        # one canonical number, one definition, stated in the payload
+        canonical = body["sentinel_wait"]
+        self.assertEqual(canonical["definition"], ballcourt.SENTINEL_WAIT_DEFINITION)
+        self.assertIn("last peer answer", canonical["definition"])
+        self.assertIsNone(canonical["median_hours"])   # no sentinel response yet
+        self.assertEqual(canonical["never"], 1)
 
     def test_the_sentinel_lag_is_peer_approval_to_sentinel_approval(self):
         court = self.load(self.fixture())[0]
@@ -556,11 +594,12 @@ class ReworkLoopTests(StoreCase):
         self.assertEqual(metric["total_rounds"], 7)
         self.assertEqual(metric["median_rounds"], 1.5)
         self.assertEqual(metric["p90_rounds"], 4.0)
-        # prd/41 P1: the target is MAX_REVIEW_ROUNDS (3), the number the footer
-        # and the conformance metric quote — not a second "cap 2".
+        # prd/46 §3: the target is the lab's best-scenario cap (2); the
+        # conformance threshold (3) is still reported as `max_rounds`.
+        self.assertEqual(metric["target_rounds"], 2)
         self.assertEqual(metric["max_rounds"], 3)
         self.assertEqual(metric["prs_over_target"], 1)
-        self.assertEqual(metric["excess_rounds"], 1)
+        self.assertEqual(metric["excess_rounds"], 2)   # PR4: 4 rounds − cap 2
         self.assertEqual(metric["by_push_class"]["content"], {"pushes": 6, "prs": 2})
         self.assertEqual(metric["by_push_class"]["rebase_conflict"], {"pushes": 1, "prs": 1})
         # the exclusions are reported, not silently dropped
@@ -581,16 +620,17 @@ class ReworkLoopTests(StoreCase):
     def test_emits_a_round_cap_rule(self):
         suggestion = by_id(self.insights(self.fixture()), "round-cap")
         self.assertIsNotNone(suggestion)
-        # one closed PR: 100 h cycle ÷ 2 rounds = 50 h per round
-        self.assertAlmostEqual(suggestion["impact_hours"], 50.0, places=1)
-        self.assertEqual(suggestion["evidence"]["excess_rounds"], 1)
+        # one closed PR: 100 h cycle ÷ 2 rounds = 50 h per round; the excess is
+        # measured against the lab's cap (2), so PR4's 4 rounds give 2 excess.
+        self.assertAlmostEqual(suggestion["impact_hours"], 100.0, places=1)
+        self.assertEqual(suggestion["evidence"]["excess_rounds"], 2)
         self.assertEqual(suggestion["evidence"]["prs_over_target"], 1)
-        # prd/41 P1: one target — the rule, the footer and the metric agree,
-        # and prd/43 §1 makes it the review-round-cap lever.
-        self.assertEqual(suggestion["evidence"]["max_rounds"], 3)
-        self.assertIn("target 3 max", suggestion["title"])
-        self.assertNotIn("cap 2", suggestion["title"])
-        self.assertIn("Cap review rounds at 3", suggestion["suggestion"])
+        # prd/46 §3: the rule, the metric and the lab all quote the cap 2; the
+        # conformance threshold stays 3 and is not presented as the target.
+        self.assertEqual(suggestion["evidence"]["round_cap"], 2)
+        self.assertIn("target 2 max", suggestion["title"])
+        self.assertNotIn("cap them at 3", suggestion["title"])
+        self.assertIn("Cap review rounds at 2", suggestion["suggestion"])
 
     def test_the_round_cap_rule_carries_the_correlation_and_the_lab(self):
         """prd/43 §1: r ≈ 0.6, and the lab's round-cap is the best scenario.
@@ -791,19 +831,31 @@ class SentinelQueueTests(StoreCase):
         return fx
 
     def test_median_wait_on_the_mandatory_approval(self):
-        """prd/40 (S12): one continuous wait is one episode, not two samples."""
+        """prd/46 §2: one clock — last peer answer → first response."""
         metric = self.metric(self.fixture(), "sentinel_queue")
         self.assertTrue(metric["available"])
         self.assertEqual(metric["sentinels"], ["RrRr"])
-        self.assertEqual(metric["n"], 1)                 # one 101 h episode
-        self.assertEqual(metric["median_hours"], 101.0)
+        self.assertEqual(metric["n"], 1)
+        self.assertEqual(metric["median_hours"], 100.0)   # PR open → first response
         self.assertTrue(metric["sentinel_after_peers"])
+        self.assertIn("last peer answer", metric["definition"])
+
+    def test_the_rules_card_quotes_the_same_number_as_the_response_table(self):
+        """prd/46 §2: one canonical clock; the two surfaces cannot drift."""
+        court = self.load(self.fixture())[0]
+        response = ballcourt.response_times(court)
+        metric = rules.sentinel_queue(court, rules.window_for(court))
+        self.assertEqual(metric["median_hours"],
+                         response["sentinel_wait"]["median_hours"])
+        self.assertEqual(metric["n"], response["sentinel_wait"]["n"])
+        self.assertEqual(metric["definition"],
+                         ballcourt.SENTINEL_WAIT_DEFINITION)
 
     def test_emits_a_rotation_rule(self):
         suggestion = by_id(self.insights(self.fixture()), "sentinel-queue")
         self.assertIsNotNone(suggestion)
         self.assertEqual(suggestion["severity"], "critical")
-        self.assertEqual(suggestion["impact_hours"], 77.0)   # (101 − 24) × 1
+        self.assertEqual(suggestion["impact_hours"], 76.0)   # (100 − 24) × 1
         self.assertEqual(suggestion["evidence"]["sentinels"], 1)
 
     def test_no_role_data_means_no_rule(self):
@@ -973,7 +1025,8 @@ class PolicyLabCrossCheckTests(unittest.TestCase):
     def test_a_contradicted_rule_says_not_a_measured_win(self):
         report = self.report()
         suggestions = [
-            {"id": "jira-waiting-time"},   # refine before start
+            {"id": "jira-waiting-time",   # refine before start
+             "evidence": {"segment_key": "created_ready"}},
             {"id": "sentinel-tail"},       # a second sentinel
             {"id": "pr-size"},             # smaller PRs
             {"id": "round-cap"},           # the cap the lab supports
@@ -999,6 +1052,42 @@ class PolicyLabCrossCheckTests(unittest.TestCase):
         self.assertTrue(capped["supports"])
         self.assertFalse(capped["contradiction"])
         self.assertIn("−13 % cycle", capped["note"])
+
+    def test_the_refinement_note_does_not_ride_a_review_rounds_card(self):
+        """prd/46 §3: the same rule id measures whichever segment is largest."""
+        suggestions = [
+            {"id": "jira-waiting-time",
+             "evidence": {"segment_key": "review_rounds"}},
+            {"id": "jira-waiting-time",
+             "evidence": {"segment_key": "created_ready"}},
+        ]
+        advice.attach(suggestions, self.report())
+        self.assertNotIn("policy_lab", suggestions[0])
+        self.assertTrue(suggestions[1]["policy_lab"]["contradiction"])
+        self.assertIn("+82 % cycle", suggestions[1]["policy_lab"]["note"])
+
+    def test_a_contradicted_rule_is_ranked_below_the_supported_lever(self):
+        """prd/46 §3: the #1 must agree with the banner's own best scenario."""
+        suggestions = [
+            {"id": "jira-waiting-time", "impact_score": 100.0,
+             "impact_hours": 100.0, "severity": "critical", "sample": 10,
+             "evidence": {"segment_key": "created_ready"}},
+            {"id": "sentinel-tail", "impact_score": 90.0,
+             "impact_hours": 90.0, "severity": "critical", "sample": 10},
+            {"id": "round-cap", "impact_score": 50.0,
+             "impact_hours": 50.0, "severity": "warning", "sample": 10},
+        ]
+        advice.attach(suggestions, self.report())
+        ordered = rules.rank(suggestions, lab_aware=True)
+        self.assertEqual(ordered[0]["id"], "round-cap")
+        self.assertTrue(ordered[0]["policy_lab"]["best"])
+        self.assertIn("−13 % cycle", ordered[0]["policy_lab"]["note"])
+        self.assertEqual([row["rank"] for row in ordered], [1, 2, 3])
+        # the demoted rules keep their measured impact; only the position moved
+        jira = next(row for row in ordered if row["id"] == "jira-waiting-time")
+        self.assertEqual(jira["impact_score"], 100.0)
+        self.assertGreater(jira["rank"], ordered[0]["rank"])
+        self.assertTrue(jira["policy_lab"]["contradiction"])
 
     def test_the_best_scenario_is_the_one_the_lab_supports(self):
         report = self.report()

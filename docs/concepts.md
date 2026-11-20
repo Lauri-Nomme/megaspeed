@@ -293,6 +293,17 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
   open story), and the view says so; a segment it can't measure is *missing* and named.
 - **Purpose**: never present an incomplete cycle as complete.
 
+### Out-of-order boundaries
+- **Definition**: a boundary the store dates outside the `created → done` window, or before its
+  lifecycle predecessor (e.g. `sprint_added` projected at the sprint's start, before the story was
+  created — DEL-185). For segment arithmetic the boundaries are clamped into the cycle and made
+  non-decreasing (cumulative max), so each segment is inside the cycle and the shares sum to ≤ 100 %.
+  The raw derivation stays available (`boundaries`), and every clamped boundary is reported as a
+  **data quirk** with the raw stamp and the clamped one; the ticket answer names it as a quirk, never
+  a finding.
+- **Purpose**: the decomposition cannot show "61 % in sprint → in progress" for a 100 h cycle whose
+  segments sum to 200 %.
+
 ### Snapshot / as-of
 - **Definition**: the store is a point-in-time capture; `as_of` is when it was taken. Any open item is
   measured up to the snapshot, and the provenance line names the snapshot time.
@@ -354,6 +365,19 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
 ### Wait hours / queue time
 - **Definition**: business hours an item spends with the ball *not* in the author's court.
 - **Purpose**: the cost of waiting, attributed to the queue/person holding the ball.
+
+### Sentinel wait (the canonical number)
+- **Definition**: **last peer answer → the sentinel's first response** (approval, needs-work,
+  unapproval or comment), priced on the sentinel's calendar. The gate is precedence-aware: the
+  sentinel's clock opens only once every peer has answered (`sentinel_after_peers`), so the peer phase
+  is not charged to them. One sample per PR; a request that was never owed (the PR merged or was
+  declined/closed before their turn, or the peer gate never opened) is not a "never answered".
+- **Derivation**: `analysis/ballcourt.response_times()["sentinel_wait"]`; the Rules `sentinel_queue`
+  metric quotes the same block.
+- **Purpose**: the one "how long does the sentinel take" number. Any other sentinel figure — the
+  person-level queue mean (person-hours from *added as reviewer*, peer phase included), the blocking
+  map's person-hours, the policy lab's fitted gate mean, the current wait on the tail items — is a
+  **different metric** and must be labelled as one.
 
 ### At stake
 - **Definition**: the wait-hours a change would eliminate, summed over the items it would unblock.

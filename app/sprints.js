@@ -43,6 +43,10 @@ export function sprintBands(data) {
       // prd/43 §5: Done in Jira, PR unmerged — not delivered work
       unmerged: sprint.unmerged || 0,
       doneShare: sprint.done_share ?? null,
+      // prd/46 §4: the plan (at start) vs the scope adopted mid-sprint
+      committed: sprint.committed ?? null,
+      adopted: sprint.adopted ?? null,
+      pointsShare: sprint.points_share ?? null,
       lateHours: sprint.late_hours || 0,
       carriedIn: sprint.carried_in || [],
       carriedOut: sprint.carried_out || [],
@@ -83,12 +87,17 @@ function windowLabel(sprint) {
 
 /** The done-by-end / late / never breakdown of one sprint, in words. */
 export function sprintOutcomeLine(sprint) {
-  const committed = sprint.story_count || 0;
+  const total = sprint.story_count || 0;
   const byEnd = sprint.done_by_end ?? sprint.done ?? 0;
   const late = sprint.done_late || 0;
   const never = sprint.never_done || 0;
   const unmerged = sprint.unmerged || 0;
-  const parts = [`${byEnd} of ${committed} done by end`];
+  const parts = [`${byEnd} of ${total} done by end`];
+  // prd/46 §4: "committed" is the scope at the start; the rest was adopted.
+  if (sprint.committed != null) {
+    parts.push(`${sprint.committed} committed at start`);
+    if (sprint.adopted) parts.push(`${sprint.adopted} adopted mid-sprint`);
+  }
   if (late) parts.push(`${late} late`);
   if (unmerged) parts.push(`${unmerged} Done in Jira · PR unmerged`);
   if (never) parts.push(`${never} still open`);
@@ -177,6 +186,8 @@ export function sprintStrip(data, { base = '', focus = null } = {}) {
     const never = sprint.never_done || 0;
     const unmerged = sprint.unmerged || 0;
     const added = sprint.added_after_start || 0;
+    const adopted = sprint.adopted == null ? added : sprint.adopted;
+    const committed = sprint.committed == null ? null : sprint.committed;
     return `<button type="button" class="sprint-row${sprint.open ? ' open' : ''}${selected ? ' selected' : ''}"
         data-sprint-id="${esc(sprint.sprint_id)}"
         data-sprint-start="${Number.isFinite(start) ? start : ''}"
@@ -188,7 +199,8 @@ export function sprintStrip(data, { base = '', focus = null } = {}) {
       <span class="sprint-window mono">${esc(windowLabel(sprint))}</span>
       <span class="sprint-days num muted">${esc(days)}</span>
       <span class="sprint-scope-count num">${sprint.story_count || 0} stor${(sprint.story_count || 0) === 1 ? 'y' : 'ies'} · ${sprint.points || 0} pts${
-        added ? ` · <span class="sprint-added" title="stories added after the sprint's start — not part of the commitment it was planned with">+${added} after start</span>` : ''}</span>
+        committed != null ? ` · <span class="sprint-committed" title="stories in the sprint when it started — the commitment it was planned with">${committed} committed at start</span>` : ''}${
+        adopted ? ` · <span class="sprint-added" title="stories added after the sprint's start — adopted scope, not the plan it was committed to">${adopted} adopted</span>` : ''}</span>
       <span class="sprint-done num" title="done by this sprint's close — not done by today">${
         sprint.done_by_end ?? sprint.done ?? 0} of ${sprint.story_count || 0} by end</span>
       ${late ? `<span class="sprint-late num" title="reached done after the sprint's close">${late} late</span>` : ''}

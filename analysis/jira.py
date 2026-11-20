@@ -196,6 +196,23 @@ def _share(part: float, whole: float) -> float:
     return round(part / whole, 4) if whole else 0.0
 
 
+def _pearson(xs: list[float], ys: list[float]) -> float | None:
+    """Pearson correlation, or ``None`` when there is no variance to correlate."""
+    n = min(len(xs), len(ys))
+    if n < 3:
+        return None
+    x = [float(value) for value in xs[:n]]
+    y = [float(value) for value in ys[:n]]
+    mean_x = sum(x) / n
+    mean_y = sum(y) / n
+    cov = sum((a - mean_x) * (b - mean_y) for a, b in zip(x, y))
+    var_x = sum((a - mean_x) ** 2 for a in x)
+    var_y = sum((b - mean_y) ** 2 for b in y)
+    if var_x <= 0 or var_y <= 0:
+        return None
+    return round(cov / math.sqrt(var_x * var_y), 3)
+
+
 def _note(data: "JiraData", empty: str, available: bool = False) -> str | None:
     """Why a metric is unavailable: the store's own reason, else the local one.
 
@@ -581,6 +598,16 @@ class Cycle:
     pr_gaps: list[dict] = field(default_factory=list)
     #: ``done → ready`` (or any leave-done) moves after the first done (prd/36 §4).
     reopens: list[dict] = field(default_factory=list)
+    #: prd/46 §1: the boundaries *as measured for the segment arithmetic* — every
+    #: boundary clamped into ``[created, done-or-snapshot]`` and made
+    #: non-decreasing along the lifecycle. ``boundaries`` stays the raw
+    #: derivation (conformance and the PR pages read it); the segments read this
+    #: one, so a segment can never be longer than the cycle and the shares can
+    #: never sum past 100 %.
+    segment_bounds: dict[str, datetime | None] = field(default_factory=dict)
+    #: prd/46 §1: every boundary the clamp had to move, with the raw timestamp,
+    #: the value used and the reason. A data quirk, named as one.
+    out_of_order: list[dict] = field(default_factory=list)
 
 
 def no_pr_open_spans(story: Story, t1: datetime, t2: datetime) -> list[tuple[datetime, datetime]]:
@@ -621,6 +648,71 @@ def between_pr_gaps(story: Story) -> list[dict]:
             "to_pr": next_number,
         })
     return gaps
+
+
+def _ordered_segment_bounds(
+    boundaries: dict[str, datetime | None],
+    end: datetime | None,
+) -> tuple[dict[str, datetime | None], list[dict]]:
+    """Order the lifecycle boundaries so the segments tile the cycle (prd/46 §1).
+
+    The store can hand over boundaries out of order — DEL-185's ``sprint_added``
+    is dated at the sprint's start (8 Oct) while the story was created on 23 Oct,
+    because the membership event is projected at the sprint boundary. Drawn
+    literally, that makes ``sprint → in progress`` a negative/overlapping
+    segment and the eight shares sum to 174–200 % of the cycle.
+
+    Two rules, applied in lifecycle order:
+
+    * every boundary is clamped into ``[created, done-or-snapshot]`` — a
+      segment can never be longer than the cycle;
+    * the sequence is made non-decreasing (``b[i] = max(b[i], b[i-1])``) — no
+      segment can overlap its neighbour.
+
+    Nothing is silently "fixed": each moved boundary is returned as a quirk
+    (raw value, clamped value, reason), and the answer names it as a data quirk
+    rather than a finding. ``boundaries`` keeps the raw derivation so
+    conformance can still report that the events are out of order.
+    """
+    ordered = dict(boundaries)
+    quirks: list[dict] = []
+    start = boundaries.get("created")
+    chain = (
+        "created", "ready", "sprint", "started", "pr_open",
+        "first_review", "approval", "merged", "in_verification", "done",
+    )
+    previous_name: str | None = None
+    previous: datetime | None = None
+    for name in chain:
+        raw = boundaries.get(name)
+        if raw is None:
+            continue
+        value = raw
+        reason: str | None = None
+        precedes: str | None = None
+        if start is not None and value < start:
+            value = start
+            reason = "before_cycle"
+            precedes = "created"
+        elif end is not None and name != "done" and value > end:
+            value = end
+            reason = "after_cycle"
+            precedes = "done"
+        if previous is not None and value < previous:
+            value = previous
+            reason = reason or "before_predecessor"
+            precedes = previous_name
+        if reason is not None:
+            quirks.append({
+                "boundary": name,
+                "ts": iso(raw),
+                "clamped_to": iso(value),
+                "reason": reason,
+                "precedes": precedes,
+            })
+        ordered[name] = value
+        previous_name, previous = name, value
+    return ordered, quirks
 
 
 def _cycle(story: Story) -> Cycle:
@@ -773,6 +865,8 @@ def _cycle(story: Story) -> Cycle:
     )
 
     person = story.actor or (prs[0].pr["actor"] if prs else None)
+    cycle_end = done or story.snapshot
+    segment_bounds, out_of_order = _ordered_segment_bounds(boundaries, cycle_end)
     cycle = Cycle(
         story=story,
         person=person,
@@ -783,6 +877,8 @@ def _cycle(story: Story) -> Cycle:
         missing=missing,
         pr_gaps=between_pr_gaps(story),
         reopens=reopens,
+        segment_bounds=segment_bounds,
+        out_of_order=out_of_order,
     )
     story._cycle_cache = cycle
     return cycle
@@ -868,6 +964,7 @@ def waiting_time_decomposition(
     decomposed = 0
     rounds_total = 0
     reopened_stories = 0
+    out_of_order: list[str] = []
     per_story_largest: list[float] = []
 
     for story in stories:
@@ -876,6 +973,8 @@ def waiting_time_decomposition(
             missing_boundaries[name] += 1
         if cycle.reopens:
             reopened_stories += 1
+        if cycle.out_of_order:
+            out_of_order.append(story.key)
         end = cycle.boundaries["done"] or court.snapshot
         begin = cycle.boundaries["created"]
         cycle_hours = (
@@ -887,20 +986,21 @@ def waiting_time_decomposition(
         measured = 0
         for key in keys:
             left, right = SEGMENT_BOUNDS[key]
-            t1 = cycle.boundaries.get(left)
-            t2 = cycle.boundaries.get(right)
+            # prd/46 §1: the *ordered* boundaries price the segment; the raw
+            # ones decide "missing" and name an inversion. That way the shares
+            # sum to at most the cycle while the store's out-of-order data is
+            # still reported (an inverted segment stays a 0 h inversion).
+            t1_raw = cycle.boundaries.get(left)
+            t2_raw = cycle.boundaries.get(right)
+            t1 = cycle.segment_bounds.get(left)
+            t2 = cycle.segment_bounds.get(right)
             entry = segments[key]
-            if t1 is None or t2 is None:
+            if t1_raw is None or t2_raw is None:
                 entry["missing"] += 1
                 row["segments"][key] = None
                 continue
-            if t2 < t1:
-                # out-of-order data (a PR opened before the ticket moved): the
-                # honest answer is "no wait here", and the inversion is counted
+            if t2_raw < t1_raw:
                 entry["inverted"] += 1
-                row["segments"][key] = 0.0
-                measured += 1
-                continue
             elapsed = round(court.business_hours(cycle.person, t1, t2), 2)
             active = round(_active_hours(court, cycle, t1, t2), 2)
             if active > elapsed:
@@ -988,6 +1088,11 @@ def waiting_time_decomposition(
         "total_hours": total_hours,
         "cycle_hours": round(cycle_total, 2),
         "explained_share": _share(total_hours, cycle_total),
+        # prd/46 §1: an out-of-order boundary is a data quirk, counted and named
+        # (never silently drawn as an overlapping segment). The hours above are
+        # clamped to the cycle, so shares cannot sum past 100 %.
+        "out_of_order_stories": len(out_of_order),
+        "out_of_order_examples": sorted(out_of_order)[:5],
         "largest": largest,
         "largest_label": SEGMENT_LABEL[largest],
         "largest_hours": out_segments[largest]["hours"],
@@ -1293,6 +1398,23 @@ def carry_over(
 # --------------------------------------------------------------------------- #
 # 2a. sprint on-time delivery (prd/37 §1, §6)
 # --------------------------------------------------------------------------- #
+def _added_at_start(story: Story, sid: int, sprint_index: dict) -> bool:
+    """Was this story in sprint ``sid`` when the sprint started? (prd/46 §4)
+
+    ``at_start`` is the store's own membership-at-start marker (prd/42 M5); a
+    ``sprint_added`` stamped at or before the sprint's start is the same fact
+    from the timestamp. Anything later was *adopted* mid-sprint, not committed.
+    """
+    start = (sprint_index.get(sid) or {}).get("start")
+    for event in story.of("sprint_added"):
+        if event_sprint_id(event) != sid:
+            continue
+        return bool(_attrs(event).get("at_start")) or (
+            start is not None and event["_ts"] <= start
+        )
+    return False
+
+
 def sprint_delivery(
     court: ballcourt.BallCourt,
     data: JiraData,
@@ -1307,6 +1429,7 @@ def sprint_delivery(
     slip. The rules page turns the worst sprint into the on-time-delivery rule.
     """
     memberships, outcomes, boundaries = sprint_outcomes(court, data)
+    sprint_index = _sprint_index(data)
     sprints: list[dict] = []
     rows: list[dict] = []
     for sid in sorted(boundaries):
@@ -1322,11 +1445,23 @@ def sprint_delivery(
             continue
         counts = {"by_end": 0, "late": 0, "never": 0, "unmerged": 0}
         points = {"by_end": 0, "late": 0, "never": 0, "unmerged": 0}
+        # prd/46 §4: "committed" is the scope at the sprint's start; a story
+        # added mid-sprint was adopted, not committed.
+        committed_at_start = adopted_count = 0
+        committed_points = adopted_points = 0
+        committed_done = adopted_done = 0
         late_hours = 0.0
         for story in members:
             outcome = outcomes[story.key]["outcomes"].get(sid)
             if outcome not in counts:
                 continue
+            at_start = _added_at_start(story, sid, sprint_index)
+            if at_start:
+                committed_at_start += 1
+                committed_points += story.points or 0
+            else:
+                adopted_count += 1
+                adopted_points += story.points or 0
             # prd/43 §5: Jira "done by end" is not delivery when the story's
             # PRs never merged. The count moves to `unmerged`, so the committed
             # total is unchanged but "delivered" is the true one.
@@ -1350,6 +1485,11 @@ def sprint_delivery(
                 continue
             counts[outcome] += 1
             points[outcome] += story.points or 0
+            if outcome == "by_end":
+                if at_start:
+                    committed_done += 1
+                else:
+                    adopted_done += 1
             if outcome == "late":
                 done = outcomes[story.key]["done_at"]
                 start = boundary["end"]
@@ -1395,6 +1535,17 @@ def sprint_delivery(
             "stories": committed,
             "points": sum(points.values()),
             "done_by_end": delivered,
+            # prd/46 §4: scope at the start vs added after it. `stories` stays
+            # the whole scope the sprint ended with; "committed" is the plan.
+            "committed": committed_at_start,
+            "adopted": adopted_count,
+            "committed_points": committed_points,
+            "adopted_points": adopted_points,
+            "committed_done_by_end": committed_done,
+            "adopted_done_by_end": adopted_done,
+            # prd/46 §4 / QA: 50 % by stories is not 50 % by points; both are
+            # stated so the denominator cannot be read as the other.
+            "points_share": _share(points["by_end"], sum(points.values())),
             # prd/43 §5: Jira-done by the close but the code never merged
             "done_by_end_jira": counts["by_end"] + counts["unmerged"],
             "unmerged": counts["unmerged"],
@@ -1431,6 +1582,8 @@ def sprint_delivery(
         "on_time_sprints": sum(1 for row in sprints if row["on_time"]),
         "stories": sum(row["stories"] for row in sprints),
         "done_by_end": sum(row["done_by_end"] for row in sprints),
+        "committed": sum(row["committed"] for row in sprints),
+        "adopted": sum(row["adopted"] for row in sprints),
         "unmerged": sum(row["unmerged"] for row in sprints),
         "done_late": len(late_rows),
         "never_done": len(never_rows),
@@ -1564,6 +1717,10 @@ def sprints(
             # store's own membership-at-start signal; a later add without it is
             # the scope-creep fact.
             "added_after_start_stories": [],
+            "committed_stories": [],
+            "adopted_stories": [],
+            "committed_points": 0,
+            "adopted_points": 0,
             "points": 0,
             "done_points": 0,
             "done": 0,
@@ -1606,6 +1763,15 @@ def sprints(
             row["stories"].append(key)
             if membership["current_sprint"] == sid:
                 row["current_stories"].append(key)
+            # prd/46 §4: committed at the start vs adopted mid-sprint. One
+            # definition shared with the sprint-delivery rule (`_added_at_start`).
+            points = story.points or 0
+            if _added_at_start(story, sid, sprint_index):
+                row["committed_stories"].append(key)
+                row["committed_points"] += points
+            else:
+                row["adopted_stories"].append(key)
+                row["adopted_points"] += points
             # prd/42 M5: an add after the sprint's measured start, without the
             # `at_start` marker, is scope added mid-sprint.
             band_start = (sprint_index.get(sid) or {}).get("start")
@@ -1620,7 +1786,6 @@ def sprints(
                 ):
                     row["added_after_start_stories"].append(key)
             verdict = outcome["outcomes"].get(sid)
-            points = story.points or 0
             delivered = bool(outcome.get("delivered"))
             row["points"] += points
             if verdict == "by_end" and not delivered:
@@ -1672,6 +1837,13 @@ def sprints(
         row["added_after_start_share"] = _share(
             row["added_after_start"], row["story_count"]
         )
+        # prd/46 §4: the planned scope and the adopted scope, counted from the
+        # same at-start signal the sprint-delivery rule uses.
+        row["committed_stories"].sort()
+        row["adopted_stories"].sort()
+        row["committed"] = len(row["committed_stories"])
+        row["adopted"] = len(row["adopted_stories"])
+        row["committed_share"] = _share(row["committed"], row["story_count"])
         committed = (
             row["done_by_end"] + row["done_late"] + row["never_done"]
             + row["unmerged"]
@@ -1983,11 +2155,15 @@ def worklog_cross_check(
     active_hours = 0.0
     stories_with_prs = 0
     rows: list[dict] = []
+    # prd/46 §5: does the logged effort track the story's size at all?
+    points_logged: list[tuple[float, float]] = []
+    points_active: list[tuple[float, float]] = []
     for story in stories:
         entries = story.of("worklogged")
         if entries:
             stories_with_worklogs += 1
         story_hours = 0.0
+        story_active = 0.0
         story_delays: list[float] = []
         story_late = 0
         for event in entries:
@@ -2031,6 +2207,19 @@ def worklog_cross_check(
                 for interval in state.intervals:
                     if interval.phase in ACTIVE_PHASES:
                         active_hours += interval.hours
+                        story_active += interval.hours
+        if entries and story.points is not None:
+            points_logged.append((float(story.points), story_hours))
+            points_active.append((float(story.points), story_active))
+
+    points_logged_r = _pearson(
+        [points for points, _ in points_logged],
+        [hours for _, hours in points_logged],
+    )
+    points_active_r = _pearson(
+        [points for points, _ in points_active],
+        [hours for _, hours in points_active],
+    )
 
     cycle_hours = 0.0
     for story in stories:
@@ -2056,6 +2245,18 @@ def worklog_cross_check(
         "logged_to_cycle_ratio": (
             round(logged_hours / cycle_hours, 2) if cycle_hours > 0 else None
         ),
+        # prd/46 §5: the honesty signal — logged hours do not track the story's
+        # size (r ≈ −0.05 on the QA store), so a worklog is a note, not effort.
+        "points_logged_correlation": points_logged_r,
+        "points_logged_n": len(points_logged),
+        "points_active_correlation": points_active_r,
+        "points_active_n": len(points_active),
+        # median logged hours by point size: "flat across 1–13 points" is the
+        # plain-language form of the correlation.
+        "logged_by_points": {
+            str(points): _median([hours for size, hours in points_logged if size == points])
+            for points in sorted({size for size, _ in points_logged})
+        },
         "buckets": {name: buckets[name] for name in LOG_DELAY_BUCKETS},
         "bucket_shares": {
             name: _share(buckets[name], worklogs) for name in LOG_DELAY_BUCKETS
@@ -2081,7 +2282,9 @@ def worklog_cross_check(
             "(same_day / next_day / within_week / late); 'logged a week late' is "
             "the late bucket (> 7 days) only, never within_week (2–7 d); "
             "active_hours is PR intervals in an active or rebasing phase, so a "
-            "story with no PR adds nothing to the denominator"
+            "story with no PR adds nothing to the denominator; "
+            "points_logged_correlation is Pearson r between a story's points and "
+            "its logged hours — near zero means the logs do not measure effort"
         ),
         "note": _note(data, "no 'worklogged' event in this window", worklogs > 0),
     }

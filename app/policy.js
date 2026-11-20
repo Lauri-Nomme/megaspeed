@@ -310,12 +310,13 @@ export function resourcesMarkup(result) {
     // the CSS class carries the colour; the text carries the distinct metric
     const tone = resource.utilisation >= 0.85 ? 'overloaded'
       : resource.utilisation >= 0.5 ? 'slow' : 'healthy';
-    const label = resource.utilisation >= 0.85 ? 'busy'
-      : resource.utilisation >= 0.5 ? 'partly busy' : 'idle';
+    // prd/46 §6: ρ is the share *busy*. "≈27 % idle" read as 73 % busy; the
+    // chip now states the same number as the share it is.
+    const label = 'busy';
     return `<tr>
       <td class="c-who" data-label="">${esc(resource.person)}</td>
       <td class="c-role" data-label="role">${esc(resource.role)}</td>
-      <td data-label="utilisation"><span class="pill ${tone}" title="calendar share (ρ) — not queue wait">${predPercent(resource.utilisation)} ${label}</span></td>
+      <td data-label="utilisation"><span class="pill ${tone}" title="calendar share (ρ): the share of this person's calendar spent busy — not the complement, and not queue wait">${predPercent(resource.utilisation)} ${label}</span></td>
       <td class="c-dur" data-label="mean wait">${predHours(resource.mean_wait_hours)}</td>
       <td class="c-dur" data-label="peak queue">≈${resource.peak_queue}</td>
       <td class="c-dur" data-label="requests">≈${resource.requests}</td>
@@ -346,15 +347,15 @@ export function calibrationMarkup(calibration) {
     ['arrival', `${predRate(arrival.per_business_day)} · ≈${arrival.mean_interarrival_hours} h apart`],
     ['review response', `≈${calibration.review_service.pooled.median} h median`],
     ['rework', `${predPercent(rework.probability)} of PRs · ${predPercent(rework.push_class.content)} content`],
-    ['sentinel gate', `≈${sentinel.observed.mean_hours} h observed · ${predPercent(sentinel.utilisation)} busy`],
-    ['PR size', `≈${size.commits.median} commits median`],
+    ['sentinel gate', `≈${sentinel.observed.mean_hours} h observed · ${predPercent(sentinel.utilisation)} busy`],    ['PR size', `≈${size.commits.median} commits median`],
     // prd/42 M3: the refinement knob prices a measured segment, not a guess.
     ['refinement', refinement.hours == null ? 'not measurable (no Jira layer)' : `≈${refinement.hours} h created → ready`],
     ['stack depth', stack.available ? `${predPercent(0)} measured` : 'not measurable (no ref digests)'],
     ['window', `${window.business_days} business days · ${window.business_hours} h`],
   ];
   return `<dl class="facts policy-facts">${facts.map(([key, value]) =>
-    `<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join('')}</dl>`;
+    `<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join('')}</dl>
+    <p class="panel-note">the sentinel gate here is the model's fitted <b>mean</b> server time over review-ball episodes — a different metric from the Queue's sentinel wait (median, last peer answer → first response).</p>`;
 }
 
 /** The provenance line every predicted number rides on (prd/23). */

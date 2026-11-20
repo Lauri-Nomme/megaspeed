@@ -71,7 +71,7 @@ POLICIES = (
         "label": "cap review at 2 rounds",
         "scenario": {"review_round_cap": 2},
         "rules": ("round-cap",),
-        "caveat": "the cap lands at 2 rounds in the lab; the rule's target is 3",
+        "caveat": "the lab's best cap is 2 rounds — the same cap the rule recommends",
     },
 )
 
@@ -254,6 +254,7 @@ def attach(suggestions: list[dict], cross_check: dict | None) -> None:
     """
     if not cross_check or not cross_check.get("available"):
         return
+    best_id = (cross_check.get("best") or {}).get("id")
     by_rule: dict[str, dict] = {}
     for policy in POLICIES:
         entry = next(
@@ -268,6 +269,14 @@ def attach(suggestions: list[dict], cross_check: dict | None) -> None:
         entry = by_rule.get(suggestion.get("id"))
         if entry is None:
             continue
+        # prd/46 §3: the refinement policy bears only on the advice that says
+        # "refine first" — the same rule id measures whichever segment is
+        # largest, and on `All` that can be review rounds. Attaching the
+        # refinement result to a review-rounds card was the QA's exact find.
+        if suggestion.get("id") == "jira-waiting-time":
+            segment = (suggestion.get("evidence") or {}).get("segment_key")
+            if segment != "created_ready":
+                continue
         suggestion["policy_lab"] = {
             "policy": entry["id"],
             "label": entry["label"],
@@ -275,5 +284,8 @@ def attach(suggestions: list[dict], cross_check: dict | None) -> None:
             "delivered_percent": entry["delivered_percent"],
             "contradiction": entry["contradiction"],
             "supports": entry["supports"],
+            # prd/46 §3: name the banner's own best scenario on the rule it
+            # comes from, so the #1 and the banner cannot disagree.
+            "best": entry["id"] == best_id,
             "note": entry["note"],
         }

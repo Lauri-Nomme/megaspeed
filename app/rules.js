@@ -26,6 +26,14 @@ export function fmtImpact(hours) {
 /** "median_hours" -> "median", "merged_prs" -> "merged PRs". */
 export function evidenceLabel(key) {
   if (key === 'diff_size_pending') return 'diff size';
+  // prd/46 §5: the worklog card's headline evidence reads as prose.
+  const worklog = {
+    points_logged_correlation: 'points ↔ logged r',
+    points_active_correlation: 'points ↔ active r',
+    points_logged_n: 'stories with points',
+    lateness: 'lateness',
+  }[key];
+  if (worklog) return worklog;
   // prd/43 §1: the review-round cap's evidence reads as prose, not snake_case.
   const cap = {
     rounds_cycle_correlation: 'rounds ↔ cycle r',
@@ -351,9 +359,10 @@ export function labNote(suggestion) {
   const lab = suggestion && suggestion.policy_lab;
   if (!lab || !lab.note) return '';
   const tone = lab.contradiction ? 'contradiction' : lab.supports ? 'supports' : 'neutral';
-  return `<p class="rule-lab ${tone}" data-lab-policy="${esc(lab.policy || '')}"
+  return `<p class="rule-lab ${tone}" data-lab-policy="${esc(lab.policy || '')}"${
+    lab.best ? ' data-lab-best-rule="true"' : ''}
     title="the policy lab's calibrated model on ${esc(lab.label || 'this policy')}">
-    <span class="lab-tag mono">policy lab</span> ${esc(lab.note)}</p>`;
+    <span class="lab-tag mono">policy lab${lab.best ? ' · best scenario' : ''}</span> ${esc(lab.note)}</p>`;
 }
 
 /** prd/43 §1: "the lab's best scenario is X" — the one cross-reference line. */
@@ -511,7 +520,7 @@ export function rulesMarkdown(data, base = '') {
         (suggestion.evidence || {}).impact_assumed ? ' — assumed, not measured' : ''}`,
       `- rule: ${suggestion.suggestion}`,
       ...(suggestion.policy_lab && suggestion.policy_lab.note
-        ? [`- policy lab: ${suggestion.policy_lab.note}`] : []),
+        ? [`- policy lab${suggestion.policy_lab.best ? ' (best scenario)' : ''}: ${suggestion.policy_lab.note}`] : []),
       `- evidence: ${facts}`,
     );
     // prd/26 P5: the exported rule carries its items too, not only the count.

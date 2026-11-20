@@ -204,8 +204,13 @@ def _segment_rows(court: ballcourt.BallCourt, cycle: jira.Cycle | None,
     )
     for key in keys:
         left, right = jira.SEGMENT_BOUNDS[key]
-        t1 = cycle.boundaries.get(left) if cycle is not None else None
-        t2 = cycle.boundaries.get(right) if cycle is not None else None
+        t1_raw = cycle.boundaries.get(left) if cycle is not None else None
+        t2_raw = cycle.boundaries.get(right) if cycle is not None else None
+        # prd/46 §1: the ordered boundary prices the segment, the raw one names
+        # the inversion. A boundary the clamp moved is a data quirk, not a
+        # finding, and the shares can never sum past the cycle.
+        t1 = (cycle.segment_bounds.get(left) if cycle is not None else None) or t1_raw
+        t2 = (cycle.segment_bounds.get(right) if cycle is not None else None) or t2_raw
         row: dict = {
             "key": key,
             "label": jira.SEGMENT_LABEL[key],
@@ -234,7 +239,7 @@ def _segment_rows(court: ballcourt.BallCourt, cycle: jira.Cycle | None,
             rows.append(row)
             continue
         row["available"] = True
-        if t2 < t1:
+        if t2_raw < t1_raw:
             # out-of-order data: both boundaries exist, the segment is empty.
             row["inverted"] = True
             row["hours"] = 0.0
@@ -270,14 +275,24 @@ def _segments(court: ballcourt.BallCourt, cycle: jira.Cycle | None,
     active = round(sum(row["active_hours"] for row in measured), 2)
     for row in measured:
         row["share"] = round(row["hours"] / total, 4) if total else 0.0
+    quirks = list(cycle.out_of_order) if cycle is not None else []
+    quirk_by_boundary = {quirk["boundary"]: quirk for quirk in quirks}
+    bounds = (
+        (cycle.segment_bounds or cycle.boundaries) if cycle is not None else {}
+    )
     boundaries = {
         name: {
-            "ts": _iso(cycle.boundaries.get(name)) if cycle is not None else None,
-            "available": bool(cycle is not None and cycle.boundaries.get(name) is not None),
+            "ts": _iso(bounds.get(name)),
+            "available": bool(cycle is not None and bounds.get(name) is not None),
             "reason": (
                 BOUNDARY_REASON[name]
                 if cycle is None or cycle.boundaries.get(name) is None else None
             ),
+            # prd/46 §1: the raw stamp and why the clamp moved it, so the chip
+            # can say "out of order" instead of drawing a different timestamp
+            # with no explanation.
+            "raw_ts": _iso(cycle.boundaries.get(name)) if cycle is not None else None,
+            "out_of_order": quirk_by_boundary.get(name),
         }
         for name in BOUNDARY_ORDER
     }
@@ -335,6 +350,10 @@ def _segments(court: ballcourt.BallCourt, cycle: jira.Cycle | None,
             for gap in (cycle.pr_gaps if cycle is not None else [])
         ],
         "explained_share": round(total / cycle_hours, 4) if cycle_hours else None,
+        # prd/46 §1: raw boundaries the segment order had to clamp, each with
+        # the reason. Empty means every boundary was already in lifecycle order.
+        "out_of_order": quirks,
+        "boundaries_clamped": sorted(quirk_by_boundary),
         "largest": largest["key"] if largest else None,
         "largest_label": largest["label"] if largest else None,
         "largest_hours": largest["hours"] if largest else None,
@@ -797,6 +816,31 @@ def _after_prefix(prefix: str, body: str) -> str:
     return f"{prefix}{body}"
 
 
+def _quirk_note(segments: dict) -> str:
+    """One sentence naming every out-of-order boundary as a data quirk (prd/46 §1)."""
+    quirks = segments.get("out_of_order") or []
+    if not quirks:
+        return ""
+    phrases = []
+    for quirk in quirks:
+        reason = quirk.get("reason")
+        if reason == "before_cycle":
+            phrase = f"the {quirk['boundary']} boundary ({quirk['ts'][:10]}) precedes created"
+        elif reason == "after_cycle":
+            phrase = f"the {quirk['boundary']} boundary ({quirk['ts'][:10]}) follows done"
+        else:
+            phrase = (
+                f"the {quirk['boundary']} boundary ({quirk['ts'][:10]}) "
+                f"precedes {quirk.get('precedes') or 'its predecessor'}"
+            )
+        phrases.append(phrase)
+    return (
+        " Data quirk: " + "; ".join(phrases) +
+        f" — clamped to the cycle ({', '.join(sorted({q['boundary'] for q in quirks}))}), "
+        "so the segment shares sum to at most 100 % and this is not a finding."
+    )
+
+
 def _answer(
     key: str,
     story: jira.Story | None,
@@ -822,6 +866,9 @@ def _answer(
         " The story is still open, so the cycle is right-censored at the snapshot."
         if censored else ""
     )
+    # prd/46 §1: an out-of-order boundary is a data quirk, named as one — never
+    # left to read as a finding ("most of the cycle in sprint → in progress").
+    quirk_note = _quirk_note(segments)
     # prd/36 §3: the end state is stated, and an open PR is disclosed rather
     # than left to a table row.
     prefix = ""
@@ -870,7 +917,7 @@ def _answer(
         body = (
             f"the store cannot say where {key}'s time went because no "
             f"segment has both boundaries — the {boundary} boundary is missing "
-            f"({first['reason']}).{reopen_note}{suffix}"
+            f"({first['reason']}).{reopen_note}{suffix}{quirk_note}"
         )
         return _after_prefix(prefix, body), "unmeasurable"
     total = segments["total_hours"]
@@ -890,7 +937,7 @@ def _answer(
             f"{biggest['label']} ({biggest['hours']:g} h, {percent}%)"
             f"{gap_clause}."
             f"{(' ' + gap_sentence) if gap_sentence else ''}"
-            f"{reopen_note}{suffix}"
+            f"{reopen_note}{suffix}{quirk_note}"
         )
         return _after_prefix(prefix, body), "partial"
     efficiency = segments["efficiency"]
@@ -921,7 +968,7 @@ def _answer(
         f"{span}: most of it went to {biggest['label']} "
         f"({biggest['hours']:g} h, {percent}% of the measured cycle)"
         f"{gap_clause}. {active} of the measured time was active work."
-        f"{(' ' + gap_sentence) if gap_sentence else ''}{suffix}"
+        f"{(' ' + gap_sentence) if gap_sentence else ''}{suffix}{quirk_note}"
     )
     return _after_prefix(prefix, body), "measured"
 

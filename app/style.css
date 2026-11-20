@@ -951,6 +951,25 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .panel .table .c-who { width: 92px; }
 .panel .table .c-dur { width: 96px; }
 .panel .table tr:first-child td { padding-top: 2px; }
+
+/* prd/46 §6: the delivery split must scroll, not paint over its inspector,
+   and the TICKET / PR cell must not collapse to "…". The table keeps a usable
+   minimum width and the wrap owns the horizontal scroll. */
+.table-wrap { min-width: 0; overflow-x: auto; }
+.delivery { min-width: 1040px; }
+.delivery .c-state { width: 132px; }
+.delivery .c-id { width: 270px; }
+.delivery .c-who { width: 150px; }
+.delivery .c-phase { width: 100px; }
+.delivery .c-since { width: 150px; }
+.delivery .c-dur { width: 96px; }
+.delivery .c-impact { width: 110px; }
+/* prd/46 §6: the response table's "6 h 2 min" / "24 (63 d 0 h)" cells were
+   clipped at 1600 px by the panel's 96 px number column. */
+#queue-response { overflow-x: auto; }
+.response-panel .response-table { min-width: 720px; }
+.response-panel .response-table .c-dur { width: 120px; }
+.response-panel .response-table .c-who { width: 180px; }
 .empty-row { padding: 18px 14px; color: var(--text-secondary); font-size: var(--body-font); }
 
 .split {
@@ -1409,6 +1428,8 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
   color: var(--text-tertiary); text-transform: uppercase; font-size: 9.5px; letter-spacing: .06em;
 }
 .ticket-boundary.missing { color: var(--warning); border-bottom: 1px dashed var(--warning-line-dash); }
+.ticket-boundary.quirk { color: var(--warning); border-bottom: 1px dotted var(--warning-line-dash); }
+.ticket-boundary.quirk .quirk-mark { font-weight: 700; }
 .ticket-mini-bar {
   display: flex; height: 10px; width: 100%; min-width: 90px; gap: 1px;
   border-radius: 2px; overflow: hidden;
@@ -1942,6 +1963,7 @@ a.child.ticket-link { color: var(--link); }
 
 /* M5: scope added after the sprint started. */
 .sprint-added { color: var(--warning); }
+.sprint-committed { color: var(--text-secondary); }
 
 /* P9: the epic page's child-story table. */
 .ticket-epic .c-id { width: auto; }

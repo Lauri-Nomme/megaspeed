@@ -138,8 +138,12 @@ export function boundaryChips(payload) {
   if (!entries.length) return '';
   return `<div class="ticket-boundaries">${entries.map(([name, entry]) => (
     entry.available
-      ? `<span class="ticket-boundary mono" title="the ${esc(name)} boundary">
-          <span class="k">${esc(name)}</span>${esc(shortStamp(entry.ts))}</span>`
+      ? `<span class="ticket-boundary mono${entry.out_of_order ? ' quirk' : ''}" title="${
+          entry.out_of_order
+            ? `data quirk: the raw ${esc(name)} boundary is ${esc(entry.raw_ts ? shortStamp(entry.raw_ts) : 'out of order')} (${esc(entry.out_of_order.reason)}), clamped to the cycle`
+            : `the ${esc(name)} boundary`
+        }">
+          <span class="k">${esc(name)}</span>${esc(shortStamp(entry.ts))}${entry.out_of_order ? ' <span class="quirk-mark">!</span>' : ''}</span>`
       : `<span class="ticket-boundary missing mono" title="${esc(entry.reason || 'missing')}">
           <span class="k">${esc(name)}</span>missing</span>`
   )).join('')}</div>`;
@@ -331,8 +335,13 @@ export function benchmarkLine(payload) {
     if (mod >= 11 && mod <= 13) return `${n}th`;
     return `${n}${['th', 'st', 'nd', 'rd'][n % 10] || 'th'}`;
   };
+  // prd/46 §6: rank n of n is the slowest story, not an "87th fastest" —
+  // name the fact rather than a rank that reads as praise.
+  const position = benchmark.rank === benchmark.n
+    ? `slowest of ${benchmark.n}`
+    : `${ordinal(benchmark.rank)} fastest of ${benchmark.n}`;
   const parts = [
-    `${ordinal(benchmark.rank)} of ${benchmark.n} fastest`,
+    position,
     benchmark.median_hours == null ? '' : `median ${segmentHours(benchmark.median_hours)}`,
     benchmark.points_median_hours == null || benchmark.points == null
       ? ''

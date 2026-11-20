@@ -367,9 +367,10 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
           <button type="button" class="link" data-go="queue">Queue view →</button></div>
         ${counted.length ? `<table class="table compact"><tbody>${counted.slice(0, 8).map((stream) => `
           <tr><td class="c-who" data-label=""><span class="mono">${esc(stream.id)}</span></td>
-            <td class="c-state" data-label="diagnosis">${pill(stream.summary.diagnosis, `≈ ${stream.summary.diagnosis}`, 'queue wait, relative to the median wait in this window — not calendar utilisation')}</td>
+            <td class="c-state" data-label="diagnosis">${pill(stream.summary.diagnosis, `≈ ${stream.summary.diagnosis}`, 'queue wait (person-hours from added as reviewer → answer, the peer phase included) relative to the median — not calendar utilisation and not the sentinel gate wait')}</td>
             <td class="c-dur num" data-label="mean wait">≈${esc(fmtHours(stream.summary.mean_wait_hours))}</td></tr>`).join('')}</tbody></table>${
-          counted.length > 8 ? `<p class="panel-note">showing the 8 longest of ${counted.length}</p>` : ''}`
+          counted.length > 8 ? `<p class="panel-note">showing the 8 longest of ${counted.length}</p>` : ''}${
+          people ? '<p class="panel-note">mean wait here is person-hours from “added as reviewer” to the answer — a different metric from the sentinel wait (Queue → response time: last peer answer → first response).</p>' : ''}`
     : '<div class="empty-row">No measured waits in this window.</div>'}
       </section>
     </div>

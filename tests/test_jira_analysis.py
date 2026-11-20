@@ -423,6 +423,44 @@ class WaitingTimeTests(StoreCase):
         self.assertTrue(metric["available"])
         self.assertEqual(metric["stories"], 1)
 
+    def test_an_out_of_order_boundary_is_clamped_and_flagged_as_a_quirk(self):
+        """prd/46 §1: DEL-185's sprint starts before the story was created.
+
+        Drawn literally, ``sprint → in progress`` covered time before the cycle
+        and the shares summed to 200 %. The clamp makes the segments tile the
+        cycle (≤ 100 %) and the boundary is named as a data quirk, not a finding.
+        """
+        fx = Fixture()
+        fx.sprint(1, T0, end=T0 + timedelta(days=14),
+                  closed=T0 + timedelta(days=14))
+        fx.story("ENG-1", T0 + timedelta(hours=100), points=3, state="done",
+                 closed=T0 + timedelta(hours=200))
+        # the membership event is projected at the sprint's start, 90 h *before*
+        # the story existed — exactly the DEL-185 shape
+        fx.add_to_sprint("ENG-1", T0 + timedelta(hours=10), 1, at_start=True)
+        fx.pointed("ENG-1", T0 + timedelta(hours=110), 3)
+        fx.status("ENG-1", T0 + timedelta(hours=120), "in_progress")
+        fx.status("ENG-1", T0 + timedelta(hours=200), "done",
+                  from_status="in_progress")
+        metric = self.metric(fx, "waiting_time_decomposition")
+        self.assertTrue(metric["available"])
+        self.assertLessEqual(metric["explained_share"], 1.0)
+        self.assertLessEqual(metric["total_hours"], metric["cycle_hours"])
+        self.assertEqual(metric["out_of_order_stories"], 1)
+        self.assertEqual(metric["out_of_order_examples"], ["ENG-1"])
+        # the raw sprint boundary (T0 + 10 h) predates created (+100 h); the
+        # segment is measured inside the cycle, never from the earlier stamp.
+        self.assertLessEqual(metric["segments"]["sprint_in_progress"]["hours"], 20.0)
+        court, data, window, _t, _b, _s = self.load(fx)
+        cycle = jira.cycle_for(jira.story_for(data, "ENG-1"))
+        self.assertEqual(len(cycle.out_of_order), 1)
+        quirk = cycle.out_of_order[0]
+        self.assertEqual(quirk["boundary"], "sprint")
+        self.assertEqual(quirk["reason"], "before_cycle")
+        self.assertGreaterEqual(
+            cycle.segment_bounds["sprint"], cycle.boundaries["created"]
+        )
+
     def test_a_pr_opened_before_the_ticket_started_is_inverted_not_negative(self):
         fx = balanced_fixture()
         # move the PR open to +25, i.e. before the story moved to in progress
@@ -642,8 +680,8 @@ class SprintDeliveryTests(StoreCase):
         self.assertEqual(suggestion["metric"], "sprint_delivery")
         self.assertEqual(
             suggestion["title"],
-            "S1 delivered 1 of 3 committed stories (33%) by its close — "
-            "1 finished late, 1 still open",
+            "S1 delivered 1 of 3 committed stories (33%) by its close "
+            "(30% by points) — 1 finished late, 1 still open",
         )
         self.assertEqual(suggestion["severity"], "critical")
         self.assertEqual(suggestion["impact_hours"], 48.0)
@@ -651,6 +689,40 @@ class SprintDeliveryTests(StoreCase):
         self.assertEqual(suggestion["evidence"]["target_share"], 0.8)
         # prd/41 B8: the headline names S1, so the drill-down is S1's items
         self.assertEqual(suggestion["scope"], {"kind": "sprint", "sprint": 1})
+
+    def test_committed_is_the_scope_at_the_sprint_start(self):
+        """prd/46 §4: a story added mid-sprint was adopted, not committed."""
+        fx = Fixture()
+        fx.sprint(1, T0, end=T0 + timedelta(days=14),
+                  closed=T0 + timedelta(days=14))
+        # three stories in the plan at the start, all delivered by the close
+        for index, key in enumerate(("ENG-1", "ENG-2", "ENG-3"), 1):
+            fx.story(key, T0, points=1, state="done",
+                     closed=T0 + timedelta(days=5))
+            fx.add_to_sprint(key, T0, 1, at_start=True)
+            fx.status(key, T0 + timedelta(days=1), "in_progress")
+            fx.status(key, T0 + timedelta(days=5), "done",
+                      from_status="in_progress")
+        # two stories adopted mid-sprint; neither finished by the close
+        for key in ("ENG-4", "ENG-5"):
+            fx.story(key, T0, points=1)
+            fx.add_to_sprint(key, T0 + timedelta(days=5), 1)
+        metric = self.metric(fx, "sprint_delivery")
+        row = metric["sprints"][0]
+        self.assertEqual(row["stories"], 5)
+        self.assertEqual(row["committed"], 3)
+        self.assertEqual(row["adopted"], 2)
+        self.assertEqual(row["committed_points"], 3)
+        self.assertEqual(row["adopted_points"], 2)
+        self.assertEqual(row["done_by_end"], 3)
+        self.assertEqual(metric["committed"], 3)
+        self.assertEqual(metric["adopted"], 2)
+        suggestion = by_id(self.payload(fx), "sprint-on-time")
+        self.assertIsNotNone(suggestion)
+        self.assertIn("only 3 were committed at the start", suggestion["title"])
+        self.assertIn("2 adopted mid-sprint", suggestion["title"])
+        self.assertEqual(suggestion["evidence"]["committed"], 3)
+        self.assertEqual(suggestion["evidence"]["adopted"], 2)
 
     def test_the_drill_down_matches_the_headline_sprint(self):
         """prd/41 B8: rule 04 said "S1 …" but listed S1 + S2's 3 items."""
@@ -789,18 +861,20 @@ class WorklogTests(StoreCase):
         self.assertEqual(metric["logged_to_active_ratio"], 0.4)
         self.assertEqual(metric["logged_to_cycle_ratio"], round(4 / 90, 2))
 
-    def test_emits_the_late_logging_template(self):
+    def test_the_headline_is_the_effort_gap_and_lateness_is_secondary(self):
+        """prd/46 §5: lateness is the minor problem; the gap is the headline."""
         payload = self.payload(self.fixture())
-        suggestion = by_id(payload, "jira-worklog-noise")
+        suggestion = by_id(payload, "jira-worklog-mismatch")
         self.assertIsNotNone(suggestion)
         self.assertEqual(
-            suggestion["title"],
-            "Logging is 16.8 days late on average — don't trust the logged hours",
+            suggestion["title"], "Logged hours differ from active PR time by 0.4×"
         )
-        self.assertEqual(suggestion["severity"], "critical")   # ≥ 7 days
-        self.assertEqual(suggestion["impact_hours"], 0.0)      # measurement, not wait
-        self.assertEqual(suggestion["evidence"]["untrusted_hours"], 1.0)
-        self.assertEqual(suggestion["evidence"]["late_share"], 0.25)
+        self.assertEqual(suggestion["severity"], "warning")
+        self.assertEqual(suggestion["evidence"]["ratio"], 0.4)
+        # lateness is present, but as a secondary line on the same card
+        self.assertIn("secondary", suggestion["evidence"]["lateness"])
+        self.assertIn("16.8 d mean delay", suggestion["evidence"]["lateness"])
+        self.assertIsNone(by_id(payload, "jira-worklog-noise"))
 
     def test_a_large_mismatch_emits_the_ratio_template(self):
         payload = self.payload(self.fixture())
@@ -812,7 +886,37 @@ class WorklogTests(StoreCase):
         self.assertEqual(suggestion["severity"], "warning")
         self.assertEqual(suggestion["evidence"]["ratio"], 0.4)
 
-    def test_same_day_logging_with_matching_hours_is_silent(self):
+    def test_the_points_correlation_leads_the_headline(self):
+        """prd/46 §5: r(points, logged) is the honesty signal, not lateness."""
+        fx = Fixture()
+        fx.sprint(1, T0, end=T0 + timedelta(days=14))
+        for index, (points, hours) in enumerate(
+            ((1, 4.0), (2, 4.0), (3, 3.0), (5, 5.0), (8, 4.0), (13, 4.0)), 1
+        ):
+            key = f"ENG-{index}"
+            fx.story(key, T0, points=points, state="done",
+                     closed=T0 + timedelta(hours=80))
+            fx.status(key, T0 + timedelta(hours=10), "in_progress")
+            fx.status(key, T0 + timedelta(hours=80), "done",
+                      from_status="in_progress")
+            # logged hours fall as the story grows: the inverse of effort
+            fx.worklog(key, T0 + timedelta(hours=20), hours, delay_hours=1.0,
+                       bucket="same_day")
+        payload = self.payload(fx)
+        metric = payload["metrics"]["worklog_cross_check"]
+        self.assertEqual(metric["points_logged_n"], 6)
+        self.assertLess(abs(metric["points_logged_correlation"]), 0.3)
+        suggestion = by_id(payload, "jira-worklog-mismatch")
+        self.assertIsNotNone(suggestion)
+        self.assertIn("don't track story points", suggestion["title"])
+        self.assertIn(
+            f"r = {metric['points_logged_correlation']:g}",
+            suggestion["title"],
+        )
+        self.assertEqual(suggestion["evidence"]["points_logged_n"], 6)
+        self.assertIn("secondary", suggestion["evidence"]["lateness"])
+
+    def test_a_clean_store_with_timely_matching_logs_is_silent(self):
         fx = Fixture()
         fx.sprint(1, T0, end=T0 + timedelta(days=14))
         fx.story("ENG-1", T0, state="done", closed=T0 + timedelta(hours=90))

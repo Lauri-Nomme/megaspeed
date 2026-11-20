@@ -81,9 +81,18 @@ test('prd/42 M2: the ticket cycle is stated against its cohort', () => {
   };
   const stats = ticketStats(payload);
   assert.match(stats, /data-benchmark-rank="73"/);
-  assert.match(stats, /73rd of 87 fastest/);
+  assert.match(stats, /73rd fastest of 87/);
   assert.match(stats, /median 89\.7 h/);
   assert.match(stats, /8-pt median 109 h/);
+  // prd/46 §6: the last-ranked story is "slowest of N", not "87th fastest"
+  const slowest = ticketStats({
+    key: 'DEL-155', story: { points: 5 },
+    segments: { cycle_hours: 200, measured: 8, rows: [], largest_label: 'review rounds', largest_share: 0.62 },
+    benchmark: { available: true, rank: 87, n: 87, median_hours: 90.1, points: 5, points_median_hours: 80 },
+    pr_count: 2,
+  });
+  assert.match(slowest, /slowest of 87/);
+  assert.doesNotMatch(slowest, /87th/);
   assert.equal(benchmarkLine({ benchmark: { available: false } }), '');
 });
 
@@ -112,6 +121,7 @@ test('prd/42 M5: a sprint names scope added after the start and the carry destin
       band_end: '2026-10-07T00:00:00Z', start: '2026-09-11T00:00:00Z',
       story_count: 30, points: 118, done_by_end: 15, done_late: 12,
       never_done: 3, added_after_start: 25, added_after_start_stories: ['DEL-153'],
+      committed: 5, adopted: 25, points_share: 0.44,
       carried_in: [], carried_out: ['DEL-153'],
     }],
     carry_over: {
@@ -122,7 +132,9 @@ test('prd/42 M5: a sprint names scope added after the start and the carry destin
       never_reappeared: 1,
     },
   }, { focus: 2 });
-  assert.match(html, /\+25 after start/);
+  assert.match(html, /25 adopted/);
+  assert.match(html, /5 committed at start/);
+  assert.doesNotMatch(html, /\+25 after start/);
   assert.match(html, /never re-committed/);
   assert.match(html, /never reappear in the next sprint/);
 });

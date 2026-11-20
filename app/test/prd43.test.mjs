@@ -160,6 +160,11 @@ test('the response table says the sentinel clock starts at the last peer', () =>
     response: {
       reviewer_median_hours: 2.0,
       sentinel_after_peers: true,
+      sentinel_wait: {
+        definition: 'sentinel wait = last peer answer → the sentinel\'s first response (approval, needs-work or comment), priced on the sentinel\'s calendar; the gate is precedence-aware, so the peer phase is not charged to them',
+        median_hours: 6.0, n: 107, gate_aware: true,
+      },
+      never_excluded: { closed_prs: 16, gate_not_open: 5 },
       people: [
         {
           person: 'FrMo', role: 'sentinel', median_hours: 6.0, mean_hours: 6.4,
@@ -179,6 +184,10 @@ test('the response table says the sentinel clock starts at the last peer', () =>
   assert.match(html, /×3\.0/);                    // 6 h vs a 2 h peer median
   assert.match(html, /oldest open request 19 d 0 h/);   // the forgotten tail
   assert.match(html, /\(19 d 0 h\)/);              // and it is on screen, not only in a title
+  // prd/46 §2: one canonical number, its definition stated, unowed requests named
+  assert.match(html, /sentinel wait<\/b> \(the one canonical number\)/);
+  assert.match(html, /median 6 h over 107 requests/);
+  assert.match(html, /21 unowed requests excluded/);
 });
 
 /* ---- 5. one PR, one set of numbers / sprint delivery ------------------- */

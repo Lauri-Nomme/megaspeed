@@ -88,6 +88,18 @@ test('prd/25: the ticket page is a route, and keys are links everywhere', () => 
   assert.match(read('rules.js'), /linkifyTickets/);
 });
 
+/* prd/46 §6: layout papercuts cannot come back — the delivery table scrolls
+ * inside its column (it used to paint over the inspector and clip TICKET / PR),
+ * and the queue's response numbers keep a wide enough column. */
+test('prd/46 §6: the delivery table and response numbers are not clipped', () => {
+  const css = read('style.css');
+  assert.match(css, /\.table-wrap \{[^}]*overflow-x: auto/);
+  assert.match(css, /\.delivery \{ min-width: 1040px; \}/);
+  assert.match(css, /\.delivery \.c-id \{ width: 270px; \}/);
+  assert.match(css, /\.response-panel \.response-table \.c-dur \{ width: 120px; \}/);
+  assert.match(css, /#queue-response \{ overflow-x: auto; \}/);
+});
+
 test('B10: a zero-event timeline has an empty state and scopes are validated', () => {
   const main = read('main.js');
   assert.match(main, /function updateTimelineEmpty/);
