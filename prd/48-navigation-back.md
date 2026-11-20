@@ -15,7 +15,13 @@ entry). Keep the deep-link URL contract (`?tenant=…&view=…&tf=…&scope=…`
 existing "Back returns from a ticket to the page it opened from" behaviour. `popstate`/`hashchange`
 must be idempotent (the prd/32 applyRoute already is).
 
+**YAH ("You Are Here") bar** — a breadcrumb strip under the top bar showing the current location path
+(`<tenant> · <view> · <ticket> · <PR>`), each segment clickable so the user can jump up the path (not
+just one step back). It is the *location* (where am I), distinct from the Back button's *history* (where
+was I); the two coexist. On phone it collapses to the nearest ancestors (tenant + view + current).
+
 ## Definition of done
 Back from a scoped view returns to the previous view (not the previous site); the in-app Back button
-does the same; a fresh deep link still lands correctly; covered by node tests (history entries + Back
-button). No regression to the shareable-URL or ticket-route behaviour.
+does the same; the YAH bar shows the path and each segment jumps to that level; a fresh deep link still
+lands correctly; covered by node tests (history entries + Back button + YAH segments). No regression to
+the shareable-URL or ticket-route behaviour.
