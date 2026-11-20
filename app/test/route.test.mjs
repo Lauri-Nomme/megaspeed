@@ -166,10 +166,12 @@ test('P-2: the page wires the title, the URL and the ticket route', () => {
   assert.match(main, /document\.title = pageTitle\(/);
   assert.match(main, /function syncTitle\(\)/);
   assert.match(main, /syncTitle\(\);\n  syncUrl\(\);/); // both follow renderPage
-  // P-2: serialise on every render, replace (never reload), push only a ticket
-  assert.match(main, /function syncUrl\(\{ push = false \} = \{\}\)/);
-  assert.match(main, /history\.replaceState\(null, '', href\)/);
-  assert.match(main, /history\.pushState\(null, '', href\)/);
+  // P-2 + prd/48: serialise on every render; a new view state pushes an entry
+  // (so Back walks the app), a refinement replaces, and a restore never pushes.
+  assert.match(main, /function syncUrl\(\)/);
+  assert.match(main, /planSync\(nav, \{/);
+  assert.match(main, /history\.replaceState\(\{ ms: plan\.index \}, '', plan\.href\)/);
+  assert.match(main, /history\.pushState\(\{ ms: plan\.index \}, '', plan\.href\)/);
   assert.match(main, /function routeHref\(\)/);
   assert.match(main, /serializeRoute\(\{/);
   assert.match(main, /parseRoute\(location\.search, location\.hash\)/);

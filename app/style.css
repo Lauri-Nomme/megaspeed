@@ -172,6 +172,10 @@
   --rule-action: 12.5px;
   --stat-n: 17px;
   --topbar-h: 40px;
+  /* prd/48: the YAH strip under the top bar. JS keeps this in step with the
+   * measured height (0 when the strip is hidden), so the sticky offsets below
+   * never guess. */
+  --yah-h: 30px;
 }
 
 /* --- light theme (prd/10 §3.1) -----------------------------------------
@@ -455,6 +459,94 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .status.live::before { background: var(--healthy); }
 .status.stale::before { background: var(--warning); }
 
+/* --- in-app history: Back (prd/48) -------------------------------------
+ * A small arrow beside the brand. It is a *history* control: it pops one
+ * in-app entry, and it is disabled at the first one (nothing behind it in the
+ * app). It never leaves the site — that is what the browser's own Back is for
+ * once the stack runs out.
+ */
+.history-back {
+  width: var(--control-h);
+  min-width: var(--control-h);
+  padding: 0;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-control);
+}
+.history-back:hover:not(:disabled) { color: var(--text-primary); background: var(--bg-hover); }
+.history-back:disabled {
+  color: var(--text-tertiary);
+  background: transparent;
+  opacity: .4;
+  cursor: default;
+}
+
+/* --- YAH ("You Are Here") bar (prd/48) ----------------------------------
+ * The location path, under the top bar: <tenant> · <view> · <ticket> · <PR>.
+ * Distinct from the Back button's history. It is sticky so the path stays
+ * readable while a long list scrolls; the provenance line slides under it.
+ */
+.yah {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: var(--yah-h);
+  padding: 0 14px;
+  background: var(--bg-app);
+  border-bottom: 1px solid var(--border-hairline);
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  position: sticky;
+  top: var(--topbar-h);
+  z-index: 7;
+}
+.yah[hidden] { display: none; }
+.yah-k {
+  flex: 0 0 auto;
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--text-tertiary);
+}
+.yah-path {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+.yah-path > * { flex: 0 1 auto; min-width: 0; }
+.yah-sep { color: var(--border-control); flex: 0 0 auto; }
+.yah-step {
+  height: 20px;
+  min-height: 20px;
+  padding: 0 6px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-control);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.yah-step:hover {
+  color: var(--text-primary);
+  background: var(--bg-hover);
+  border-color: var(--border-hairline);
+}
+.yah-here {
+  color: var(--text-primary);
+  font-weight: 500;
+  flex: 0 0 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* --- tenant switcher (prd/12): the dataset the whole app is talking to ---
  * A workspace-style pill, not a <select>: the active dataset is context, and
  * its PR/event counts are what tell two environments apart at a glance.
@@ -520,8 +612,8 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
   flex-direction: column;
   gap: 16px;
   position: sticky;
-  top: var(--topbar-h);
-  height: calc(100vh - var(--topbar-h));
+  top: calc(var(--topbar-h) + var(--yah-h));
+  height: calc(100vh - var(--topbar-h) - var(--yah-h));
   overflow-y: auto;
 }
 .nav-group { display: flex; flex-direction: column; gap: 2px; }
@@ -574,7 +666,7 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
   border-top: 1px solid var(--border-hairline);
   border-bottom: 1px solid var(--border-hairline);
   position: sticky;
-  top: var(--topbar-h);
+  top: calc(var(--topbar-h) + var(--yah-h));
   z-index: 6;
 }
 .meta .dot { color: var(--border-control); }
@@ -1088,7 +1180,7 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 }
 .drawer {
   position: fixed;
-  top: var(--topbar-h);
+  top: calc(var(--topbar-h) + var(--yah-h));
   right: 0;
   bottom: 0;
   width: 384px;
@@ -1528,6 +1620,15 @@ a.child.ticket-link { color: var(--link); }
   .nav-toggle { order: 1; }
   .brand { order: 2; font-size: 0; }
   .brand::before { margin-right: 0; }
+  /* prd/48: Back is a first-row control, right beside the brand. */
+  .history-back { order: 2; width: 44px; min-width: 44px; height: 44px; font-size: 16px; }
+  /* The YAH strip is a compact line under the (already two-row) top bar: the
+   * phone keeps tenant + view + current (renderYah collapses the path), so it
+   * scrolls with the page instead of sticking and eating more of the screen. */
+  .yah { position: static; height: auto; min-height: 38px; padding: 2px 10px; gap: 6px; }
+  .yah-k { display: none; }
+  .yah-step { height: 34px; min-height: 34px; padding: 0 8px; font-size: 12px; }
+  .yah-here { font-size: 12px; }
   /* the theme toggle stays on the first row, next to density: it is global
      context, and a phone must be able to reach it without opening a menu */
   .theme-toggle { order: 3; width: 44px; min-width: 44px; font-size: 16px; }

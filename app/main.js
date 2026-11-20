@@ -48,6 +48,8 @@ import {
   bindLongPress, hintText, initMobile, isPhone, phoneEntryLanes, phoneEntryPage,
 } from '/mobile.js';
 import { pageTitle, parseRoute, serializeRoute, ticketFromHash } from '/route.js';
+import { createHistory, planSync, routeKey } from '/history.js';
+import { collapseYah, yahPath } from '/yah.js';
 import {
   DEFAULT_THEME, applyTheme, color, normalizeTheme, otherTheme, readTheme,
   refreshPalette, storeTheme, themeGlyph, themeLabel,
@@ -143,6 +145,13 @@ const state = {
   snapshotAge: null,
   emptyReason: '',
 };
+
+/* prd/48: the in-app entry stack (see history.js). Every distinct view state
+ * is one entry, so the browser Back button and the top-bar Back button both
+ * walk the app's own steps. `restoringRoute` marks the popstate/hashchange/boot
+ * path: the browser is the one that moved, so nothing may be pushed. */
+const nav = createHistory();
+let restoringRoute = false;
 
 const timeline = new Timeline({
   canvas: $('timeline'),
@@ -389,7 +398,12 @@ function withTenant(url) {
 /** Keep the sticky table header / detail panel below the (wrapping) meta line. */
 function syncChromeHeight() {
   const meta = $('meta');
-  const bottom = 40 + meta.offsetHeight + 2;
+  const yah = $('yah');
+  // prd/48: the YAH strip is sticky chrome on a desktop; on a phone it scrolls
+  // with the page, so it must not push the sticky table headers down.
+  const yahH = yah && !yah.hidden && !isPhone() ? yah.offsetHeight : 0;
+  document.documentElement.style.setProperty('--yah-h', `${yahH}px`);
+  const bottom = 40 + yahH + meta.offsetHeight + 2;
   document.documentElement.style.setProperty('--meta-bottom', `${bottom}px`);
 }
 
@@ -425,12 +439,12 @@ function flashStatus(text, cls = 'live', ms = 2500) {
  * the href and one writes it, so every navigation path — tenant switch, view
  * change, ticket, scope, timeframe — updates the same string. `#ticket/KEY`
  * stays the ticket route; the query carries what used to be session-local. */
-function routeHref() {
+function routeFields() {
   // prd/42 P10: the sprint lens is a timeline filter. A Queue/Blocking/Rules
   // URL must not keep `sprint=2&from=&to=` describing a view that ignores it.
   const usesSprint = state.page === 'timeline';
   const sprint = usesSprint ? sprintRange() : { start: null, end: null };
-  return serializeRoute({
+  return {
     tenant: state.tenant,
     // A ticket page without its key is a transient boot state, not a place to
     // link: omit the view rather than encode an empty ticket page.
@@ -443,22 +457,87 @@ function routeHref() {
     sprint: usesSprint ? state.sprint : null,
     from: Number.isFinite(sprint.start) ? sprint.start : null,
     to: Number.isFinite(sprint.end) ? sprint.end : null,
+  };
+}
+
+function routeHref() {
+  return serializeRoute({
+    ...routeFields(),
     // dark is the default, so only a light view puts anything in the URL: an
     // existing dark link is byte-identical to what it was before themes.
     theme: state.theme === 'light' ? 'light' : null,
   });
 }
 
-/* replaceState, not a reload and not a new entry: the bar follows the view the
- * user is already looking at. Only opening a ticket pushes, so the back button
- * still returns from a ticket to the page it was opened from. */
-function syncUrl({ push = false } = {}) {
+/** The canonical URL of the state on screen, including the path. */
+function locationHref() {
+  return `${location.pathname}${location.search}${location.hash}`;
+}
+
+/* prd/48: the address bar records history instead of overwriting it. Every
+ * distinct view state — view, tenant, scope, timeframe, sprint lens — is a
+ * `pushState` entry, so Back walks the app instead of leaving it. A restore
+ * (browser Back/Forward, a pasted hash, boot) never pushes: the browser moved,
+ * and `planSync` rewrites the entry instead. `replaceState` stays for the
+ * refinements of the entry the user is already on (a sprint's measured
+ * `from`/`to`, the theme, the canonical spelling of a link). */
+function syncUrl() {
   if (typeof history === 'undefined' || typeof location === 'undefined') return;
-  const href = `${location.pathname}${routeHref()}`;
-  const current = `${location.pathname}${location.search}${location.hash}`;
-  if (href === current) return;
-  if (push) history.pushState(null, '', href);
-  else history.replaceState(null, '', href);
+  const plan = planSync(nav, {
+    href: `${location.pathname}${routeHref()}`,
+    current: locationHref(),
+    key: routeKey(routeFields()),
+    restoring: restoringRoute,
+  });
+  if (plan.action === 'push') history.pushState({ ms: plan.index }, '', plan.href);
+  else if (plan.action === 'replace') history.replaceState({ ms: plan.index }, '', plan.href);
+  renderBack();
+}
+
+/* prd/48: the first paint is step 0, not a navigation. Seeding the stack with
+ * the URL the browser already has keeps the in-app Back disabled until the user
+ * actually moves — a fresh deep link lands with nothing to pop. */
+function seedHistory() {
+  if (typeof history === 'undefined' || typeof location === 'undefined') return;
+  const href = locationHref();
+  nav.seed(href, routeKey(routeFields()));
+  history.replaceState({ ms: 0 }, '', href);
+  renderBack();
+}
+
+/* prd/48: the top-bar Back button. It is disabled at the first entry — the one
+ * place the app can safely say "there is nothing behind you here". */
+function renderBack() {
+  const button = $('history-back');
+  if (!button) return;
+  const can = nav.canBack();
+  const steps = Math.max(0, nav.index);
+  button.disabled = !can;
+  button.setAttribute('aria-disabled', can ? 'false' : 'true');
+  button.title = can
+    ? `back — ${steps} step${steps === 1 ? '' : 's'} back in this app`
+    : 'back — this is the first step in this app';
+  button.setAttribute('aria-label', button.title);
+}
+
+/* One in-app step back. The browser owns the entries, so this walks the real
+ * history and `popstate` restores the previous state through `applyRoute()` —
+ * the same path the browser's own Back button takes. */
+function inAppBack() {
+  if (!nav.canBack()) return;
+  history.back();
+}
+
+/* prd/48: the browser moved to one of our entries. Trust its index (tagged as
+ * `{ ms }` on every push/replace); an entry we cannot place becomes the first
+ * one, so the stack never claims a step it did not record. */
+function restoreFromLocation(event) {
+  if (typeof location === 'undefined') return;
+  const entryState = event && event.state;
+  const index = entryState && Number.isFinite(entryState.ms) ? entryState.ms : -1;
+  const route = parseRoute(location.search, location.hash);
+  nav.restore(index, locationHref(), routeKey(route));
+  renderBack();
 }
 
 /* P-1: the tab title names the tenant and the view, never the static title. */
@@ -471,6 +550,70 @@ function syncTitle() {
     ticket: state.page === 'ticket' ? state.ticketKey : null,
     title: page ? page.title : null,
   });
+}
+
+// ---------------------------------------------------------------------- YAH
+/* prd/48: the YAH bar is *location* — `<tenant> · <view> · <ticket> · <PR>` —
+ * beside the Back button's *history*. On a ticket page the view level is the
+ * view it was opened from, so the path is also the way back to that list. */
+function drawerPr() {
+  const entity = state.drawerEntity;
+  if (!entity) return null;
+  const pr = entity.pr || entity.row || entity;
+  if (!pr || pr.number == null) return null;
+  return { number: pr.number, repo: pr.repo || pr.repo_short || null };
+}
+
+function yahSteps() {
+  const onTicket = state.page === 'ticket' && Boolean(state.ticketKey);
+  const view = onTicket ? (state.ticketFrom || 'overview') : state.page;
+  return yahPath({
+    tenant: state.tenant,
+    view,
+    viewLabel: PAGES[view] ? PAGES[view].title : view,
+    ticket: onTicket ? state.ticketKey : null,
+    pr: drawerPr(),
+    timeframe: state.timeframe,
+    scope: state.scope,
+    sprint: state.page === 'timeline' ? state.sprint : null,
+  });
+}
+
+function renderYah() {
+  const bar = $('yah');
+  const path = $('yah-path');
+  if (!bar || !path) return;
+  const steps = yahSteps();
+  const shown = isPhone() ? collapseYah(steps) : steps;
+  bar.hidden = shown.length === 0;
+  path.innerHTML = shown.map((step, index) => {
+    const label = `<span class="yah-label">${esc(step.label)}</span>`;
+    const sep = index ? '<span class="yah-sep" aria-hidden="true">·</span>' : '';
+    if (index === shown.length - 1) {
+      return `${sep}<span class="yah-here" aria-current="location" title="${esc(step.title)}">${label}</span>`;
+    }
+    return `${sep}<button type="button" class="yah-step" data-yah="${esc(step.level)}"`
+      + ` data-yah-href="${esc(step.href)}" title="${esc(step.title)}">${label}</button>`;
+  }).join('');
+  syncChromeHeight();
+}
+
+/* A jump up the path is a new step (never Back): the history keeps both where
+ * the user was and where they went. */
+async function yahJump(level) {
+  closeDrawer();
+  if (level === 'tenant') {
+    await showPage('overview');
+    return;
+  }
+  if (level === 'view') {
+    const view = state.page === 'ticket' ? (state.ticketFrom || 'overview') : state.page;
+    await showPage(view);
+    return;
+  }
+  if (level === 'ticket' && state.ticketKey) {
+    await openTicket(state.ticketKey);
+  }
 }
 
 // -------------------------------------------------------------------- views
@@ -524,9 +667,10 @@ function renderPage() {
   $('page-question').textContent = PAGES[page].question;
   // P-1/P-2: the tab and the address bar follow every render, so no navigation
   // path (tenant switch, scope, timeframe, drawer) can leave either one
-  // describing the previous view.
+  // describing the previous view. prd/48: the YAH strip follows too.
   syncTitle();
   syncUrl();
+  renderYah();
   syncLevelSelects();
   renderScopeBanner();
   setHonesty('');
@@ -1145,7 +1289,7 @@ function renderTicketPage() {
   }
 }
 
-async function openTicket(key, { push = true } = {}) {
+async function openTicket(key) {
   const wanted = ticketKey(key);
   if (!wanted) return;
   if (state.page !== 'ticket') {
@@ -1156,11 +1300,11 @@ async function openTicket(key, { push = true } = {}) {
   state.ticket = null;
   state.ticketError = null;
   state.page = 'ticket';
-  // pushState (not location.hash) so opening a ticket does not fire the
-  // hashchange listener and fetch the same page twice. The URL is the whole
-  // route — tenant + view in the query, the key in the hash (P-2) — and a
-  // back/forward restore passes `push: false` so history is not rewritten.
-  syncUrl({ push });
+  // prd/48: the ticket is a history entry of its own — the key changed, so the
+  // render's syncUrl pushes. A back/forward restore goes through `applyRoute()`
+  // with `restoringRoute` set, so the entry the browser already holds is
+  // rewritten instead of duplicated. renderPage() writes the whole route —
+  // tenant + view in the query, the key in the hash (P-2).
   renderPage();
   try {
     await ensureData('ticket');
@@ -1176,50 +1320,56 @@ async function openTicket(key, { push = true } = {}) {
 
 /* P-2: back/forward, and a `#ticket/KEY` typed or pasted into the bar, land
  * here. Only state that actually differs is moved, so a popstate followed by
- * its own hashchange is a no-op the second time and history is never pushed
- * from inside a restore. */
+ * its own hashchange is a no-op the second time. prd/48: the whole restore is
+ * flagged, so no render inside it can push a duplicate entry. */
 async function applyRoute() {
   if (typeof location === 'undefined') return;
   const route = parseRoute(location.search, location.hash);
-  // prd/10 §3.1: a `?theme=` link is a destination like any other; an absent
-  // parameter keeps the stored preference (dark is the default either way).
-  if (route.theme && route.theme !== state.theme) setTheme(route.theme);
-  if (route.tenant && route.tenant !== state.tenant) {
-    await setTenant(route.tenant, { silent: true });
-  }
-  if (route.scope
-    && (route.scope.kind !== state.scope.kind || route.scope.value !== state.scope.value)) {
-    setScope(route.scope.kind, route.scope.value, { silent: true });
-  }
-  if (route.timeframe && TIMEFRAMES[route.timeframe] && route.timeframe !== state.timeframe) {
-    setTimeframe(route.timeframe);
-  }
-  // prd/37 §4: a sprint link restores the filter, the band and the range.
-  if (route.sprint != null) {
-    if (state.sprints) {
-      if (!focusSprint(route.sprint, { start: route.from, end: route.to, sync: false })) {
-        state.sprint = null;
+  const wasRestoring = restoringRoute;
+  restoringRoute = true;
+  try {
+    // prd/10 §3.1: a `?theme=` link is a destination like any other; an absent
+    // parameter keeps the stored preference (dark is the default either way).
+    if (route.theme && route.theme !== state.theme) setTheme(route.theme);
+    if (route.tenant && route.tenant !== state.tenant) {
+      await setTenant(route.tenant, { silent: true });
+    }
+    if (route.scope
+      && (route.scope.kind !== state.scope.kind || route.scope.value !== state.scope.value)) {
+      setScope(route.scope.kind, route.scope.value, { silent: true });
+    }
+    if (route.timeframe && TIMEFRAMES[route.timeframe] && route.timeframe !== state.timeframe) {
+      setTimeframe(route.timeframe);
+    }
+    // prd/37 §4: a sprint link restores the filter, the band and the range.
+    if (route.sprint != null) {
+      if (state.sprints) {
+        if (!focusSprint(route.sprint, { start: route.from, end: route.to, sync: false })) {
+          state.sprint = null;
+        }
+      } else {
+        // the payload is not loaded yet; load() applies it once the bands exist
+        state.sprint = route.sprint;
       }
-    } else {
-      // the payload is not loaded yet; load() applies it once the bands exist
-      state.sprint = route.sprint;
+    } else if (state.sprint != null) {
+      state.sprint = null;
+      timeline.setSprintFocus(null);
+      renderSprintStrip();
     }
-  } else if (state.sprint != null) {
-    state.sprint = null;
-    timeline.setSprintFocus(null);
-    renderSprintStrip();
-  }
-  if (route.ticket) {
-    if (state.page !== 'ticket' || state.ticketKey !== route.ticket) {
-      await openTicket(route.ticket, { push: false });
+    if (route.ticket) {
+      if (state.page !== 'ticket' || state.ticketKey !== route.ticket) {
+        await openTicket(route.ticket);
+      }
+      return;
     }
-    return;
+    if (state.page === 'ticket') {
+      await showPage(route.view || state.ticketFrom || 'overview');
+      return;
+    }
+    if (route.view && route.view !== state.page) await showPage(route.view);
+  } finally {
+    restoringRoute = wasRestoring;
   }
-  if (state.page === 'ticket') {
-    await showPage(route.view || state.ticketFrom || 'overview');
-    return;
-  }
-  if (route.view && route.view !== state.page) await showPage(route.view);
 }
 
 // ----------------------------------------------------------------- blocking
@@ -1636,6 +1786,8 @@ function openDrawer(entity) {
   // prd/42 B2: the drawer is beside the content, not on top of the list
   // inspector. The class lets the shell reserve its width on desktop.
   if (typeof document !== 'undefined' && $('app')) $('app').classList.add('drawer-open');
+  // prd/48: an open PR is the deepest level of the YAH path.
+  renderYah();
 }
 
 /* prd/38 #12: a ticket's PR row is a doorway, not a dead end. The ticket payload
@@ -1753,6 +1905,8 @@ function closeDrawer() {
   state.drawerEntity = null;
   $('drawer').hidden = true;
   if (typeof document !== 'undefined' && $('app')) $('app').classList.remove('drawer-open');
+  // prd/48: the PR level leaves the YAH path with the drawer.
+  renderYah();
 }
 
 // --------------------------------------------------------------- pivot menu
@@ -2737,6 +2891,11 @@ window.__megaspeed = {
   // check a deep link without reloading the page.
   get url() { return routeHref(); },
   applyRoute,
+  // prd/48: the in-app history depth and the location path. The harness walks
+  // Back with `back()` and reads the YAH bar without a screenshot.
+  get history() { return { depth: nav.depth, index: nav.index, canBack: nav.canBack() }; },
+  back: () => inAppBack(),
+  get yah() { return yahSteps().map((step) => step.label); },
   get ticket() { return state.ticket; },
   // Test hook: lower the event cap so the capped path (and its "load the full
   // range" affordance) can be exercised on a small fixture.
@@ -2854,6 +3013,17 @@ document.addEventListener('click', async (event) => {
     return;
   }
   if (!event.target.closest('#menu')) closeMenu();
+  // prd/48: Back pops one in-app entry; a YAH segment jumps up the path (a
+  // new step — the history keeps both where the user was and where they went).
+  if (event.target.closest('#history-back')) {
+    inAppBack();
+    return;
+  }
+  const yahStep = event.target.closest('#yah [data-yah]');
+  if (yahStep) {
+    await yahJump(yahStep.dataset.yah);
+    return;
+  }
   if (event.target.closest('#tenant-button')) {
     toggleTenantMenu();
     return;
@@ -3238,23 +3408,43 @@ bindLongPress((target, x, y) => {
 });
 // prd/25 + P-2: a direct link (`/#ticket/DEL-167`, with or without the query)
 // opens the ticket page after the dataset has loaded, exactly as a click does.
-// Back/forward and a hand-edited hash both re-apply the whole route.
+// Back/forward and a hand-edited hash both re-apply the whole route. prd/48:
+// the entry stack learns which entry the browser moved to *before* the route
+// is applied, so renderBack() is already right when the view repaints.
 window.addEventListener('hashchange', () => { applyRoute(); });
-window.addEventListener('popstate', () => { applyRoute(); });
+window.addEventListener('popstate', (event) => {
+  restoreFromLocation(event);
+  applyRoute();
+});
 syncChromeHeight();
-window.addEventListener('resize', () => { syncChromeHeight(); renderHints(); syncRangeMeta(); });
+window.addEventListener('resize', () => {
+  syncChromeHeight();
+  renderHints();
+  renderYah();
+  syncRangeMeta();
+});
 buildLensButtons();
+// prd/48: the URL the page opened with is step 0 of the in-app history. Boot
+// is not a navigation: the app may adopt a tenant or view from the stored
+// preference, and that canonicalisation rewrites step 0 instead of stacking a
+// second entry (a fresh landing must open with Back disabled).
+restoringRoute = true;
+seedHistory();
 renderPage();
 // prd/32: the build identity is independent of the store, so it loads even
 // when there is no dataset to read.
 loadVersion();
 load().then(async () => {
   if (state.page === 'ticket' && state.ticketKey) {
-    await openTicket(state.ticketKey, { push: false });
+    await openTicket(state.ticketKey);
   } else {
     await showPage(state.page);
   }
   connect();
   // a sprint lens already set its measured window; a preset must not override it
   if (state.sprint == null) applyTimeframeToTimeline();
+}).finally(() => {
+  // the first view is on screen: from here on, a URL change is a real step
+  restoringRoute = false;
+  renderBack();
 });
