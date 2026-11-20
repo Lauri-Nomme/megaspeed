@@ -7,6 +7,7 @@
  *
  *   /?tenant=del-combined&view=timeline&tf=1q&scope=all
  *   /?tenant=del-combined&view=ticket&tf=1q&scope=all#ticket/DEL-167
+ *   /?tenant=del-combined&view=delivery&repo=delivery-api   (prd/49)
  *
  * The parameter names are the ones the API already uses (`?tenant=<name>`), so
  * the URL and the request agree. A bare `#ticket/DEL-167` still resolves: the
@@ -27,7 +28,7 @@ export const ROUTE_VIEWS = [
 ];
 
 /** The closed set of scope kinds (scope.js owns the behaviour). */
-export const SCOPE_KINDS = ['person', 'role', 'ticket'];
+export const SCOPE_KINDS = ['person', 'role', 'ticket', 'repo'];
 
 /* prd/10 §3.1: dark is the default, so a dark view is the absence of a
  * parameter. `?theme=light` is a shareable light view; `?theme=dark` is
@@ -92,7 +93,16 @@ export function serializeRoute({
   }
   // `all` is explicit: a link must reproduce "everything", not inherit the
   // recipient's stored person scope.
-  if (scope && scope.kind) params.set('scope', scopeParam(scope));
+  if (scope && scope.kind) {
+    // prd/49: a repo scope is written as `repo=`, the parameter the API's own
+    // endpoints take, so a copied link is also a valid API filter. `parseRoute`
+    // accepts both forms; the other scope kinds stay in `scope=`.
+    if (scope.kind === 'repo' && scope.value) {
+      params.set('repo', String(scope.value));
+    } else {
+      params.set('scope', scopeParam(scope));
+    }
+  }
   // dark is the default, so it costs no characters and old links keep working
   if (normalizeTheme(theme) === 'light') params.set('theme', 'light');
   const query = params.toString();
@@ -104,17 +114,24 @@ export function serializeRoute({
  * Parse a `location.search` + `location.hash` pair. Absent parameters are
  * `null` (keep whatever the stored preference says); an unknown `view` is
  * ignored rather than trusted.
+ *
+ * prd/49: a bare `?repo=ENG/delivery-api` is accepted as the same scope the
+ * `?scope=repo:…` form carries, so an API-style link (the endpoints take
+ * `repo=`) lands on the repo-scoped view too.
  */
 export function parseRoute(search = '', hash = '') {
   const params = new URLSearchParams(String(search || ''));
   const ticket = ticketFromHash(hash);
+  const repo = params.get('repo') || null;
   return {
     tenant: params.get('tenant') || null,
     // A ticket hash is the ticket view, whatever a stale `view` says.
     view: ticket ? 'ticket' : normalizeView(params.get('view')),
     ticket,
     timeframe: params.get('tf') || null,
-    scope: parseScope(params.get('scope')),
+    scope: parseScope(params.get('scope')) || (repo
+      ? { kind: 'repo', value: repo, label: repo }
+      : null),
     // an id, not free text: anything else means "no sprint lens"
     sprint: /^\d+$/.test(params.get('sprint') || '') ? Number(params.get('sprint')) : null,
     from: /^\d+$/.test(params.get('from') || '') ? Number(params.get('from')) : null,

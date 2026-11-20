@@ -46,7 +46,7 @@ class Fixture:
         self.events: list[dict] = []
         self.relations: list[tuple[str, str, str]] = []
         self.objects: list[dict] = []
-        self.opened: dict[int, datetime] = {}
+        self.opened: dict[tuple[str, int], datetime] = {}
         self._count = 0
 
     # -- objects ------------------------------------------------------------ #
@@ -144,33 +144,33 @@ class Fixture:
     # -- PRs ---------------------------------------------------------------- #
     def pr(self, number: int, author: str, opened: datetime,
            tickets: tuple[str, ...] = ("ENG-1",), state: str = "merged",
-           closed: datetime | None = None) -> "Fixture":
-        self.opened[number] = opened
+           closed: datetime | None = None, repo: str = REPO) -> "Fixture":
+        self.opened[(repo, number)] = opened
         self._object(
-            "PR", f"PR:{REPO}#{number}", repo=REPO, pr_id=number,
+            "PR", f"PR:{repo}#{number}", repo=repo, pr_id=number,
             ticket_keys=list(tickets), actor=author, state=state,
             created_at=opened, closed_at=closed, head_commit="a" * 40,
         )
-        self.pr_event(number, "pr_opened", author, 0)
+        self.pr_event(number, "pr_opened", author, 0, repo=repo)
         return self
 
     def pr_event(self, number: int, activity: str, actor: str, hours: float,
-                 **attributes) -> "Fixture":
+                 repo: str = REPO, **attributes) -> "Fixture":
         self._count += 1
-        event_key = f"{REPO}#{number}:{self._count}"
+        event_key = f"{repo}#{number}:{self._count}"
         self.events.append({
             "event_key": event_key,
-            "ts": self.opened[number] + timedelta(hours=hours),
+            "ts": self.opened[(repo, number)] + timedelta(hours=hours),
             "activity": activity,
             "actor": actor,
-            "repo": REPO,
+            "repo": repo,
             "pr_id": number,
             "attributes": attributes,
             "classifier_version": "deterministic-v1",
             "content_hash": hashlib.blake2b(event_key.encode(), digest_size=8).hexdigest(),
             "as_of": self.as_of,
         })
-        self.relations.append((event_key, "PR", f"PR:{REPO}#{number}"))
+        self.relations.append((event_key, "PR", f"PR:{repo}#{number}"))
         return self
 
     # -- materialise -------------------------------------------------------- #

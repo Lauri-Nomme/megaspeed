@@ -217,6 +217,20 @@ Each entry: **Definition** (what it is) · **Derivation** (how it's computed fro
   tenant-scoped (`?tenant=`).
 - **Purpose**: the unit of isolation — one team/environment per tenant, so analyses never mix.
 
+### Repo (scope dimension, prd/49)
+- **Definition**: a PR's repository — the store's `repo` value. It is a *scope* beside `person` and
+  `role`: a repo scope narrows the PR-side views (delivery list, queue, blocking map, timeline,
+  overview) and makes Rules and the policy lab **recompute on that repo's cohort**, not on the whole
+  store's. The scope is one `{kind: "repo", value}` in the same plumbing, carried by
+  `?scope=repo:<value>` (a bare `?repo=<value>` is accepted as the same scope).
+- **Derivation**: `analysis.ballcourt.scope_to_repo` keeps the PRs and intervals whose `repo` matches;
+  `analysis.jira.scope_to_repo` keeps the stories joined to a PR in that repo and only that repo's PR
+  states, so a story with no PR is in no repo's cohort. **Roles do not narrow**: the sentinel set and
+  the bot set are store-wide (`§2`), so a repo slice can still say "waiting on the sentinel".
+- **Purpose**: answer "is `delivery-api` slower than `delivery-web`?" in the UI, with the same
+  definitions as the whole-store view. An unknown repo is a 400 listing the store's repos, never an
+  empty view.
+
 ### `objects.actor` — one column, several roles
 - **Definition**: `actor` is the pseudonym associated with an object **in that type's role**, not a
   single "who did it" predicate. The source of truth is `ingest.store.ACTOR_ROLE_BY_TYPE`:
@@ -444,7 +458,7 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
 | **rebase waste** | rebase effort that produced no new review value | `rebase_conflict` pushes |
 | **PR size** | PRs over the size caps | > the tenant's commit cap or changed-line cap (defaults 10 commits / 400 changed lines; prd/39) |
 | **point churn** | stories re-pointed after work started | `pointed` events after `started` |
-| **worklog cross-check** | logged hours vs active hours (and the log delay) | worklogs ÷ active hours; `log_delay_bucket` = created−started gap |
+| **worklog cross-check** | logged hours vs active hours *(and vs story points)*, and the log delay | worklogs ÷ active hours; Pearson `r` between a story's points and its logged hours, overall and per week (the trend buckets by the week the story started); median logged hours per point; `log_delay_bucket` = created−started gap |
 | **carry-over** | stories committed to a closed sprint but not done by its close | §Sprint carry-over |
 | **stale PR** | PRs open past N business days, or ticket Done with the PR open | open age > 5 business days, or `done` ticket + open PR |
 | **sentinel tail** | items whose only holder is the sentinel, past a threshold | sole-holder episode > 24 business hours |
@@ -523,6 +537,31 @@ These are comparisons, not new units. Each names its cohort and its basis wherev
   calendar. An open story is censored and has no completed rank (mixing the two changed the cohort from
   87 to 100 and moved every rank).
 - **Purpose**: read a cycle ("73 h") against its cohort instead of in a vacuum.
+
+### Worklog honesty
+- **Definition**: whether logged hours measure effort. Two comparisons, plus their history: (1)
+  `r(points, logged hours)` over the stories that carry both — near zero means a worklog is a note, not
+  effort; (2) logged ÷ active PR time — the effort gap; and (3) the same correlation bucketed by the
+  week the story started, so the direction ("is logging getting more trustworthy?") is answerable.
+- **Derivation**: `analysis.jira.worklog_cross_check`. The trend buckets are Monday 00:00 UTC weeks,
+  dense between the first and last story; a bucket with fewer than three stories has no correlation
+  (reported `null` — a two-point r is ±1 by construction, never a zero). The median hours per point is
+  the per-story logged ÷ points median. Lateness (`log_delay_bucket`) is a **secondary** line: it says
+  *when* the hours were written, not whether they track the work.
+- **Purpose**: stop a lead reading "logging is 1.5 days late" as the trust problem when the measured
+  problem is that a 13-point story logs 2–3 h.
+
+### Chase action ("what to do now", prd/54)
+- **Definition**: the delivery list's own holder fact, read as an action: an **orphaned approval** is an
+  open PR whose only remaining reviewer is the sentinel, or a stale PR with the sentinel still owing.
+  A normal review with a peer still pending is not one — the sentinel's precedence gate has not opened
+  (`§2`), so the peer is the current constraint.
+- **Derivation**: `orphanedApprovals` in `app/tables.js` over `delivery.rows` (`waiting_on`,
+  `waiting_roles`, `stale`); every row links to its `#ticket/KEY` page and names who owes. The
+  review-SLA line links to the policy lab's own `sla4` preset — the model's number is printed there,
+  never invented on the card.
+- **Purpose**: answer "what do I do today" from the same signals as "what is stuck", not a new metric.
+
 
 ### Done in Jira, PR open
 - **Definition**: an *open* PR whose ticket has a final done boundary. `opened after the ticket closed`

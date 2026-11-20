@@ -9,6 +9,7 @@
 import { fmtHours, esc } from './format.js';
 import { prSizePanel } from './prsize.js';
 import { linkifyTickets, markdownLinkTickets, ticketHref } from './tickets.js';
+import { worklogMarkdown, worklogPanel, fmtRate } from './worklog.js';
 
 const SEVERITY_LABEL = {
   critical: 'critical',
@@ -31,6 +32,8 @@ export function evidenceLabel(key) {
     points_logged_correlation: 'points ↔ logged r',
     points_active_correlation: 'points ↔ active r',
     points_logged_n: 'stories with points',
+    median_logged_hours: 'median logged',
+    median_hours_per_point: 'median per point',
     lateness: 'lateness',
   }[key];
   if (worklog) return worklog;
@@ -76,6 +79,10 @@ export function evidenceValue(key, value) {
   if (typeof value === 'number') {
     // A policy target is fixed, not estimated, so it takes no `≈` (B19).
     if (key === 'target_hours') return fmtHours(value);
+    // prd/53 §1: a measured median is not an estimate, and hours per point is a
+    // rate rather than a duration.
+    if (key === 'median_logged_hours') return fmtHours(value);
+    if (key === 'median_hours_per_point') return fmtRate(value);
     if (key.endsWith('_hours') || key === 'hours_per_round' || key === 'hours_per_refinement') return fmtImpact(value);
     // A share (flow efficiency, waiting share) is a fraction of one, not hours.
     if (key.startsWith('share') || key.endsWith('_share') || key.endsWith('_efficiency')) {
@@ -480,6 +487,7 @@ export function rulesMarkup(data, { base = '', prSize = null, caps = null } = {}
         time under 9 d (72 business hours), two review rounds or fewer, no lost approvals.
         Widen the timeframe or switch to people to check the per-person rules.</p>
     </div>
+    ${worklogPanel((data && data.metrics && data.metrics.worklog_cross_check) || null)}
     ${prSizePanel(prSize, { caps })}`;
   }
   // prd/39: the calibration panel sits next to the size rule (or after the list
@@ -492,6 +500,16 @@ export function rulesMarkup(data, { base = '', prSize = null, caps = null } = {}
     const index = suggestions.findIndex((suggestion) => suggestion.metric === 'pr_size');
     if (index >= 0) rows.splice(index + 1, 0, panel);
     else rows.push(panel);
+  }
+  // prd/53 §1/§3: the worklog card carries its chart (logged vs points, logged
+  // vs active) and the per-week trend. It rides the card when the rule fires,
+  // and answers "can we trust the logs?" at the end of the list when it does
+  // not (a trustworthy worklog is a result, not a missing panel).
+  const worklog = worklogPanel((data && data.metrics && data.metrics.worklog_cross_check) || null);
+  if (worklog) {
+    const index = suggestions.findIndex((suggestion) => suggestion.metric === 'worklog_cross_check');
+    if (index >= 0) rows.splice(index + 1, 0, worklog);
+    else rows.push(worklog);
   }
   return `${note ? `<p class="rules-note">${esc(note)}</p>` : ''}
     ${lab ? `<p class="rules-lab" data-lab-best>${esc(lab)}</p>` : ''}
@@ -558,6 +576,11 @@ export function rulesMarkdown(data, base = '') {
     }
     lines.push('');
   }
+  // prd/53: the worklog block is part of the export, not only the screen.
+  const worklog = worklogMarkdown(
+    (data.metrics && data.metrics.worklog_cross_check) || null,
+  );
+  if (worklog.length) lines.push(...worklog, '');
   lines.push(`_${data.note || ''}_`);
   return lines.join('\n');
 }

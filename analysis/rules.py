@@ -3140,6 +3140,12 @@ def templates(
                     "Logged hours don't track story points "
                     f"(r = {correlation:g})"
                 )
+                # prd/53 §1: the same card states the second half of the gap —
+                # the logged-vs-active ratio — when it is also out of band.
+                if out_of_band and ratio is not None and 0 < ratio < 1:
+                    title += (
+                        f" and are {round(ratio * 100)} % of active PR time"
+                    )
             elif ratio is not None and ratio < 1:
                 # prd/56 §6: "0.49× less" is ambiguous (49 % as much? 51 %
                 # less?). State the share directly.
@@ -3159,6 +3165,9 @@ def templates(
                 "points_logged_correlation": correlation,
                 "points_logged_n": wc.get("points_logged_n"),
                 "points_active_correlation": wc.get("points_active_correlation"),
+                # prd/53 §1: the gap in plain numbers next to the correlation.
+                "median_logged_hours": wc.get("median_logged_hours"),
+                "median_hours_per_point": wc.get("median_hours_per_point"),
             }
             if lateness:
                 evidence["lateness"] = lateness

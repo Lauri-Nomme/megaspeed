@@ -40,6 +40,18 @@ export const VIEW_NAMES = {
   sources: 'sources',
 };
 
+/* prd/49: a repo scope is the PR's repository — the store's per-PR slice.
+ * Every view that answers a PR question narrows; the Rule and Policy lab
+ * recompute server-side, so they are named here too. */
+const REPO_PAGES = [
+  'overview', 'delivery', 'timeline', 'blocking', 'queue', 'rules', 'policy',
+];
+
+/** The short repo label a person recognises: "ENG/delivery-api" → "delivery-api". */
+export function repoLabel(value) {
+  return String(value || '').split('/').filter(Boolean).pop() || String(value || '');
+}
+
 /* prd/38 #20: the Timeline chip from a PR/ticket scopes to *that ticket*, not
  * to the author. A ticket scope narrows the two views that can answer "where
  * did this ticket's time go": the timeline (its events) and the delivery list
@@ -123,6 +135,10 @@ export function filteredPages(scope) {
   if (!scope || scope.kind === 'all') return new Set();
   if (scope.kind === 'person') return new Set(PERSON_PAGES);
   if (scope.kind === 'ticket') return new Set(TICKET_PAGES);
+  // prd/49: a repo is a first-class scope dimension, not a person and not a
+  // role queue. The Rules page and the policy lab recompute on the repo's
+  // cohort, so they narrow too.
+  if (scope.kind === 'repo') return new Set(REPO_PAGES);
   if (scope.kind === 'role') {
     return new Set(ROLE_PAGES[String(scope.value || '').toLowerCase()] || []);
   }
@@ -130,13 +146,16 @@ export function filteredPages(scope) {
 }
 
 function list(ids) {
-  const names = ids.map((id) => VIEW_NAMES[id] || id);
+  // prd/49: the policy lab is a filtered page only for a repo scope, so it is
+  // not in VIEW_NAMES (which drives the "not filtered" list); it still needs
+  // its proper name when it *is* filtered.
+  const names = ids.map((id) => (id === 'policy' ? 'policy lab' : (VIEW_NAMES[id] || id)));
   if (!names.length) return 'none';
   if (names.length === 1) return names[0];
   return `${names.slice(0, -1).join(', ')} and ${names[names.length - 1]}`;
 }
 
-/** What a person/role/ticket scope means *in this view* (prd/34 §3: one meaning each). */
+/** What a person/role/ticket/repo scope means *in this view* (one meaning each). */
 export function scopeMeaning(scope, pageId) {
   if (!scope || scope.kind === 'all') return 'everything';
   if (scope.kind === 'ticket') {
@@ -152,6 +171,13 @@ export function scopeMeaning(scope, pageId) {
     if (pageId === 'timeline') return `events by ${scope.value}`;
     if (pageId === 'overview') return `items waiting on ${scope.value}`;
     return `person ${scope.value}`;
+  }
+  // prd/49: one meaning everywhere — the PRs (and their events) in that repo.
+  if (scope.kind === 'repo') {
+    const name = repoLabel(scope.value);
+    if (pageId === 'timeline') return `events in ${name}`;
+    if (pageId === 'rules' || pageId === 'policy') return `rules recomputed on ${name}`;
+    return `the ${name} repo's open PRs and waits`;
   }
   return `the ${scope.value} queue`;
 }
@@ -169,7 +195,9 @@ export function scopeBanner(scope, pageId) {
     ? `ticket ${scope.value} (${scopeMeaning(scope, pageId)})`
     : scope.kind === 'person'
       ? `person ${scope.value} (${scopeMeaning(scope, pageId)})`
-      : `the ${scope.value} queue`;
+      : scope.kind === 'repo'
+        ? `repo ${repoLabel(scope.value)} (${scopeMeaning(scope, pageId)})`
+        : `the ${scope.value} queue`;
   const inside = [...filtered];
   const outside = Object.keys(VIEW_NAMES).filter((id) => !filtered.has(id));
   const bits = [

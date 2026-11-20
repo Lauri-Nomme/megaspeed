@@ -65,7 +65,7 @@ from __future__ import annotations
 import json
 import math
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
 from analysis import ballcourt
@@ -492,6 +492,33 @@ def cohort(data: JiraData, window: tuple[datetime, datetime]) -> list[Story]:
         story for story in data.stories
         if story.start is not None and start <= story.start <= end
     ]
+
+
+def scope_to_repo(data: JiraData, repo: str) -> JiraData:
+    """The ticket layer of one repo cohort (prd/49).
+
+    A story is attributable to a repo only through a PR that **names it**, so a
+    repo slice keeps the stories joined to a PR in ``repo`` and drops the rest —
+    a story with no PR anywhere is not part of any repo's delivery cohort. Each
+    surviving story keeps only that repo's PR states, so its worklog-vs-active
+    and PR-open gaps are measured on the scoped cohort, not on every repo's PRs.
+
+    Sprints and epics survive unchanged: they are planning windows and parent
+    links, not repo-specific objects. Every cloned story recomputes its cycle
+    (the memo is per story, and its PR list changed).
+    """
+    wanted = str(repo or "")
+    stories: list[Story] = []
+    for story in data.stories:
+        prs = [state for state in story.prs if state.pr.get("repo") == wanted]
+        if not prs:
+            continue
+        stories.append(replace(story, prs=prs, _cycle_cache=None))
+    return replace(
+        data,
+        stories=stories,
+        events=sum(len(story.events) for story in stories),
+    )
 
 
 def story_for(data: JiraData | None, key: str) -> Story | None:
@@ -2260,6 +2287,9 @@ def worklog_cross_check(
     # prd/46 §5: does the logged effort track the story's size at all?
     points_logged: list[tuple[float, float]] = []
     points_active: list[tuple[float, float]] = []
+    # prd/53 §3: the same metric per week, so "is logging getting more
+    # trustworthy?" has an answer and not only "is it trustworthy now".
+    timeline: list[tuple[datetime | None, float, float]] = []
     for story in stories:
         entries = story.of("worklogged")
         if entries:
@@ -2313,6 +2343,7 @@ def worklog_cross_check(
         if entries and story.points is not None:
             points_logged.append((float(story.points), story_hours))
             points_active.append((float(story.points), story_active))
+            timeline.append((story.start, float(story.points), story_hours))
 
     points_logged_r = _pearson(
         [points for points, _ in points_logged],
@@ -2334,6 +2365,44 @@ def worklog_cross_check(
     late = buckets["late"]
     untrusted_share = _share(late, worklogs)
     ratio = round(logged_hours / active_hours, 2) if active_hours > 0 else None
+    # prd/53 §3: the per-week trend of the same gap. A bucket is the week the
+    # story started (Monday 00:00 UTC); its correlation is the same Pearson r
+    # over the stories that started in it (``None`` with fewer than three), and
+    # ``median_hours_per_point`` is the per-story logged ÷ points median. Dense
+    # buckets between the first and last story, so the sparkline has a real time
+    # axis; the most recent week is marked.
+    per_point_all = [hours / points for points, hours in points_logged if points > 0]
+    trend: list[dict] = []
+    if timeline:
+        def week_floor(stamp: datetime) -> datetime:
+            day = stamp.replace(hour=0, minute=0, second=0, microsecond=0)
+            return day - timedelta(days=day.weekday())
+
+        weeks = [week_floor(start) for start, _points, _hours in timeline if start]
+        cursor, last_week = min(weeks), max(weeks)
+        while cursor <= last_week:
+            entries = [
+                (points, hours) for start, points, hours in timeline
+                if start is not None and week_floor(start) == cursor
+            ]
+            per_point = [hours / points for points, hours in entries if points > 0]
+            trend.append({
+                "week_start": iso(cursor),
+                "week_end": iso(cursor + timedelta(days=7)),
+                "label": cursor.strftime("%Y-%m-%d"),
+                "stories": len(entries),
+                "logged_hours": round(sum(hours for _points, hours in entries), 2),
+                "correlation": (
+                    _pearson(
+                        [points for points, _hours in entries],
+                        [hours for _points, hours in entries],
+                    ) if len(entries) >= 2 else None
+                ),
+                "median_hours_per_point": _median(per_point),
+                "median_logged_hours": _median([hours for _points, hours in entries]),
+                "current": cursor == last_week,
+            })
+            cursor += timedelta(days=7)
     return {
         "available": worklogs > 0,
         "stories": len(stories),
@@ -2353,12 +2422,27 @@ def worklog_cross_check(
         "points_logged_n": len(points_logged),
         "points_active_correlation": points_active_r,
         "points_active_n": len(points_active),
+        # prd/53 §1: the gap in plain numbers — median logged hours and median
+        # logged hours per point. A flat h/pt across 1–13 point stories is the
+        # "a 13-pt story logs 2–3 h" finding.
+        "median_logged_hours": _median([hours for _points, hours in points_logged]),
+        "median_hours_per_point": _median(per_point_all),
         # median logged hours by point size: "flat across 1–13 points" is the
         # plain-language form of the correlation.
         "logged_by_points": {
             str(points): _median([hours for size, hours in points_logged if size == points])
             for points in sorted({size for size, _ in points_logged})
         },
+        # prd/53 §3: the historical trend, per week, of the same gap.
+        "trend": trend,
+        "trend_note": (
+            "weekly buckets by the week the story started (Monday 00:00 UTC, "
+            "dense between the first and last story); correlation is the same "
+            "points ↔ logged-hours Pearson r over that week's stories (None "
+            "when the week has fewer than three — a two-point r is ±1 by "
+            "construction), and median_hours_per_point is the per-story logged "
+            "÷ points median; the last bucket is the most recent week"
+        ),
         "buckets": {name: buckets[name] for name in LOG_DELAY_BUCKETS},
         "bucket_shares": {
             name: _share(buckets[name], worklogs) for name in LOG_DELAY_BUCKETS

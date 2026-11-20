@@ -8,7 +8,8 @@
 
 import { fmtAbsolute, fmtHours, esc, whoLabel, BUSINESS_HOURS_PER_DAY } from './format.js';
 import { isTicketKey, rowTicket, ticketHref, ticketLink } from './tickets.js';
-import { streamIsQueue } from './scope.js';
+import { streamIsQueue, repoLabel } from './scope.js';
+import { legendMarkup } from './queues.js';
 
 export const TABS = [
   { id: 'blocked', label: 'Blocked' },
@@ -175,6 +176,18 @@ export function deliveryTable(data, tab, { scope = null } = {}) {
 export function matchesScope(row, scope) {
   if (!scope || scope.kind === 'all') return true;
   const value = String(scope.value || '').toLowerCase();
+  // prd/49: a repo scope is the PR's repository — a store slice, not a person's
+  // queue. The row carries the full repo and its short label, and a scope may
+  // be either form (the select offers the full value, a shared link may be short).
+  if (scope.kind === 'repo') {
+    const short = repoLabel(scope.value).toLowerCase();
+    return [row.repo, row.repo_short]
+      .filter(Boolean)
+      .some((repo) => {
+        const candidate = String(repo).toLowerCase();
+        return candidate === value || candidate === short;
+      });
+  }
   // prd/38 #20: a ticket scope is "the PRs that name this ticket", not the
   // author and not a person's queue.
   if (scope.kind === 'ticket') {
@@ -252,6 +265,134 @@ export function deliveryMarkdown(rows, meta, base = '') {
 }
 
 /**
+ * prd/54 §1: "what to do now" — the orphaned approvals, with who owes each.
+ *
+ * A thin presentation over the delivery list's own holder facts: `waiting_on`
+ * names every person who owes (`concepts.md` §2), `waiting_roles` says which of
+ * them is the sentinel, and `stale` is the same aged-PR flag the list shows.
+ * It does not add an analytics path: each row is a delivery row, linked to its
+ * ticket page, and the review-SLA line opens the policy lab's own preset.
+ */
+export function whoOwes(row) {
+  if (!row) return '—';
+  const roles = row.waiting_roles || {};
+  const people = (row.waiting_on || []).filter(Boolean);
+  if (!people.length) return row.ball_label || row.ball || '—';
+  return people
+    .map((person) => `${person}${roles[person] ? ` (${roles[person]})` : ''}`)
+    .join(' + ');
+}
+
+/** True when a sentinel is one of the people the PR waits on. */
+export function waitsOnSentinel(row) {
+  if (!row || row.ball === 'ready') return false;
+  const roles = row.waiting_roles || {};
+  return (row.waiting_on || []).some(
+    (person) => String(roles[person] || '').toLowerCase() === 'sentinel',
+  );
+}
+
+/**
+ * The orphaned approvals: open PRs whose ball is with the sentinel.
+ *
+ * "Orphaned" here is the delivery list's own holder fact, not a new metric:
+ * the sentinel is the PR's **only** remaining reviewer (a `#52`: the peer
+ * approved, the merge is waiting on the mandatory approval), **or** the PR is
+ * stale while the sentinel still owes (`#53`: 21 days, a peer plus the
+ * sentinel). A normal two-day review where a peer is still pending is *not*
+ * orphaned — the sentinel's gate has not opened yet (concepts.md §2), so the
+ * peer, not the sentinel, is the current constraint.
+ *
+ * Sorted by the wait, so the worst forgotten item is first.
+ */
+export function orphanedApprovals(delivery) {
+  const rows = (delivery && delivery.rows) || [];
+  return rows
+    .filter((row) => {
+      if (!waitsOnSentinel(row)) return false;
+      const roles = row.waiting_roles || {};
+      const peers = (row.waiting_on || []).filter((person) => person
+        && person !== row.author
+        && String(roles[person] || '').toLowerCase() !== 'sentinel');
+      return peers.length === 0 || Boolean(row.stale);
+    })
+    .sort((a, b) => Number(b.waiting_hours || 0) - Number(a.waiting_hours || 0));
+}
+
+/** The sentinel pseudonyms behind the card, from the holder roles (deduped). */
+export function sentinelNames(rows) {
+  const names = new Set();
+  for (const row of rows || []) {
+    const roles = row.waiting_roles || {};
+    for (const person of row.waiting_on || []) {
+      if (String(roles[person] || '').toLowerCase() === 'sentinel') names.add(person);
+    }
+  }
+  return [...names].sort();
+}
+
+/** The Overview card, or '' when nothing is orphaned and no ticket is Done-open. */
+export function chaseCard(delivery, { base = '', scope = null } = {}) {
+  const done = delivery && delivery.done_open;
+  let orphans = orphanedApprovals(delivery);
+  if (scope && scope.kind !== 'all') {
+    const scoped = scope;
+    orphans = orphans.filter((row) => matchesScope(row, scoped));
+  }
+  // The done-but-open count follows the scope too (a repo/person view must not
+  // claim the whole store's finished-but-unmerged work). The API always sends
+  // the rows, so the filtered length is the honest count; an older payload with
+  // only a count is trusted only when nothing is scoped.
+  const doneRows = (done && done.rows) || [];
+  const doneCount = scope && scope.kind !== 'all' && done && done.rows
+    ? doneRows.filter((row) => matchesScope(row, scope)).length
+    : Number((done && done.count) || 0);
+  if (!orphans.length && !doneCount) return '';
+  const sentinels = sentinelNames(orphans);
+  const sentinelLabel = sentinels.length === 1
+    ? sentinels[0]
+    : (sentinels.length ? `${sentinels.length} sentinels` : 'the sentinel');
+  const rows = orphans.map((row) => {
+    const key = rowTicket(row);
+    return `<tr data-chase="${esc(row.object_id)}" data-chase-ticket="${esc(key || '')}">
+      <td class="c-id" data-label="">${key ? ticketLink(key, { base }) : '<span class="keys">—</span>'}
+        <span class="mono id">#${esc(row.number)}</span>
+        <span class="repo">${esc(row.repo_short)}</span></td>
+      <td class="c-who" data-label="who owes">${esc(whoOwes(row))}</td>
+      <td class="c-dur num" data-label="waiting">${esc(fmtHours(row.waiting_hours))}</td>
+      <td class="c-action" data-label="">${key
+        ? `<a class="chip chase-link" href="${esc(ticketHref(key, base))}"
+             data-ticket="${esc(key)}" title="open ${esc(key)} and nudge the holder">chase →</a>`
+        : '<span class="muted">—</span>'}</td>
+    </tr>`;
+  }).join('');
+  return `<section class="panel wide chase-panel" id="chase">
+    <div class="panel-head"><h2>What to do now</h2>
+      ${orphans.length ? `<span class="pill warning" data-chase-count="${orphans.length}">${
+        orphans.length} orphaned approval${orphans.length === 1 ? '' : 's'}</span>` : ''}
+      <span class="muted">${orphans.length
+        ? `waiting on ${esc(sentinelLabel)} — nudge the holder today`
+        : 'no orphaned approval; the Done-open items below are the remaining gap'}</span></div>
+    ${orphans.length ? `<table class="table compact"><thead><tr>
+        <th class="c-id">ticket / PR</th><th class="c-who">who owes</th>
+        <th class="c-dur num">waiting</th><th class="c-action"></th>
+      </tr></thead><tbody>${rows}</tbody></table>
+      <p class="panel-note">an orphaned approval waits only on the sentinel, or is
+        stale with the sentinel still owing — the same holder set the delivery
+        list shows${doneCount
+          ? ` · ${doneCount} ticket${doneCount === 1 ? ' is' : 's are'} Done in Jira with the PR open`
+          : ''}</p>`
+    : ''}
+    <div class="chase-actions">
+      <p class="chase-sla">Or adopt a review SLA instead of relying on a nudge:
+        <button type="button" class="link" data-preset="sla4" data-go="policy"
+          title="open the policy lab with the review SLA 4 h scenario, calibrated on this store">open the lab's review SLA 4 h scenario →</button></p>
+      ${doneCount ? `<p class="chase-done-open"><button type="button" class="link" data-go="delivery">${doneCount} Done in Jira, PR open →</button></p>` : ''}
+    </div>
+  </section>`;
+}
+
+/**
  * prd/42 M4: "Done in Jira, PR open" as a first-class list.
  *
  * The QA run could only find these three items in the raw store. The list
@@ -263,9 +404,15 @@ export function doneOpenMarkup(delivery, { base = '', scope = null } = {}) {
   let rows = (done && done.rows) || [];
   if (scope && scope.kind !== 'all') {
     const value = String(scope.value || '').toLowerCase();
-    rows = rows.filter((row) => (scope.kind === 'ticket'
-      ? String(row.key || '').toLowerCase() === value
-      : (row.waiting_on || []).some((person) => String(person).toLowerCase() === value)));
+    if (scope.kind === 'repo') {
+      // prd/49: the server computed this list from the repo-scoped court; the
+      // row's own repo keeps the client filter honest.
+      rows = rows.filter((row) => String(row.repo || '').toLowerCase() === value);
+    } else {
+      rows = rows.filter((row) => (scope.kind === 'ticket'
+        ? String(row.key || '').toLowerCase() === value
+        : (row.waiting_on || []).some((person) => String(person).toLowerCase() === value)));
+    }
   }
   if (!done || !done.available) return '';
   if (!rows.length) {
@@ -275,6 +422,12 @@ export function doneOpenMarkup(delivery, { base = '', scope = null } = {}) {
       <p class="panel-note">Every ticket marked Done in Jira has its code merged.</p>
     </section>`;
   }
+  // prd/49: under a scope the pill counts the rows this view shows, not the
+  // store-wide count (a repo/person view must not overstate its own list).
+  const count = scope && scope.kind !== 'all' ? rows.length : done.count;
+  const afterCount = scope && scope.kind !== 'all'
+    ? rows.filter((row) => row.opened_after_close).length
+    : done.opened_after_close;
   const body = rows.map((row) => `<tr data-done-open="${esc(row.key)}">
       <td class="c-id" data-label="ticket">${ticketLink(row.key, { base })}
         <span class="mono id">#${esc(row.number)}</span>
@@ -288,9 +441,9 @@ export function doneOpenMarkup(delivery, { base = '', scope = null } = {}) {
     </tr>`).join('');
   return `<section class="panel wide done-open-panel" id="done-open">
     <div class="panel-head"><h2>Done in Jira, PR open</h2>
-      <span class="pill blocked">${done.count}</span>
-      <span class="muted">${done.opened_after_close
-        ? `${done.opened_after_close} PR${done.opened_after_close === 1 ? ' was' : 's were'} opened after the ticket closed`
+      <span class="pill blocked">${count}</span>
+      <span class="muted">${afterCount
+        ? `${afterCount} PR${afterCount === 1 ? ' was' : 's were'} opened after the ticket closed`
         : 'the code is unmerged'}</span></div>
     <table class="table compact"><thead><tr>
       <th class="c-id">ticket / PR</th><th class="c-who">who owes</th>
@@ -338,16 +491,20 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
   // stream (`review`, `author`, …) is a queue even when the API level says
   // "person", so it must not inflate "N overloaded people" (QA #10).
   const counted = people ? streams.filter((stream) => !streamIsQueue(stream)) : streams;
+  // prd/49: the backend already answered this view for the repo cohort, so
+  // there is no client-side stream/edge to match by id (the streams are
+  // people and queues, not repos).
+  const repoScope = scoped && scope.kind === 'repo';
   // prd/56 §4: the queue diagnosis follows the scope too (one person, or one
   // role queue), instead of showing the whole team under a scoped banner.
-  const scopedStreams = scoped
+  const scopedStreams = scoped && !repoScope
     ? counted.filter((stream) => String(stream.id) === String(scope.value))
     : counted;
   const overloaded = scopedStreams.filter((s) => s.summary.diagnosis === 'overloaded');
   const slow = scopedStreams.filter((s) => s.summary.diagnosis === 'slow');
   const allBlocking = (blocking && blocking.edges ? blocking.edges : []);
   const scopeValue = scoped ? String(scope.value || '').toLowerCase() : '';
-  const topBlocking = (scoped && scope.kind !== 'ticket'
+  const topBlocking = (scoped && scope.kind !== 'ticket' && !repoScope
     ? allBlocking.filter((edge) => String(edge.from || '').toLowerCase() === scopeValue
       || String(edge.to || '').toLowerCase() === scopeValue)
     : allBlocking).slice(0, 3);
@@ -371,6 +528,7 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
     (best, stream) => Math.max(best, Number(stream.summary.mean_wait_hours) || 0), 0,
   );
   return `
+    ${chaseCard(delivery, { scope })}
     <div class="stats">
       <div class="stat"><span class="stat-n ${counts.blocked ? 'attention' : ''}">${counts.blocked}</span>
         <span class="stat-k">blocked</span>
@@ -434,6 +592,8 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
     : `<div class="empty-row">No measured waits${scoped ? ` for scope ${esc(scope.label)}` : ''}.</div>`}
       </section>
     </div>
+    ${queues && queues.legend && (queues.legend.people || []).length
+      ? `<div class="overview-legend">${legendMarkup(queues)}</div>` : ''}
     ${doneOpenMarkup(delivery, { scope })}`;
 }
 

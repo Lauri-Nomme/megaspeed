@@ -88,7 +88,7 @@ from __future__ import annotations
 import bisect
 import json
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 
 from ingest.store import iso, to_naive_utc
@@ -455,6 +455,15 @@ class BallCourt:
     def role_of(self, actor: str) -> str:
         """Coarse role for graph grouping: sentinel or reviewer."""
         return "sentinel" if actor in self.sentinels else "review"
+
+    @property
+    def repos(self) -> list[str]:
+        """The PR repositories this store holds, sorted (prd/49).
+
+        The scope control offers exactly these, and a ``repo`` query parameter
+        outside the set is a 400 at the endpoint rather than an empty view.
+        """
+        return sorted({state.pr["repo"] for state in self.prs if state.pr.get("repo")})
 
 
 # --------------------------------------------------------------------------- #
@@ -1112,6 +1121,35 @@ def load(
         intervals=intervals, prs=states, snapshot=snapshot, sentinels=sentinels,
         events=len(events), calendar=calendar, calendar_error=calendar_error,
         sentinel_after_peers=sentinel_after_peers, bots=bots,
+    )
+
+
+def scope_to_repo(bc: BallCourt, repo: str) -> BallCourt:
+    """A repo-scoped slice of the court (prd/49).
+
+    The store already carries each PR's ``repo``, so a repo scope is a filter on
+    the same reconstruction, not a second analysis: the PRs, their intervals and
+    their PR-side events narrow to ``repo`` and every projection downstream
+    (delivery list, blocking graph, queues, rules, the policy lab) therefore
+    recomputes against that repo's cohort.
+
+    The *roles* do not narrow: sentinels and bots are store-wide identities
+    (``concepts.md`` §2), so a PR's mandatory approver is still the same person
+    in a one-repo slice. The Jira side is scoped separately
+    (:func:`analysis.jira.scope_to_repo`) because a story is only attributable to
+    a repo through a PR that names it.
+    """
+    wanted = str(repo or "")
+    prs = [state for state in bc.prs if state.pr.get("repo") == wanted]
+    object_ids = {state.pr["object_id"] for state in prs}
+    intervals = [interval for interval in bc.intervals if interval.object_id in object_ids]
+    return replace(
+        bc,
+        prs=prs,
+        intervals=intervals,
+        # the PR-side event count of the slice: the scope changes the cohort,
+        # so the payload must not quote the whole log's size
+        events=sum(len(state.events) for state in prs),
     )
 
 

@@ -23,15 +23,15 @@ one failure this whole feature exists to prevent.
     GET  /api/ticket/{key}?tenant=            one ticket's full cycle (prd/25):
                                               story + segments + PRs + sprints
                                               + worklogs + events + prose answer
-    GET  /api/blocking?level=&days=&tenant=   wait-hours handover graph (prd/05)
-    GET  /api/queues?level=&days=&tenant=     per-person WIP / throughput series
-    GET  /api/delivery?days=&tenant=          triage list: blocked / oldest waiting
-    GET  /api/insights?level=&days=&tenant=   ranked "change this" rules (prd/17)
+    GET  /api/blocking?level=&days=&repo=&tenant=   wait-hours handover graph (prd/05)
+    GET  /api/queues?level=&days=&repo=&tenant=     per-person WIP / throughput series
+    GET  /api/delivery?days=&repo=&tenant=          triage list: blocked / oldest waiting
+    GET  /api/insights?level=&days=&repo=&tenant=   ranked "change this" rules (prd/17)
     GET  /api/pr-size?tenant=&size_commits=&size_lines=
                                         PR-size distributions + caps (prd/39)
     GET  /api/sprints?days=&tenant=     sprint lens (prd/26 P6): bands, scope
                                         (in/out of a sprint) and carry-over
-    GET  /api/simulate?days=&scenario=&tenant= policy lab: calibrated model,
+    GET  /api/simulate?days=&scenario=&repo=&tenant= policy lab: calibrated model,
                                               validation gate + one scenario (prd/23)
     GET  /api/calendar?tenant=          effective business-hours calendar (prd/19)
     GET  /ws                            harness websocket (hello/changed/eval)
@@ -988,14 +988,38 @@ def _insight_level(level: str) -> str:
 
 
 ANALYSIS_PARAMS = {
-    "blocking": ("level", "days"),
-    "queues": ("level", "days", "bucket_hours"),
-    "delivery": ("days",),
-    "insights": ("level", "days", "size_commits", "size_lines"),
+    "blocking": ("level", "days", "repo"),
+    "queues": ("level", "days", "bucket_hours", "repo"),
+    "delivery": ("days", "repo"),
+    "insights": ("level", "days", "size_commits", "size_lines", "repo"),
     "sprints": ("days",),
-    "simulate": ("days", "scenario", "seed", "tolerance", "replications"),
+    "simulate": ("days", "scenario", "seed", "tolerance", "replications", "repo"),
     "pr-size": ("size_commits", "size_lines"),
 }
+
+
+def _repo_param(request: Request, court) -> str | None:
+    """The requested repo scope (prd/49), validated against the store's PRs.
+
+    An unknown repo is a 400 listing the real ones, never an empty view: a typo
+    that silently answers "0 open items" looks like a finding.
+    """
+    repo = (request.query_params.get("repo") or "").strip() or None
+    if repo and repo not in court.repos:
+        raise ValueError(
+            f"unknown repo {repo}: repo must be one of "
+            f"{', '.join(court.repos) or '(none in this store)'}"
+        )
+    return repo
+
+
+def _repo_scope(court, jira, repo: str | None):
+    """The court and ticket layer narrowed to one repo (prd/49)."""
+    if not repo:
+        return court, jira
+    scoped_court = analyse.scope_to_repo(court, repo)
+    scoped_jira = jira_analysis.scope_to_repo(jira, repo) if jira is not None else None
+    return scoped_court, scoped_jira
 
 # prd/39: the PR-size caps are a per-tenant calibration. They arrive as query
 # parameters (the UI persists them per tenant, like the scope/timeframe), so the
@@ -1035,11 +1059,18 @@ def blocking(request: Request):
         return _tenant_error(exc.args[0])
     try:
         with store_conn(path) as con:
-            court = _ballcourt(con, tenant, path)
+            bundle = _analysis_bundle(con, tenant, path)
+            try:
+                repo = _repo_param(request, bundle.court)
+            except ValueError as exc:
+                return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["blocking"])))
+            court, _jira = _repo_scope(bundle.court, None, repo)
             window = analyse.window_from_events(court, _days(days))
             payload = analyse.blocking_graph(court, level, window)
             # prd/44 DES-5: which calendar priced these hours (re-derivable).
             payload["calendar_id"] = court.calendar_id
+            # prd/49: the slice this answer describes (absent = whole store).
+            payload["repo"] = repo
             return payload
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
@@ -1064,16 +1095,21 @@ def queues(request: Request):
     try:
         with store_conn(path) as con:
             bundle = _analysis_bundle(con, tenant, path)
-            court = bundle.court
+            try:
+                repo = _repo_param(request, bundle.court)
+            except ValueError as exc:
+                return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["queues"])))
+            jira = bundle.jira(con)
+            court, jira = _repo_scope(bundle.court, jira, repo)
             window = analyse.window_from_events(court, _days(days))
             payload = analyse.queue_series(court, level, window, bucket_hours)
             # prd/42 M7: a pseudonym legend by role (sentinel / bot / author /
-            # reviewer / story owner) — never a real name (prd/02).
-            payload["legend"] = analyse.person_legend(
-                court, bundle.jira(con).stories,
-            )
+            # reviewer / story owner) — never a real name (prd/02). A repo scope
+            # lists only the people who act in that repo (prd/49).
+            payload["legend"] = analyse.person_legend(court, jira.stories)
             # prd/44 DES-5: the calendar identity travels with the hours.
             payload["calendar_id"] = court.calendar_id
+            payload["repo"] = repo
             return payload
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
@@ -1103,11 +1139,15 @@ def delivery(request: Request):
     try:
         with store_conn(path) as con:
             bundle = _analysis_bundle(con, tenant, path)
-            court = bundle.court
-            window = analyse.window_from_events(court, _days(days))
+            try:
+                repo = _repo_param(request, bundle.court)
+            except ValueError as exc:
+                return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["delivery"])))
             # prd/34 §5: "ticket Done but PR open" needs the ticket layer's end
             # state; the bundle caches it, so this costs one load per version.
             jira = bundle.jira(con)
+            court, jira = _repo_scope(bundle.court, jira, repo)
+            window = analyse.window_from_events(court, _days(days))
             done = jira_analysis.done_keys(jira)
             payload = analyse.delivery_list(court, window, done_tickets=done)
             # prd/42 M4: a first-class list of Done-in-Jira tickets with an
@@ -1124,6 +1164,7 @@ def delivery(request: Request):
                 row["open_threads"] = open_threads.get((row["repo"], row["number"]), 0)
             # prd/44 DES-5: the calendar identity travels with the hours.
             payload["calendar_id"] = court.calendar_id
+            payload["repo"] = repo
             return payload
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
@@ -1139,10 +1180,10 @@ _advice_cache: dict[tuple, dict] = {}
 ADVICE_CACHE_SIZE = 32
 
 
-def _advice_payload(con, tenant: str, path: Path, court, jira, window) -> dict:
+def _advice_payload(con, tenant: str, path: Path, court, jira, window, repo: str | None = None) -> dict:
     key = (
         tenant, str(path), _file_stamp(path), _calendar_key(tenant),
-        window[0], window[1],
+        window[0], window[1], repo or "",
     )
     with _advice_lock:
         hit = _advice_cache.get(key)
@@ -1220,10 +1261,16 @@ def insights(request: Request):
     try:
         with store_conn(path) as con:
             bundle = _analysis_bundle(con, tenant, path)
-            court = bundle.court
+            try:
+                repo = _repo_param(request, bundle.court)
+            except ValueError as exc:
+                return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["insights"])))
             # prd/21: the ticket layer is loaded before the window, because a
             # Jira-only store's earliest item is a story, not a PR.
             jira = bundle.jira(con)
+            # prd/49: a repo-scoped rule recomputes against that repo's cohort —
+            # both the PR side and the stories joined to its PRs.
+            court, jira = _repo_scope(bundle.court, jira, repo)
             window = insights_rules.window_for(court, _days(days), jira)
             threads = bundle.threads(con)
             bots = bundle.bots(con)
@@ -1231,12 +1278,18 @@ def insights(request: Request):
             payload = insights_rules.insights(
                 court, threads, window, level=level, bots=bots, sizes=sizes,
                 jira=jira, caps=caps,
-                policy_lab=_advice_payload(con, tenant, path, court, jira, window),
+                policy_lab=_advice_payload(
+                    con, tenant, path, court, jira, window, repo,
+                ),
             )
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
     payload["tenant"] = tenant
     payload["calendar_id"] = court.calendar_id
+    payload["repo"] = repo
+    # prd/53 §2: the pseudonym legend rides with the rules too, so "who is the
+    # sentinel" is answerable next to the worklog card without visiting Queue.
+    payload["legend"] = analyse.person_legend(court, jira.stories if jira else None)
     return payload
 
 
@@ -1429,6 +1482,7 @@ def simulate(request: Request):
         return _tenant_error(exc.args[0])
     key = (
         tenant, _file_stamp(path), _calendar_key(tenant), days,
+        (request.query_params.get("repo") or "").strip(),
         raw or "", seed, replications, tolerance,
     )
     with _sim_lock:
@@ -1438,11 +1492,16 @@ def simulate(request: Request):
     try:
         with store_conn(path) as con:
             bundle = _analysis_bundle(con, tenant, path)
-            court = bundle.court
-            window = analyse.window_from_events(court, _days(days))
+            try:
+                repo = _repo_param(request, bundle.court)
+            except ValueError as exc:
+                return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["simulate"])))
             # the calibration excludes the store's bot actors from the reviewer
             # pool by default (FR-7): a service account is not capacity to staff
             jira = bundle.jira(con)
+            # prd/49: the lab calibrates on the repo's own cohort.
+            court, jira = _repo_scope(bundle.court, jira, repo)
+            window = analyse.window_from_events(court, _days(days))
             refinement = jira_analysis.refinement_cost(court, jira, window)
             calibration = policy_lab.calibrate(
                 court, window, conn=con, refinement=refinement,
@@ -1455,9 +1514,11 @@ def simulate(request: Request):
         return _store_error(exc)
     payload["tenant"] = tenant
     payload["calendar_id"] = court.calendar_id
+    payload["repo"] = repo
     payload["params"] = {
         "days": days, "seed": seed, "replications": replications,
         "tolerance": tolerance,
+        "repo": repo,
         "scenario": scenario.as_dict() if scenario else None,
     }
     with _sim_lock:

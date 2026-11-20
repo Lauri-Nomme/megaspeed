@@ -41,8 +41,8 @@ import {
   rememberSizeCaps, sizeCapsForTenant,
 } from '/prsize.js';
 import {
-  ROLE_QUEUES, drawerTimelineScope, filteredPages, queueLevelForNode, scopeBanner,
-  scopeForNode, scopeForStream,
+  ROLE_QUEUES, drawerTimelineScope, filteredPages, queueLevelForNode, repoLabel,
+  scopeBanner, scopeForNode, scopeForStream,
 } from '/scope.js';
 import {
   bindLongPress, hintText, initMobile, isPhone, phoneEntryLanes, phoneEntryPage,
@@ -278,6 +278,21 @@ function allDays() {
 function timeframeQuery() {
   const days = timeframeDays() ?? allDays();
   return days ? `days=${days}` : '';
+}
+
+/**
+ * prd/49: a repo scope is the one scope the API applies, because the Rules page
+ * and the policy lab recompute on that repo's cohort (person/role/ticket scopes
+ * filter the returned rows client-side). Empty for every other scope.
+ */
+function repoQuery() {
+  if (state.scope.kind !== 'repo' || !state.scope.value) return '';
+  return `repo=${encodeURIComponent(state.scope.value)}`;
+}
+
+/** The timeframe + repo filters as one query fragment (may be empty). */
+function scopedQuery() {
+  return [timeframeQuery(), repoQuery()].filter(Boolean).join('&');
 }
 
 /** The absolute window the active timeframe describes, from the snapshot. */
@@ -711,21 +726,22 @@ async function showPage(page) {
 }
 
 async function ensureData(page) {
-  const q = timeframeQuery();
+  const q = scopedQuery();
+  const repo = repoQuery();
   const stamp = state.meta ? state.meta.as_of : 'none';
   const tenant = state.tenant || 'none';
   if (page === 'delivery' || page === 'overview') {
-    const key = `delivery:${tenant}:${state.timeframe}:${stamp}`;
+    const key = `delivery:${tenant}:${state.timeframe}:${repo}:${stamp}`;
     if (!cached(key)) state.cache.set(key, await getJSON(withTenant(`/api/delivery?${q}`)));
     state.delivery = cached(key);
   }
   if (page === 'blocking' || page === 'overview') {
-    const key = `blocking:${tenant}:${state.timeframe}:${state.blockingLevel}:${stamp}`;
+    const key = `blocking:${tenant}:${state.timeframe}:${state.blockingLevel}:${repo}:${stamp}`;
     if (!cached(key)) state.cache.set(key, await getJSON(withTenant(`/api/blocking?level=${state.blockingLevel}&${q}`)));
     state.blocking = cached(key);
   }
   if (page === 'queue' || page === 'overview') {
-    const key = `queues:${tenant}:${state.timeframe}:${state.queueLevel}:${stamp}`;
+    const key = `queues:${tenant}:${state.timeframe}:${state.queueLevel}:${repo}:${stamp}`;
     if (!cached(key)) state.cache.set(key, await getJSON(withTenant(`/api/queues?level=${state.queueLevel}&${q}`)));
     state.queues = cached(key);
   }
@@ -738,7 +754,7 @@ async function ensureData(page) {
     }
     state.prSize = cached(sizeKey);
     const caps = capsQuery(state.sizeCaps);
-    const key = `rules:${tenant}:${state.timeframe}:${state.rulesLevel}:${caps}:${stamp}`;
+    const key = `rules:${tenant}:${state.timeframe}:${state.rulesLevel}:${caps}:${repo}:${stamp}`;
     if (!cached(key)) {
       state.cache.set(key, await getJSON(withTenant(
         `/api/insights?level=${state.rulesLevel}&${q}&${caps}`,
@@ -763,7 +779,7 @@ async function ensureData(page) {
     // prd/23: the scenario is part of the cache key — two knob settings are two
     // different predictions, and re-running the same one must not refetch.
     const scenario = scenarioQuery(state.policyScenario);
-    const key = `policy:${tenant}:${state.timeframe}:${scenario}:${stamp}`;
+    const key = `policy:${tenant}:${state.timeframe}:${scenario}:${repo}:${stamp}`;
     if (!cached(key)) {
       const url = `/api/simulate?${q}${scenario ? `&${scenario}` : ''}`;
       state.cache.set(key, await getJSON(withTenant(url)));
@@ -1153,12 +1169,17 @@ function renderDeliveryPage() {
   }
   if (data) {
     const filtered = filteredPages(state.scope).has('delivery');
+    // prd/49: a person/role scope means "waiting on it"; a repo scope means
+    // "this repository's PRs" — the label must not reuse the wrong sentence.
+    const scopeSuffix = state.scope.kind === 'repo'
+      ? `the ${repoLabel(state.scope.value)} repo`
+      : `${state.scope.label} (waiting on it)`;
     setHonesty(
       `${counts.all} open item${counts.all === 1 ? '' : 's'} in view · ` +
       `${counts.blocked} blocked · ${counts.oldest} waiting over a week (${weekLabel(data)}) · ` +
       `${data.counts.stale || 0} stale · ${data.counts.unobserved || 0} unobserved · ` +
       `impact = dependents × current wait (≈) · ` +
-      (filtered ? `filtered to ${state.scope.label} (waiting on it)` : 'whole team'),
+      (filtered ? `filtered to ${scopeSuffix}` : 'whole team'),
     );
   }
   renderDeliveryDetail();
@@ -1394,10 +1415,15 @@ function renderBlockingPage() {
   if (data) {
     const totals = data.totals || {};
     const scoped = state.scope.kind !== 'all';
+    // prd/49: a repo scope is answered by the API, so this graph really is
+    // filtered; a person/role scope is not (a handover is never one person's).
+    const repoFiltered = scoped && state.scope.kind === 'repo';
     setHonesty(
       `${totals.nodes || 0} nodes · ${totals.edges || 0} edges · ` +
       `${fmtHours(totals.hours || 0)} measured wait in the ${data.window.days} calendar-day window · ` +
-      (scoped ? 'not filtered by scope — every handover stays visible' : 'whole team'),
+      (repoFiltered
+        ? `filtered to the ${repoLabel(state.scope.value)} repo`
+        : (scoped ? 'not filtered by scope — every handover stays visible' : 'whole team')),
     );
   }
   renderBlockingStats();
@@ -1476,6 +1502,9 @@ function renderQueuePage() {
 
 function queueMatchesScope(stream) {
   if (state.scope.kind === 'all') return true;
+  // prd/49: the API answered this view for the repo cohort; every returned
+  // stream is already that repo's person/queue, so nothing is filtered here.
+  if (state.scope.kind === 'repo') return true;
   const value = String(state.scope.value || '').toLowerCase();
   if (state.scope.kind === 'person') return String(stream.id).toLowerCase() === value;
   if (state.scope.kind === 'role') {
@@ -1502,12 +1531,17 @@ function buildRulesLevels() {
 function renderRulesPage() {
   buildRulesLevels();
   const data = state.rules;
+  // prd/53 §2: the pseudonym legend sits next to the worklog card, so "who is
+  // the sentinel" is answerable here without opening Queue. Roles only.
+  const legend = data && data.legend && (data.legend.people || []).length
+    ? `<div class="rules-legend">${legendMarkup({ legend: data.legend })}</div>`
+    : '';
   $('rules-list').innerHTML = data
-    ? rulesMarkup(data, {
+    ? `${legend}${rulesMarkup(data, {
       base: appBase(),
       prSize: state.prSize,
       caps: state.sizeCaps,
-    })
+    })}`
     : '<div class="empty-row">Loading the rule engine…</div>';
   // prd/39: the panel's count/markers follow the sliders without a re-render.
   updatePrSizePanel();
@@ -2018,6 +2052,18 @@ function availableRoles() {
   return ROLE_QUEUES.filter((role) => seen.has(role));
 }
 
+/** Repositories this tenant actually has PRs for (prd/49: no dead-end options). */
+function availableRepos() {
+  const repos = new Set();
+  for (const object of state.objects || []) {
+    if (object.object_type === 'PR' && object.repo) repos.add(String(object.repo));
+  }
+  for (const event of state.events || []) {
+    if (event.repo) repos.add(String(event.repo));
+  }
+  return [...repos].sort();
+}
+
 function buildScopeOptions() {
   const counts = new Map();
   for (const event of state.events) counts.set(event.actor, (counts.get(event.actor) || 0) + 1);
@@ -2032,6 +2078,10 @@ function buildScopeOptions() {
   // set from the queue chart or a graph node always has a matching <option>
   // (B4) — and a role with no data is not offered as a dead end.
   options.push(...availableRoles().map((role) => [`role:${role}`, `queue ${role}`]));
+  // prd/49: a repo is a first-class scope dimension beside person and role. The
+  // option value is the store's full repo string (the API filter's exact
+  // match); the label is the short name people say.
+  options.push(...availableRepos().map((repo) => [`repo:${repo}`, `repo ${repoLabel(repo)}`]));
   // prd/38 #20: a ticket scope set by the "Timeline" chip is a real option, so
   // the select can show it (and the user can clear it like any other scope).
   if (state.scope.kind === 'ticket' && state.scope.value) {
@@ -2043,6 +2093,7 @@ function buildScopeOptions() {
 }
 
 function setScope(kind, value, { silent = false } = {}) {
+  const wasRepo = state.scope.kind === 'repo';
   state.scope = {
     kind,
     value: kind === 'all' ? null : value,
@@ -2054,6 +2105,16 @@ function setScope(kind, value, { silent = false } = {}) {
   buildScopeOptions();
   applyScopeToTimeline();
   renderPage();
+  // prd/49: the repo scope is answered by the API (Rules and the Lab recompute),
+  // so entering or leaving it must refetch the current view — a person/role
+  // scope is applied client-side and does not.
+  const nowRepo = state.scope.kind === 'repo';
+  if (wasRepo || nowRepo) {
+    state.cache.clear();
+    ensureData(state.page)
+      .then(() => renderPage())
+      .catch((err) => setStatus(`scope failed: ${err.message}`, 'stale'));
+  }
   if (!silent) {
     if (!valid) flashStatus('that scope has no events in this dataset — showing everything', 'stale');
     else flashStatus(kind === 'all' ? 'scope cleared' : `scoped to ${state.scope.label}`, 'live');
@@ -2072,6 +2133,10 @@ function setScopeFromQueue(stream) {
 function scopedEvents() {
   if (state.scope.kind === 'person') {
     return state.events.filter((event) => event.actor === state.scope.value);
+  }
+  // prd/49: a repo scope is the PR's repository — every event carries it.
+  if (state.scope.kind === 'repo') {
+    return state.events.filter((event) => String(event.repo || '') === String(state.scope.value));
   }
   if (state.scope.kind === 'ticket') {
     const key = String(state.scope.value || '').toUpperCase();
@@ -2107,7 +2172,10 @@ function validateScope() {
     && !ROLE_QUEUES.some((queue) => queue.toLowerCase() === String(state.scope.value || '').toLowerCase());
   const ticket = state.scope.kind === 'ticket'
     && !String(state.scope.value || '').trim();
-  if (person || role || ticket) {
+  // prd/49: a repo scope is valid only when this store has PRs in it.
+  const repo = state.scope.kind === 'repo'
+    && !availableRepos().includes(String(state.scope.value || ''));
+  if (person || role || ticket || repo) {
     state.scope = { kind: 'all', value: null, label: 'everything' };
     return false;
   }
@@ -2116,6 +2184,12 @@ function validateScope() {
 
 function scopedObjects(events) {
   if (state.scope.kind === 'all') return state.objects;
+  // prd/49: keep the objects that belong to the repo. An object without a repo
+  // (a STORY/TICKET/SPRINT) is not a PR-side fact, so it stays for the labels.
+  if (state.scope.kind === 'repo') {
+    const repo = String(state.scope.value);
+    return state.objects.filter((object) => !object.repo || String(object.repo) === repo);
+  }
   if (state.scope.kind === 'ticket') {
     const key = String(state.scope.value || '').toUpperCase();
     const prIds = ticketPrIds(key);
@@ -3136,6 +3210,9 @@ document.addEventListener('click', async (event) => {
   if (preset) {
     const chosen = PRESETS.find((entry) => entry.id === preset.dataset.preset);
     if (chosen) await runPolicyScenario({ ...defaultScenario(), ...chosen.scenario });
+    // prd/54: the Overview chase card links straight to the lab's review-SLA
+    // preset, so one click lands on the scenario already run.
+    if (preset.dataset.go) await showPage(preset.dataset.go);
     return;
   }
   const ruleLevel = event.target.closest('[data-rule-level]');
