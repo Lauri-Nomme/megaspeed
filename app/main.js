@@ -8,6 +8,7 @@
  *   overview   What needs attention?     delivery list (triage)
  *   delivery   What needs attention?     triage table + detail panel
  *   timeline   Where does the time go?   stream explorer (canvas)
+ *   trend      Is it getting better?     one metric per week/sprint (SVG)
  *   blocking   Who is blocking whom?     weighted handover graph (canvas)
  *   queue      Who is slow vs overloaded? WIP per person (canvas)
  *   rules      What should we change first? ranked, evidence-backed rules
@@ -30,6 +31,7 @@ import {
 import { rulesMarkup, rulesStats, rulesMarkdown } from '/rules.js';
 import { sprintStrip } from '/sprints.js';
 import { ticketMarkdown, ticketMarkup, ticketStats } from '/ticket.js';
+import { trendMarkdown, trendMarkup, trendStats } from '/trend.js';
 import {
   defaultScenario, policyMarkdown, policyMarkup, predHours,
   PRESETS, readScenario, scenarioQuery,
@@ -65,6 +67,7 @@ const PAGES = {
   ticket: { title: 'Ticket', question: 'Why did this ticket take this long?' },
   blocking: { title: 'Blocking map', question: 'Who is blocking whom?' },
   queue: { title: 'Queue', question: 'Who is overloaded, and who is merely slow?' },
+  trend: { title: 'Trend', question: 'Is it getting better?' },
   rules: { title: 'Rules', question: 'What should we change first?' },
   policy: { title: 'Policy lab', question: 'What should we change first?' },
   sources: { title: 'Sources', question: 'What is this screen made of?' },
@@ -118,6 +121,12 @@ const state = {
   blocking: null,
   // prd/26 P6: the sprint lens (`/api/sprints`): bands, scope, carry-over.
   sprints: null,
+  // prd/50: the trend view (`/api/trend`) and the metric/bucket being shown.
+  trend: null,
+  trendMetric: 'flow_efficiency',
+  trendBucket: 'week',
+  // prd/57: the benchmark contrast is on by default and has a per-view toggle.
+  benchmark: true,
   // prd/37 §4: the selected sprint (id) — filters the story lanes, marks the
   // band and rides in the URL so the lens is shareable.
   sprint: null,
@@ -676,6 +685,7 @@ function renderPage() {
   syncUrl();
   renderYah();
   syncLevelSelects();
+  renderBenchmarkToggles();
   renderScopeBanner();
   setHonesty('');
   renderTimeframe();
@@ -684,6 +694,7 @@ function renderPage() {
   if (page === 'delivery') renderDeliveryPage();
   if (page === 'blocking') renderBlockingPage();
   if (page === 'queue') renderQueuePage();
+  if (page === 'trend') renderTrendPage();
   if (page === 'rules') renderRulesPage();
   if (page === 'policy') renderPolicyPage();
   if (page === 'overview') renderOverviewPage();
@@ -728,6 +739,18 @@ async function ensureData(page) {
     const key = `queues:${tenant}:${state.timeframe}:${state.queueLevel}:${stamp}`;
     if (!cached(key)) state.cache.set(key, await getJSON(withTenant(`/api/queues?level=${state.queueLevel}&${q}`)));
     state.queues = cached(key);
+  }
+  if (page === 'trend') {
+    // prd/50: one endpoint per metric+bucket; the cache key names both, so
+    // switching a tab is one cheap request and going back is free.
+    const key = `trend:${tenant}:${state.timeframe}:${state.trendMetric}:${state.trendBucket}:${stamp}`;
+    if (!cached(key)) {
+      state.cache.set(key, await getJSON(withTenant(
+        `/api/trend?metric=${encodeURIComponent(state.trendMetric)}` +
+        `&bucket=${encodeURIComponent(state.trendBucket)}&${q}`,
+      )));
+    }
+    state.trend = cached(key);
   }
   if (page === 'rules') {
     // prd/39: the distributions are cap-independent; the size *rule* is not, so
@@ -1131,7 +1154,9 @@ function renderDeliveryPage() {
       aria-selected="${state.tab === tab.id}" class="${state.tab === tab.id ? 'on' : ''}">
       ${esc(tab.label)} <span class="num">${counts[tab.id]}</span></button>`).join('');
   $('delivery-table').innerHTML = data
-    ? deliveryTable(data, state.tab, { scope: deliveryScope() })
+    ? deliveryTable(data, state.tab, {
+      scope: deliveryScope(), benchmark: state.benchmark,
+    })
     : '<div class="empty-row">Loading the triage list…</div>';
   $('delivery-assumption').textContent = data
     ? `${data.assumption} · snapshot ${fmtStamp(Date.parse(data.snapshot))} · ` +
@@ -1216,6 +1241,8 @@ function renderDeliveryDetail() {
         : []),
       ...(row.stale ? [['stale', (row.stale_reasons || []).join('; ')]] : []),
       ...(row.unobserved ? [['unobserved since', row.unobserved_since]] : []),
+      // prd/57: the wait is read against the window cohort's median.
+      ['waiting', fmtHours(row.waiting_hours), row.wait_benchmark],
       ['waiting since', `${fmtStamp(Date.parse(row.waiting_since))} (${fmtHours(row.waiting_hours)})`],
       ['phase', row.phase],
       ['age', fmtHours(row.age_hours)],
@@ -1226,7 +1253,7 @@ function renderDeliveryDetail() {
       ['impact', row.dependents ? `≈${fmtHours(row.impact_hours)}` : '—'],
     ],
     children: [rowTicket(row), row.epic, row.id].filter(Boolean),
-  });
+  }, { benchmark: state.benchmark });
 }
 
 /** prd/28: closing the phone's detail sheet clears the selection it showed. */
@@ -1257,10 +1284,12 @@ function renderTicketPage() {
         or switch to a dataset that holds it.</p></div>`;
   } else {
     body.innerHTML = state.ticket
-      ? ticketMarkup(state.ticket, { base: appBase() })
+      ? ticketMarkup(state.ticket, { base: appBase(), benchmark: state.benchmark })
       : '<p class="empty-row">Loading the ticket…</p>';
   }
-  $('ticket-stats').innerHTML = state.ticket ? ticketStats(state.ticket) : '';
+  $('ticket-stats').innerHTML = state.ticket
+    ? ticketStats(state.ticket, { benchmark: state.benchmark })
+    : '';
   $('ticket-back').textContent =
     `← ${PAGES[state.ticketFrom] ? PAGES[state.ticketFrom].title : 'back'}`;
   const data = state.ticket;
@@ -1453,7 +1482,9 @@ function renderQueuePage() {
   // prd/42 M1/M7: the response-time column and the pseudonym legend sit under
   // the chart, so "who is the constraint" is answerable without the raw store.
   const responseHost = $('queue-response');
-  if (responseHost) responseHost.innerHTML = data ? responseTable(data) : '';
+  if (responseHost) responseHost.innerHTML = data
+    ? responseTable(data, { benchmark: state.benchmark })
+    : '';
   const legendHost = $('queue-legend');
   if (legendHost) legendHost.innerHTML = data ? legendMarkup(data) : '';
   $('queue-assumption').textContent = data
@@ -1486,6 +1517,75 @@ function queueMatchesScope(stream) {
     return value === 'sentinel' && stream.role === 'sentinel';
   }
   return true;
+}
+
+// -------------------------------------------------------------------- trend
+/* prd/50: one headline metric per week (or sprint), evaluated by the same
+ * functions as the headline. The chart is inline SVG; the table below it is the
+ * same series, so a reader never needs to hover. The bucket that contains the
+ * snapshot is labelled "in progress" — provisional, not hidden. */
+function renderTrendPage() {
+  const data = state.trend;
+  $('trend-body').innerHTML = trendMarkup(data, {
+    bucket: data ? data.bucket : state.trendBucket,
+  });
+  $('trend-stats').innerHTML = data ? trendStats(data) : '';
+  $('trend-assumption').textContent = data
+    ? `${data.definition} · ${data.assumption} · snapshot ${fmtStamp(Date.parse(data.as_of))} · ` +
+      `${data.bucket} buckets: the first/last is clipped to the analysis window; ` +
+      'the bucket containing the snapshot is in progress.'
+    : '';
+  if (data) {
+    const summary = data.summary || {};
+    setHonesty(
+      `${summary.measured_buckets || 0} of ${summary.buckets || 0} ${data.bucket} buckets measured · ` +
+      `${(summary.in_progress || []).length
+        ? `in progress: ${(summary.in_progress || []).join(', ')}`
+        : 'every bucket is complete'} · ` +
+      `same cohort and calendar as the headline (${data.hours_mode} hours)`,
+    );
+  }
+}
+
+async function setTrendView({ metric = null, bucket = null } = {}) {
+  if (metric) state.trendMetric = metric;
+  if (bucket) state.trendBucket = bucket;
+  state.trend = null;
+  renderPage();
+  try {
+    await ensureData('trend');
+  } catch (err) {
+    setStatus(`trend failed: ${err.message}`, 'stale');
+    return;
+  }
+  if (state.page === 'trend') renderPage();
+  saveUI();
+}
+
+// ------------------------------------------------------- benchmark contrast
+/* prd/57: every per-view duration carries its cohort median ×; the toggle is
+ * per view (delivery, ticket, queue) but one preference, so the surfaces never
+ * disagree about whether the contrast is on. */
+function renderBenchmarkToggles() {
+  for (const button of document.querySelectorAll('[data-benchmark-toggle]')) {
+    button.setAttribute('aria-pressed', String(state.benchmark));
+    button.classList.toggle('on', state.benchmark);
+    button.title = state.benchmark
+      ? 'showing the cohort median × next to each duration — click to hide it'
+      : 'benchmark contrast hidden — click to show the cohort median ×';
+  }
+}
+
+function setBenchmark(on) {
+  state.benchmark = Boolean(on);
+  saveUI();
+  renderPage();
+  // The drawer is a separate surface; repaint it with the new preference too.
+  if (state.drawerEntity && $('drawer') && !$('drawer').hidden) {
+    $('drawer').innerHTML = '<div class="sheet-handle" aria-hidden="true"></div>'
+      + '<button type="button" class="drawer-close" data-drawer="close" aria-label="close">×</button>'
+      + detailMarkup(state.drawerEntity, { benchmark: state.benchmark });
+  }
 }
 
 // -------------------------------------------------------------------- rules
@@ -1780,6 +1880,8 @@ function openPrDrawer(pr, row = null) {
       phaseHours
         ? (phaseHours[phase] != null ? fmtHours(phaseHours[phase]) : '—')
         : (totals.get(phase) ? fmtCalendarDuration(totals.get(phase)) : '—'),
+      // prd/57: a phase is read against its cohort (merged PRs' same phase).
+      row && row.phase_benchmarks ? row.phase_benchmarks[phase] : null,
     ]),
     ...(phaseHours ? [['phase total', fmtHours(Object.values(phaseHours).reduce(
       (sum, value) => sum + (Number(value) || 0), 0))]] : []),
@@ -1804,7 +1906,7 @@ function openDrawer(entity) {
   const drawer = $('drawer');
   drawer.innerHTML = `<div class="sheet-handle" aria-hidden="true"></div>` +
     `<button type="button" class="drawer-close" data-drawer="close" aria-label="close">×</button>` +
-    detailMarkup(entity);
+    detailMarkup(entity, { benchmark: state.benchmark });
   drawer.hidden = false;
   // prd/42 B2: the drawer is beside the content, not on top of the list
   // inspector. The class lets the shell reserve its width on desktop.
@@ -1835,7 +1937,7 @@ function openTicketPrDrawer(pr) {
     ['author', pr.author || '—'],
     ['state', `${pr.state}${pr.censored ? ' · right-censored' : ''}`],
     // prd/55 §7: the phase total is the cycle the phase list sums to.
-    ['cycle (sum of phases)', phaseTotal ? fmtHours(phaseTotal) : '—'],
+    ['cycle (sum of phases)', phaseTotal ? fmtHours(phaseTotal) : '—', pr.cycle_benchmark],
     // prd/42 M6: the review facts the ticket payload now carries.
     ['reviewers', pr.reviewers_total
       ? `${pr.reviewers_approved || 0}/${pr.reviewers_total} approved · ${pr.reviewers_pending || 0} pending`
@@ -1864,6 +1966,8 @@ function openTicketPrDrawer(pr) {
         ? 'unobserved (no events since the snapshot)'
         : PHASE[phase].label,
       phases.get(phase) ? fmtHours(phases.get(phase)) : '—',
+      // prd/57: each drawer phase is read against the merged-PR cohort.
+      (pr.phase_benchmarks || {})[phase] || null,
     ]),
     ['phase total', phaseTotal ? fmtHours(phaseTotal) : '—'],
   ];
@@ -1920,6 +2024,11 @@ function openDeliveryPrDrawer(row) {
         ? `${fmtStamp(Date.parse(row.last_event || row.waiting_since))} · ${row.last_event_activity || row.kind || ''}`
         : '—'],
       ['waiting since', `${fmtStamp(Date.parse(row.waiting_since))} (${fmtHours(row.waiting_hours)})`],
+      // prd/57: the wait and each measured phase are read against their cohorts.
+      ['waiting', fmtHours(row.waiting_hours), row.wait_benchmark],
+      ...Object.entries(row.phase_hours || {}).map(([phase, hours]) => [
+        phase, fmtHours(hours), (row.phase_benchmarks || {})[phase] || null,
+      ]),
       ['age', fmtHours(row.age_hours)],
       ['waiting on author', row.author_open ? 'yes' : 'no'],
       ['CI', row.ci ? 'running' : 'not running'],
@@ -2948,6 +3057,10 @@ window.__megaspeed = {
   setTheme,
   get theme() { return state.theme; },
   setRulesLevel,
+  setTrendView,
+  setBenchmark,
+  get benchmark() { return state.benchmark; },
+  get trend() { return state.trend; },
   stamp: fmtStamp,
 };
 
@@ -3143,6 +3256,26 @@ document.addEventListener('click', async (event) => {
     await setRulesLevel(ruleLevel.dataset.ruleLevel);
     return;
   }
+  // prd/50: a metric tab or the week/sprint bucket is one cached request.
+  const trendMetric = event.target.closest('[data-trend-metric]');
+  if (trendMetric) {
+    await setTrendView({ metric: trendMetric.dataset.trendMetric });
+    return;
+  }
+  const trendBucket = event.target.closest('[data-trend-bucket]');
+  if (trendBucket) {
+    await setTrendView({ bucket: trendBucket.dataset.trendBucket });
+    return;
+  }
+  if (event.target.closest('#trend-copy')) {
+    await copyText(trendMarkdown(state.trend));
+    return;
+  }
+  // prd/57: the per-view benchmark toggle (delivery / ticket / queue).
+  if (event.target.closest('[data-benchmark-toggle]')) {
+    setBenchmark(!state.benchmark);
+    return;
+  }
   const nav = event.target.closest('.nav-item');
   if (nav) {
     await showPage(nav.dataset.page);
@@ -3313,6 +3446,10 @@ function saveUI() {
       queueLevel: state.queueLevel,
       rulesLevel: state.rulesLevel,
       policyScenario: state.policyScenario,
+      // prd/50: the trend tab; prd/57: the benchmark contrast preference.
+      trendMetric: state.trendMetric,
+      trendBucket: state.trendBucket,
+      benchmark: state.benchmark,
       activity: [...timeline.activityState.entries()],
       scope: state.scope,
       tenant: state.tenant,
@@ -3368,6 +3505,14 @@ function restoreUI() {
   if (stored.rulesLevel === 'team' || stored.rulesLevel === 'person') {
     state.rulesLevel = stored.rulesLevel;
   }
+  if (['flow_efficiency', 'cycle_median', 'on_time', 'wait_hours', 'merged', 'open']
+    .includes(stored.trendMetric)) {
+    state.trendMetric = stored.trendMetric;
+  }
+  if (stored.trendBucket === 'week' || stored.trendBucket === 'sprint') {
+    state.trendBucket = stored.trendBucket;
+  }
+  if (typeof stored.benchmark === 'boolean') state.benchmark = stored.benchmark;
   if (stored.policyScenario && typeof stored.policyScenario === 'object') {
     state.policyScenario = { ...defaultScenario(), ...stored.policyScenario };
   }

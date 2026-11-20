@@ -31,6 +31,9 @@ one failure this whole feature exists to prevent.
                                         PR-size distributions + caps (prd/39)
     GET  /api/sprints?days=&tenant=     sprint lens (prd/26 P6): bands, scope
                                         (in/out of a sprint) and carry-over
+    GET  /api/trend?tenant=&metric=…&bucket=&days=
+                                        one headline metric as a time series,
+                                        bucketed by week or sprint (prd/50)
     GET  /api/simulate?days=&scenario=&tenant= policy lab: calibrated model,
                                               validation gate + one scenario (prd/23)
     GET  /api/calendar?tenant=          effective business-hours calendar (prd/19)
@@ -148,6 +151,7 @@ from analysis import jira as jira_analysis  # noqa: E402  (prd/21 sprints)
 from analysis import rules as insights_rules  # noqa: E402  (prd/17 suggestions)
 from analysis import simulation as policy_lab  # noqa: E402  (prd/23 policy lab)
 from analysis import tickets as ticket_view  # noqa: E402  (prd/25 ticket detail)
+from analysis import trend as trend_view  # noqa: E402  (prd/50 time series)
 from ingest import store as pstore  # noqa: E402  (read helpers + schema guard only)
 from ingest import taxonomy  # noqa: E402  (closed vocabularies, read-only)
 from server import query as query  # noqa: E402  (filters, paging, aggregation)
@@ -781,6 +785,7 @@ def _ticket_payload(con, tenant: str, path: Path, key: str) -> dict | None:
     bundle = _analysis_bundle(con, tenant, path)
     payload = ticket_view.ticket(
         bundle.court, bundle.jira(con), key, threads=bundle.threads(con),
+        benchmarks=bundle.benchmarks(con),
     )
     if payload is not None:
         payload["tenant"] = tenant
@@ -818,7 +823,8 @@ class _AnalysisBundle:
     so sharing it between requests and threads cannot change an answer.
     """
 
-    __slots__ = ("court", "_lock", "_jira", "_threads", "_bots", "_sizes")
+    __slots__ = ("court", "_lock", "_jira", "_threads", "_bots", "_sizes",
+                 "_benchmarks")
 
     def __init__(self, court) -> None:
         self.court = court
@@ -830,6 +836,7 @@ class _AnalysisBundle:
         self._threads = None
         self._bots = None
         self._sizes = None
+        self._benchmarks = None
 
     def jira(self, con) -> jira_analysis.JiraData:
         """The Jira half of the store, joined to this bundle's court."""
@@ -855,6 +862,21 @@ class _AnalysisBundle:
             if self._sizes is None:
                 self._sizes = insights_rules.load_pr_sizes(con)
             return self._sizes
+
+    def benchmarks(self, con) -> dict:
+        """prd/57: the per-duration cohorts, built once per store version.
+
+        Segment medians need every completed story's segments, so this is the
+        expensive slot — exactly the reason it lives on the bundle rather than
+        being recomputed for a new ticket key.
+        """
+        jira = self.jira(con)
+        with self._lock:
+            if self._benchmarks is None:
+                self._benchmarks = ticket_view.benchmark_cohorts(
+                    self.court, jira,
+                )
+            return self._benchmarks
 
 
 def _analysis_bundle(con, tenant: str, path: Path) -> _AnalysisBundle:
@@ -993,6 +1015,7 @@ ANALYSIS_PARAMS = {
     "delivery": ("days",),
     "insights": ("level", "days", "size_commits", "size_lines"),
     "sprints": ("days",),
+    "trend": ("metric", "bucket", "days"),
     "simulate": ("days", "scenario", "seed", "tolerance", "replications"),
     "pr-size": ("size_commits", "size_lines"),
 }
@@ -1373,6 +1396,90 @@ def sprints(request: Request):
             "days": round(max(0.0, (end - start).total_seconds()) / 86400.0, 1),
         },
     })
+    return JSONResponse(payload, headers={"X-Tenant": tenant})
+
+
+# --------------------------------------------------------------------------- #
+# trend / time series (prd/50): the window metrics, one bucket at a time
+# --------------------------------------------------------------------------- #
+# One payload per (tenant, store + calendar version, window, bucket, metric).
+# A trend is several evaluations of the same metric functions, so the answer is
+# cached exactly like the other analysis views; a store or calendar change
+# makes old entries unreachable.
+_trend_lock = threading.Lock()
+_trend_cache: dict[tuple, dict] = {}
+TREND_CACHE_SIZE = 32
+
+
+@app.get("/api/trend")
+def trend(request: Request):
+    """One headline metric as a time series, bucketed by week or sprint.
+
+    ``metric`` is one of ``flow_efficiency`` (default), ``cycle_median``,
+    ``on_time``, ``wait_hours``, ``merged``, ``open``; ``bucket`` is ``week``
+    (default, Monday-aligned) or ``sprint``. Each point is **the same metric
+    function the headline uses**, evaluated on the bucket's own window with the
+    same cohort rule and calendar — no new definitions (prd/50). The bucket
+    containing the snapshot is ``in_progress`` (its cohort is still
+    accumulating), and the active sprint is named when the store has one. The
+    payload carries the metric catalogue, its definition, and a summary
+    (first → latest change), so the chart and the tab labels come from one
+    answer.
+    """
+    unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["trend"]))
+    if unknown is not None:
+        return unknown
+    try:
+        days = _num_param(request, "days", minimum=0, maximum=3650)
+        metric = (
+            request.query_params.get("metric") or trend_view.DEFAULT_METRIC
+        ).strip()
+        bucket = (
+            request.query_params.get("bucket") or trend_view.DEFAULT_BUCKET
+        ).strip()
+        if metric not in trend_view.METRICS:
+            raise ValueError(f"metric must be one of {sorted(trend_view.METRICS)}")
+        if bucket not in trend_view.BUCKETS:
+            raise ValueError(f"bucket must be one of {sorted(trend_view.BUCKETS)}")
+    except ValueError as exc:
+        return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["trend"])))
+    try:
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    key = (
+        tenant, _file_stamp(path), _calendar_key(tenant),
+        days, bucket, metric,
+    )
+    with _trend_lock:
+        hit = _trend_cache.get(key)
+    if hit is not None:
+        return JSONResponse(hit, headers={"X-Tenant": tenant})
+    try:
+        with store_conn(path) as con:
+            bundle = _analysis_bundle(con, tenant, path)
+            court = bundle.court
+            jira = bundle.jira(con)
+            window = insights_rules.window_for(court, _days(days), jira)
+            payload = trend_view.trend(
+                court, jira, window, metric=metric, bucket=bucket,
+            )
+    except Exception as exc:  # noqa: BLE001
+        return _store_error(exc)
+    payload.update({
+        "ok": True,
+        "tenant": tenant,
+        "as_of": pstore.iso(court.snapshot),
+        "hours_mode": court.hours_mode,
+        "calendar_id": court.calendar_id,
+        "assumption": court.assumption,
+        **court.calendar_warning(),
+        "jira": jira.summary(),
+    })
+    with _trend_lock:
+        if len(_trend_cache) >= TREND_CACHE_SIZE:
+            _trend_cache.clear()
+        _trend_cache[key] = payload
     return JSONResponse(payload, headers={"X-Tenant": tenant})
 
 

@@ -90,6 +90,7 @@
       </div>
       <div class="nav-group"><span class="nav-label">Flow</span>
         <button type="button" class="nav-item" data-page="timeline">Timeline</button>
+        <button type="button" class="nav-item" data-page="trend">Trend</button>
       </div>
       <div class="nav-group"><span class="nav-label">Blocking</span>
         <button type="button" class="nav-item" data-page="blocking">Blocking map</button>
@@ -175,12 +176,25 @@
         </div>
       </section>
 
+      <!-- Trend (prd/50): one headline metric per week or sprint -->
+      <section class="page" id="page-trend" aria-labelledby="page-title" hidden>
+        <div class="toolbar">
+          <div class="stats-strip" id="trend-stats"></div>
+          <span class="grow"></span>
+          <button type="button" class="chip" id="trend-copy">Copy as Markdown</button>
+        </div>
+        <div id="trend-body"></div>
+        <p class="assumption" id="trend-assumption"></p>
+      </section>
+
       <!-- Delivery list -->
       <section class="page" id="page-delivery" aria-labelledby="page-title" hidden>
         <div class="toolbar">
           <div class="tabs" id="delivery-tabs" role="tablist" aria-label="subset"></div>
           <span class="grow"></span>
           <button type="button" class="chip" id="delivery-copy">Copy as Markdown</button>
+          <button type="button" class="chip" data-benchmark-toggle aria-pressed="true"
+            title="showing the cohort median × next to each duration — click to hide it">median ×</button>
           <span class="hint" id="delivery-hint">click a row to inspect · right-click to pivot</span>
         </div>
         <div class="split">
@@ -198,6 +212,8 @@
           <button type="button" class="chip" id="ticket-back">← back</button>
           <span class="grow"></span>
           <div class="stats-strip" id="ticket-stats"></div>
+          <button type="button" class="chip" data-benchmark-toggle aria-pressed="true"
+            title="showing the cohort median × next to each duration — click to hide it">median ×</button>
           <button type="button" class="chip" id="ticket-copy">Copy as Markdown</button>
         </div>
         <div id="ticket-body"></div>
@@ -236,6 +252,8 @@
             </select>
           </label>
           <span class="grow"></span>
+          <button type="button" class="chip" data-benchmark-toggle aria-pressed="true"
+            title="showing the cohort median × next to each response time — click to hide it">median ×</button>
           <span class="hint">WIP = items waiting · completions in grey · click a row to scope</span>
         </div>
         <div class="stage queue-stage" id="queue-stage">

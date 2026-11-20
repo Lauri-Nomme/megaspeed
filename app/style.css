@@ -2121,3 +2121,36 @@ a.child.ticket-link { color: var(--link); }
   .app.drawer-open .main { margin-right: 0; }
 }
 
+
+/* prd/57: the benchmark contrast — a cohort median × next to a per-item
+ * duration. Tertiary ink so it informs without competing with the value. */
+.benchmark-contrast {
+  color: var(--text-tertiary); font-size: 10.5px; font-weight: 400;
+  white-space: nowrap;
+}
+.facts .benchmark-contrast { margin-left: 4px; }
+.delivery .benchmark-contrast, .ticket-prs .benchmark-contrast,
+.ticket-seg-legend .benchmark-contrast { font-size: 10px; }
+[data-benchmark-toggle][aria-pressed="false"] { color: var(--text-tertiary); opacity: .7; }
+[data-benchmark-off="true"] .benchmark-contrast { display: none; }
+
+/* prd/50: the trend view — metric tabs, an inline SVG, and the same series as
+ * a table. The in-progress bucket is shaded and named, never hidden. */
+.trend-toolbar {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  margin: 0 0 10px;
+}
+.trend-body { padding: 0 12px 8px; }
+.trend-chart {
+  display: block; width: 100%; max-width: 920px; height: auto;
+  margin: 0 0 8px;
+}
+.trend-table { max-width: 720px; }
+.trend-table tr.in-progress td { color: var(--text-secondary); }
+.trend-table tr.in-progress td:first-child::after {
+  content: " · in progress"; color: var(--text-tertiary); font-size: 10px;
+}
+@media (max-width: 640px) {
+  .trend-body { padding: 0; }
+  .trend-chart { max-width: 100%; }
+}

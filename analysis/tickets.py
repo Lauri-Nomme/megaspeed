@@ -30,9 +30,15 @@ from collections import Counter
 from datetime import datetime
 
 from analysis import ballcourt
+from analysis import benchmark
 from analysis import jira
 from analysis.effort import ACTIVE_PHASES
 from ingest.store import iso
+
+#: The benchmark-contrast bases (prd/57 §3: every multiple is labelled with
+#: what it is a multiple of).
+CYCLE_BENCHMARK_BASIS = "median created → done over completed stories"
+SEGMENT_BENCHMARK_BASIS = "median of the same segment over completed stories"
 
 #: Why a boundary is absent, in the words the detail page shows. These are
 #: explanations, not guesses: each names the event that would have produced the
@@ -259,13 +265,12 @@ def _segment_rows(court: ballcourt.BallCourt, cycle: jira.Cycle | None,
     )
     for key in keys:
         left, right = jira.SEGMENT_BOUNDS[key]
-        t1_raw = cycle.boundaries.get(left) if cycle is not None else None
-        t2_raw = cycle.boundaries.get(right) if cycle is not None else None
         # prd/46 §1: the ordered boundary prices the segment, the raw one names
         # the inversion. A boundary the clamp moved is a data quirk, not a
         # finding, and the shares can never sum past the cycle.
-        t1 = (cycle.segment_bounds.get(left) if cycle is not None else None) or t1_raw
-        t2 = (cycle.segment_bounds.get(right) if cycle is not None else None) or t2_raw
+        t1, t2, t1_raw, t2_raw = jira.segment_bounds_for(cycle, key) if cycle is not None else (
+            None, None, None, None,
+        )
         row: dict = {
             "key": key,
             "label": jira.SEGMENT_LABEL[key],
@@ -304,7 +309,7 @@ def _segment_rows(court: ballcourt.BallCourt, cycle: jira.Cycle | None,
             )
             rows.append(row)
             continue
-        elapsed = round(court.business_hours(cycle.person, t1, t2), 2)
+        elapsed = jira.segment_hours(court, cycle, key)
         active = round(jira.active_hours(court, cycle, t1, t2), 2)
         if active > elapsed:
             active = elapsed
@@ -626,7 +631,8 @@ def _gap_notes(biggest: dict, segments: dict) -> tuple[str, str]:
 # cohort benchmark (prd/42 M2)
 # --------------------------------------------------------------------------- #
 def _benchmark(court: ballcourt.BallCourt, data: jira.JiraData,
-               story: jira.Story | None, segments: dict) -> dict:
+               story: jira.Story | None, segments: dict,
+               cohorts: dict | None = None) -> dict:
     """Where this story's cycle sits among its peers.
 
     "73 h" means nothing without a cohort. Rank 1 is the *fastest* story, so
@@ -637,6 +643,11 @@ def _benchmark(court: ballcourt.BallCourt, data: jira.JiraData,
     The cohort is **completed** stories only: an open story's "cycle" is
     censored at the snapshot, and mixing the two made the DEL-167 cohort 100
     instead of the 87 completed stories (and moved every rank).
+
+    prd/57 adds the benchmark contrast: the cycle's ``multiple`` of the cohort
+    median, from the one :func:`analysis.benchmark.contrast` helper. ``cohorts``
+    is the pre-built block (``benchmark_cohorts``) the payload shares with the
+    segment contrasts, so one request computes the cohort once.
     """
     current = segments.get("cycle_hours")
     censored = bool(segments.get("boundaries", {}).get("done", {}).get("ts") is None)
@@ -653,22 +664,14 @@ def _benchmark(court: ballcourt.BallCourt, data: jira.JiraData,
                 "has no completed cohort rank"
             ),
         }
-    cycles: list[tuple[str, float, int | None]] = []
-    for peer in data.stories:
-        cycle = jira._cycle(peer)
-        begin = cycle.boundaries.get("created")
-        done = cycle.boundaries.get("done")
-        if begin is None or done is None or done <= begin:
-            continue
-        hours = round(court.business_hours(peer.actor, begin, done), 2)
-        cycles.append((peer.key, hours, peer.points))
-    if not cycles:
+    peers = (cohorts or benchmark_cohorts(court, data)).get("stories") or []
+    if not peers:
         return {"available": False, "note": "no completed story cycle in the cohort"}
-    ordered = sorted(cycles, key=lambda item: (item[1], item[0]))
-    rank = 1 + sum(1 for item in ordered if item[1] < current)
+    ordered = sorted(peers, key=lambda item: (item["hours"], item["key"]))
+    rank = 1 + sum(1 for item in ordered if item["hours"] < current)
     same_points = [
-        hours for key, hours, points in ordered
-        if story.points is not None and points == story.points
+        item["hours"] for item in ordered
+        if story.points is not None and item["points"] == story.points
     ]
     return {
         "available": True,
@@ -677,17 +680,71 @@ def _benchmark(court: ballcourt.BallCourt, data: jira.JiraData,
         "faster": max(0, rank - 1),
         "slower": max(0, len(ordered) - rank),
         "percentile": round(rank / len(ordered), 4),
-        "median_hours": _median([item[1] for item in ordered]),
+        "median_hours": _median([item["hours"] for item in ordered]),
         "points": story.points,
         "points_n": len(same_points),
         "points_median_hours": _median(same_points),
         "censored": False,
+        # prd/57: "73 h" read as "4.1× the 30 h median" — same cohort, same clock.
+        "contrast": benchmark.contrast(
+            current, [item["hours"] for item in ordered],
+            basis=CYCLE_BENCHMARK_BASIS,
+        ),
         "basis": (
             "rank = 1 + completed stories with a shorter measured created → done "
             "cycle; the cohort is every completed story in the store (open "
             "stories are censored and excluded)"
         ),
     }
+
+
+# --------------------------------------------------------------------------- #
+# benchmark contrast (prd/57): one cohort per per-item duration the page shows
+# --------------------------------------------------------------------------- #
+def benchmark_cohorts(court: ballcourt.BallCourt, data: jira.JiraData | None) -> dict:
+    """Every cohort the ticket page reads, built once per store version (prd/57).
+
+    * ``stories`` — completed stories' cycles (rank + cycle contrast);
+    * ``segments`` — per-segment hours over the same completed stories;
+    * ``phases`` — per-phase hours over merged PRs (the PR drawer);
+    * ``pr_cycles`` — merged PRs' created → merged hours.
+
+    The server caches this block in the per-store analysis bundle, so a new
+    ticket key never re-derives 4,000 stories' segments.
+    """
+    data = data or jira.EMPTY
+    stories = jira.story_cycle_cohort(court, data)
+    return {
+        "stories": stories,
+        "segments": jira.segment_cohort(court, data),
+        "phases": ballcourt.phase_cohort(court),
+        "pr_cycles": ballcourt.pr_cycle_cohort(court),
+    }
+
+
+def _attach_benchmarks(segments: dict, prs: list[dict], cohorts: dict) -> None:
+    """Attach ``median`` + ``multiple`` to each per-item duration (prd/57)."""
+    for row in segments.get("rows") or ():
+        if row.get("hours") is None:
+            continue
+        row["benchmark"] = benchmark.contrast(
+            row["hours"], cohorts["segments"].get(row["key"], ()),
+            basis=SEGMENT_BENCHMARK_BASIS,
+        )
+    for pr in prs:
+        # A censored PR has no completed cycle; the contrast is suppressed with
+        # its reason rather than comparing a running age to merged PRs.
+        pr["cycle_benchmark"] = benchmark.contrast(
+            None if pr.get("censored") else pr.get("cycle_hours"),
+            cohorts["pr_cycles"], basis=ballcourt.PR_CYCLE_BASIS,
+        )
+        pr["phase_benchmarks"] = {
+            phase: benchmark.contrast(
+                hours, cohorts["phases"].get(phase, ()),
+                basis=ballcourt.PHASE_BENCHMARK_BASIS,
+            )
+            for phase, hours in (pr.get("phase_hours") or {}).items()
+        }
 
 
 # --------------------------------------------------------------------------- #
@@ -778,18 +835,22 @@ def _median(values: list[float]) -> float | None:
 # epics are not stories (prd/42 P9)
 # --------------------------------------------------------------------------- #
 def _epic(court: ballcourt.BallCourt, data: jira.JiraData,
-          key: str, epic: dict) -> dict:
+          key: str, epic: dict, cohorts: dict | None = None) -> dict:
     """A minimal epic page: the parent, its children and why it has no cycle.
 
     An epic is a grouping, not a work item: it has no created → done cycle of
     its own, and rendering one as "0/9 segments" made the product look broken.
     The page now says what it is and lists the child stories with their own
     cycles, so the epic is a doorway rather than a dead end.
+
+    prd/57: a child's completed cycle carries the same cohort contrast as a
+    ticket's, so the epic list is read against the store, not in a vacuum.
     """
     children = [
         story for story in data.stories
         if (story.epic_key or "") == key
     ]
+    cycles = [row["hours"] for row in (cohorts or {}).get("stories") or ()]
     child_rows = []
     for story in children:
         cycle = jira._cycle(story)
@@ -806,6 +867,10 @@ def _epic(court: ballcourt.BallCourt, data: jira.JiraData,
             "points": story.points,
             "cycle_hours": hours,
             "censored": done is None,
+            "cycle_benchmark": benchmark.contrast(
+                None if done is None else hours, cycles,
+                basis=CYCLE_BENCHMARK_BASIS,
+            ),
         })
     child_rows.sort(key=lambda row: (row["cycle_hours"] is None, row["cycle_hours"] or 0, row["key"]))
     story_count = len(child_rows)
@@ -1084,6 +1149,7 @@ def ticket(
     data: jira.JiraData | None,
     key: str,
     threads: list[dict] | None = None,
+    benchmarks: dict | None = None,
 ) -> dict | None:
     """The full cycle of one ticket, or ``None`` when the store has never seen it.
 
@@ -1095,6 +1161,8 @@ def ticket(
 
     ``threads`` (the review threads from ``rules.load_threads``) lets each PR
     row carry its open-thread count, which the PR drawer shows (prd/42 M6).
+    ``benchmarks`` is the pre-built ``benchmark_cohorts`` block (prd/57); the
+    server caches it per store version, a direct caller gets it computed here.
     """
     data = data or jira.EMPTY
     wanted = normalize_key(key)
@@ -1102,11 +1170,12 @@ def ticket(
         return None
     story = jira.story_for(data, wanted)
     states = _pr_states(court, wanted)
+    cohorts = benchmarks or benchmark_cohorts(court, data)
     # prd/42 P9: an epic key is a parent grouping, not a story — even when every
     # PR in the corpus names it as its epic link (DEL-1 has 131).
     epic = (data.epic_objects or {}).get(wanted)
     if story is None and epic is not None:
-        return _epic(court, data, wanted, epic)
+        return _epic(court, data, wanted, epic, cohorts)
     if story is None and not states:
         return None
 
@@ -1129,7 +1198,9 @@ def ticket(
     worklog_rows, worklog = _worklogs(story, prs)
     events = _events(story)
     answer, answer_kind = _answer(wanted, story, segments, prs)
-    benchmark = _benchmark(court, data, story, segments)
+    benchmark = _benchmark(court, data, story, segments, cohorts)
+    # prd/57: each segment and each PR phase carries its cohort median + multiple.
+    _attach_benchmarks(segments, prs, cohorts)
 
     story_row = None
     if story is not None:

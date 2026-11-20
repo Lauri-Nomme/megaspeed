@@ -10,6 +10,7 @@
  */
 
 import { fmtStamp, fmtCalendarDuration, fmtHours, esc, rgba } from './format.js';
+import { benchmarkInline } from './benchmark.js';
 import { streamRoleLabel } from './scope.js';
 import { color, onPalette } from './theme.js';
 
@@ -437,7 +438,7 @@ export function fmtWipTick(value) {
  * column carries the age of the oldest unanswered request so the two forgotten
  * PRs are a quantity, not a count.
  */
-export function responseTable(data) {
+export function responseTable(data, { benchmark = true } = {}) {
   const response = data && data.response;
   const people = (response && response.people) || [];
   if (!people.length) return '';
@@ -461,6 +462,7 @@ export function responseTable(data) {
         ${row.role === 'sentinel' ? '<span class="pill warning" title="mandatory approver on every PR">sentinel</span>' : ''}</td>
       <td class="c-dur num" data-label="median response" title="${esc(clock)}">${
         row.median_hours == null ? '—' : esc(fmtHours(row.median_hours))}${
+        benchmarkInline(row.response_benchmark, { enabled: benchmark })}${
         ratio ? ` <span class="muted">${ratio}</span>` : ''}</td>
       <td class="c-dur num" data-label="mean">${
         row.mean_hours == null ? '—' : `≈${esc(fmtHours(row.mean_hours))}`}</td>

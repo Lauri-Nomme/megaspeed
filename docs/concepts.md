@@ -391,6 +391,40 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
   total across stories. They must never be conflated: an aggregate total mislabelled "per story" (e.g.
   "100.1 d per story" for a whole-team total) is a bug — the label must match the statistic.
 
+### Benchmark contrast (prd/57)
+- **Definition**: any **per-item** duration shown in the UI is rendered next to its **cohort median** and a
+  **multiple**, so the reader sees whether it is normal and by how much: `123 h (median 30 h · 4.1×)`.
+  It answers "is this a one-off or the norm", not "what is the total" — so it is never drawn on an
+  aggregate figure (those are already cohort statistics).
+- **Derivation**: one helper (`analysis/benchmark.py` `contrast`) computes `median` and
+  `multiple = value ÷ median` from the cohort the metric already uses, on the same business-hours clock
+  and calendar:
+  - the **cycle** and each **segment** → completed stories in the store (§9 Cohort benchmark);
+  - a **PR phase** and the **PR cycle** → merged PRs;
+  - the **delivery-list wait** → the window cohort of open PRs;
+  - a **response time** → every reviewer answer in the window.
+  The payload carries `n`, `min_n` and a `basis` phrase; the view labels the multiple with that basis
+  ("vs median of N completed stories"). A cohort below **10** (`BENCHMARK_MIN_N`) is **suppressed** with
+  the reason rather than compared — a multiple over three items is noise. A censored value (an open
+  story's running age, an open PR's cycle) is suppressed too, never compared with completed work.
+- **Purpose**: the decisive half the raw numbers lacked — "review rounds 123 h" becomes "4.1× the 30 h
+  median", and "most of it went to review" becomes "this item is the outlier". A per-view toggle
+  hides the contrast when it is not wanted.
+
+### Trend (time series, prd/50)
+- **Definition**: one headline metric evaluated **per bucket** — a calendar week (Monday 00:00 UTC, the
+  same alignment the event histogram uses) or a sprint's measured band (start → end, or start → snapshot
+  while active).
+- **Derivation**: **no new metric**. Each point calls the same function the window figure comes from
+  (`rules.flow_efficiency`, `rules.cycle_time`, `jira.sprint_delivery`, …) on the bucket's own window,
+  with the same cohort rule ("items created in the window") and the same calendar. The point's `start` /
+  `end` are the evaluation window (the first/last bucket is clipped to the analysis window); `bucket_start`
+  is the calendar edge. The bucket containing the snapshot is marked **in progress** — its cohort is
+  still accumulating, so its value is provisional, not hidden; an active sprint's bucket is in progress
+  for the same reason.
+- **Purpose**: "is flow efficiency improving week over week?" and "did delivery get better after the
+  review-SLA change?" — a trend must be a sequence of the *same* number, never a second definition.
+
 ### Sprint "done" / scope / carry-over
 - **Definition**: a story is *done in sprint S* if it reached `done` **by S's end** (not "by now")
   **and no PR it names is still open**. A story whose Jira status is Done while one of its PRs is open
