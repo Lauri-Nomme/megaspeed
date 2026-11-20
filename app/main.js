@@ -1235,7 +1235,7 @@ function renderBlockingPage() {
   blockingMap.setData(data || { nodes: [], edges: [] });
   blockingMap.setLens(state.lens);
   $('blocking-assumption').textContent = data
-    ? `${data.assumption} · ${data.window.days} calendar days in view · edge = “X waited on Y” · ${data.attribution}. Direction colour is relative to the selected node.`
+    ? `${data.assumption} · ${data.window.days} calendar days in view · edge = “X waited on Y” · ${data.attribution}.${data.hours_note ? ` ${data.hours_note}.` : ''} Direction colour is relative to the selected node.`
     : '';
   if (data) {
     const totals = data.totals || {};

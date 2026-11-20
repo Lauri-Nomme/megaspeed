@@ -95,6 +95,11 @@ from ingest.store import iso, to_naive_utc, utcnow
 TARGET_FIRST_REVIEW_HOURS = 24.0
 TARGET_CYCLE_HOURS = 72.0
 MAX_REVIEW_ROUNDS = 3
+#: prd/46 §3: the *advice* target is the cap the policy lab's best scenario
+#: uses (2 rounds) — a cap of 3 binds no PR in the 90-day cohort, so the rule
+#: must not recommend it. The conformance metric keeps ``MAX_REVIEW_ROUNDS`` (3)
+#: as its own, older threshold; the payload names both.
+REVIEW_ROUND_CAP_TARGET = 2
 # Flow efficiency (prd/05): the share of a PR's business-hour lifetime spent in
 # active work. 25% is the common "good" threshold for software delivery; below
 # 10% the process is almost all queue.
@@ -1246,11 +1251,12 @@ def rework_loops(court: ballcourt.BallCourt, window) -> dict:
         "mean_rounds": round(sum(rounds) / len(rounds), 2) if rounds else None,
         "median_rounds": _median([float(r) for r in rounds]),
         "p90_rounds": _p90([float(r) for r in rounds]),
-        # prd/41 P1: one target everywhere — the same MAX_REVIEW_ROUNDS the
-        # footer and the conformance metric quote (concepts.md §6).
-        "prs_over_target": sum(1 for r in rounds if r > MAX_REVIEW_ROUNDS),
+        # prd/46 §3: the advice target is the lab's best-scenario cap (2); the
+        # conformance threshold (3) is reported next to it, never instead of it.
+        "prs_over_target": sum(1 for r in rounds if r > REVIEW_ROUND_CAP_TARGET),
         "prs_over_max": sum(1 for r in rounds if r > MAX_REVIEW_ROUNDS),
-        "excess_rounds": sum(max(0, r - MAX_REVIEW_ROUNDS) for r in rounds),
+        "excess_rounds": sum(max(0, r - REVIEW_ROUND_CAP_TARGET) for r in rounds),
+        "target_rounds": REVIEW_ROUND_CAP_TARGET,
         "max_rounds": MAX_REVIEW_ROUNDS,
         # prd/43 §1: is the round count the lever? Measured on merged PRs only.
         "rounds_cycle_n": len(pairs),
@@ -1721,16 +1727,17 @@ def pr_size_distribution(court: ballcourt.BallCourt, window,
 
 
 def sentinel_queue(court: ballcourt.BallCourt, window) -> dict:
-    """Median wait on the mandatory approval, when sentinel roles exist.
+    """The sentinel wait, one number from one clock (prd/46 §2).
 
-    Episodes, not intervals (S12), and the same ``unrequired`` rule as the
-    reviewer metric: a PR that merged without the sentinel did not need them
-    (S7). With ``sentinel_after_peers`` (the default) the clock only starts
-    once every peer has answered, so the median prices the time the sentinel was
-    actually expected to act.
+    This metric used to average *review-ball episodes* while the Queue's
+    response table timed "last peer answer → first response". A lead saw 5.7 h,
+    6.0 h and 11.1 h for the same person and could not tell they were three
+    metrics. It now quotes ``ballcourt.response_times``'s canonical
+    ``sentinel_wait`` block verbatim — the gate-aware first-response clock — and
+    carries its definition in the payload.
     """
-    start, end = window
     sentinels = set(court.sentinels)
+    definition = ballcourt.SENTINEL_WAIT_DEFINITION
     if not sentinels:
         return {
             "available": False,
@@ -1741,70 +1748,54 @@ def sentinel_queue(court: ballcourt.BallCourt, window) -> dict:
             "target_hours": TARGET_FIRST_REVIEW_HOURS,
             "by_person": {},
             "rows": [],
+            "definition": definition,
         }
-    unrequired = ballcourt.pending_at_close(court)
-    waits: dict[str, list[float]] = defaultdict(list)
-    unrequired_waits: dict[str, dict] = defaultdict(_empty_wait)
+    response = ballcourt.response_times(court, window)
+    canonical = response["sentinel_wait"]
     pr_meta = {state.pr["object_id"]: state.pr for state in court.prs}
-    # per (sentinel, PR): the item a reader opens, not each interval
-    by_pr: dict[tuple[str, str], dict] = {}
-    for episode in _episodes(court, window, "review"):
-        person = episode["person"]
-        if person not in sentinels:
-            continue
-        entry = by_pr.get((person, episode["object_id"]))
-        if entry is None:
-            entry = by_pr[(person, episode["object_id"])] = {
-                "person": person,
-                "object_id": episode["object_id"],
-                **_empty_wait(),
-                "first_ts": episode["first_ts"],
-                "last_ts": episode["last_ts"],
-            }
-        entry["hours"] += episode["hours"]
-        entry["waits"] += 1
-        entry["first_ts"] = min(entry["first_ts"], episode["first_ts"])
-        entry["last_ts"] = max(entry["last_ts"], episode["last_ts"])
-        if person in unrequired.get(episode["object_id"], ()):
-            entry["unrequired_hours"] += episode["hours"]
-            unrequired_waits[person]["hours"] += episode["hours"]
-            unrequired_waits[person]["waits"] += 1
-        else:
-            entry["required_hours"] += episode["hours"]
-            entry["required_waits"] += 1
-            entry["longest_hours"] = max(entry["longest_hours"], episode["hours"])
-            waits[person].append(episode["hours"])
-    all_waits = [hours for values in waits.values() for hours in values]
     rows: list[dict] = []
-    for entry in by_pr.values():
-        pr = pr_meta.get(entry["object_id"])
+    for request in canonical.get("requests", ()):
+        pr = pr_meta.get(request["object_id"])
         if pr is None:
             continue
         rows.append(_pr_row(
-            pr, person=entry["person"], hours=round(entry["hours"], 2),
-            waits=entry["waits"],
-            required_hours=round(entry["required_hours"], 2),
-            unrequired_hours=round(entry["unrequired_hours"], 2),
-            unrequired=entry["required_waits"] == 0,
-            longest_hours=round(entry["longest_hours"], 2),
-            from_ts=iso(entry["first_ts"]), to_ts=iso(entry["last_ts"]),
-            affected=entry["longest_hours"] > TARGET_FIRST_REVIEW_HOURS,
+            pr, person=request["person"], hours=request["hours"], waits=1,
+            longest_hours=request["hours"],
+            from_ts=request["start"], to_ts=request["end"],
+            affected=request["hours"] > TARGET_FIRST_REVIEW_HOURS,
         ))
+    by_person: dict[str, dict] = {}
+    for request in canonical.get("requests", ()):
+        entry = by_person.setdefault(
+            request["person"], {"hours": [], "n": 0}
+        )
+        entry["hours"].append(request["hours"])
+        entry["n"] += 1
     return {
-        "available": bool(all_waits),
+        "available": bool(canonical["n"]),
         "sentinels": sorted(sentinels),
-        "n": len(all_waits),
-        "median_hours": _median(all_waits),
-        "p90_hours": _p90(all_waits),
+        "n": canonical["n"],
+        "median_hours": canonical["median_hours"],
+        "p90_hours": canonical["p90_hours"],
         "target_hours": TARGET_FIRST_REVIEW_HOURS,
         "sentinel_after_peers": court.sentinel_after_peers,
-        "unrequired_n": sum(v["waits"] for v in unrequired_waits.values()),
-        "unrequired_hours": round(sum(v["hours"] for v in unrequired_waits.values()), 2),
+        # prd/46 §2: requests closed by a merge/decline before the sentinel's
+        # turn are counted, not charged (they were never owed).
+        "unrequired_n": response.get("never_excluded", {}).get("closed_prs", 0),
         "by_person": {
-            person: {"n": len(values), "median_hours": _median(values)}
-            for person, values in sorted(waits.items())
+            person: {
+                "n": entry["n"],
+                "median_hours": _median(entry["hours"]),
+            }
+            for person, entry in sorted(by_person.items())
         },
         "rows": _drill_order(rows),
+        # prd/46 §2: the definition travels with the number, so the Rules card
+        # and the Queue table cannot be read as two clocks.
+        "definition": definition,
+        "never": canonical.get("never", 0),
+        "never_oldest_hours": canonical.get("never_oldest_hours"),
+        "never_excluded": response.get("never_excluded", {}),
     }
 
 
@@ -2431,12 +2422,12 @@ def templates(
         if correlation is not None and correlation_n >= 5:
             title = (
                 f"Review rounds track cycle time (r = {correlation:.2f}) — "
-                f"cap them at {MAX_REVIEW_ROUNDS}"
+                f"cap them at {REVIEW_ROUND_CAP_TARGET}"
             )
         else:
             title = (
                 f"Review loops run to {round(rw['p90_rounds'] or 0)} rounds at p90 "
-                f"(target {MAX_REVIEW_ROUNDS} max)"
+                f"(target {REVIEW_ROUND_CAP_TARGET} max)"
             )
         evidence = (
             f" Each extra round adds ≈{_human_hours(hours_per_round)} of cycle "
@@ -2453,16 +2444,17 @@ def templates(
                 "p90_rounds": rw["p90_rounds"],
                 "prs_over_target": rw["prs_over_target"],
                 "excess_rounds": rw["excess_rounds"],
-                "max_rounds": MAX_REVIEW_ROUNDS,
-                "hours_per_round": round_hours,
-                # prd/43 §1: the correlation the cap is ranked on
-                "rounds_cycle_correlation": correlation,
-                "rounds_cycle_n": correlation_n,
+                # prd/46 §3: the cap the rule recommends is the lab's best
+                # scenario (2), not the conformance threshold (3).
+                "round_cap": REVIEW_ROUND_CAP_TARGET,
                 "hours_per_extra_round": (
                     hours_per_round if correlation is not None else None
                 ),
+                # prd/43 §1: the correlation the cap is ranked on
+                "rounds_cycle_correlation": correlation,
+                "rounds_cycle_n": correlation_n,
             },
-            f"Cap review rounds at {MAX_REVIEW_ROUNDS}: if a PR needs one more "
+            f"Cap review rounds at {REVIEW_ROUND_CAP_TARGET}: if a PR needs one more "
             "round, the owner and reviewer agree the remaining blockers in one "
             f"pass instead of another comment round.{evidence}",
             "warning", rw["excess_rounds"] * hours_per_round, rw["n"],
@@ -2643,6 +2635,10 @@ def templates(
                 "median_hours": sq["median_hours"],
                 "p90_hours": sq["p90_hours"],
                 "target_hours": TARGET_FIRST_REVIEW_HOURS,
+                # prd/46 §2: the canonical clock, named on the card, and the
+                # current wait it does NOT measure.
+                "clock": "last peer answer → first response",
+                "never_open": sq.get("never"),
             },
             "Rotate or add sentinels: the mandatory approval is the longest single wait, "
             "so one more sentinel shortens the tail of every PR that needs one.",
@@ -2673,6 +2669,8 @@ def templates(
                 "longest_hours": longest,
                 "threshold_hours": st["threshold_hours"],
                 "person": names,
+                # prd/46 §2: this is a *current* wait, not the response clock.
+                "clock": "current wait on the sentinel, not their response time",
                 # prd/42 P8: ticket keys, not bare PR ids, so the rule's
                 # examples are links like every other view's.
                 "examples": ", ".join(
@@ -2993,19 +2991,71 @@ def templates(
         ))
 
     # 14. worklog_cross_check — how much to trust the logged hours.
+    # prd/46 §5: the headline is the honesty defect the QA measured — logged
+    # hours do not track story points (r ≈ −0.05) and total a fraction of the
+    # active PR time. Lateness is a secondary line on the same card, not the
+    # reason to distrust the number.
     wc = m["worklog_cross_check"]
     if wc["available"]:
         delay = wc["mean_delay_days"]
-        if delay is not None and delay >= WORKLOG_DELAY_TARGET_DAYS:
+        ratio = wc["logged_to_active_ratio"]
+        correlation = wc.get("points_logged_correlation")
+        weak = correlation is not None and abs(correlation) < 0.3
+        out_of_band = ratio is not None and (
+            ratio >= WORKLOG_RATIO_HIGH or ratio <= WORKLOG_RATIO_LOW
+        )
+        lateness = None
+        if delay is not None:
+            late_percent = round(wc["late_share"] * 100)
+            lateness = (
+                f"{round(delay, 1)} d mean delay · {late_percent}% more than a "
+                "week late (secondary)"
+            )
+        if weak or out_of_band:
             severity = (
                 "critical"
-                if delay >= 7 or wc["late_share"] >= WORKLOG_LATE_SHARE_TARGET
+                if (ratio is not None and (ratio >= 5 or ratio <= 0.2))
                 else "warning"
             )
+            if weak:
+                title = (
+                    "Logged hours don't track story points "
+                    f"(r = {correlation:g})"
+                )
+            else:
+                title = f"Logged hours differ from active PR time by {ratio:g}×"
+            evidence = {
+                "worklogs": wc["worklogs"],
+                "stories_with_worklogs": wc["stories_with_worklogs"],
+                "logged_hours": wc["logged_hours"],
+                "active_hours": wc["active_hours"],
+                "ratio": ratio,
+                "points_logged_correlation": correlation,
+                "points_logged_n": wc.get("points_logged_n"),
+                "points_active_correlation": wc.get("points_active_correlation"),
+            }
+            if lateness:
+                evidence["lateness"] = lateness
+            out.append(_suggestion(
+                "jira-worklog-mismatch", "worklog_cross_check",
+                title,
+                evidence,
+                "Treat logged hours as a note, not a measure of effort: a "
+                "worklog that is flat across 1–13 point stories cannot size, "
+                "forecast or compare work, and the active PR time is a different "
+                "clock. Agree what a worklog means (time spent? effort? "
+                "attendance?) before either is used for planning. Logging is "
+                "mostly timely, which is why lateness is the minor problem.",
+                severity, 0.0, wc["worklogs"],
+            ))
+        elif delay is not None and (
+            delay >= 7 or wc["late_share"] >= WORKLOG_LATE_SHARE_TARGET
+        ):
+            # Only when lateness is genuinely extreme and nothing above fired.
+            severity = "critical" if delay >= 7 else "warning"
             out.append(_suggestion(
                 "jira-worklog-noise", "worklog_cross_check",
-                f"Logging is {round(delay, 1)} days late on average — don't "
-                "trust the logged hours",
+                f"Logging is {round(delay, 1)} days late on average",
                 {
                     "mean_delay_days": delay,
                     "median_delay_days": wc["median_delay_days"],
@@ -3018,58 +3068,7 @@ def templates(
                 },
                 "Log the hours on the day they are worked: a worklog written a "
                 "week later is reconstructed from memory, so it can support a "
-                "total but never a timeline. Until logging is same-day, read "
-                "logged hours as an estimate of effort, not as evidence of when "
-                "the work happened.",
-                severity, 0.0, wc["worklogs"],
-            ))
-        elif wc["late_share"] >= WORKLOG_LATE_SHARE_TARGET:
-            late_percent = round(wc["late_share"] * 100)
-            out.append(_suggestion(
-                "jira-worklog-noise", "worklog_cross_check",
-                f"{late_percent}% of worklogs are a week or more late — don't "
-                "trust the logged hours",
-                {
-                    "late_share": wc["late_share"],
-                    # "a week or more late" is the ``late`` bucket (> 7 d);
-                    # within_week (2–7 d) is reported separately, never counted.
-                    "late_worklogs": wc["buckets"]["late"],
-                    "within_week_worklogs": wc["buckets"]["within_week"],
-                    "untrusted_hours": wc["untrusted_hours"],
-                    "worklogs": wc["worklogs"],
-                    "logged_hours": wc["logged_hours"],
-                    "target_days": wc["delay_target_days"],
-                },
-                "Log the hours on the day they are worked, or accept that the "
-                "worklog is a weekly estimate: a log written after the fact "
-                "cannot tell you when the work happened, which is what the "
-                "timeline needs.",
-                "warning", 0.0, wc["worklogs"],
-            ))
-        ratio = wc["logged_to_active_ratio"]
-        if ratio is not None and (
-            ratio >= WORKLOG_RATIO_HIGH or ratio <= WORKLOG_RATIO_LOW
-        ):
-            severity = (
-                "critical"
-                if ratio >= 5 or ratio <= 0.2 else "warning"
-            )
-            direction = "more" if ratio > 1 else "less"
-            out.append(_suggestion(
-                "jira-worklog-mismatch", "worklog_cross_check",
-                f"Logged hours differ from active PR time by {ratio:g}×",
-                {
-                    "logged_hours": wc["logged_hours"],
-                    "active_hours": wc["active_hours"],
-                    "ratio": ratio,
-                    "stories_with_worklogs": wc["stories_with_worklogs"],
-                    "stories_with_prs": wc["stories_with_prs"],
-                },
-                f"The team logs {ratio:g}× {direction} time than the PRs show "
-                "as active work. One of the two numbers is wrong: either the "
-                "worklog counts meetings, reviews and waiting, or the PR is the "
-                "last ten percent of a long story. Agree what a worklog means "
-                "before either is used for planning.",
+                "total but never a timeline.",
                 severity, 0.0, wc["worklogs"],
             ))
 
@@ -3141,10 +3140,24 @@ def templates(
         )
         never = worst["never_done"]
         unmerged = worst.get("unmerged", 0)
+        committed_at_start = worst.get("committed", 0)
+        adopted = worst.get("adopted", 0)
+        points_share = worst.get("points_share")
         title = (
             f"S{worst['sprint_id']} delivered {delivered} of {committed} "
-            f"committed stories ({round(share * 100)}%) by its close"
+            f"{'committed ' if not adopted else ''}stories "
+            f"({round(share * 100)}%) by its close"
         )
+        # prd/46 §4: the denominator is the scope the sprint ended with; name
+        # how much of it was ever a commitment, so "50 %" cannot read as
+        # "half the plan shipped".
+        if adopted:
+            title += (
+                f" — only {committed_at_start} were committed at the start, "
+                f"{adopted} adopted mid-sprint"
+            )
+        if points_share is not None and abs(points_share - share) >= 0.02:
+            title += f" ({round(points_share * 100)}% by points)"
         if late:
             title += f" — {late} finished late"
         if unmerged:
@@ -3158,6 +3171,11 @@ def templates(
                 "sprint": f"S{worst['sprint_id']}",
                 "stories": committed,
                 "points": worst["points"],
+                "committed": committed_at_start,
+                "adopted": adopted,
+                "committed_points": worst.get("committed_points", 0),
+                "adopted_points": worst.get("adopted_points", 0),
+                "points_share": points_share,
                 "done_by_end": delivered,
                 # prd/43 §5: the Jira-done count and the "code never merged"
                 # count that was excluded from delivery
@@ -3352,11 +3370,29 @@ def attribute_at_stake(suggestions: list[dict]) -> dict:
     }
 
 
-def rank(suggestions: list[dict]) -> list[dict]:
-    """Order by impact × confidence, then severity, then a stable id."""
+def rank(suggestions: list[dict], *, lab_aware: bool = False) -> list[dict]:
+    """Order by impact × confidence, then severity, then a stable id.
+
+    ``lab_aware`` (prd/46 §3) demotes a rule whose own policy-lab note
+    contradicts its advice (the lab models it slower, or sees no clear effect)
+    below every rule the lab does not contradict. The measured ``impact_score``
+    is unchanged — only the presented order changes, so the page cannot rank
+    "refine first" above its own banner's lever.
+    """
+    def contradicted(suggestion: dict) -> int:
+        if not lab_aware:
+            return 0
+        lab = suggestion.get("policy_lab") or {}
+        return 1 if lab.get("contradiction") else 0
+
     ordered = sorted(
         suggestions,
-        key=lambda s: (-s["impact_score"], SEVERITY_RANK.get(s["severity"], 9), s["id"]),
+        key=lambda s: (
+            contradicted(s),
+            -s["impact_score"],
+            SEVERITY_RANK.get(s["severity"], 9),
+            s["id"],
+        ),
     )
     for index, suggestion in enumerate(ordered, 1):
         suggestion["rank"] = index
@@ -3396,6 +3432,10 @@ def insights(
         "the policy lab was not run for this request"
     )
     advice.attach(suggestions, cross_check)
+    # prd/46 §3: a contradicted rule is demoted below the rules the lab does not
+    # contradict, so the #1 the page presents agrees with its own banner. The
+    # impact scores stay the measured ones; only the position changes.
+    suggestions = rank(suggestions, lab_aware=True)
     # prd/37 §2: the headline total counts each cost pool once (most specific).
     at_stake = attribute_at_stake(suggestions)
     days = round(max(0.0, (end - start).total_seconds()) / 86400.0, 1)

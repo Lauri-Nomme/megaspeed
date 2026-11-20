@@ -636,6 +636,9 @@ class SoloLoadTests(Case):
         graph = ballcourt.blocking_graph(court, level="person")
         self.assertIn("solo", graph["hours_note"])
         self.assertIn("shared wait", graph["hours_note"])
+        # prd/46 §2: a person-hour total is labelled as a different metric from
+        # the canonical sentinel wait.
+        self.assertIn("not the sentinel's response time", graph["hours_note"])
         node = next(node for node in graph["nodes"] if node["id"] == "RBrB")
         self.assertEqual(node["hours"], 10.0)        # t0 → snapshot (12 h)
         self.assertEqual(node["solo_hours"], 8.0)    # t2 → snapshot

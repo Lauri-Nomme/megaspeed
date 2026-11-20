@@ -145,6 +145,14 @@ PARENT_KEY_MIN_PRS = 3
 #: days.
 BUSINESS_HOURS_PER_DAY = 8.0
 STALE_BUSINESS_DAYS = 5.0
+#: prd/46 §2: the one canonical definition of the sentinel wait. Every surface
+#: that shows a sentinel number either quotes this clock or names its own
+#: (queue wait, person-hours, current wait).
+SENTINEL_WAIT_DEFINITION = (
+    "sentinel wait = last peer answer → the sentinel's first response "
+    "(approval, needs-work or comment), priced on the sentinel's calendar; "
+    "the gate is precedence-aware, so the peer phase is not charged to them"
+)
 #: concepts.md §1: a working week is 5 d = **40 business hours**. It is the one
 #: threshold behind every "waiting over a week" label (prd/41 B3): the Overview
 #: card, the row pill, the list header and the footer all read this number.
@@ -1271,9 +1279,12 @@ def blocking_graph(bc: BallCourt, level: str = "queue", window: tuple[datetime, 
             "person-hours charge every concurrent holder, so one wait with three "
             "holders is counted three times; solo_hours is the part where that "
             "person was the only open ball — read solo as the marginal load and "
-            "hours as the shared wait it came from"
+            "hours as the shared wait it came from. This is not the sentinel's "
+            "response time (Queue → response time: last peer answer → first "
+            "response), which is a different metric"
             if level == "person" else
-            "wait-hours count each wait once, under the role/queue that held it"
+            "wait-hours count each wait once, under the role/queue that held it; "
+            "this is not the sentinel's response time (a different metric)"
         ),
         "window": {"start": iso(start), "end": iso(end), "days": round(days, 1)},
         "nodes": sorted(nodes.values(), key=lambda n: (-n["hours"], n["id"])),
@@ -1478,8 +1489,11 @@ def queue_series(
         "diagnosis_note": (
             "queue wait, not calendar utilisation: 'overloaded' = long wait with "
             "a standing queue, 'slow' = long wait with little WIP, both measured "
-            "against the median wait in this window; the policy lab's 'busy' is "
-            "a different metric (calendar share)"
+            "against the median wait in this window; person-level mean wait is "
+            "person-hours from 'added as reviewer' to the answer, so it includes "
+            "the peer phase and is NOT the sentinel wait (Queue → response time: "
+            "last peer answer → first response); the policy lab's 'busy' is "
+            "calendar share, a third metric"
         ),
         "diagnosis_kind": "queue-wait",
         "level": level,
@@ -1556,8 +1570,18 @@ def response_times(bc: BallCourt, window: tuple[datetime, datetime] | None = Non
     never_since: dict[str, datetime] = {}
     sentinel_lags: dict[str, list[float]] = defaultdict(list)
     gate_aware_n = 0
+    # prd/46 §2: the canonical sentinel-wait samples, one per (sentinel, PR),
+    # so the Queue table, the Rules card and the blocking map can quote the
+    # same series instead of three clocks.
+    sentinel_rows: list[dict] = []
+    never_closed = 0
+    never_gate_closed = 0
+    # prd/40: a reviewer still pending when a PR merged was, ex post, not
+    # required; the canonical sentinel wait leaves those samples out.
+    unrequired = pending_at_close(bc)
     for state in bc.prs:
         author = state.pr["actor"]
+        still_open = state.pr.get("closed_ts") is None
         added: dict[str, datetime] = {}
         answered: set[str] = set()
         approvals: list[tuple[datetime, str]] = []
@@ -1578,41 +1602,77 @@ def response_times(bc: BallCourt, window: tuple[datetime, datetime] | None = Non
                 activity == "reviewer_changed"
                 and attrs.get("change") == "reviewed"
             )
-            if responded and actor in added and actor not in answered:
+            if responded and actor not in answered and (
+                actor in added
+                # a store with no roster at all (an old scrape, a REST source):
+                # the sentinel's wait can only be timed from the PR opening.
+                or (actor in sentinels and not added)
+            ):
                 answered.add(actor)
                 # prd/43 §2: the sentinel is a *precedence* constraint. With
                 # `sentinel_after_peers` their ball only opens once every peer
                 # has answered, so timing them from "added" prices the peer
                 # phase as the sentinel's latency (QA: 20 h vs a true ~6 h).
-                clock_start = added[actor]
+                clock_start = added.get(actor) or state.pr["created_ts"]
                 if actor in sentinels and bc.sentinel_after_peers:
                     peers = [
                         stamp for stamp in peer_responses
                         if stamp <= event["_ts"]
                     ]
-                    if peers:
-                        clock_start = max(added[actor], max(peers))
-                        if clock_start > added[actor]:
+                    if peers and clock_start is not None and clock_start < max(peers):
+                        clock_start = max(peers)
+                        if actor in added and clock_start > added[actor]:
                             gate_aware_n += 1
-                if start <= clock_start < end:
-                    samples[actor].append(
-                        bc.business_hours(actor, clock_start, event["_ts"])
+                if clock_start is not None and start <= clock_start < end:
+                    hours = bc.business_hours(actor, clock_start, event["_ts"])
+                    required = (
+                        actor not in unrequired.get(state.pr["object_id"], ())
                     )
+                    if required or actor not in sentinels:
+                        samples[actor].append(hours)
+                    if actor in sentinels and required:
+                        sentinel_rows.append({
+                            "person": actor,
+                            "object_id": state.pr["object_id"],
+                            "number": state.pr["pr_id"],
+                            "repo": state.pr["repo"],
+                            "tickets": list(state.pr.get("ticket_keys") or ()),
+                            "start": clock_start,
+                            "end": event["_ts"],
+                            "hours": round(hours, 2),
+                        })
             if responded and actor not in sentinels:
                 peer_responses.append(event["_ts"])
             if activity == "pr_approved":
                 approvals.append((event["_ts"], actor))
         for person in added:
-            if person not in answered:
-                never[person] += 1
-                # prd/43 §2: keep the forgotten-item tail quantified — the gate
-                # opened (or the person was asked) and nothing has answered.
-                opened = added[person]
-                if person in sentinels and bc.sentinel_after_peers and peer_responses:
-                    opened = max([added[person], *peer_responses])
-                current = never_since.get(person)
-                if current is None or opened < current:
-                    never_since[person] = opened
+            if person in answered:
+                continue
+            # prd/46 §2: "never answered" is only a wait the person *owed*.
+            # A PR that merged or was declined/closed by anyone (the bot
+            # included) was never their turn — the ex-post rule prd/40 already
+            # applies to the blocking map. And a sentinel whose peer gate never
+            # opened has not had the ball yet.
+            if not still_open:
+                never_closed += 1
+                continue
+            if person in sentinels and bc.sentinel_after_peers:
+                peers_added = {
+                    peer for peer in added
+                    if peer not in sentinels and peer != person
+                }
+                if not peers_added.issubset(answered):
+                    never_gate_closed += 1
+                    continue
+            never[person] += 1
+            # prd/43 §2: keep the forgotten-item tail quantified — the gate
+            # opened (or the person was asked) and nothing has answered.
+            opened = added[person]
+            if person in sentinels and bc.sentinel_after_peers and peer_responses:
+                opened = max([added[person], *peer_responses])
+            current = never_since.get(person)
+            if current is None or opened < current:
+                never_since[person] = opened
         # peer approval -> sentinel approval: the gate's own latency
         for stamp, actor in approvals:
             if actor not in sentinels:
@@ -1656,16 +1716,67 @@ def response_times(bc: BallCourt, window: tuple[datetime, datetime] | None = Non
         -(row["median_hours"] if row["median_hours"] is not None else -1),
         row["person"],
     ))
+    sentinel_values = [
+        hours for person in sentinels for hours in samples.get(person, ())
+    ]
+    sentinel_never = sum(never.get(person, 0) for person in sentinels)
+    sentinel_since = [
+        never_since[person] for person in sentinels if person in never_since
+    ]
+    sentinel_wait = {
+        "definition": SENTINEL_WAIT_DEFINITION,
+        "gate_aware": bool(bc.sentinel_after_peers),
+        "sentinels": sorted(sentinels),
+        "n": len(sentinel_values),
+        "median_hours": _median(sentinel_values),
+        "mean_hours": (
+            round(sum(sentinel_values) / len(sentinel_values), 2)
+            if sentinel_values else None
+        ),
+        "p90_hours": _p90(sentinel_values),
+        "max_hours": round(max(sentinel_values), 2) if sentinel_values else None,
+        "never": sentinel_never,
+        "never_oldest_hours": (
+            round(min(
+                bc.business_hours(person, since, bc.snapshot)
+                for person, since in (
+                    (person, never_since[person]) for person in sentinels
+                    if person in never_since
+                )
+            ), 2)
+            if sentinel_since else None
+        ),
+        "requests": [
+            {
+                **row,
+                "start": iso(row["start"]),
+                "end": iso(row["end"]),
+            }
+            for row in sorted(
+                sentinel_rows, key=lambda item: (-item["hours"], item["object_id"])
+            )
+        ],
+    }
     reviewer_values = [
         row["median_hours"] for row in people
         if row["median_hours"] is not None and row["role"] != "sentinel"
     ]
     return {
         "people": people,
+        # prd/46 §2: the canonical sentinel-wait number. Every other surface
+        # either quotes this block or labels its own clock as a different metric.
+        "sentinel_wait": sentinel_wait,
         "sentinels": sorted(sentinels),
         "bots_excluded": sorted(bots),
         "sentinel_after_peers": bc.sentinel_after_peers,
         "gate_aware_n": gate_aware_n,
+        # prd/46 §2: "never answered" excludes requests that were never owed —
+        # the PR merged or was declined/closed (bot or author) before their turn,
+        # or a peer gate that never opened. The counts are stated, not dropped.
+        "never_excluded": {
+            "closed_prs": never_closed,
+            "gate_not_open": never_gate_closed,
+        },
         "reviewer_median_hours": _median(reviewer_values),
         "basis": (
             "hours from 'added as reviewer' to that person's first response "
@@ -1673,8 +1784,10 @@ def response_times(bc: BallCourt, window: tuple[datetime, datetime] | None = Non
             "responder's calendar; the sentinel's clock opens at the last peer "
             "answer (their ball only arrives after the peers), so the peer "
             "phase is not charged to them; a reviewer who never answered is "
-            "counted under 'never' with the age of the oldest open request, "
-            "not as a zero"
+            "counted under 'never' only while the PR is still open and, for a "
+            "sentinel, only once the peer gate has opened — a merged or "
+            "declined PR was never their turn, and the age of the oldest open "
+            "request is stated"
         ),
         "sentinel_lag_basis": (
             "hours from the last peer approval to the sentinel's approval; "

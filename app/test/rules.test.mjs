@@ -11,7 +11,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  DRILL_LIMIT, metricRows, ruleItems, rulesMarkdown, rulesMarkup, rulesStats,
+  DRILL_LIMIT, labNote, metricRows, ruleItems, rulesMarkdown, rulesMarkup, rulesStats,
 } from '../rules.js';
 
 const REVIEW_METRIC = {
@@ -251,4 +251,27 @@ test('an assumed at-stake figure is labelled an assumption', () => {
   const html = rulesMarkup(data);
   assert.match(html, /at stake <span class="muted">\(assumed\)<\/span>/);
   assert.match(rulesMarkdown(data), /assumed, not measured/);
+});
+
+/* prd/46 §3: the rule's lab note must agree with the banner, and the lab's own
+ * best scenario is tagged on the rule it comes from. */
+test('prd/46 §3: a contradicted rule says so; the best scenario is tagged', () => {
+  const contradicted = labNote({
+    policy_lab: {
+      policy: 'refine', label: 'refine before start', contradiction: true,
+      note: 'the policy lab models this at +82 % cycle — not a measured win',
+    },
+  });
+  assert.match(contradicted, /rule-lab contradiction/);
+  assert.match(contradicted, /not a measured win/);
+  const best = labNote({
+    policy_lab: {
+      policy: 'roundcap2', label: 'cap review at 2 rounds', supports: true,
+      best: true, note: 'the policy lab models this at −13 % cycle',
+    },
+  });
+  assert.match(best, /data-lab-best-rule="true"/);
+  assert.match(best, /policy lab · best scenario/);
+  assert.match(best, /−13 % cycle/);
+  assert.equal(labNote({}), '');
 });

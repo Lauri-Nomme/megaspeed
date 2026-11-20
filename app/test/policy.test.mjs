@@ -255,8 +255,10 @@ test('the bottleneck row names the server and its utilisation', () => {
 
 test('prd/34 §4: "busy" (calendar share) is not "overloaded" (queue wait)', () => {
   const markup = resourcesMarkup(result());
-  // the distinct name for the distinct metric, with the lens stated
-  assert.match(markup, /≈48% idle/);
+  // the distinct name for the distinct metric, with the lens stated. prd/46 §6:
+  // ρ is the share *busy*, so the chip says "48% busy", never "48% idle".
+  assert.match(markup, /≈48% busy/);
+  assert.doesNotMatch(markup, /idle/);
   assert.match(markup, /busy \(ρ\)/);
   assert.match(markup, /not queue wait/);
   assert.doesNotMatch(markup, />overloaded</);

@@ -122,10 +122,11 @@ class Fixture:
         self.event(key, ts, "status_changed",
                    **{"from_status": from_status, "to_status": to_status})
 
-    def add_to_sprint(self, key: str, ts: datetime, sid: int) -> None:
+    def add_to_sprint(self, key: str, ts: datetime, sid: int,
+                      at_start: bool = False) -> None:
         self.event(
             key, ts, "sprint_added", objects=[f"STORY:{key}", f"SPRINT:DEL#{sid}"],
-            sprint_id=sid,
+            sprint_id=sid, **({"at_start": True} if at_start else {}),
         )
 
     def worklog(self, key: str, created: datetime, hours: float,
@@ -437,6 +438,42 @@ class TicketCycleTests(StoreCase):
         self.assertIn("review rounds", payload["answer"])
         self.assertIn("20 h", payload["answer"])
         self.assertNotIn("cannot say", payload["answer"])
+
+    def test_an_out_of_order_boundary_is_a_quirk_and_the_shares_stay_under_100(self):
+        """prd/46 §1: DEL-185's sprint starts before the story was created."""
+        fx = Fixture()
+        fx.sprint(1, T0, end=T0 + timedelta(days=14))
+        fx.story("DEL-185", T0 + timedelta(hours=100), points=3, state="done",
+                 closed=T0 + timedelta(hours=200))
+        # the membership is projected at the sprint's start (T0 + 10 h), 90 h
+        # before the story object existed — the DEL-185 shape
+        fx.add_to_sprint("DEL-185", T0 + timedelta(hours=10), 1, at_start=True)
+        fx.pointed("DEL-185", T0 + timedelta(hours=110), 3)
+        fx.status("DEL-185", T0 + timedelta(hours=120), "in_progress")
+        fx.status("DEL-185", T0 + timedelta(hours=200), "done",
+                  from_status="in_progress")
+        con, court, data = self.load(fx)
+        try:
+            payload = tickets.ticket(court, data, "DEL-185")
+        finally:
+            con.close()
+        segments = payload["segments"]
+        self.assertLessEqual(segments["explained_share"], 1.0)
+        self.assertLessEqual(
+            sum(row["hours"] for row in segments["rows"] if row["available"]),
+            segments["cycle_hours"],
+        )
+        self.assertEqual(segments["boundaries_clamped"], ["sprint"])
+        quirk = segments["out_of_order"][0]
+        self.assertEqual(quirk["boundary"], "sprint")
+        self.assertEqual(quirk["reason"], "before_cycle")
+        # the boundary chip exposes the clamped stamp and the raw one
+        self.assertEqual(segments["boundaries"]["sprint"]["ts"], quirk["clamped_to"])
+        self.assertEqual(segments["boundaries"]["sprint"]["raw_ts"], quirk["ts"])
+        # the one-line answer names it as a data quirk, not as a finding
+        self.assertIn("Data quirk", payload["answer"])
+        self.assertIn("sprint boundary", payload["answer"])
+        self.assertIn("not a finding", payload["answer"])
 
     def test_the_answer_names_the_missing_boundary(self):
         con, court, data = self.load()

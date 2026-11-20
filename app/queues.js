@@ -454,8 +454,8 @@ export function responseTable(data) {
       ? 'last peer answer → first response (the sentinel cannot act earlier)'
       : 'added as reviewer → first response';
     const neverTitle = row.never_oldest_hours != null
-      ? `asked but never answered · oldest open request ${fmtHours(row.never_oldest_hours)}`
-      : 'asked but never answered';
+      ? `asked but never answered · oldest open request ${fmtHours(row.never_oldest_hours)} — only open PRs whose gate opened are counted`
+      : 'asked but never answered — only open PRs whose gate opened are counted';
     return `<tr data-response-person="${esc(row.person)}" class="${row.role === 'sentinel' ? 'sentinel' : ''}">
       <td class="c-who" data-label="person"><span class="mono">${esc(row.person)}</span>
         ${row.role === 'sentinel' ? '<span class="pill warning" title="mandatory approver on every PR">sentinel</span>' : ''}</td>
@@ -472,6 +472,9 @@ export function responseTable(data) {
       <td class="c-dur num" data-label="peer → sentinel">${lag}</td>
     </tr>`;
   }).join('');
+  const canonical = response.sentinel_wait || {};
+  const neverExcluded = response.never_excluded || {};
+  const excluded = (neverExcluded.closed_prs || 0) + (neverExcluded.gate_not_open || 0);
   return `<section class="response-panel" aria-labelledby="response-title">
     <div class="response-head">
       <h2 class="policy-h" id="response-title">Response time</h2>
@@ -479,10 +482,17 @@ export function responseTable(data) {
         gateAware ? ' · sentinel: last peer answer first' : ''}${
         peer != null ? ` · peer median ${esc(fmtHours(peer))}` : ''}</span>
     </div>
+    ${canonical.definition
+      ? `<p class="panel-note response-definition" data-sentinel-wait="${
+        canonical.median_hours == null ? '' : canonical.median_hours}">
+        <b>sentinel wait</b> (the one canonical number): ${esc(canonical.definition)}${
+        canonical.median_hours == null ? '' : ` — median ${esc(fmtHours(canonical.median_hours))} over ${canonical.n} request${canonical.n === 1 ? '' : 's'}`}${
+        excluded ? ` · ${excluded} unowed request${excluded === 1 ? '' : 's'} excluded (PR already closed or peer gate never opened)` : ''}.</p>`
+      : ''}
     <table class="table compact response-table"><thead><tr>
       <th class="c-who">person</th><th class="c-dur num">median</th>
       <th class="c-dur num">mean</th><th class="c-dur num">p90</th>
-      <th class="c-dur num" title="asked but never answered">never</th>
+      <th class="c-dur num" title="asked but never answered — only open PRs whose gate opened">never</th>
       <th class="c-dur num" title="last peer approval → sentinel approval">peer → sentinel</th>
     </tr></thead><tbody>${rows}</tbody></table>
     <p class="panel-note">${esc((response && response.basis) || '')}. ${
