@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **963** (`tests/`) + **99** (`scrape/tests`) + **231** (node `app/test`) green.
+Tests: **1019** (`tests/`) + **99** (`scrape/tests`) + **280** (node `app/test`) green.
 
 ## Scrape (airgapped) — full value, reliable
 
