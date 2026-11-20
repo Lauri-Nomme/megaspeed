@@ -172,6 +172,15 @@ test('prd/38 #18: Sources uses the ingest run figures and one snapshot age', () 
   assert.match(main, /\$\{fmtStamp\(Date\.parse\(meta\.as_of\)\)\} \(\$\{snapshotAge\(\)\}\)/);
 });
 
+test('regression: a desktop delivery row opens the inspector, not the PR drawer', () => {
+  // The delivery list has its own inline detail panel, so a row click must not
+  // also open the drawer — that stacked two panels for the same PR. Only the
+  // overview (no inspector) opens the drawer from a row.
+  const main = read('main.js');
+  assert.doesNotMatch(main, /state\.page === 'delivery' && !isPhone\(\)/);
+  assert.match(main, /state\.page === 'overview'\) \{\s*openDeliveryPrDrawer/);
+});
+
 test('prd/38 #20 / prd/43 #3: the Timeline chip scopes to the ticket and keeps the PR marked', () => {
   const main = read('main.js');
   // prd/43 §3: one helper reads the ticket from the entity, the PR or the row

@@ -3406,10 +3406,11 @@ document.addEventListener('click', async (event) => {
   const row = event.target.closest('tr.row');
   if (row && row.dataset.id) {
     selectRow(row.dataset.id);
-    // prd/38 #12: the delivery/overview row is the same doorway. On a phone the
-    // delivery detail sheet is already the PR's panel, so the drawer does not
-    // stack on top of it; the overview has no such sheet, so it opens the drawer.
-    if ((state.page === 'delivery' && !isPhone()) || state.page === 'overview') {
+    // prd/38 #12 + regression fix: the delivery list has its own inline detail
+    // panel (the inspector), so a desktop delivery row must NOT also open the
+    // PR drawer — that stacked two panels for the same PR. Only the overview
+    // (which has no inspector) opens the drawer from a row.
+    if (state.page === 'overview') {
       openDeliveryPrDrawer(findDeliveryRow(row.dataset.id));
     }
     return;
@@ -3479,7 +3480,7 @@ document.addEventListener('keydown', (event) => {
   if (row) {
     event.preventDefault();
     selectRow(row.dataset.id);
-    if ((state.page === 'delivery' && !isPhone()) || state.page === 'overview') {
+    if (state.page === 'overview') {
       openDeliveryPrDrawer(findDeliveryRow(row.dataset.id));
     }
   }
