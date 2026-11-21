@@ -211,9 +211,6 @@ REVIEW_ACTIONS = ("comment_added", "pr_approved")
 LOG_DELAY_BUCKETS = ("same_day", "next_day", "within_week", "late")
 #: concepts.md §1: a day is 8 business hours, never 24 and never a calendar day.
 BUSINESS_HOURS_PER_DAY = 8.0
-#: What one refinement costs when the store cannot measure it (a fallback, and
-#: stated as such in the payload).
-DEFAULT_REFINEMENT_HOURS = 1.0
 
 
 # --------------------------------------------------------------------------- #
@@ -2417,6 +2414,10 @@ def sprint_delivery(
                     "affected": True,
                 })
             elif outcome == "never":
+                # prd/64 F-06b: a story still open at the sprint's close missed
+                # it exactly like a late one, so it is affected too. The status
+                # stays `never` so the drill-down can say *why* it missed
+                # ("still open") instead of folding both misses together.
                 rows.append({
                     "kind": "story",
                     "object_id": story.object_id,
@@ -2427,7 +2428,7 @@ def sprint_delivery(
                     "points": story.points,
                     "slip_hours": None,
                     "done_at": None,
-                    "affected": False,
+                    "affected": True,
                 })
         committed = sum(counts.values())
         delivered = counts["by_end"]
@@ -3834,8 +3835,10 @@ def refinement_cost(
 
     A re-point or an unrefined start means the estimate was not settled when it
     should have been, so the price of the rule is one more refinement. Measured
-    from the cohort's own created → ready segments; falls back to a stated
-    default when the store has none.
+    from the cohort's own created → ready segments. A store with no measured
+    segment (no Jira layer, or no story with a refinement boundary) reports
+    ``hours: None`` and ``n: 0`` — there is no default to invent. A scenario
+    that needs this input is then unavailable, not modelled at a made-up cost.
     """
     spans: list[float] = []
     for story in cohort(data, window):
@@ -3847,12 +3850,12 @@ def refinement_cost(
         spans.append(round(court.business_hours(cycle.person, begin, ready), 2))
     measured = _median(spans)
     return {
-        "hours": measured if measured is not None else DEFAULT_REFINEMENT_HOURS,
+        "hours": measured,
         "n": len(spans),
         "basis": (
             "median created → ready segment of this cohort"
             if measured is not None
-            else "default: the cohort has no measured created → ready segment"
+            else "no measured created → ready segment in this cohort"
         ),
     }
 

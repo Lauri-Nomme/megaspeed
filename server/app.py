@@ -1446,7 +1446,16 @@ def _advice_payload(con, tenant: str, path: Path, court, jira, window, repo: str
                 result = policy_lab.simulate(
                     calibration, scenario, held_constant=stability,
                 )
-                comparisons[policy["id"]] = result.get("compare")
+                comparison = result.get("compare")
+                if comparison is None and result.get("scenario_available") is False:
+                    # prd/64 F-03: the scenario's own calibration input is
+                    # missing (e.g. a PR-only store has no refinement segment).
+                    # Carry the stated reason, not a fabricated comparison.
+                    comparison = {
+                        "available": False,
+                        "reason": result.get("scenario_unavailable_reason"),
+                    }
+                comparisons[policy["id"]] = comparison
         report = (
             advice_crosscheck.report(comparisons)
             if comparisons else
@@ -1455,6 +1464,21 @@ def _advice_payload(con, tenant: str, path: Path, court, jira, window, repo: str
                 or "the policy lab could not calibrate a model from this store"
             )
         )
+        # prd/64 F-03: the same calibration facts reach the Rules note and the
+        # lab, so a "not measurable" scenario is visible on both surfaces.
+        refinement_hours = (refinement or {}).get("hours")
+        report["calibration_inputs"] = {
+            "refinement": {
+                "available": refinement_hours is not None,
+                "hours": refinement_hours,
+                "n": (refinement or {}).get("n", 0),
+                "basis": (refinement or {}).get("basis"),
+                "reason": (
+                    None if refinement_hours is not None
+                    else "no measured refinement segments"
+                ),
+            },
+        }
         # prd/62: the lab-implied per-step yield, for the panel's warning dot.
         # The model fits a rework probability (share of PRs with more than one
         # push), so its implied clean-review share is its complement; it does

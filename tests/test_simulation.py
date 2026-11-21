@@ -1046,6 +1046,12 @@ class GuardrailTests(StoreCase):
     def test_every_preset_carries_the_modelled_keys_and_the_held_baselines(self):
         from analysis import advice
         calibration = self.calibrate(Fixture(n_prs=100, days=20))
+        # prd/64 F-03: refine before start is only modelled when the store has
+        # a measured created → ready segment; this PR-only fixture has none, so
+        # supply one rather than relying on a fabricated default.
+        calibration["refinement"] = {
+            "hours": 6.0, "n": 20, "basis": "median created → ready segment",
+        }
         for policy in advice.POLICIES:
             result = simulation.simulate(
                 calibration,
