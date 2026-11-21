@@ -286,9 +286,9 @@ class StaleSignalTests(StoreCase):
         row = delivery["rows"][0]
         self.assertTrue(row["stale"])
         self.assertEqual(row["stale_business_days"], 5.0)
-        self.assertTrue(any("business days" in reason for reason in row["stale_reasons"]))
+        self.assertTrue(any("limit 5 d 0 h" in reason for reason in row["stale_reasons"]))
         self.assertEqual(delivery["counts"]["stale"], 1)
-        self.assertIn("business days", delivery["stale_note"])
+        self.assertIn("longer than 5 d 0 h", delivery["stale_note"])
 
     def test_a_done_ticket_with_an_open_pr_is_stale(self):
         delivery = ballcourt.delivery_list(
@@ -384,7 +384,7 @@ class LifecycleHonestyTests(StoreCase):
             "100 h of which had no PR open.",
             payload["answer"],
         )
-        self.assertIn("PR #2 started 12.5 business days after PR #1 merged",
+        self.assertIn("PR #2 started 12 d 4 h after PR #1 merged",
                       payload["answer"])
         # the sentences are joined, never run together ("active work 100 h …")
         self.assertIn("active work. PR #2 started", payload["answer"])

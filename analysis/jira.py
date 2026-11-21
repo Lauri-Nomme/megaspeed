@@ -1871,6 +1871,7 @@ def sprint_delivery(
         ]
         if not members:
             continue
+        end = boundary["end"]
         counts = {"by_end": 0, "late": 0, "never": 0, "unmerged": 0}
         points = {"by_end": 0, "late": 0, "never": 0, "unmerged": 0}
         # prd/46 §4: "committed" is the scope at the sprint's start; a story
@@ -1953,6 +1954,24 @@ def sprint_delivery(
         committed = sum(counts.values())
         delivered = counts["by_end"]
         share = _share(delivered, committed)
+        # prd/63 V-A9/V-C3: the lens above answers "did the sprint's members
+        # finish?" It does not answer "how much did the team ship in these
+        # dates?" — carry-overs that were never re-committed belong to no
+        # sprint's membership. Count every story whose done boundary falls in
+        # the sprint's window, and split the ones this sprint did not plan.
+        window_done = window_carry_in = window_points = window_carry_points = 0
+        start = sprint.get("start")
+        for story in data.stories:
+            outcome = outcomes.get(story.key) or {}
+            done_at = outcome.get("done_at")
+            if done_at is None or end is None or not (start < done_at <= end):
+                continue
+            story_points = story.points or 0
+            window_done += 1
+            window_points += story_points
+            if sid not in memberships[story.key]["sprints"]:
+                window_carry_in += 1
+                window_carry_points += story_points
         sprint_row = {
             "sprint_id": sid,
             "object_id": sprint.get("object_id"),
@@ -1968,6 +1987,14 @@ def sprint_delivery(
             "stories": committed,
             "points": sum(points.values()),
             "done_by_end": delivered,
+            # prd/63 V-A9/V-C3: team velocity per sprint *window* — every story
+            # that reached done inside the dates, including carry-overs this
+            # sprint never planned. `window_carry_in` is the credited part.
+            "window_done": window_done,
+            "window_points": window_points,
+            "window_carry_in": window_carry_in,
+            "window_carry_in_points": window_carry_points,
+            "window_own": window_done - window_carry_in,
             # prd/46 §4: scope at the start vs added after it. `stories` stays
             # the whole scope the sprint ended with; "committed" is the plan.
             "committed": committed_at_start,
@@ -2612,6 +2639,28 @@ def sprints(
         row["done_share"] = _share(row["done_by_end"], committed)
         row["on_time"] = committed > 0 and row["done_by_end"] == committed
         row["late_hours"] = round(row["late_hours"], 2)
+        # prd/63 V-A9/V-C3: the sprint *window's* velocity, beside the
+        # membership verdict — every story that reached done in the dates,
+        # including carry-overs this sprint never planned.
+        window_start = _sprint_datetime(row.get("start"))
+        window_end = _sprint_datetime(row.get("band_end") or row.get("end"))
+        window_done = window_carry = window_points = window_carry_points = 0
+        if window_start is not None and window_end is not None:
+            for story in data.stories:
+                done_at = (outcomes.get(story.key) or {}).get("done_at")
+                if done_at is None or not (window_start < done_at <= window_end):
+                    continue
+                story_points = story.points or 0
+                window_done += 1
+                window_points += story_points
+                if sid not in memberships[story.key]["sprints"]:
+                    window_carry += 1
+                    window_carry_points += story_points
+        row["window_done"] = window_done
+        row["window_points"] = window_points
+        row["window_carry_in"] = window_carry
+        row["window_carry_in_points"] = window_carry_points
+        row["window_own"] = window_done - window_carry
         bands.append(row)
 
     # prd/55 §5: flag a sprint whose length is an outlier against its siblings.

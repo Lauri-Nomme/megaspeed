@@ -47,6 +47,11 @@ export function sprintBands(data) {
       committed: sprint.committed ?? null,
       adopted: sprint.adopted ?? null,
       pointsShare: sprint.points_share ?? null,
+      // prd/63 V-A9/V-C3: finished inside the sprint's dates, incl. carry-ins.
+      windowDone: sprint.window_done ?? null,
+      windowPoints: sprint.window_points ?? null,
+      windowCarryIn: sprint.window_carry_in ?? 0,
+      windowOwn: sprint.window_own ?? null,
       lateHours: sprint.late_hours || 0,
       // prd/55 §5: a long sprint's delivery share is not comparable
       days: sprint.days ?? null,
@@ -251,25 +256,33 @@ function carriedOver(data, base) {
   const carry = data.carry_over || {};
   const rows = carry.rows || [];
   if (!rows.length) return '';
-  const shown = rows.slice(0, 50);
-  const more = rows.length > shown.length
-    ? ` <span class="muted">+${rows.length - shown.length} more</span>` : '';
-  const items = shown.map((row) => {
+  // prd/63 V-B: 27 token-separated keys were an unreadable run-on. The summary
+  // states the counts; the list is a table behind a disclosure.
+  const total = carry.count ?? rows.length;
+  const late = carry.late || 0;
+  const never = carry.rows.filter((row) => row.status === 'never').length;
+  const neverRe = carry.never_reappeared || 0;
+  const body = rows.map((row) => {
     const path = (row.sprints || []).join(' → ');
-    const status = row.status ? ` ${row.status}` : '';
-    // prd/42 M5: say where it went next, or that it never reappeared.
     const destination = row.reappears === true
-      ? ` → S${row.destination_sprint}`
+      ? `S${row.destination_sprint}`
       : row.reappears === false
-        ? ' → never re-committed'
-        : '';
-    return `${ticketLink(row.key, { base })} <span class="muted mono">${esc(path + status + destination)}</span>`;
-  });
-  const destination = (carry.never_reappeared || 0)
-    ? ` · <b>${carry.never_reappeared}</b> never reappear in the next sprint`
-      + (carry.no_next_sprint ? ` (${carry.no_next_sprint} have no next sprint)` : '')
-    : '';
-  return `<p class="sprint-carry-list">committed but not done by the close: ${items.join(' · ')}${more}${destination}</p>`;
+        ? 'never re-committed'
+        : '—';
+    return `<tr><td data-label="ticket">${ticketLink(row.key, { base })}</td>
+      <td class="mono" data-label="sprint">${esc(path || '—')}</td>
+      <td data-label="outcome">${esc(row.status || '—')}</td>
+      <td data-label="next">${esc(destination)}</td></tr>`;
+  }).join('');
+  return `<details class="sprint-carry-summary" data-carry-count="${total}">
+    <summary>committed but not done by the close: <b>${total}</b> stor${total === 1 ? 'y' : 'ies'}${
+      late ? ` · ${late} finished late` : ''}${never ? ` · ${never} still open` : ''}${
+      neverRe ? ` · ${neverRe} never re-committed` : ''}${
+      carry.no_next_sprint ? ` (${carry.no_next_sprint} have no next sprint)` : ''}</summary>
+    <div class="table-wrap"><table class="table compact sprint-carry-table"><thead><tr>
+      <th>ticket</th><th>sprint</th><th>outcome</th><th>next sprint</th>
+    </tr></thead><tbody>${body}</tbody></table></div>
+  </details>`;
 }
 
 /** The sprint lens selection line: what is filtered and how to clear it. */
@@ -292,8 +305,14 @@ export function sprintStrip(data, { base = '', focus = null } = {}) {
   const rows = sprints.map((sprint) => {
     const start = Date.parse(sprint.band_start);
     const end = Date.parse(sprint.band_end);
+    // prd/63 F24: an active sprint's band ends at the snapshot, but the plan
+    // ends later. Say both, so the strip's `8 Oct → 18 Nov` cannot be read as
+    // contradicting the ticket page's "plan ends 27 Nov".
+    const windowText = sprint.open && sprint.planned_end
+      ? `${windowLabel(sprint)} · plan ${sprint.planned_end}`
+      : windowLabel(sprint);
     const plan = sprint.open && sprint.planned_end
-      ? `<span class="sprint-plan" title="the plan is not the band: an active sprint's band ends at the snapshot">plan ${esc(sprint.planned_end)}</span>`
+      ? `<span class="sprint-plan" title="the band ends at the snapshot; the plan ends on ${esc(sprint.planned_end)}">snapshot band · plan ${esc(sprint.planned_end)}</span>`
       : '';
     const state = sprint.state || (sprint.open ? 'active' : 'closed');
     const planned = sprint.planned_days ?? sprint.plannedDays;
@@ -313,17 +332,23 @@ export function sprintStrip(data, { base = '', focus = null } = {}) {
         data-sprint-start="${Number.isFinite(start) ? start : ''}"
         data-sprint-end="${Number.isFinite(end) ? end : ''}"
         aria-pressed="${selected}"
-        title="select sprint ${esc(sprint.sprint_id)} (${esc(windowLabel(sprint))}): ${esc(sprintOutcomeLine(sprint))}">
+        title="select sprint ${esc(sprint.sprint_id)} (${esc(windowText)}): ${esc(sprintOutcomeLine(sprint))}">
       <span class="sprint-id mono">S${esc(sprint.sprint_id)}</span>
       <span class="sprint-state">${esc(state)}</span>
-      <span class="sprint-window mono">${esc(windowLabel(sprint))}</span>
+      <span class="sprint-window mono">${esc(windowText)}</span>
       <span class="sprint-days num muted">${esc(days)}</span>
       ${outlier ? `<span class="sprint-length-flag" title="${esc(sprint.length_note || 'a sprint whose planned length is an outlier')}">length outlier</span>` : ''}
       <span class="sprint-scope-count num">${sprint.story_count || 0} stor${(sprint.story_count || 0) === 1 ? 'y' : 'ies'} · ${sprint.points || 0} pts${
         committed != null ? ` · <span class="sprint-committed" title="stories in the sprint when it started — the commitment it was planned with">${committed} committed at start</span>` : ''}${
         adopted ? ` · <span class="sprint-added" title="stories added after the sprint's start — adopted scope, not the plan it was committed to">${adopted} adopted</span>` : ''}</span>
-      <span class="sprint-done num" title="done by this sprint's close — not done by today">${
-        sprint.done_by_end ?? sprint.done ?? 0} of ${sprint.story_count || 0} by end</span>
+      <span class="sprint-done num" title="done by this sprint's close — not done by today; the points are its own delivered share">${
+        sprint.done_by_end ?? sprint.done ?? 0} of ${sprint.story_count || 0} by end${
+        sprint.done_points ? ` · ${sprint.done_points} pts` : ''}</span>
+      ${sprint.window_done != null ? `<span class="sprint-velocity num"
+        data-sprint-velocity="${esc(sprint.window_done)}"
+        title="every story that reached done inside this sprint's dates — the team's velocity for the window, including carry-overs nobody re-committed">${sprint.window_done} finished in the window${
+          sprint.window_points ? ` · ${sprint.window_points} pts` : ''}${
+          sprint.window_carry_in ? ` (${sprint.window_carry_in} carried in)` : ''}</span>` : ''}
       ${late ? `<span class="sprint-late num" title="reached done after the sprint's close">${late} late</span>` : ''}
       ${unmerged ? `<span class="sprint-unmerged num" title="Done in Jira while a PR the story names never merged — the code is not delivered">${unmerged} unmerged</span>` : ''}
       ${never ? `<span class="sprint-never num muted" title="not done at the snapshot">${never} open</span>` : ''}

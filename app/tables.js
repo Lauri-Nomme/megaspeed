@@ -137,15 +137,24 @@ export function impactCell(row) {
   return `<span class="num">≈${esc(fmtHours(row.impact_hours))}</span>`;
 }
 
-export function deliveryTable(data, tab, { scope = null, benchmark = true, base = '' } = {}) {
-  const rows = tabRows(data, tab).filter((row) => !scope || matchesScope(row, scope));
+export function deliveryTable(data, tab, {
+  scope = null, benchmark = true, base = '', rowFilter = null, sprintLabel = null,
+} = {}) {
+  const rows = tabRows(data, tab)
+    .filter((row) => !scope || matchesScope(row, scope))
+    .filter((row) => !rowFilter || rowFilter(row));
+  // prd/63 F16: `unobserved` is noise when it is true for every row. Show the
+  // pill only where it distinguishes a row from an observed neighbour; the
+  // snapshot age is stated once under the table instead.
+  const anyObserved = rows.some((row) => !row.unobserved);
   if (!rows.length) {
     // B11: an empty tab is a result, not a refusal. `Blocked 0` says so.
     const suffix = scope ? ` for scope ${esc(scope.label)}` : '';
+    const sprintSuffix = sprintLabel ? ` · sprint ${esc(sprintLabel)} lens` : '';
     if (tab === 'blocked') {
-      return `<div class="empty-row">Nothing blocked${suffix} — good. No open item is waiting on a change.</div>`;
+      return `<div class="empty-row">Nothing blocked${suffix}${sprintSuffix} — good. No open item is waiting on a change.</div>`;
     }
-    return `<div class="empty-row">Nothing in this subset${suffix}. Counts are honest: an empty tab means no item matches.</div>`;
+    return `<div class="empty-row">Nothing in this subset${suffix}${sprintSuffix}. Counts are honest: an empty tab means no item matches.</div>`;
   }
   const head = `<thead><tr>
       <th class="c-state">Status</th>
@@ -163,7 +172,7 @@ export function deliveryTable(data, tab, { scope = null, benchmark = true, base 
         aria-label="open PR #${esc(row.number)} ${esc(row.repo_short)} in the drawer">
       <td class="c-state" data-label="status">${rowState(row)}${
         row.stale ? ` ${pill('waiting', 'stale', (row.stale_reasons || []).join('; '))}` : ''}${
-        row.unobserved ? ` ${pill('neutral', 'unobserved', 'no events since the snapshot — the blocking graph excludes this tail')}` : ''}</td>
+        row.unobserved && anyObserved ? ` ${pill('neutral', 'unobserved', 'no events since the snapshot — the blocking graph excludes this tail')}` : ''}</td>
       <td class="c-id" data-label="">${ticketLink(rowTicket(row), { cls: 'keys', base }) || '<span class="keys">—</span>'}
         <span class="mono id">#${esc(row.number)}</span>
         <span class="repo">${esc(row.repo_short)}</span></td>
@@ -175,7 +184,10 @@ export function deliveryTable(data, tab, { scope = null, benchmark = true, base 
       <td class="c-impact num" data-label="impact">${impactCell(row)}</td>
     </tr>`).join('');
   return `<table class="table delivery">${head}<tbody>${body}</tbody></table>
-    <p class="panel-note">unobserved = no events since the snapshot: the blocking map excludes that tail, so the row stays here rather than disappearing. A duration is business hours on the team calendar; 1 d = 8 h.</p>`;
+    <p class="panel-note">ages and waits are priced to the snapshot stated below.
+      “unobserved” means no events since then — the blocking map excludes that tail${
+      anyObserved ? ', and the pill is shown only where it distinguishes a row' : ''}.
+      A duration is business hours on the team calendar; 1 d = 8 h.</p>`;
 }
 
 export function matchesScope(row, scope) {
@@ -361,6 +373,14 @@ export function chaseCard(delivery, { base = '', scope = null } = {}) {
   const sentinelLabel = sentinels.length === 1
     ? sentinels[0]
     : (sentinels.length ? `${sentinels.length} sentinels` : 'the sentinel');
+  // prd/63 F10: the Overview card and Rules' sentinel-tail card are the same
+  // holder fact at two thresholds (this card lists every sentinel-only item;
+  // the rule counts those past 24 business hours). Say so instead of leaving
+  // two counts 400 px apart looking wrong.
+  const tailThreshold = 24;
+  const pastTail = orphans.filter(
+    (row) => Number(row.waiting_hours || 0) > tailThreshold,
+  ).length;
   const rows = orphans.map((row) => {
     const key = rowTicket(row);
     return `<tr data-chase="${esc(row.object_id)}" data-chase-ticket="${esc(key || '')}">
@@ -378,18 +398,21 @@ export function chaseCard(delivery, { base = '', scope = null } = {}) {
   }).join('');
   return `<section class="panel wide chase-panel" id="chase">
     <div class="panel-head"><h2>What to do now</h2>
-      ${orphans.length ? `<span class="pill warning" data-chase-count="${orphans.length}">${
+      ${orphans.length ? `<span class="pill warning" data-chase-count="${orphans.length}"
+        title="orphaned approval = at least one peer approved and the sentinel is the only remaining holder">${
         orphans.length} orphaned approval${orphans.length === 1 ? '' : 's'}</span>` : ''}
       <span class="muted">${orphans.length
-        ? `waiting on ${esc(sentinelLabel)} — nudge the holder today`
+        ? `approved by peers, waiting only on ${esc(sentinelLabel)} — nudge the holder today`
         : 'no orphaned approval; the Done-open items below are the remaining gap'}</span></div>
     ${orphans.length ? `<table class="table compact"><thead><tr>
         <th class="c-id">ticket / PR</th><th class="c-who">who owes</th>
         <th class="c-dur num">waiting</th><th class="c-action"></th>
       </tr></thead><tbody>${rows}</tbody></table>
-      <p class="panel-note">an orphaned approval has at least one approval and
+      <p class="panel-note">an orphaned approval has at least one peer approval and
         waits only on the sentinel — the same holder set the delivery list
-        shows${doneCount
+        shows${tailThreshold && orphans.length
+          ? ` (Rules counts the ${pastTail} older than its ${tailThreshold} h sentinel-tail threshold)`
+          : ''}${doneCount
           ? ` · ${doneCount} ticket${doneCount === 1 ? ' is' : 's are'} Done in Jira with the PR open`
           : ''}</p>`
     : ''}
@@ -531,7 +554,10 @@ export function scopedWaitHours(delivery, blocking, scope = null) {
 /** What the "measured wait" number on the active scope is a measure of. */
 export function waitBasis(scope = null) {
   if (!scope || scope.kind === 'all' || scope.kind === 'repo') {
-    return 'queue-wait hours (handover graph) — not response time';
+    // prd/63 F20: say which of the two blocking-map totals this is. The
+    // person level charges every concurrent holder and is larger (340 d vs
+    // 304 d); that is a different basis, not a contradiction.
+    return 'queue-wait hours (role-level handover graph, each handover once) — not response time';
   }
   if (scope.kind === 'ticket') {
     return 'current wait on this ticket\'s open PRs (not a handover total)';
@@ -614,7 +640,10 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
       <div class="stat"><span class="stat-n">${overloaded.length}</span>
         <span class="stat-k">${esc(overloadedLabel)}</span>
         <span class="stat-note">${slow.length} slow · longest mean wait ${
-          counted.length ? `≈${fmtHours(longest)}` : '–'} (queue-wait, not response time)</span></div>
+          counted.length ? `≈${fmtHours(longest)}` : '–'} (queue-wait, not response time${
+          queues && queues.baseline_mean_wait_hours != null
+            ? `; a flag needs ${queues.outlier_threshold_hours == null ? '> 2×' : `> ${fmtHours(queues.outlier_threshold_hours)}`} vs the ${fmtHours(queues.baseline_mean_wait_hours)} baseline`
+            : ''})</span></div>
     </div>
     <div class="overview-grid">
       <section class="panel">

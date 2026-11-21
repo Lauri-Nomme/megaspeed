@@ -297,6 +297,16 @@ class SprintBandTests(StoreCase):
             sorted(row["band_start"] for row in payload["sprints"]),
         )
 
+    def test_a_band_reports_the_velocity_of_its_own_window(self):
+        """prd/63 V-A9/V-C3: stories finished inside the band's dates."""
+        payload = self.sprint_view()
+        two = by_sprint(payload, 2)
+        # ENG-2 finished inside sprint 2's dates and was committed to it
+        self.assertEqual(two["window_done"], 1)
+        self.assertEqual(two["window_own"], 1)
+        self.assertEqual(two["window_carry_in"], 0)
+        self.assertEqual(two["window_points"], 3)
+
     def test_a_closed_sprint_without_a_completion_still_stops_at_the_snapshot(self):
         fx = fixture()
         # sprint 4 is closed in the store but has no completion timestamp: its

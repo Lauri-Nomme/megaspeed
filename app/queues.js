@@ -9,7 +9,7 @@
  * Small multiples share one x scale, so rows are comparable at a glance.
  */
 
-import { fmtStamp, fmtCalendarDuration, fmtHours, esc, rgba } from './format.js';
+import { HOUR, fmtStamp, fmtCalendarDuration, fmtHours, esc, rgba } from './format.js';
 import { benchmarkInline } from './benchmark.js';
 import { streamRoleLabel } from './scope.js';
 import { color, onPalette } from './theme.js';
@@ -282,10 +282,20 @@ export class QueueChart {
     ctx.font = '500 10px "JetBrains Mono", ui-monospace, monospace';
     ctx.fillStyle = C.muted;
     ctx.textAlign = 'left';
+    // prd/63 F26: one interval label. The chart divides the window into N
+    // equal buckets (≈23 h 44 min), while the payload's sampling basis is the
+    // stated bucket_hours (24 h). Quote the payload's number here too, so the
+    // canvas and the header cannot disagree.
+    const basisMs = this.data && this.data.bucket_hours
+      ? this.data.bucket_hours * HOUR
+      : bucketMs;
+    const basisLabel = this.data && this.data.bucket_hours
+      ? `${this.data.bucket_hours} h`
+      : fmtCalendarDuration(basisMs);
     ctx.fillText(
       phone
-        ? `WIP every ${fmtCalendarDuration(bucketMs)} · scale 0–${fmtWipTick(maxWip)}`
-        : `WIP sampled every ${fmtCalendarDuration(bucketMs)} · ` +
+        ? `WIP every ${basisLabel} · scale 0–${fmtWipTick(maxWip)}`
+        : `WIP sampled every ${basisLabel} · ` +
           `${this.data && this.data.hours_mode === 'business' ? 'business hours' : 'wall-clock'} · ` +
           `WIP scale 0–${fmtWipTick(maxWip)} items (shared) · completions in grey`,
       phone ? 14 : GUTTER,
@@ -438,9 +448,26 @@ export function fmtWipTick(value) {
  * column carries the age of the oldest unanswered request so the two forgotten
  * PRs are a quantity, not a count.
  */
-export function responseTable(data, { benchmark = true } = {}) {
+export function responseTable(data, { benchmark = true, scope = null } = {}) {
   const response = data && data.response;
-  const people = (response && response.people) || [];
+  let people = (response && response.people) || [];
+  if (scope && scope.kind !== 'all') {
+    const value = String(scope.value || '').toLowerCase();
+    people = people.filter((row) => (scope.kind === 'person'
+      ? String(row.person).toLowerCase() === value
+      : (scope.kind === 'role'
+        ? String(row.role).toLowerCase() === value
+          || (value === 'sentinel' && row.role === 'sentinel')
+        : true)));
+  }
+  // prd/63 F26: an empty scoped table is a result, not a blank panel.
+  if (!people.length && response) {
+    return `<section class="response-panel" aria-labelledby="response-title">
+      <div class="response-head"><h2 class="policy-h" id="response-title">Response time</h2>
+        <span class="muted">added as reviewer → first response</span></div>
+      <p class="empty-row">No review requests for scope ${esc(scope.label || scope.value)} in this window —
+        the person has no reviewer queue here.</p></section>`;
+  }
   if (!people.length) return '';
   const peer = response.reviewer_median_hours;
   const gateAware = response.sentinel_after_peers !== false;
@@ -457,18 +484,29 @@ export function responseTable(data, { benchmark = true } = {}) {
     const neverTitle = row.never_oldest_hours != null
       ? `asked but never answered · oldest open request ${fmtHours(row.never_oldest_hours)} — only open PRs whose gate opened are counted`
       : 'asked but never answered — only open PRs whose gate opened are counted';
-    return `<tr data-response-person="${esc(row.person)}" class="${row.role === 'sentinel' ? 'sentinel' : ''}">
+    // prd/63 F20/V-A8: the hint promised "click a row to scope" but these rows
+    // did nothing. Make the row a real pivot, and split the unrequited count
+    // into "only on this sentinel" vs "another holder still owes".
+    const only = row.never_only_holder || 0;
+    const others = row.never_other_holder || 0;
+    const neverText = row.never
+      ? `${row.never}${only ? ` <span class="muted" title="no peer and no author owes — the sentinel is the only holder">(${only} only)</span>` : ''}${others ? ` <span class="muted" title="a peer or the author must act first">+${others}</span>` : ''}`
+      : '0';
+    return `<tr data-response-person="${esc(row.person)}" data-response-role="${esc(row.role)}"
+        class="response-row ${row.role === 'sentinel' ? 'sentinel' : ''}"
+        tabindex="0" role="button"
+        title="click to scope the queue view to ${esc(row.person)}">
       <td class="c-who" data-label="person"><span class="mono">${esc(row.person)}</span>
         ${row.role === 'sentinel' ? '<span class="pill warning" title="mandatory approver on every PR">sentinel</span>' : ''}</td>
       <td class="c-dur num" data-label="median response" title="${esc(clock)}">${
         row.median_hours == null ? '—' : esc(fmtHours(row.median_hours))}${
         benchmarkInline(row.response_benchmark, { enabled: benchmark })}${
-        ratio ? ` <span class="muted">${ratio}</span>` : ''}</td>
+        ratio ? ` <span class="muted" title="the sentinel's median ÷ the peer reviewers' median response">${ratio} peers</span>` : ''}</td>
       <td class="c-dur num" data-label="mean">${
         row.mean_hours == null ? '—' : `≈${esc(fmtHours(row.mean_hours))}`}</td>
       <td class="c-dur num" data-label="p90">${
         row.p90_hours == null ? '—' : esc(fmtHours(row.p90_hours))}</td>
-      <td class="c-dur num" data-label="never" title="${esc(neverTitle)}">${row.never || 0}${
+      <td class="c-dur num" data-label="never" title="${esc(neverTitle)}">${neverText}${
         row.never_oldest_hours != null
           ? ` <span class="muted">(${esc(fmtHours(row.never_oldest_hours))})</span>` : ''}</td>
       <td class="c-dur num" data-label="peer → sentinel">${lag}</td>

@@ -816,14 +816,18 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .sprint-rows { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
 .sprint-row {
   display: inline-flex; align-items: baseline; gap: 8px;
-  height: calc(var(--control-h) + 2px);
-  padding: 0 9px;
+  /* prd/63 V-A9: the window-velocity chip made the single line wider than a
+   * 1600 px viewport. A row may use two lines; it never scrolls the page. */
+  min-height: calc(var(--control-h) + 2px);
+  max-width: 100%;
+  flex-wrap: wrap;
+  padding: 4px 9px;
   border: 1px solid var(--border-hairline);
   border-radius: var(--radius-control);
   background: transparent;
   color: var(--text-secondary);
   font-size: 11px;
-  white-space: nowrap;
+  white-space: normal;
 }
 .sprint-row:hover { background: var(--bg-hover); color: var(--text-primary); }
 .sprint-row.open { border-color: var(--warning-line-strong); }
@@ -974,7 +978,9 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
  * canvas is pinned at the top of that scrollport — so the bitmap never grows
  * with the store (a 5,240-PR store would ask for 78,930 px, past Chrome's
  * 65,535 px canvas limit, where it paints nothing at all). */
-.timeline-stage { height: clamp(360px, 72vh, 1100px); }
+/* prd/63 F24: 72vh put the canvas bottom below a 1000 px viewport once the
+ * toolbar and meta line were counted; 62vh keeps the whole plot on screen. */
+.timeline-stage { height: clamp(340px, 62vh, 1100px); }
 .timeline-scroll {
   position: absolute;
   inset: 0;
@@ -2278,3 +2284,86 @@ a.child.ticket-link { color: var(--link); }
   .trend-body { padding: 0; }
   .trend-chart { max-width: 100%; }
 }
+
+/* --- prd/63: v0.10.0 QA papercuts -------------------------------------- */
+
+/* F19: the first Tab stop skips the nine sidebar items. Off-screen until
+ * focused, then a real button above the top bar. */
+.skip-link {
+  position: fixed; left: 8px; top: -48px; z-index: 80;
+  padding: 8px 12px; border-radius: var(--radius-control);
+  background: var(--bg-surface-raised); color: var(--text-primary);
+  border: 1px solid var(--border-control); font-size: 12px;
+}
+.skip-link:focus { top: 8px; }
+
+/* F14: a silent fallback is stated once, in the same slot as the scope
+ * banner, so a rewritten URL never reads as if nothing happened. */
+.routenotice {
+  margin: 0; padding: 6px 14px; font-size: 11.5px;
+  color: var(--text-primary);
+  background: var(--warning-tint, var(--bg-surface-raised));
+  border-top: 1px solid var(--warning-line, var(--border-control));
+  border-bottom: 1px solid var(--warning-line, var(--border-control));
+}
+.routenotice[hidden] { display: none; }
+
+/* F15: a scope control on a view that ignores it is visibly inert (still
+ * operable, so it can be cleared) and its banner says which views apply. */
+#scope.scope-inert { opacity: .55; }
+#scope.scope-inert:focus { opacity: 1; }
+
+/* F29: the chase paragraph sat flush against the card border. */
+.chase-actions { padding: 0 14px calc(var(--density-pad) + 4px); }
+.chase-sla { margin: 0; }
+
+/* F17/V-A7: a segment's caveat (no PR open / reopen loop) is part of the
+ * legend, not only a tooltip. */
+.ticket-seg-key .seg-caveat {
+  display: block; font-size: 9.5px; color: var(--warning);
+  white-space: normal; line-height: 1.25;
+}
+.ticket-boundary.quirk { color: var(--warning); }
+.event-attr { display: inline-flex; gap: 3px; margin-right: 8px; white-space: nowrap; }
+.event-attr .k { color: var(--text-tertiary); }
+.ticket-events td.c-attrs { white-space: normal; }
+
+/* V-A9/V-C3: the team's velocity for a sprint's dates beside the membership
+ * verdict. */
+.sprint-row .sprint-velocity { color: var(--text-secondary); font-style: italic; }
+.stat-inline.attention, .stat-inline.attention b { color: var(--critical); }
+.quirk-stat { color: var(--warning); }
+
+/* F20/F26: a clickable response row is a pivot, like the chart rows above. */
+tr.response-row { cursor: pointer; }
+tr.response-row:hover td, tr.response-row:focus-visible td { background: var(--bg-hover); color: var(--text-primary); }
+
+/* F21: a scenario run is visible while the model works. */
+.policy-loading {
+  margin: 8px 12px; padding: 8px 10px; font-size: 12px;
+  border: 1px solid var(--border-control); border-radius: var(--radius-control);
+  background: var(--bg-surface-raised); color: var(--text-primary);
+}
+.policy-loading::before {
+  content: ""; display: inline-block; width: 10px; height: 10px;
+  margin-right: 8px; border-radius: 50%;
+  border: 2px solid var(--text-tertiary); border-top-color: var(--link);
+  animation: policy-spin .9s linear infinite;
+}
+@keyframes policy-spin { to { transform: rotate(360deg); } }
+
+/* F27: per-source runs on Sources. */
+.source-runs { margin: 10px 0 6px; }
+.ticket-links {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
+  margin: 4px 0 8px;
+}
+.ticket-links .overline { margin-right: 4px; }
+.sprint-carry-summary { margin: 6px 14px calc(var(--density-pad) + 4px); }
+.sprint-carry-summary > summary { cursor: pointer; font-size: var(--body-font); color: var(--text-secondary); }
+.sprint-carry-summary > summary:hover { color: var(--text-primary); }
+/* prd/63 F17/F25: labelled attributes wrap on a phone instead of forcing the
+ * events table past the viewport. */
+.event-attr { white-space: normal; }
+.ticket-events { table-layout: fixed; width: 100%; }
+.ticket-events td, .ticket-events th { overflow-wrap: anywhere; }

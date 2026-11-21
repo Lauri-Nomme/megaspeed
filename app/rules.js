@@ -409,6 +409,9 @@ export function ruleRow(suggestion, { base = '', metrics = {} } = {}) {
         <div class="rule-top">
           <span class="pill ${esc(severity)}">${esc(severity)}</span>
           <span class="rule-metric mono">${esc(suggestion.metric)}</span>
+          ${(suggestion.evidence || {}).live_state
+            ? '<span class="pill neutral" data-live-state="true" title="describes the live state at the snapshot, not only the chosen timeframe">live</span>'
+            : ''}
           ${person ? `<span class="rule-scope mono" title="pseudonym — the store holds no raw names">${esc(person)}</span>` : ''}
           <span class="grow"></span>
           <span class="rule-impact num" title="${stakeTitle}">${fmtImpact(suggestion.impact_hours)} at stake${assumed ? ' <span class="muted">(assumed)</span>' : ''}</span>

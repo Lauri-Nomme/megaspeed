@@ -82,8 +82,9 @@ test('prd/42 M2: the ticket cycle is stated against its cohort', () => {
   const stats = ticketStats(payload);
   assert.match(stats, /data-benchmark-rank="73"/);
   assert.match(stats, /73rd fastest of 87/);
-  assert.match(stats, /median 89\.7 h/);
-  assert.match(stats, /8-pt median 109 h/);
+  // prd/63 V-B: one duration language — 89.7 h is "11 d 2 h", not "89.7 h".
+  assert.match(stats, /median 11 d 1 h/);
+  assert.match(stats, /8-pt median 13 d 5 h/);
   // prd/46 §6: the last-ranked story is "slowest of N", not "87th fastest"
   const slowest = ticketStats({
     key: 'DEL-155', story: { points: 5 },
@@ -136,7 +137,9 @@ test('prd/42 M5: a sprint names scope added after the start and the carry destin
   assert.match(html, /5 committed at start/);
   assert.doesNotMatch(html, /\+25 after start/);
   assert.match(html, /never re-committed/);
-  assert.match(html, /never reappear in the next sprint/);
+  // prd/63 V-B: the 27-item run-on became a counted summary + a table.
+  assert.match(html, /<details class="sprint-carry-summary"/);
+  assert.match(html, /1 never re-committed/);
 });
 
 // --------------------------------------------------------------------- M4
@@ -237,6 +240,8 @@ test('prd/42 B2: the drawer reserves space instead of covering the inspector', (
 
 test('prd/42 P3/P7: the queue states its basis and the honesty line dedupes the clock', () => {
   const main = read('main.js');
-  assert.match(main, /relative to the median wait in this window/);
+  // prd/63 V-A12: the queue states the *person* baseline it flags against.
+  assert.match(main, /data\.diagnosis_note/);
+  assert.match(read('style.css'), /tr\.response-row/);
   assert.match(main, /business\|wall-clock\) hours/);
 });

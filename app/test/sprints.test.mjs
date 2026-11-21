@@ -144,7 +144,9 @@ test('carry-over is marked on the sprint and listed with links', () => {
   assert.match(html, /↻ 1 in/);             // sprint 2 carried it in
   // the mark on the story lane is explained, not left as a mystery glyph
   assert.match(html, /committed but not done by the close/);
-  assert.match(html, /class="sprint-carry-list"/);
+  // prd/63 V-B: the run-on is a counted summary + a table.
+  assert.match(html, /<details class="sprint-carry-summary"/);
+  assert.match(html, /<table class="table compact sprint-carry-table">/);
   assert.match(html, /href="http:\/\/x\/#ticket\/DEL-101"/);
   assert.match(html, /1 → 2/);
 });

@@ -74,6 +74,24 @@ BOUNDARY_ORDER = (
     "in_verification", "pr_open", "first_review", "approval", "merged", "done",
 )
 
+#: The order the *clock* should show (prd/63 F17). It differs from
+#: ``BOUNDARY_ORDER``: the workflow's verification stage follows the merge
+#: (concepts.md §5), so "in_verification before PR open" is a correct sequence,
+#: not an inversion. A boundary is flagged only when it precedes its
+#: predecessor on this list.
+BOUNDARY_CLOCK_ORDER = (
+    "created", "refined", "ready", "sprint", "started", "pr_open",
+    "in_review", "first_review", "approval", "merged", "in_verification", "done",
+)
+
+#: Only these boundaries have a strict, one-way dependency. `ready`/`refined`
+#: and the PR events vs the workflow's `in_review` status can legitimately land
+#: in either order, so flagging them would invent a quirk (prd/63 F17).
+BOUNDARY_STRICT_ORDER = (
+    "created", "started", "pr_open", "approval", "merged", "in_verification",
+    "done",
+)
+
 def normalize_key(key: str) -> str:
     """Accept ``DEL-167``, ``STORY:DEL-167`` or ``TICKET:DEL-167``."""
     text = str(key or "").strip()
@@ -218,6 +236,13 @@ def _pr_rows(court: ballcourt.BallCourt, states: list) -> list[dict]:
             "closed": _iso(closed),
             "cycle_hours": cycle,
             "commit_count": len(state.commits),
+            # prd/63 V-A6: the change size and whether it shipped. These are the
+            # PR's own counts (never the diff), so the notion of "how much of
+            # the story's change is unmerged" is measurable.
+            "lines_added": int(pr.get("lines_added") or 0),
+            "lines_removed": int(pr.get("lines_removed") or 0),
+            "lines_changed": int(pr.get("lines_added") or 0)
+                + int(pr.get("lines_removed") or 0),
             "censored": closed is None,
             "censored_at": _iso(court.snapshot) if closed is None else None,
             "review_rounds": rounds,
@@ -283,6 +308,11 @@ def _segment_rows(court: ballcourt.BallCourt, cycle: jira.Cycle | None,
             "efficiency": None,
             "no_pr_open_hours": None,
             "no_pr_open_share": None,
+            # prd/63 V-A7: the part of this segment that is a reopen/rework
+            # loop (first done → final done), so "verification → done 31 %" can
+            # say it is the loop instead of implying the QA stage was slow.
+            "rework_hours": None,
+            "rework_share": None,
             "available": False,
             "inverted": False,
             "clamped": False,
@@ -318,11 +348,23 @@ def _segment_rows(court: ballcourt.BallCourt, cycle: jira.Cycle | None,
             court.business_hours(cycle.person, low, high)
             for low, high in jira.no_pr_open_spans(cycle.story, t1, t2)
         ), 2)
+        # prd/63 V-A7: a reopened story's last segment contains the whole
+        # reopen/rework loop; price the overlap here so the label can name it.
+        rework = 0.0
+        if cycle is not None and cycle.reopens:
+            loop_from = cycle.boundaries.get("first_done")
+            loop_to = cycle.boundaries.get("done") or court.snapshot
+            if loop_from is not None and loop_to is not None and loop_to > loop_from:
+                low, high = max(t1, loop_from), min(t2, loop_to)
+                if high > low:
+                    rework = round(court.business_hours(cycle.person, low, high), 2)
         row["hours"] = elapsed
         row["active_hours"] = active
         row["efficiency"] = round(active / elapsed, 4) if elapsed > 0 else None
         row["no_pr_open_hours"] = no_pr
         row["no_pr_open_share"] = round(no_pr / elapsed, 4) if elapsed > 0 else 0.0
+        row["rework_hours"] = rework
+        row["rework_share"] = round(rework / elapsed, 4) if elapsed > 0 else 0.0
         rows.append(row)
     return rows
 
@@ -356,6 +398,30 @@ def _segments(court: ballcourt.BallCourt, cycle: jira.Cycle | None,
         }
         for name in BOUNDARY_ORDER
     }
+    # prd/63 F17: the lifecycle order and the clock can disagree (DEL-183's
+    # `refined` is 20 min *after* `ready`; `in_verification` precedes
+    # `pr_open`). The payload says which boundary is out of order and what it
+    # should follow, so the chips can be drawn chronologically with a flag
+    # instead of silently asserting a false sequence.
+    previous_name = None
+    previous_ts = None
+    for name in BOUNDARY_STRICT_ORDER:
+        entry = boundaries.get(name) or {}
+        if not entry.get("ts"):
+            continue
+        stamp = bounds.get(name)
+        if stamp is not None and previous_ts is not None and stamp < previous_ts:
+            entry["order_quirk"] = {
+                "after": previous_name,
+                "after_ts": _iso(previous_ts),
+                "reason": (
+                    f"the {name} boundary is dated before {previous_name}, "
+                    "so the lifecycle order and the clock disagree"
+                ),
+            }
+        # Compare each pair, not the last well-ordered boundary: a single
+        # inversion must not cascade into five flags.
+        previous_name, previous_ts = name, stamp
     begin = cycle.boundaries.get("created") if cycle is not None else None
     end = (cycle.boundaries.get("done") or court.snapshot) if cycle is not None else None
     cycle_hours = (
@@ -415,21 +481,45 @@ def _segments(court: ballcourt.BallCourt, cycle: jira.Cycle | None,
         "out_of_order": quirks,
         "boundaries_clamped": sorted(quirk_by_boundary),
         "largest": largest["key"] if largest else None,
-        "largest_label": largest["label"] if largest else None,
+        "largest_label": (
+            f"{largest['label']} (the reopen loop)"
+            if largest and (largest.get("rework_hours") or 0) >= 0.5 * (largest["hours"] or 1)
+            else (largest["label"] if largest else None)
+        ),
         "largest_hours": largest["hours"] if largest else None,
         "largest_share": largest["share"] if largest else None,
         "largest_no_pr_open_hours": (
             largest["no_pr_open_hours"] if largest else None
         ),
+        # prd/63 V-A7: reopened stories name the rework loop, not only the
+        # segment it fell into.
+        "rework_hours": round(
+            sum(row["rework_hours"] or 0.0 for row in measured), 2
+        ),
+        "rework_segments": [
+            {"key": row["key"], "label": row["label"], "hours": row["rework_hours"]}
+            for row in measured if (row["rework_hours"] or 0) > 0
+        ],
+        # prd/63 F17: the chip order a reader can trust (available stamps by
+        # clock, then the missing ones), plus every out-of-order pair.
+        "boundary_order": [
+            name for name in sorted(
+                (name for name, entry in boundaries.items() if entry.get("ts")),
+                key=lambda name: boundaries[name]["ts"],
+            )
+        ] + [name for name in BOUNDARY_ORDER if not boundaries.get(name, {}).get("ts")],
+        "boundary_quirks": [
+            {"boundary": name, **entry["order_quirk"]}
+            for name, entry in boundaries.items() if entry.get("order_quirk")
+        ],
         "clamped": sum(1 for row in rows if row["clamped"]),
         "hours_mode": court.hours_mode,
         "heuristic": (
-            "the same boundaries and active-work accounting as the prd/21 "
-            "decomposition: created → ready = the first status → ready, "
-            "falling back to the first 'pointed' estimate; sprint = first "
-            "'sprint_added', status stages for started/in-review/in-verification/"
-            "done, and the story's PRs (joined on PR.ticket_keys) for "
-            "open/review/merge"
+            "created → ready is the first status → ready (falling back to the "
+            "first estimate); sprint is the first sprint membership; started, "
+            "in review, in verification and done come from the workflow; and "
+            "the story's own PRs supply open, first review and merge. Active "
+            "time is the measured work inside each segment."
         ),
     }
 
@@ -531,6 +621,41 @@ def _sprint_rows(court, data: jira.JiraData, story: jira.Story | None) -> dict:
     }
 
 
+def _change(pr_rows: list[dict]) -> dict:
+    """How much of a story's *change* shipped (prd/63 V-A6).
+
+    The PR line counts are the store's only size fact. A Done-in-Jira story
+    whose PR is still open is not a delivered story, and a headline that reads
+    only the ticket's ``created → done`` clock ("13th fastest") brags about work
+    that is 62 % unmerged. This is the share that corrects it: lines changed in
+    open PRs ÷ lines changed in all the story's PRs.
+    """
+    total = sum(int(pr.get("lines_changed") or 0) for pr in pr_rows)
+    open_total = sum(
+        int(pr.get("lines_changed") or 0) for pr in pr_rows
+        if pr.get("censored")
+    )
+    merged = sum(
+        int(pr.get("lines_changed") or 0) for pr in pr_rows
+        if not pr.get("censored")
+    )
+    return {
+        "available": total > 0,
+        "lines_total": total,
+        "lines_merged": merged,
+        "lines_unmerged": open_total,
+        "unmerged_share": round(open_total / total, 4) if total else None,
+        "open_prs": sorted(
+            pr["number"] for pr in pr_rows if pr.get("censored")
+        ),
+        "note": (
+            None if total else
+            "the store has no changed-line counts for this ticket's PRs, so "
+            "the unmerged share of the change cannot be measured"
+        ),
+    }
+
+
 def _worklogs(story: jira.Story | None, pr_rows: list[dict]) -> tuple[list[dict], dict]:
     rows: list[dict] = []
     for event in story.of("worklogged") if story is not None else []:
@@ -619,10 +744,12 @@ def _gap_notes(biggest: dict, segments: dict) -> tuple[str, str]:
     ]
     if overlapping:
         gap = max(overlapping, key=lambda item: item["hours"])
-        days = round(gap["hours"] / jira.BUSINESS_HOURS_PER_DAY, 1)
+        # prd/63 V-B: one duration language. The gap is business hours already,
+        # so it is rendered by the shared "Nd Nh" formatter — "2 d 4 h", not
+        # a second unit ("12.5 business days") inside a business-hours story.
         parts.append(
-            f"PR #{gap['to_pr']} started {days:g} business day"
-            f"{'' if days == 1 else 's'} after PR #{gap['from_pr']} merged."
+            f"PR #{gap['to_pr']} started {jira.human_hours(gap['hours'])} "
+            f"after PR #{gap['from_pr']} merged."
         )
     return clause, " ".join(parts)
 
@@ -974,8 +1101,22 @@ def _after_prefix(prefix: str, body: str) -> str:
 def _quirk_note(segments: dict) -> str:
     """One sentence naming every out-of-order boundary as a data quirk (prd/46 §1)."""
     quirks = segments.get("out_of_order") or []
-    if not quirks:
+    order = segments.get("boundary_quirks") or []
+    if not quirks and not order:
         return ""
+    if not quirks and order:
+        # prd/63 F17: a boundary dated before its lifecycle predecessor is the
+        # same kind of data quirk, even when the segment clamp did not move it.
+        phrases = [
+            f"the {item['boundary']} boundary follows {item.get('after')} on the "
+            "lifecycle but is dated earlier"
+            for item in order
+        ]
+        return (
+            " Data quirk: " + "; ".join(phrases)
+            + " — the events are shown in clock order with the flag, not "
+            "reordered, and this is not a finding."
+        )
     phrases = []
     for quirk in quirks:
         reason = quirk.get("reason")
@@ -1021,11 +1162,25 @@ def _open_pr_state(open_prs: list[dict]) -> str:
     return " · ".join(parts)
 
 
+def _change_note(change: dict | None) -> str:
+    """The unmerged share of the change, as one clause (prd/63 V-A6)."""
+    change = change or {}
+    share = change.get("unmerged_share")
+    if not change.get("available") or not share:
+        return ""
+    return (
+        f" {round(share * 100)} % of the story's change "
+        f"({change.get('lines_unmerged', 0)} of {change.get('lines_total', 0)} "
+        "changed lines) is in an unmerged PR, so this is not a shipped change."
+    )
+
+
 def _answer(
     key: str,
     story: jira.Story | None,
     segments: dict,
     prs: list[dict],
+    change: dict | None = None,
 ) -> tuple[str, str]:
     """One sentence: where the time went, or which boundary the store lacks.
 
@@ -1073,13 +1228,17 @@ def _answer(
         numbers = ", ".join(f"#{pr['number']}" for pr in open_prs)
         prefix = (
             f"Done in Jira, but PR {numbers} is still open (right-censored); "
-            "the cycle is measured to the ticket's done, not to that PR. "
+            "the cycle is measured to the ticket's done, not to that PR."
         )
+        prefix += _change_note(change)
         if censor_note:
-            prefix += censor_note
+            prefix += f" {censor_note}"
+        if not prefix.endswith(" "):
+            prefix += " "
     elif open_prs and censored:
         numbers = ", ".join(f"#{pr['number']}" for pr in open_prs)
-        prefix = f"Still open in Jira, with PR {numbers} open too (right-censored). "
+        prefix = f"Still open in Jira, with PR {numbers} open too (right-censored)."
+        prefix += _change_note(change) + " "
         if censor_note:
             prefix += censor_note
     elif censored and unmeasured:
@@ -1126,6 +1285,11 @@ def _answer(
     total = segments["total_hours"]
     biggest = max(measured, key=lambda row: (row["hours"], row["key"]))
     percent = round(100 * (biggest["share"] or 0))
+    # prd/63 V-A7: "verification → done 31 %" was the reopen loop, not the QA
+    # stage. Name the loop when it is what the segment mostly contains.
+    if (biggest.get("rework_hours") or 0) >= 0.5 * (biggest.get("hours") or 1):
+        biggest = dict(biggest)
+        biggest["label"] = f"{biggest['label']} (the reopen loop)"
     # prd/41 B5: a no-PR-open gap is part of the headline when it is material,
     # and the day count is rounded to one decimal (never "7.51875").
     gap_clause, gap_sentence = _gap_notes(biggest, segments)
@@ -1173,7 +1337,11 @@ def _answer(
         f"{gap_clause}. {active} of the measured time was active work."
         f"{(' ' + gap_sentence) if gap_sentence else ''}{suffix}{quirk_note}"
     )
-    return _after_prefix(prefix, body), "measured"
+    # prd/63 V-A6: a Done-in-Jira story with an open PR has a *measured ticket
+    # cycle* but a censored change; the kind says so, so the page never calls
+    # the delivery "measured".
+    kind = "done_with_open_pr" if (open_prs and not censored) else "measured"
+    return _after_prefix(prefix, body), kind
 
 
 # --------------------------------------------------------------------------- #
@@ -1232,10 +1400,31 @@ def ticket(
     sprints = _sprint_rows(court, data, story)
     worklog_rows, worklog = _worklogs(story, prs)
     events = _events(story)
-    answer, answer_kind = _answer(wanted, story, segments, prs)
+    answer, answer_kind = _answer(wanted, story, segments, prs, change=_change(prs))
     benchmark = _benchmark(court, data, story, segments, cohorts)
     # prd/57: each segment and each PR phase carries its cohort median + multiple.
     _attach_benchmarks(segments, prs, cohorts)
+
+    change = _change(prs)
+    # prd/63 V-A7: two clocks called "active". The segment efficiency counts
+    # measured work in the story's segments (PR intervals *plus* worklog
+    # durations and a fixed cost per ticket touch); the worklog panel's
+    # "active (PR)" counts only PR intervals with commits in business hours.
+    # State both, and why they differ, instead of showing "8 % active" next to
+    # "active (PR) 0 h".
+    story_active = {
+        "segment_hours": segments.get("active_hours"),
+        "pr_hours": worklog.get("active_hours"),
+        "worklog_hours": worklog.get("logged_hours"),
+        "efficiency": segments.get("efficiency"),
+        "note": (
+            "the segment figure counts measured work inside the story: PR "
+            "intervals where the author was working, worklog durations, and a "
+            "fixed attention cost per ticket change; the PR-clock figure counts "
+            "only PR intervals with commits inside business hours. A push after "
+            "hours is real work but prices 0 h on the PR clock."
+        ),
+    }
 
     story_row = None
     if story is not None:
@@ -1299,6 +1488,18 @@ def ticket(
         "segments": segments,
         "prs": prs,
         "pr_count": len(prs),
+        # prd/63 V-A6/A7: the unmerged share of the change and the two active
+        # clocks, so a headline cannot brag over unshipped work or leave two
+        # "active" numbers unexplained.
+        "change": change,
+        "active": story_active,
+        # prd/63 F17/V-B: a visible quirk flag, not only prose.
+        "quirk": {
+            "count": len(segments.get("boundaries_clamped") or ())
+                + len(segments.get("boundary_quirks") or ()),
+            "clamped": list(segments.get("boundaries_clamped") or ()),
+            "order": list(segments.get("boundary_quirks") or ()),
+        },
         # prd/42 M2: "73 h" is read against its cohort, not in a vacuum.
         "benchmark": benchmark,
         "sprints": sprints,

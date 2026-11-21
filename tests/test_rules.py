@@ -399,6 +399,44 @@ class ResponseTimeTests(StoreCase):
         self.assertIsNone(canonical["median_hours"])   # no sentinel response yet
         self.assertEqual(canonical["never"], 1)
 
+    def test_never_answered_splits_holder_sets(self):
+        """prd/63 V-A8: "NEVER 8" over-counted — most needed a peer first.
+
+        A sentinel's gate opens on a peer *answer*, so every open PR with a
+        comment from a peer lands in ``never``. Only the PRs with no other
+        holder (no pending peer, no author debt) are "waiting only on the
+        sentinel"; the rest cannot be moved by nudging them.
+        """
+        fx = Fixture()
+        # sentinel-only: the peer answered, the author has no debt
+        fx.pr(1, "AaAa", state="open")
+        fx.event(1, "reviewer_changed", "AaAa", 0, change="added",
+                 people=("FrMo", "CaOs"))
+        fx.event(1, "pr_approved", "CaOs", 4)
+        # the peer answered with a needs-work: the author owes the rework, so
+        # nudging the sentinel would still not merge it
+        fx.pr(2, "BbBb", state="open")
+        fx.event(2, "reviewer_changed", "BbBb", 0, change="added",
+                 people=("FrMo", "DaKo"))
+        fx.event(2, "pr_needs_work", "DaKo", 2)
+        # the author owes a rework: even a sentinel approval would not merge it
+        fx.pr(3, "CcCc", state="open")
+        fx.event(3, "reviewer_changed", "CcCc", 0, change="added",
+                 people=("FrMo", "ErLi"))
+        fx.event(3, "pr_needs_work", "ErLi", 3)
+        # declare the sentinel role
+        fx.pr(4, "DdDd", state="open")
+        fx.event(4, "reviewer_changed", "FrMo", 0, change="removed",
+                 sentinel=True)
+        body = ballcourt.response_times(self.load(fx)[0])
+        fr = next(row for row in body["people"] if row["person"] == "FrMo")
+        self.assertEqual(fr["never"], 3)
+        self.assertEqual(fr["never_only_holder"], 1)
+        self.assertEqual(fr["never_other_holder"], 2)
+        self.assertEqual(body["sentinel_wait"]["never_only_holder"], 1)
+        self.assertEqual(body["sentinel_wait"]["never_other_holder"], 2)
+        self.assertIsNotNone(fr["never_only_holder_oldest_hours"])
+
     def test_the_sentinel_lag_is_peer_approval_to_sentinel_approval(self):
         court = self.load(self.fixture())[0]
         body = ballcourt.response_times(court)
@@ -475,6 +513,22 @@ class ResponseTimeTests(StoreCase):
         body = ballcourt.queue_series(court, "person", rules.window_for(court, None))
         self.assertIn("response", body)
         self.assertEqual(body["response"]["reviewer_median_hours"], 6.0)
+        # prd/63 V-A12: the person-level flag needs > 2× the *person* mean, and
+        # the payload states the baseline it used (it used to be the per-wait
+        # median, which flagged every person as slow).
+        self.assertIn("median person mean wait", body["baseline_kind"])
+        self.assertGreaterEqual(
+            body["outlier_threshold_hours"],
+            body["baseline_mean_wait_hours"] * 2 - 0.01,
+        )
+        flagged = [row for row in body["streams"]
+                   if row["summary"]["diagnosis"] != "healthy"
+                   and row["role"] != "synthetic"]
+        for row in flagged:
+            self.assertGreater(
+                row["summary"]["mean_wait_hours"],
+                body["baseline_mean_wait_hours"] * 2,
+            )
         # the legend names the sentinel role without a real name (prd/02)
         legend = ballcourt.person_legend(court)
         roles = {row["person"]: row["role"] for row in legend["people"]}

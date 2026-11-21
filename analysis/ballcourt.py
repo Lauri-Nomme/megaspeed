@@ -95,6 +95,24 @@ from ingest.store import iso, to_naive_utc
 from analysis import benchmark
 from analysis.calendar import Calendar
 
+def human_hours(hours: float | None) -> str:
+    """The shared "Nd Nh" rendering, without importing the Jira layer.
+
+    ``analysis.jira.human_hours`` is the public twin; importing it here would be
+    circular (jira imports this module), and a second format would violate the
+    one-duration-language rule. This is deliberately the same four lines.
+    """
+    if hours is None:
+        return "—"
+    minutes = round(float(hours) * 60)
+    if minutes < 60:
+        return f"{minutes} min"
+    whole, rest = divmod(minutes, 60)
+    if whole < 8:
+        return f"{whole} h" + (f" {rest} min" if rest else "")
+    days, rest_hours = divmod(whole, 8)
+    return f"{days} d {rest_hours} h"
+
 ASSUMPTION = "wall-clock hours (no working-hours calendar configured)"
 
 SNAPSHOT_PHASE = "unobserved"
@@ -913,6 +931,11 @@ OBJECT_SQL = (
 REF_SQL = (
     "SELECT object_id, CAST(attributes AS VARCHAR) FROM objects WHERE object_type = 'PR'"
 )
+#: prd/63 V-A6: a Done-with-open-PR story must be able to name the share of its
+#: *change* that is unmerged. The PR's own line counts are the only size fact in
+#: the store (never the diff itself), so they ride on the PR object beside the
+#: refs.
+PR_LINES_SQL = REF_SQL
 PERSON_SQL = (
     "SELECT object_id, CAST(attributes AS VARCHAR) FROM objects WHERE object_type = 'PERSON'"
 )
@@ -970,6 +993,37 @@ def _pr_refs(con) -> dict[str, dict]:
         if entry:
             refs[object_id] = entry
     return refs
+
+
+def _pr_lines(con) -> dict[str, dict]:
+    """``object_id -> {lines_added, lines_removed}`` for the PRs that carry them.
+
+    The store keeps only the two counts from the PR's attributes (never the
+    diff), which is enough for the one question prd/63 V-A6 asks: how much of a
+    story's change is still unmerged. A store ingested before the counts were
+    persisted simply has none and the share is ``None``, never a guess.
+    """
+    columns = {
+        row[0]
+        for row in con.execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = 'main' AND table_name = 'objects'"
+        ).fetchall()
+    }
+    if "attributes" not in columns:
+        return {}
+    out: dict[str, dict] = {}
+    for object_id, attrs in con.execute(PR_LINES_SQL).fetchall():
+        payload = json.loads(attrs) if attrs else {}
+        added = payload.get("lines_added")
+        removed = payload.get("lines_removed")
+        if added is None and removed is None:
+            continue
+        out[object_id] = {
+            "lines_added": int(added or 0),
+            "lines_removed": int(removed or 0),
+        }
+    return out
 
 
 def _snapshot(conn) -> datetime:
@@ -1074,6 +1128,11 @@ def load(
     for object_id, refs in _pr_refs(conn).items():
         if object_id in pr_objects:
             pr_objects[object_id].update(refs)
+    # prd/63 V-A6: the PR's changed-line counts ride beside the refs, so the
+    # ticket view can state the unmerged share of a story's change.
+    for object_id, lines in _pr_lines(conn).items():
+        if object_id in pr_objects:
+            pr_objects[object_id].update(lines)
 
     by_pr: dict[str, list[dict]] = defaultdict(list)
     sentinels: set[str] = set()
@@ -1474,6 +1533,20 @@ def queue_series(
     # global mean wait, for a relative diagnosis that works on any data size
     all_hours = [i.hours for i in measured]
     baseline = sorted(all_hours)[len(all_hours) // 2] if all_hours else 0.0
+    # prd/63 V-A12: a person-level diagnosis is only meaningful against the
+    # *person* cohort. The old test compared every person's mean (8.7-11.1 h)
+    # with the per-wait median (2.5 h) and flagged all six, while the same five
+    # peers sat at 0.5-0.9x of the response median. Flag only a real outlier:
+    # more than twice the median person's mean wait.
+    person_means = sorted(
+        entry["hours"] / max(1, len(entry["prs"]))
+        for name, entry in streams.items()
+        if entry.get("role") != "synthetic" and name not in SYNTHETIC
+    )
+    person_baseline = (
+        person_means[len(person_means) // 2] if person_means else 0.0
+    )
+    level_baseline = person_baseline if level == "person" else baseline
     out = []
     for entry in streams.values():
         items = len(entry["prs"])
@@ -1482,7 +1555,15 @@ def queue_series(
         queue_length = entry["hours"] / service_hours
         served = len(entry.get("served") or ())
         per_day = served / business_days if business_days else 0.0
-        if mean_hours > baseline * 1.25 and queue_length >= 1.0:
+        if level == "person" and entry.get("role") != "synthetic":
+            threshold = person_baseline * 2.0
+            if mean_hours > threshold and queue_length >= 1.0:
+                diagnosis = "overloaded"
+            elif mean_hours > threshold:
+                diagnosis = "slow"
+            else:
+                diagnosis = "healthy"
+        elif mean_hours > baseline * 1.25 and queue_length >= 1.0:
             diagnosis = "overloaded"
         elif mean_hours > baseline * 1.25:
             diagnosis = "slow"
@@ -1527,14 +1608,26 @@ def queue_series(
         **bc.calendar_warning(),
         "diagnosis_note": (
             "queue wait, not calendar utilisation: 'overloaded' = long wait with "
-            "a standing queue, 'slow' = long wait with little WIP, both measured "
-            "against the median wait in this window; person-level mean wait is "
-            "person-hours from 'added as reviewer' to the answer, so it includes "
-            "the peer phase and is NOT the sentinel wait (Queue → response time: "
-            "last peer answer → first response); the policy lab's 'busy' is "
-            "calendar share, a third metric"
+            "a standing queue, 'slow' = long wait with little WIP. At people "
+            "level a person is flagged only when their mean wait is more than "
+            "twice the median person's mean — the per-request baseline is not "
+            "the person cohort. Person-level mean wait is person-hours from "
+            "'added as reviewer' to the answer, so it includes the peer phase "
+            "and is NOT the sentinel wait (Queue → response time: last peer "
+            "answer → first response); the policy lab's 'busy' is calendar "
+            "share, a third metric"
         ),
         "diagnosis_kind": "queue-wait",
+        # The number the relative labels compare against, and what it is.
+        "baseline_mean_wait_hours": round(level_baseline, 2),
+        "baseline_kind": (
+            "median person mean wait; a flag needs > 2x this"
+            if level == "person" else
+            "median per-wait hours in the window; a flag needs > 1.25x this"
+        ),
+        "outlier_threshold_hours": round(
+            (person_baseline * 2.0) if level == "person" else (baseline * 1.25), 2
+        ),
         "level": level,
         "hours_kind": "person-hours" if level == "person" else "wait-hours",
         "bots_excluded": sorted(bc.bots),
@@ -1552,7 +1645,9 @@ def queue_series(
         },
         "bucket_hours": bucket_hours,
         "buckets": buckets,
-        "baseline_mean_wait_hours": round(baseline, 1),
+        # the same basis the diagnosis labels used (person level compares
+        # person means; queue level the per-wait median)
+        "baseline_mean_wait_hours": round(level_baseline, 1),
         # prd/42 M1: the comparative answer ("who is the constraint") needs a
         # response-time column, not only a queue-wait ranking. It is computed
         # from the same events/intervals and travels with the queue payload.
@@ -1607,6 +1702,13 @@ def response_times(bc: BallCourt, window: tuple[datetime, datetime] | None = Non
     samples: dict[str, list[float]] = defaultdict(list)
     never: dict[str, int] = defaultdict(int)
     never_since: dict[str, datetime] = {}
+    # prd/63 V-A8: "never answered" for a sentinel over-counts the tail when a
+    # peer or the author still owes (the gate opened on a peer *comment*, not
+    # an approval). Split the count: waiting only on this sentinel vs another
+    # holder still to act.
+    never_only_holder: dict[str, int] = defaultdict(int)
+    never_other_holder: dict[str, int] = defaultdict(int)
+    never_only_oldest: dict[str, datetime] = {}
     sentinel_lags: dict[str, list[float]] = defaultdict(list)
     gate_aware_n = 0
     # prd/46 §2: the canonical sentinel-wait samples, one per (sentinel, PR),
@@ -1712,6 +1814,25 @@ def response_times(bc: BallCourt, window: tuple[datetime, datetime] | None = Non
             current = never_since.get(person)
             if current is None or opened < current:
                 never_since[person] = opened
+            # prd/63 V-A8: is the sentinel the *only* holder? A peer who never
+            # answered, or an author with a standing debt, must act first —
+            # nudging the sentinel would change nothing.
+            # Use the *current* status vector, not the historical answered set:
+            # a peer whose verdict was staled by a push is pending again even
+            # though they answered earlier (DEL-167 #53's CaOs).
+            last = state.intervals[-1] if state.intervals else None
+            others_pending = {
+                peer for peer in (last.pending_all if last is not None else ())
+                if peer != person and peer != author and peer not in sentinels
+            }
+            author_owes = bool(last is not None and last.author_open)
+            if person in sentinels and not others_pending and not author_owes:
+                never_only_holder[person] += 1
+                oldest = never_only_oldest.get(person)
+                if oldest is None or opened < oldest:
+                    never_only_oldest[person] = opened
+            elif person in sentinels:
+                never_other_holder[person] += 1
         # peer approval -> sentinel approval: the gate's own latency
         for stamp, actor in approvals:
             if actor not in sentinels:
@@ -1741,6 +1862,17 @@ def response_times(bc: BallCourt, window: tuple[datetime, datetime] | None = Non
             "p90_hours": _p90(values),
             "max_hours": round(max(values), 2) if values else None,
             "never": never.get(person, 0),
+            # prd/63 V-A8: split the unrequited tail by who still owes. Only
+            # "waiting only on this sentinel" is a sentinel problem; the rest
+            # needs a peer or the author first.
+            "never_only_holder": never_only_holder.get(person, 0),
+            "never_other_holder": never_other_holder.get(person, 0),
+            "never_only_holder_oldest_hours": (
+                round(bc.business_hours(
+                    person, never_only_oldest[person], bc.snapshot,
+                ), 2)
+                if person in never_only_oldest else None
+            ),
             # prd/43 §2: the orphan tail, quantified: the oldest unanswered
             # request and how long it has waited (business hours to the snapshot).
             "never_oldest_hours": (
@@ -1775,6 +1907,14 @@ def response_times(bc: BallCourt, window: tuple[datetime, datetime] | None = Non
         "p90_hours": _p90(sentinel_values),
         "max_hours": round(max(sentinel_values), 2) if sentinel_values else None,
         "never": sentinel_never,
+        # prd/63 V-A8: "NEVER 8" was every open PR because a peer comment opens
+        # the gate. Only this many are waiting *only* on the sentinel.
+        "never_only_holder": sum(
+            never_only_holder.get(person, 0) for person in sentinels
+        ),
+        "never_other_holder": sum(
+            never_other_holder.get(person, 0) for person in sentinels
+        ),
         "never_oldest_hours": (
             round(min(
                 bc.business_hours(person, since, bc.snapshot)
@@ -1911,7 +2051,7 @@ def person_legend(bc: BallCourt, stories: list | None = None) -> dict:
     return {
         "people": people,
         "note": (
-            "roles, not names: the store holds pseudonyms only (prd/02). "
+            "roles, not names: the store holds pseudonyms only. "
             "sentinel = mandatory approver on every PR; bot = automation, never "
             "a constraint; story owner = assigned Jira stories, not PRs"
         ),
@@ -2147,8 +2287,11 @@ def delivery_list(
         done_keys = sorted(key for key in story_keys if key in done_tickets)
         stale_reasons = []
         if age_business_days > stale_business_days:
+            # prd/63 V-B: the page is priced in "Nd Nh", so the reason uses the
+            # same renderer instead of a second unit ("24 business days").
             stale_reasons.append(
-                f"open {age_business_days:g} business days (limit {stale_business_days:g})"
+                f"open {human_hours(age_hours)} "
+                f"(limit {human_hours(stale_business_days * BUSINESS_HOURS_PER_DAY)})"
             )
         if done_keys:
             stale_reasons.append(
@@ -2276,9 +2419,9 @@ def delivery_list(
             "author whose debt stands), not when X authored it"
         ),
         "stale_note": (
-            f"stale = open > {stale_business_days:g} business days "
-            f"({BUSINESS_HOURS_PER_DAY:g} h each) or a ticket that is Done in "
-            "Jira while its PR is still open"
+            f"stale = open longer than "
+            f"{human_hours(stale_business_days * BUSINESS_HOURS_PER_DAY)} "
+            "or a ticket that is Done in Jira while its PR is still open"
         ),
         "unobserved_note": (
             "unobserved = no events since the snapshot: the blocking graph "

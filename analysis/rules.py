@@ -2038,7 +2038,7 @@ def stale_prs(court: ballcourt.BallCourt, window,
         "hours": round(sum(row["hours"] for row in stale), 2),
         "rows": _drill_order(rows),
         "note": (
-            f"stale = open longer than {limit_days:g} business days (8 h each) "
+            f"stale = open longer than {_human_hours(limit_days * 8)} "
             "or the ticket is Done in Jira while the PR is open; hours = the "
             "age past the limit, or the current wait when the ticket is Done"
         ),
@@ -2706,7 +2706,10 @@ def templates(
         )
         reasons = []
         if sp["over_age"]:
-            reasons.append(f"{sp['over_age']} open past {sp['limit_days']:g} business days")
+            reasons.append(
+                f"{sp['over_age']} open past "
+                f"{_human_hours(sp['limit_days'] * 8)}"
+            )
         if sp["ticket_done_open"]:
             reasons.append(f"{sp['ticket_done_open']} with the ticket already Done")
         examples = ", ".join(
@@ -2729,6 +2732,9 @@ def templates(
                 "limit_days": sp["limit_days"],
                 "oldest_age_hours": oldest,
                 "recoverable_hours": sp["hours"],
+                # prd/63 V-B: stale PRs are a live state; `1w` does not window
+                # them, and the card says so rather than looking inconsistent.
+                "live_state": True,
                 "examples": examples,
             },
             "Close, land, or decline stale PRs in the weekly review: a PR open "
@@ -2789,6 +2795,9 @@ def templates(
                 "person": names,
                 # prd/46 §2: this is a *current* wait, not the response clock.
                 "clock": "current wait on the sentinel, not their response time",
+                # prd/63 V-B: a live-state card describes the snapshot, not
+                # the chosen timeframe; the badge says so.
+                "live_state": True,
                 # prd/42 P8: ticket keys, not bare PR ids, so the rule's
                 # examples are links like every other view's.
                 "examples": ", ".join(
@@ -3048,7 +3057,9 @@ def templates(
         out.append(_suggestion(
             "jira-carry-over", "carry_over",
             f"{carried} stor{'y' if carried == 1 else 'ies'} committed but not "
-            "done by their sprint's close",
+            "done by their sprint's close"
+            + (f" ({cohort_window.get('days')}-day window; the sprint lens "
+               "counts the whole store)" if cohort_window.get("days") is not None else ""),
             {
                 "carried_over": carried,
                 "late": co["late"],
@@ -3306,6 +3317,17 @@ def templates(
             title += f", {unmerged} Done in Jira with an unmerged PR"
         if never:
             title += f", {never} still open"
+        # prd/63 V-A9/V-C3: the membership verdict is not the team's output.
+        # State the work that finished inside the sprint's dates, and credit
+        # the carry-overs nobody re-committed.
+        window_done = worst.get("window_done") or 0
+        if window_done > delivered:
+            carried_in = worst.get("window_carry_in") or 0
+            title += (
+                f"; the team finished {window_done} stories "
+                f"({worst.get('window_points') or 0} pts) in its dates"
+                + (f", {carried_in} carried in from an earlier sprint" if carried_in else "")
+            )
         if worst.get("length_outlier"):
             # prd/55 §5: S3's 50-day plan is not S1/S2's 24–26, so its share is
             # not a like-for-like delivery number.
@@ -3326,6 +3348,12 @@ def templates(
                 "adopted_points": worst.get("adopted_points", 0),
                 "points_share": points_share,
                 "done_by_end": delivered,
+                # prd/63 V-A9/V-C3: the window velocity beside the membership
+                # verdict, so "15 of 30" cannot be read as "15 shipped".
+                "window_done": worst.get("window_done"),
+                "window_points": worst.get("window_points"),
+                "window_carry_in": worst.get("window_carry_in"),
+                "window_own": worst.get("window_own"),
                 # prd/43 §5: the Jira-done count and the "code never merged"
                 # count that was excluded from delivery
                 "done_by_end_jira": worst.get("done_by_end_jira", delivered),

@@ -306,6 +306,13 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
 - **Definition**: a ticket/PR whose cycle is cut off by the snapshot is *right-censored* (open PR,
   open story), and the view says so; a segment it can't measure is *missing* and named.
 - **Purpose**: never present an incomplete cycle as complete.
+- **Unmerged share of a change** (prd/63 V-A6): changed lines in the story's still-open PRs ÷ changed
+  lines in all of its PRs (the line counts are the store's only size fact). A Done-in-Jira story with
+  an open PR has a measured *ticket* cycle but a censored *change*: the headline names the share and
+  reads its rank as "to Jira done", never as a delivery result.
+- **Two active clocks** (prd/63 V-A7): the segment efficiency counts measured work inside the story
+  (PR work intervals, worklog durations, and a fixed cost per ticket change); the PR clock counts only
+  PR intervals with commits in business hours. They are both shown, labelled, never one as the other.
 
 ### Out-of-order boundaries
 - **Definition**: a boundary the store dates outside the `created → done` window, or before its
@@ -458,6 +465,19 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
 - **Window**: a carry-over count is over the **stories created in the chosen timeframe** (the sprint
   lens counts every story in the store). Both are correct for their scope, so the window travels with
   the number — two views must not show different counts for "carried over" without stating it.
+- **Window velocity**: stories (and points) that reached `done` **inside the sprint's own dates**,
+  whether or not they were committed to it. This is the team's output for the window; the membership
+  verdict ("15 of 30 by end") answers a different question. Work finished in the window that belongs
+  to an earlier sprint is credited as `window_carry_in`, so a carry-over is not invisible in the
+  sprint that actually shipped it. The two numbers are shown together, never one as the other.
+
+### Plan-day grace ("committed" vs "adopted")
+- **Definition**: a story added to a sprint on the sprint's **start calendar day** is *committed*,
+  not adopted mid-sprint. A planning session that adds at 09:30 to a sprint starting at 09:00 was in
+  the room at the start.
+- **Derivation**: `_added_at_start` compares the `sprint_added` date with the sprint's start date (or
+  trusts the store's `at_start` marker); the recall is the day, not the second.
+- **Purpose**: "2 committed / 28 adopted" cannot be a strict-timestamp artefact.
 
 ### Sprint at risk (prd/52)
 - **Definition**: the stories committed to the **active** sprint that its own done-by-snapshot count

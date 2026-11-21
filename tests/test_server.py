@@ -697,6 +697,10 @@ class SummaryRunTests(unittest.TestCase):
             self.assertEqual(result["prs_seen"], int(pr_run[1]))
             self.assertEqual(result["prs_kept"], int(pr_run[2]))
             self.assertGreater(result["prs_seen"], 0)
+            # prd/63 F27: every source run is reported, not only the latest.
+            self.assertGreaterEqual(len(result["runs"]), 2)
+            self.assertEqual(result["runs"][-1]["source"], "jira-cloud")
+            self.assertTrue(all(row["source"] for row in result["runs"]))
 
     def test_a_store_with_no_pr_run_reports_zero_not_a_crash(self):
         with tempfile.TemporaryDirectory() as tmp:

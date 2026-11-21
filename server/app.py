@@ -445,6 +445,9 @@ def _tenant_health(path: Path) -> dict:
             "as_of": summary["as_of"],
             "first_ts": summary["first_ts"],
             "last_ts": summary["last_ts"],
+            # prd/63 F27: a combined tenant's per-source runs, so Sources can
+            # break the dataset down instead of naming only the latest source.
+            "runs": summary.get("runs") or [],
         }
     except StoreBusy:
         return {"ok": False, "error": "the store is being written right now", "retryable": True}
@@ -495,10 +498,21 @@ def meta(request: Request):
     not when the process started. A store-less server still answers: the
     version is a code identity, not tenant data.
     """
-    unknown = _unknown_params(request, ())
+    # prd/63 F14: every other endpoint takes `?tenant=`; refusing it here meant
+    # the build identity could not be asked for beside a named dataset. The
+    # answer is tenant-independent, but the named tenant is validated (a typo
+    # is a 404, never a silent default) and echoed for the caller.
+    unknown = _unknown_params(request, _params(()))
     if unknown is not None:
         return unknown
-    return {"ok": True, **build.VERSION_INFO}
+    name = None
+    raw = request.query_params.get(TENANT_PARAM)
+    if raw:
+        try:
+            name, _path = _tenant_of(request)
+        except UnknownTenant as exc:
+            return _tenant_error(exc.args[0])
+    return {"ok": True, **build.VERSION_INFO, "tenant": name}
 
 
 @app.get("/api/health")

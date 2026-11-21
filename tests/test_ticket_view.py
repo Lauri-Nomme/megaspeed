@@ -141,12 +141,14 @@ class Fixture:
 
     def pr(self, number: int, author: str, opened: datetime,
            tickets: tuple[str, ...] = ("DEL-1",), state: str = "merged",
-           closed: datetime | None = None) -> "Fixture":
+           closed: datetime | None = None,
+           attributes: dict | None = None) -> "Fixture":
         self.opened[number] = opened
         self._object(
             "PR", f"PR:{REPO}#{number}", repo=REPO, pr_id=number,
             ticket_keys=list(tickets), actor=author, state=state,
             created_at=opened, closed_at=closed, head_commit="a" * 40,
+            attributes=dict(attributes or {}),
         )
         self.pr_event(number, "pr_opened", author, 0, tickets=tickets)
         return self
@@ -226,7 +228,8 @@ def fixture() -> Fixture:
     fx.worklog("DEL-167", T0 + timedelta(hours=25), 4.0, delay_hours=1.0)
     # the merged PR: open +40, first review +50, push +60, approval +70, merge +80
     fx.pr(52, "AaAa", T0 + timedelta(hours=40), tickets=("DEL-1", "DEL-167"),
-          closed=T0 + timedelta(hours=80))
+          closed=T0 + timedelta(hours=80),
+          attributes={"lines_added": 38, "lines_removed": 0})
     fx.pr_event(52, "comment_added", "RrRr", 10, severity="suggestion",
                 tickets=("DEL-1", "DEL-167"))
     fx.pr_event(52, "pr_pushed", "AaAa", 20, push_class="content",
@@ -235,7 +238,8 @@ def fixture() -> Fixture:
     fx.pr_event(52, "pr_merged", "RrRr", 40, tickets=("DEL-1", "DEL-167"))
     # the still-open PR: open +45, first review +55, a content push +65
     fx.pr(53, "AlNg", T0 + timedelta(hours=45), tickets=("DEL-1", "DEL-167"),
-          state="open", closed=None)
+          state="open", closed=None,
+          attributes={"lines_added": 62, "lines_removed": 0})
     fx.pr_event(53, "comment_added", "RrRr", 10, severity="mandatory",
                 tickets=("DEL-1", "DEL-167"))
     fx.pr_event(53, "pr_pushed", "AlNg", 20, push_class="content",
@@ -433,11 +437,28 @@ class TicketCycleTests(StoreCase):
             payload = tickets.ticket(court, data, "DEL-167")
         finally:
             con.close()
-        self.assertEqual(payload["answer_kind"], "measured")
+        # prd/63 V-A6: a Done-in-Jira story with an open PR has a measured ticket
+        # cycle but a censored change.
+        self.assertEqual(payload["answer_kind"], "done_with_open_pr")
         self.assertIn("DEL-167 took 90 h from created to done", payload["answer"])
         self.assertIn("review rounds", payload["answer"])
         self.assertIn("20 h", payload["answer"])
         self.assertNotIn("cannot say", payload["answer"])
+        # prd/63 V-A6: the unmerged share of the *change*, not only the fact
+        # that a PR is open, and the headline kind says the delivery is censored.
+        change = payload["change"]
+        self.assertTrue(change["available"])
+        self.assertEqual(change["lines_total"], 100)
+        self.assertEqual(change["lines_unmerged"], 62)
+        self.assertAlmostEqual(change["unmerged_share"], 0.62, places=3)
+        self.assertIn("62 % of the story's change", payload["answer"])
+        self.assertIn("62 of 100 changed lines", payload["answer"])
+        # prd/63 V-A7: two active clocks are stated, not conflated.
+        self.assertIsNotNone(payload["active"]["segment_hours"])
+        self.assertIsNotNone(payload["active"]["pr_hours"])
+        self.assertIn("fixed attention cost", payload["active"]["note"])
+        # prd/63 F17/V-B: the visible quirk block, not only prose.
+        self.assertIn("count", payload["quirk"])
 
     def test_an_out_of_order_boundary_is_a_quirk_and_the_shares_stay_under_100(self):
         """prd/46 §1: DEL-185's sprint starts before the story was created."""
@@ -897,7 +918,7 @@ class TicketApiTests(unittest.TestCase):
         self.assertEqual(body["hours_mode"], "business")
         self.assertGreater(body["segments"]["total_hours"], 0)
         self.assertLess(body["segments"]["total_hours"], 90)
-        self.assertTrue(body["answer_kind"] in ("measured", "partial"))
+        self.assertTrue(body["answer_kind"] in ("measured", "partial", "done_with_open_pr"))
 
     def test_a_missing_boundary_is_named_by_the_api(self):
         body = get("/api/ticket/DEL-176", tenant="del").json()

@@ -1048,23 +1048,20 @@ def calibrate(court, window=None, conn=None, bots=None,
             "queue_recovery": QUEUE_RECOVERY,
             "attention_max_sigma": ATTENTION_MAX_SIGMA,
             "note": (
-                "an observed review response is split into attention latency (the "
-                "reviewer has not looked yet), service (the work) and queueing "
-                "(capacity contention). Response times alone cannot tell a slow "
-                "reviewer from an overloaded one, so the split rests on two stated "
-                "constants: service is 'service_share' of the response, and the "
-                "queue is 'queue_recovery' of the P-K estimate — because the P-K "
-                "formula assumes Poisson arrivals while this pipeline's servers are "
-                "fed by arrivals the upstream stages have smoothed (measured: 0.52-"
-                "0.70 of the estimate on del3/del-combined). With 'queue_recovery' "
-                "at 1.0 the simulated server waits less than the decomposition "
-                "assumes, attention is floored at zero, and the baseline loses the "
-                "difference (on a wall-clock axis it under-predicted the cycle-time "
-                "median by 31 %). 'attention_max_sigma' keeps the cadence's spread "
-                "below the work's: the observed response's heavy tail is the queue "
-                "and the work, both priced separately. Both mechanisms stay "
-                "visible: see the per-person 'decomposition' (attention, queue, "
-                "service)"
+                "an observed review response is split into three parts: waiting "
+                "for the reviewer to look (attention), the review work itself "
+                "(service), and capacity contention (queue). Response times alone "
+                "cannot tell a slow reviewer from an overloaded one, so the split "
+                "uses two disclosed calibration shares: a fixed share of each "
+                "response is treated as review work, and a fixed share of the "
+                "textbook queueing estimate is assumed to materialise, because "
+                "this pipeline smooths arrivals before the reviewer sees them "
+                "(the measured share is 52–70 % on these datasets). Without the "
+                "second adjustment the model under-predicted the cycle-time median "
+                "by 31 % on a wall-clock axis. A third constant keeps the "
+                "response-time spread below the work's, so the heavy tail is "
+                "priced as queue and work, not as attention. The per-person "
+                "breakdown below shows the three parts separately."
             ),
             "min_fit_samples": MIN_FIT_SAMPLES,
         },
@@ -1573,7 +1570,11 @@ def _summary(calibration: dict, scenario: Scenario, pooled: dict,
             "role": entry["role"],
             "utilisation": round(entry["busy"] / busy_hours, 4),
             "busy_hours": round(entry["busy"] / replications, 2),
-            "requests": entry["requests"],
+            # prd/63 V-B: requests are pooled over every replication, so a
+            # 6-replication run showed "≈640" (a 6x sum). Quote the number per
+            # replication — the same basis as busy hours and the queue.
+            "requests": round(entry["requests"] / replications, 1),
+            "requests_total": entry["requests"],
             "mean_wait_hours": _round(
                 entry["wait"] / entry["requests"] if entry["requests"] else None
             ),

@@ -100,10 +100,19 @@ class MetaEndpointTests(unittest.TestCase):
         for key in ("version", "tag", "sha", "build_time"):
             self.assertEqual(body[key], version_module.VERSION_INFO[key], key)
 
-    def test_meta_rejects_unknown_parameters(self):
+    def test_meta_accepts_a_tenant_and_rejects_an_unknown_one(self):
+        # prd/63 F14: every endpoint takes `?tenant=`; /api/meta used to reject
+        # it. A *known* tenant is echoed, an unknown one is a stated 404.
         status, body = _call_asgi("/api/meta", query="tenant=alpha")
-        self.assertEqual(status, 400)
+        self.assertEqual(status, 404)
         self.assertFalse(body["ok"])
+        status, tenants = _call_asgi("/api/tenants")
+        self.assertEqual(status, 200)
+        if tenants.get("default"):
+            status, body = _call_asgi("/api/meta", query=f"tenant={tenants['default']}")
+            self.assertEqual(status, 200)
+            self.assertTrue(body["ok"])
+            self.assertEqual(body["tenant"], tenants["default"])
 
     def test_the_app_version_is_the_resolved_string(self):
         self.assertEqual(app_module.app.version, version_module.VERSION_INFO["version"])

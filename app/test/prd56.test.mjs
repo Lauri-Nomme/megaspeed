@@ -194,7 +194,7 @@ test('the delivery table defines "unobserved" and "d" inline', () => {
     rows: [row()],
     counts: { waiting_week_hours: 40 },
   }, 'all');
-  assert.match(html, /unobserved = no events since the snapshot/);
+  assert.match(html, /“unobserved” means no events since then/);
   assert.match(html, /1 d = 8 h/);
 });
 

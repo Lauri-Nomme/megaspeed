@@ -155,7 +155,7 @@ test('the verification split renders as its own measured QA segment', () => {
   assert.match(html, /data-segment="verification_done" data-available="true"/);
   assert.match(html, /data-segment="merge_verification" data-available="true"/);
   // the QA segment is priced, not folded into "done"
-  assert.match(html, /verification → done<\/span> <b>9 h<\/b>/);
+  assert.match(html, /verification → done<\/span> <b>1 d 1 h<\/b>/);
   assert.doesNotMatch(html, /data-segment="merge_done"/);
 });
 
@@ -225,7 +225,7 @@ test('the sprint strip and the worklog block state their own facts', () => {
   assert.match(worklog, /0\.13/);
   assert.match(worklog, /late 1/);
   const stats = ticketStats(payload());
-  assert.match(stats, /85 h/);
+  assert.match(stats, /10 d 5 h/);
   assert.match(stats, /7<\/b>\/8 segments/);
 });
 
@@ -274,8 +274,8 @@ test('prd/36 §3/§4: the head states the end state, an open PR and a reopen', (
     open_prs: [{ number: 53, repo: 'DEL/delivery-api', state: 'open' }],
   }));
   assert.match(markdown, /\*\*reopened\*\* ×1/);
-  assert.match(markdown, /created→first done 60 h/);
-  assert.match(markdown, /created→final done 85 h/);
+  assert.match(markdown, /created→first done 7 d 4 h/);
+  assert.match(markdown, /created→final done 10 d 5 h/);
   assert.match(markdown, /\*\*still open:\*\* #53 \(right-censored\)/);
 });
 
@@ -284,7 +284,7 @@ test('prd/36 §2: a segment says how much of it had no PR open', () => {
     row.key === 'review_rounds' ? { ...row, no_pr_open_hours: 12 } : row
   ));
   const html = segmentBar(payload({ segments: { ...payload().segments, rows } }));
-  assert.match(html, /review rounds — 10 h \(20% of the measured cycle, 20% active\) · 12 h with no PR open/);
+  assert.match(html, /review rounds — 1 d 2 h \(20% of the measured cycle, 20% active\) · 1 d 4 h with no PR open/);
 });
 
 test('a missing story is a stated result, not an empty page', () => {
@@ -431,8 +431,8 @@ test('object lane labels carry the ticket so the gutter links it', () => {
 });
 
 test('segmentHours never invents a duration for a missing segment', () => {
-  assert.equal(segmentHours(45), '45 h');
-  assert.equal(segmentHours(1.63), '1.6 h');
+  assert.equal(segmentHours(45), '5 d 5 h');
+  assert.equal(segmentHours(1.63), '1 h 38 min');
   assert.equal(segmentHours(null), '—');
   assert.equal(segmentHours(undefined), '—');
 });

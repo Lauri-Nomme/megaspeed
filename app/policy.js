@@ -170,10 +170,10 @@ export function policyConfigMarkup(scenario) {
       <button type="button" class="chip" id="policy-reset">Reset to baseline</button>
     </div>
     <div class="policy-presets"><span class="legend-label">presets</span>${presets}</div>
-    <p class="policy-combine" id="policy-combine">A scenario can combine knobs:
-      sentinel + review SLA is one run, and the model composes them. One knob at
-      a time understates the effect — the queue moves to whichever constraint
-      is left.</p>`;
+    <p class="policy-combine" id="policy-combine">Presets <b>add to</b> the current
+      scenario, so sentinel + review SLA + a round cap is one run; “Reset to
+      baseline” clears them. One knob at a time understates the effect — the
+      queue moves to whichever constraint is left.</p>`;
 }
 
 /** The gate: the one sentence that decides whether anything else is credible. */
@@ -319,7 +319,8 @@ export function resourcesMarkup(result) {
       <td data-label="utilisation"><span class="pill ${tone}" title="calendar share (ρ): the share of this person's calendar spent busy — not the complement, and not queue wait">${predPercent(resource.utilisation)} ${label}</span></td>
       <td class="c-dur" data-label="mean wait">${predHours(resource.mean_wait_hours)}</td>
       <td class="c-dur" data-label="peak queue">≈${resource.peak_queue}</td>
-      <td class="c-dur" data-label="requests">≈${resource.requests}</td>
+      <td class="c-dur" data-label="requests / replication"
+          title="requests per replication (the pooled run counts each replication once)">≈${resource.requests}</td>
     </tr>`;
   }).join('');
   const warnings = (result.warnings || []).map((warning) =>
@@ -327,7 +328,7 @@ export function resourcesMarkup(result) {
   return `<table class="table compact policy-table"><thead><tr>
       <th class="c-who">server</th><th class="c-role">role</th>
       <th title="calendar share (ρ), not queue wait">busy (ρ)</th><th class="c-dur">mean wait</th>
-      <th class="c-dur">peak queue</th><th class="c-dur">requests</th>
+      <th class="c-dur">peak queue</th><th class="c-dur" title="per replication, not the sum over replications">requests / run</th>
     </tr></thead><tbody>${rows}</tbody></table>
     <p class="panel-note">busy = calendar share (ρ); the queue view's “overloaded” is queue wait — different metrics.</p>${warnings}`;
 }

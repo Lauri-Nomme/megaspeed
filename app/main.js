@@ -33,7 +33,7 @@ import { sprintStrip } from '/sprints.js';
 import { ticketMarkdown, ticketMarkup, ticketStats } from '/ticket.js';
 import { trendMarkdown, trendMarkup, trendStats } from '/trend.js';
 import {
-  defaultScenario, policyMarkdown, policyMarkup, predHours,
+  defaultScenario, isBaselineScenario, policyMarkdown, policyMarkup, predHours,
   PRESETS, readScenario, scenarioQuery,
 } from '/policy.js';
 import { annotateRow, epicKeySet, keyListsOf, rowTicket, ticketFromQuery, ticketKey } from '/tickets.js';
@@ -136,6 +136,9 @@ const state = {
   prSize: null,
   policy: null,
   policyScenario: defaultScenario(),
+  // prd/63 F21: a scenario run has a visible loading state (the model takes a
+  // moment; the page used to look frozen).
+  policyLoading: false,
   blockingLevel: 'queue',
   queueLevel: 'person',
   lens: 'hours',
@@ -153,6 +156,9 @@ const state = {
   // the Sources row cannot say "9 h ago" and "10 h ago" on the same page.
   snapshotAge: null,
   emptyReason: '',
+  // prd/63 F14: the one-line notice for a silent fallback (unknown tenant,
+  // view, timeframe or scope), cleared on the next real navigation.
+  notice: '',
 };
 
 /* prd/48: the in-app entry stack (see history.js). Every distinct view state
@@ -470,8 +476,11 @@ function flashStatus(text, cls = 'live', ms = 2500) {
 function routeFields() {
   // prd/42 P10: the sprint lens is a timeline filter. A Queue/Blocking/Rules
   // URL must not keep `sprint=2&from=&to=` describing a view that ignores it.
-  const usesSprint = state.page === 'timeline';
+  // prd/63 F30: the Delivery list honours it too (the rows are filtered to the
+  // sprint's stories), so a `sprint=` deep link there is no longer decorative.
+  const usesSprint = state.page === 'timeline' || state.page === 'delivery';
   const sprint = usesSprint ? sprintRange() : { start: null, end: null };
+  const usesTrend = state.page === 'trend';
   return {
     tenant: state.tenant,
     // A ticket page without its key is a transient boot state, not a place to
@@ -485,6 +494,11 @@ function routeFields() {
     sprint: usesSprint ? state.sprint : null,
     from: Number.isFinite(sprint.start) ? sprint.start : null,
     to: Number.isFinite(sprint.end) ? sprint.end : null,
+    // prd/63 F30: the Trend metric + bucket; prd/63 F21: the lab scenario.
+    trendMetric: usesTrend ? state.trendMetric : null,
+    trendBucket: usesTrend ? state.trendBucket : null,
+    policy: state.page === 'policy' && !isBaselineScenario(state.policyScenario)
+      ? state.policyScenario : null,
   };
 }
 
@@ -654,6 +668,27 @@ function setHonesty(text) {
   let value = text || '';
   value = value.replace(/\s*·\s*(business|wall-clock) hours\s*$/i, '');
   $('honesty').textContent = value;
+  // prd/63 F29: an empty honesty line left its separator behind ("· ·
+  // business hours"). Hide the separator with the line.
+  const dot = $('dot-honesty');
+  if (dot) dot.hidden = !value;
+}
+
+/* prd/63 F14: one line for every silent fallback (tenant, view, timeframe,
+ * scope). A notice is not an error page: the view loaded, but it says what was
+ * substituted. `setNotice('')` clears it. */
+function setNotice(text, { append = false } = {}) {
+  const next = text || '';
+  if (!next) state.notice = '';
+  else if (append && state.notice && !state.notice.includes(next)) {
+    state.notice = `${state.notice} · ${next}`;
+  } else {
+    state.notice = next;
+  }
+  const el = $('route-notice');
+  if (!el) return;
+  el.hidden = !state.notice;
+  el.textContent = state.notice;
 }
 
 /** B3: the banner is derived from the filters the views really apply. */
@@ -662,6 +697,16 @@ function renderScopeBanner() {
   const text = scopeBanner(state.scope, state.page);
   banner.hidden = !text;
   banner.textContent = text;
+  // prd/63 F15: the selector stays usable (so the scope can be cleared from
+  // here), but on a view that ignores it, it says so instead of looking active.
+  const control = $('scope');
+  if (!control) return;
+  const applies = state.scope.kind === 'all'
+    || filteredPages(state.scope).has(state.page);
+  control.classList.toggle('scope-inert', !applies);
+  control.title = applies || state.scope.kind === 'all'
+    ? 'scope the views by person, queue, ticket or repo'
+    : `this view is not filterable by scope ${state.scope.label} — it still shows the whole team`;
 }
 
 /* prd/28 §2: the hint line names the gesture the device actually has. A phone
@@ -721,7 +766,12 @@ async function showPage(page) {
   if (!PAGES[page]) return;
   // prd/38 #19: a PR drawer belongs to the view that opened it. Any view change
   // closes it (desktop and phone), so it can never float over a different view.
-  if (page !== state.page) closeDrawer();
+  if (page !== state.page) {
+    closeDrawer();
+    // prd/63 F14: a fallback notice describes the link that landed, not every
+    // later view; an explicit navigation clears it.
+    setNotice('');
+  }
   // Leaving the ticket route needs no special case: renderPage() re-serialises
   // the URL from `state.page`, so the ticket hash (and `view=ticket`) drop off
   // together with the page (P-2).
@@ -870,12 +920,22 @@ async function loadTenants() {
   const list = Array.isArray(data.tenants) ? data.tenants : [];
   state.tenants = list;
   const names = new Set(list.map((tenant) => tenant.name));
+  const requested = state.tenant;
   if (!state.tenant || !names.has(state.tenant)) {
     // No stored choice, or it was deleted: fall back to the server's default,
     // which is the first tenant by name.
     state.tenant = data.default && names.has(data.default)
       ? data.default
       : (list[0] ? list[0].name : null);
+    // prd/63 F14: a `?tenant=nope` link used to rewrite the URL and load a
+    // different dataset without a word. Say which one is on screen instead.
+    if (requested && requested !== state.tenant) {
+      setNotice(
+        `No dataset “${requested}” on this server — showing ${state.tenant || 'none'}. `
+        + 'Datasets are the names under data/<name>.duckdb.',
+        { append: true },
+      );
+    }
   }
   // prd/39: the active tenant's stored size calibration (default 10 / 400).
   state.sizeCaps = sizeCapsForTenant(state.sizeCapsMap, state.tenant);
@@ -977,8 +1037,17 @@ async function setTenant(name, { silent = false } = {}) {
   // Scope is per tenant (prd/12): pseudonyms are independent identity spaces,
   // so a person scoped in one dataset means nothing in the next.
   if (state.tenant) state.scopes[state.tenant] = state.scope;
+  const previousScope = state.scope;
   state.tenant = name;
   state.scope = state.scopes[name] || { kind: 'all', value: null, label: 'everything' };
+  // prd/63 F14: datasets are independent identity spaces, so a person/role
+  // scope cannot follow the switch. Say that instead of resetting silently.
+  if (previousScope.kind !== 'all' && state.scope.kind === 'all') {
+    setNotice(
+      `Dataset switch cleared the ${previousScope.kind} scope “${previousScope.label}” — `
+      + 'pseudonyms are per dataset, so it cannot be carried across.',
+    );
+  }
   // prd/39: the size calibration is per tenant too (two datasets can need
   // different knees); the stored choice wins, the default is 10 / 400.
   state.sizeCaps = sizeCapsForTenant(state.sizeCapsMap, name);
@@ -1096,6 +1165,11 @@ function clearSprintFocus({ sync = true } = {}) {
 function scopeToSprint(sprint) {
   if (!sprint) return;
   const id = sprint.id != null ? sprint.id : sprint.sprint_id;
+  // prd/63 F24: the band/row is a toggle — a second click clears the lens.
+  if (state.sprint != null && String(state.sprint) === String(id)) {
+    clearSprintFocus();
+    return;
+  }
   if (!focusSprint(id, { start: sprint.start, end: sprint.end })) return;
   flashStatus(`sprint ${id} lens · ${timelineStatsLine()}`, 'live');
 }
@@ -1147,8 +1221,25 @@ function renderPhaseLegend() {
 }
 
 // ----------------------------------------------------------------- delivery
+/** prd/63 F30: the story keys of the selected sprint lens (empty = no lens). */
+function sprintStoryKeys() {
+  const band = sprintById(state.sprint);
+  return new Set((band && band.stories) || []);
+}
+
+function rowInSprint(row, keys) {
+  if (!keys || !keys.size) return true;
+  return [...(row.tickets || []), ...(row.story_tickets || []), rowTicket(row)]
+    .filter(Boolean)
+    .some((key) => keys.has(String(key)));
+}
+
 function renderDeliveryPage() {
   const data = state.delivery;
+  // prd/63 F30: a `?sprint=` deep link on Delivery keeps the pill pressed on
+  // the Timeline but used to leave the rows unfiltered. Filter to the sprint's
+  // stories, the same membership the timeline lens uses.
+  const sprintKeys = state.page === 'delivery' ? sprintStoryKeys() : new Set();
   // B2: label each row with its own ticket key, not the shared epic link. The
   // API names the parent keys it excluded from impact; union with the store
   // census so the table and the impact sentence agree.
@@ -1159,7 +1250,7 @@ function renderDeliveryPage() {
     ]);
     for (const row of data.rows) annotateRow(row, epics);
   }
-  const counts = scopedTabCounts(data);
+  const counts = scopedTabCounts(data, sprintKeys);
   if (data && state.tab !== 'all' && !state.tabPinned) {
     // The actionable subset is the default, but never an empty screen. An
     // explicit choice (or a restored tab) is never overridden: `Blocked 0`
@@ -1173,7 +1264,11 @@ function renderDeliveryPage() {
       ${esc(tab.label)} <span class="num">${counts[tab.id]}</span></button>`).join('');
   $('delivery-table').innerHTML = data
     ? deliveryTable(data, state.tab, {
-      scope: deliveryScope(), benchmark: state.benchmark, base: appBase(),
+      scope: deliveryScope(),
+      benchmark: state.benchmark,
+      base: appBase(),
+      rowFilter: sprintKeys.size ? (row) => rowInSprint(row, sprintKeys) : null,
+      sprintLabel: sprintKeys.size ? `S${state.sprint}` : null,
     })
     : '<div class="empty-row">Loading the triage list…</div>';
   // prd/63 B9: the Overview's "Done in Jira, PR open →" now lands on a list
@@ -1187,7 +1282,8 @@ function renderDeliveryPage() {
       : '';
   }
   $('delivery-assumption').textContent = data
-    ? `${data.assumption} · snapshot ${fmtStamp(Date.parse(data.snapshot))} · ` +
+    ? `${data.assumption} · snapshot ${fmtStamp(Date.parse(data.snapshot))} ` +
+      `(${snapshotAge()}; every age on this page is priced to it) · ` +
       `${data.counts.open} open items, ${data.counts.waiting_over_week} of them waiting over a week. ` +
       `${data.impact_note}.`
     : '';
@@ -1224,6 +1320,7 @@ function renderDeliveryPage() {
       `${counts.blocked} blocked · ${counts.oldest} waiting over a week (${weekLabel(data)}) · ` +
       `${data.counts.stale || 0} stale · ${data.counts.unobserved || 0} unobserved · ` +
       `impact = dependents × current wait (≈) · ` +
+      (sprintKeys.size ? `sprint S${state.sprint} lens: ${sprintKeys.size} stories · ` : '') +
       (filtered ? `filtered to ${scopeSuffix}` : 'whole team') +
       (benchNote ? ` · ${benchNote}` : ''),
     );
@@ -1232,9 +1329,10 @@ function renderDeliveryPage() {
 }
 
 /** Counts follow the scope, so the tab number always matches the rows below it. */
-function scopedTabCounts(data) {
+function scopedTabCounts(data, sprintKeys = null) {
   if (!data) return { blocked: 0, oldest: 0, all: 0 };
-  const rows = data.rows.filter((row) => matchesScopeRow(row));
+  const rows = data.rows.filter((row) => matchesScopeRow(row)
+    && (!sprintKeys || !sprintKeys.size || rowInSprint(row, sprintKeys)));
   // prd/41 B3: the same 40-business-hour week the payload states, never a
   // second threshold local to this view.
   const week = Number((data.counts && data.counts.waiting_week_hours) || 40);
@@ -1355,11 +1453,16 @@ function renderTicketPage() {
     }
     const missing = (data.segments && data.segments.missing) || [];
     const total = ((data.segments && data.segments.rows) || []).length;
-    setHonesty(
-      `${data.pr_count} PR${data.pr_count === 1 ? '' : 's'} joined on ${data.key} · ` +
-      `${data.segments.measured}/${total} segments measured · ` +
-      (data.hours_mode === 'business' ? 'business hours' : 'wall-clock hours') +
-      (missing.length ? ` · missing boundaries: ${missing.join(', ')}` : ''),
+    // prd/63 F17: without a STORY object there are no story segments to
+    // measure; say what the PR side does have instead of "0/8 segments".
+    setHonesty(data.story
+      ? `${data.pr_count} PR${data.pr_count === 1 ? '' : 's'} joined on ${data.key} · ` +
+        `${data.segments.measured}/${total} segments measured · ` +
+        (data.hours_mode === 'business' ? 'business hours' : 'wall-clock hours') +
+        (missing.length ? ` · missing boundaries: ${missing.join(', ')}` : '')
+      : `no STORY object for ${data.key} in this dataset · ` +
+        `${data.pr_count} PR${data.pr_count === 1 ? '' : 's'} measured from the code · ` +
+        (data.hours_mode === 'business' ? 'business hours' : 'wall-clock hours'),
     );
     $('ticket-assumption').textContent =
       `${data.assumption} · snapshot ${fmtStamp(Date.parse(data.snapshot))} · ` +
@@ -1436,7 +1539,7 @@ async function applyRoute() {
   try {
     // prd/10 §3.1: a `?theme=` link is a destination like any other; an absent
     // parameter keeps the stored preference (dark is the default either way).
-    if (route.theme && route.theme !== state.theme) setTheme(route.theme);
+    if (route.theme && route.theme !== state.theme) setTheme(route.theme, { save: false });
     if (route.tenant && route.tenant !== state.tenant) {
       await setTenant(route.tenant, { silent: true });
     }
@@ -1446,6 +1549,12 @@ async function applyRoute() {
     }
     if (route.timeframe && TIMEFRAMES[route.timeframe] && route.timeframe !== state.timeframe) {
       setTimeframe(route.timeframe);
+    }
+    // prd/63 F30/F21: a shared Trend tab pair or lab scenario is route state.
+    if (route.metric && route.metric !== state.trendMetric) state.trendMetric = route.metric;
+    if (route.bucket && route.bucket !== state.trendBucket) state.trendBucket = route.bucket;
+    if (route.policy) {
+      state.policyScenario = { ...defaultScenario(), ...route.policy };
     }
     // prd/37 §4: a sprint link restores the filter, the band and the range.
     if (route.sprint != null) {
@@ -1502,6 +1611,12 @@ function renderBlockingPage() {
     setHonesty(
       `${totals.nodes || 0} nodes · ${totals.edges || 0} edges · ` +
       `${fmtHours(totals.hours || 0)} measured wait in the ${data.window.days} calendar-day window · ` +
+      // prd/63 F20: people and role levels total differently (concurrent
+      // holders are charged to each at person level); the Overview uses the
+      // role-level number. Name the basis instead of showing two "mean"s.
+      (data.level === 'person'
+        ? 'person level charges every concurrent holder, so it exceeds the role total; the Overview headline uses role-level queue wait · '
+        : 'role level counts each handover once; the Overview headline uses this basis · ') +
       (repoFiltered
         ? `filtered to the ${repoLabel(state.scope.value)} repo`
         : (scoped ? 'not filtered by scope — every handover stays visible' : 'whole team')),
@@ -1561,18 +1676,22 @@ function renderQueuePage() {
   // prd/42 M1/M7: the response-time column and the pseudonym legend sit under
   // the chart, so "who is the constraint" is answerable without the raw store.
   const responseHost = $('queue-response');
+  // prd/63 F26: the response table follows the same scope as the chart. With
+  // `person:LaAd` the page said "0 streams" while the table still listed every
+  // reviewer. Pass the scope so the table is empty (and says why) too.
   if (responseHost) responseHost.innerHTML = data
-    ? responseTable(data, { benchmark: state.benchmark })
+    ? responseTable(data, {
+      benchmark: state.benchmark,
+      scope: filteredPages(state.scope).has('queue') ? state.scope : null,
+    })
     : '';
   const legendHost = $('queue-legend');
   if (legendHost) legendHost.innerHTML = data ? legendMarkup(data) : '';
+  // prd/63 F26: one explanatory paragraph, not the same sentence twice. The
+  // diagnosis note already carries the metric/baseline statements.
   $('queue-assumption').textContent = data
     ? `${data.assumption} · ${data.bucket_hours} h buckets over ${data.window.days} calendar days. ` +
-      `Little's law: WIP ≈ throughput × wait. Overloaded = long queue wait with a standing queue; slow = long wait with little WIP. ` +
-      // prd/42 P3: state the basis of the relative label, with the number.
-      `Both labels are relative to the median wait in this window (≈${fmtHours(data.baseline_mean_wait_hours || 0)}); ` +
-      `they are queue wait, not calendar utilisation (the policy lab's “busy”). ` +
-      `${data.diagnosis_note}.`
+      `Little's law: WIP ≈ throughput × wait. ${data.diagnosis_note}.`
     : '';
   if (data) {
     const filtered = filteredPages(state.scope).has('queue');
@@ -1819,7 +1938,11 @@ function setSizeCaps(next, { refetch = false } = {}) {
  * not run and the mismatch is the result. */
 function renderPolicyPage() {
   const data = state.policy;
-  $('policy-body').innerHTML = policyMarkup(data, state.policyScenario);
+  const loading = state.policyLoading
+    ? `<p class="policy-loading" role="status" data-policy-loading="true">
+         running the calibrated model… <span class="muted">(the numbers below are the previous run)</span></p>`
+    : '';
+  $('policy-body').innerHTML = loading + policyMarkup(data, state.policyScenario);
   const baseline = data && data.baseline && data.baseline.ok ? data.baseline : null;
   $('policy-stats').innerHTML = data && data.validation
     ? `<span class="stat-inline"><b class="${data.validation.ok ? '' : 'attention'}">${
@@ -1836,13 +1959,22 @@ function renderPolicyPage() {
 async function runPolicyScenario(scenario) {
   state.policyScenario = scenario;
   state.cache.clear();
+  // prd/63 F21: show the run, then repaint with its result; the URL carries
+  // the scenario so a colleague can reopen it.
+  state.policyLoading = true;
+  renderPolicyPage();
+  syncUrl();
   try {
     await ensureData('policy');
   } catch (err) {
+    state.policyLoading = false;
     setStatus(`policy lab failed: ${err.message}`, 'stale');
     return;
+  } finally {
+    state.policyLoading = false;
   }
   renderPolicyPage();
+  syncUrl();
   saveUI();
 }
 
@@ -1897,13 +2029,40 @@ function renderSourcesPage() {
     ['PRs', `${meta.prs_kept ?? '—'} kept of ${meta.prs_seen ?? '—'} seen`],
     ['commits', String(meta.commits ?? '—')],
     ['dropped', `${meta.prs_dropped ?? '—'} PRs had no ticket key`],
-    ['window', `${meta.first_ts ? fmtDay(Date.parse(meta.first_ts)) : '—'} → ${meta.last_ts ? fmtDay(Date.parse(meta.last_ts)) : '—'}`],
+    // prd/63 F27: the store span is not the analysis window. The top bar and
+    // Rules query the chosen timeframe (1q), so Sources states that window
+    // once, and the store span separately.
+    ['analysis window', (() => {
+      const window = presetWindow();
+      const label = TIMEFRAMES[state.timeframe] ? TIMEFRAMES[state.timeframe].label : 'the window';
+      return window
+        ? `${fmtDay(window.start)} → ${fmtDay(window.end)} (${label})`
+        : '—';
+    })()],
+    ['store span', `${meta.first_ts ? fmtDay(Date.parse(meta.first_ts)) : '—'} → ${meta.last_ts ? fmtDay(Date.parse(meta.last_ts)) : '—'} (every event the store holds)`],
     ['duration basis', meta.calendar && meta.calendar.hours_mode === 'business'
       ? `business hours — ${meta.calendar.working_hours?.default || '24/7'} ${meta.calendar.timezone || ''}, holidays and vacations excluded`
       : 'wall-clock hours; no working-hours calendar configured'],
   ];
+  // prd/63 F27/V-B: a combined tenant is built from several ingest runs. List
+  // each source, not only the latest run's name.
+  const runs = Array.isArray(meta.runs) ? meta.runs : [];
+  const sourceTable = runs.length
+    ? `<table class="table compact source-runs"><thead><tr>
+        <th>source</th><th>snapshot</th><th class="num">PRs seen</th>
+        <th class="num">PRs kept</th><th class="num">dropped</th></tr></thead><tbody>${
+        runs.map((run) => `<tr data-source="${esc(run.source)}">
+          <td class="mono">${esc(run.source)}</td>
+          <td class="mono">${run.as_of ? esc(fmtStamp(Date.parse(run.as_of))) : '—'}</td>
+          <td class="num">${run.prs_seen ?? '—'}</td>
+          <td class="num">${run.prs_kept ?? '—'}</td>
+          <td class="num">${run.prs_dropped ?? '—'}</td></tr>`).join('')}</tbody></table>
+      <p class="panel-note">${runs.length} ingest run${runs.length === 1 ? '' : 's'} built this dataset;
+        the combined tenant joins the PR half to the Jira ticket half on ticket keys.</p>`
+    : '';
   $('sources-body').innerHTML = `<dl class="facts">${rows.map(([key, value]) =>
     `<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join('')}</dl>
+    ${sourceTable}
     <p class="panel-note">The store holds ticket keys, PR ids, commit hashes, actor pseudonyms,
       timestamps and closed attribute labels only. No title, description, comment, message or diff
       is stored, so no view can render one.</p>
@@ -2026,6 +2185,12 @@ function openPrDrawer(pr, row = null) {
 
 function openDrawer(entity) {
   state.drawerEntity = entity;
+  // prd/63 F19: remember what had focus, move focus into the dialog, and put it
+  // back on close — a row click used to leave focus behind the drawer.
+  if (typeof document !== 'undefined') {
+    const active = document.activeElement;
+    state.drawerOpener = active && active !== document.body ? active : null;
+  }
   const drawer = $('drawer');
   drawer.innerHTML = `<div class="sheet-handle" aria-hidden="true"></div>` +
     `<button type="button" class="drawer-close" data-drawer="close" aria-label="close">×</button>` +
@@ -2034,6 +2199,8 @@ function openDrawer(entity) {
   // prd/42 B2: the drawer is beside the content, not on top of the list
   // inspector. The class lets the shell reserve its width on desktop.
   if (typeof document !== 'undefined' && $('app')) $('app').classList.add('drawer-open');
+  // prd/63 F19: the drawer is a dialog; focus lands in it, not on the row.
+  if (typeof drawer.focus === 'function') drawer.focus({ preventScroll: true });
   // prd/48: an open PR is the deepest level of the YAH path.
   renderYah();
 }
@@ -2167,9 +2334,18 @@ function openDeliveryPrDrawer(row) {
 }
 
 function closeDrawer() {
+  const wasOpen = !$('drawer').hidden;
+  const opener = state.drawerOpener;
   state.drawerEntity = null;
+  state.drawerOpener = null;
   $('drawer').hidden = true;
   if (typeof document !== 'undefined' && $('app')) $('app').classList.remove('drawer-open');
+  // prd/63 F19: Esc or a click behind the drawer returns focus to the row (or
+  // button) that opened it, when it is still on screen.
+  if (wasOpen && opener && typeof opener.focus === 'function'
+    && document.contains(opener) && (opener.offsetParent !== null || opener === document.body)) {
+    opener.focus({ preventScroll: true });
+  }
   // prd/48: the PR level leaves the YAH path with the drawer.
   renderYah();
 }
@@ -2275,7 +2451,11 @@ function buildScopeOptions() {
   // Every role queue this dataset can show is a scope option, so a role scope
   // set from the queue chart or a graph node always has a matching <option>
   // (B4) — and a role with no data is not offered as a dead end.
-  options.push(...availableRoles().map((role) => [`role:${role}`, `queue ${role}`]));
+  // prd/63 F15: a role that filters no view (`queue ready`) was a selectable
+  // control with zero effect; only offer roles some view actually applies.
+  options.push(...availableRoles()
+    .filter((role) => filteredPages({ kind: 'role', value: role }).size > 0)
+    .map((role) => [`role:${role}`, `queue ${role}`]));
   // prd/49: a repo is a first-class scope dimension beside person and role. The
   // option value is the store's full repo string (the API filter's exact
   // match); the label is the short name people say.
@@ -2873,7 +3053,16 @@ async function load({ force = false } = {}) {
   }
 
   state.cache.clear();
-  validateScope();
+  // prd/63 F14: a `?scope=person:Zed` that this dataset does not know falls
+  // back to everything — say so, with the value that was dropped.
+  const dropped = `${state.scope.kind} ${state.scope.value || ''}`.trim();
+  const scopeKept = validateScope();
+  if (!scopeKept && dropped !== 'all') {
+    setNotice(
+      `Scope “${dropped}” does not exist in dataset ${state.tenant} — showing everything.`,
+      { append: true },
+    );
+  }
   // A tenant with an empty store is a reachable screen (the switcher lists it),
   // so say why it is empty instead of drawing a blank timeline.
   if (state.events.length) {
@@ -3311,6 +3500,14 @@ $('ticket-jump').addEventListener('submit', async (event) => {
 });
 
 document.addEventListener('click', async (event) => {
+  // prd/63 F19: a click on the page behind an open drawer closes it (Esc
+  // already did; the pointer path was missing).
+  const drawerEl = $('drawer');
+  if (drawerEl && !drawerEl.hidden
+    && !event.target.closest('#drawer')
+    && !event.target.closest('#menu')) {
+    closeDrawer();
+  }
   const menuItem = event.target.closest('#menu [data-menu]');
   if (menuItem) {
     const entity = state.menuEntity;
@@ -3384,6 +3581,14 @@ document.addEventListener('click', async (event) => {
   }
   const sprintRow = event.target.closest('[data-sprint-start]');
   if (sprintRow) {
+    // prd/63 F24: clicking the selected sprint again deselects it (the row is
+    // a toggle, which its aria-pressed already promised).
+    if (state.sprint != null
+      && String(state.sprint) === String(sprintRow.dataset.sprintId)) {
+      clearSprintFocus();
+      flashStatus('sprint lens cleared — every story lane is back', 'live');
+      return;
+    }
     const start = Number(sprintRow.dataset.sprintStart);
     const end = Number(sprintRow.dataset.sprintEnd);
     if (Number.isFinite(start) && Number.isFinite(end)) {
@@ -3419,7 +3624,9 @@ document.addEventListener('click', async (event) => {
   const preset = event.target.closest('[data-preset]');
   if (preset) {
     const chosen = PRESETS.find((entry) => entry.id === preset.dataset.preset);
-    if (chosen) await runPolicyScenario({ ...defaultScenario(), ...chosen.scenario });
+    // prd/63 F21: presets compose (the helper says they do). A preset merges
+    // onto the current knobs; Reset to baseline is the way to clear.
+    if (chosen) await runPolicyScenario({ ...state.policyScenario, ...chosen.scenario });
     // prd/54: the Overview chase card links straight to the lab's review-SLA
     // preset, so one click lands on the scenario already run.
     if (preset.dataset.go) await showPage(preset.dataset.go);
@@ -3500,12 +3707,37 @@ document.addEventListener('click', async (event) => {
     if (target) openDeliveryPrDrawer(target);
     return;
   }
+  // prd/63 V-B: the ticket page links out to the views that answer "where does
+  // this time go", scoped to the ticket (and to its PRs outside the table).
+  const ticketOpen = event.target.closest('[data-ticket-open]');
+  if (ticketOpen && state.ticketKey) {
+    const scope = { kind: 'ticket', value: state.ticketKey, label: state.ticketKey };
+    setScope(scope.kind, scope.value, { silent: true });
+    await showPage(ticketOpen.dataset.ticketOpen);
+    return;
+  }
+  const ticketPrOpen = event.target.closest('[data-ticket-pr-open]');
+  if (ticketPrOpen) {
+    const pr = ((state.ticket && state.ticket.prs) || [])
+      .find((candidate) => candidate.object_id === ticketPrOpen.dataset.ticketPrOpen);
+    if (pr) openTicketPrDrawer(pr);
+    return;
+  }
   // prd/38 #12: a ticket's PR row opens the PR drawer.
   const prRow = event.target.closest('tr.pr-row[data-pr]');
   if (prRow) {
     const pr = ((state.ticket && state.ticket.prs) || [])
       .find((candidate) => candidate.object_id === prRow.dataset.pr);
     openTicketPrDrawer(pr);
+    return;
+  }
+  // prd/63 F20: the response-time rows are pivots too (the hint promised it).
+  const responseRow = event.target.closest('[data-response-person]');
+  if (responseRow) {
+    const person = responseRow.dataset.responsePerson;
+    const role = responseRow.dataset.responseRole;
+    if (role === 'sentinel' || role === 'synthetic') setScope('role', role);
+    else setScope('person', person);
     return;
   }
   const row = event.target.closest('tr.row');
@@ -3586,6 +3818,14 @@ document.addEventListener('keydown', (event) => {
     const pr = ((state.ticket && state.ticket.prs) || [])
       .find((candidate) => candidate.object_id === prRow.dataset.pr);
     openTicketPrDrawer(pr);
+    return;
+  }
+  const responseRow = event.target.closest && event.target.closest('[data-response-person]');
+  if (responseRow) {
+    event.preventDefault();
+    const role = responseRow.dataset.responseRole;
+    if (role === 'sentinel' || role === 'synthetic') setScope('role', role);
+    else setScope('person', responseRow.dataset.responsePerson);
     return;
   }
   const row = event.target.closest && event.target.closest('tr.row[data-id]');
@@ -3732,12 +3972,39 @@ const initialRoute = parseRoute(
   typeof location !== 'undefined' ? location.search : '',
   typeof location !== 'undefined' ? location.hash : '',
 );
+// prd/63 F14: a link with an unknown view, timeframe or scope is a fallback,
+// not a silent default. State which part of the link could not be used.
+(() => {
+  try {
+    const params = new URLSearchParams(location.search);
+    const view = params.get('view');
+    const tf = params.get('tf');
+    const scopeRaw = params.get('scope');
+    const problems = [];
+    if (view && !PAGES[view]) problems.push(`view “${view}”`);
+    if (tf && !TIMEFRAMES[tf]) problems.push(`timeframe “${tf}”`);
+    if (scopeRaw && scopeRaw !== 'all' && !parseRoute(location.search, '').scope) {
+      problems.push(`scope “${scopeRaw}”`);
+    }
+    if (problems.length) {
+      setNotice(
+        `This link names ${problems.join(' and ')}, which this build does not know — `
+        + 'showing the default view, timeframe and scope.',
+        { append: true },
+      );
+    }
+  } catch { /* no URL: nothing to report */ }
+})();
 if (initialRoute.tenant) state.tenant = initialRoute.tenant;
 if (initialRoute.timeframe && TIMEFRAMES[initialRoute.timeframe]) {
   state.timeframe = initialRoute.timeframe;
 }
 if (initialRoute.scope) state.scope = initialRoute.scope;
 if (initialRoute.sprint != null) state.sprint = initialRoute.sprint;
+// prd/63 F30/F21: the Trend tab pair and the lab scenario win over storage.
+if (initialRoute.metric) state.trendMetric = initialRoute.metric;
+if (initialRoute.bucket) state.trendBucket = initialRoute.bucket;
+if (initialRoute.policy) state.policyScenario = { ...defaultScenario(), ...initialRoute.policy };
 if (initialRoute.view && PAGES[initialRoute.view]) state.page = initialRoute.view;
 if (initialRoute.ticket) {
   state.page = 'ticket';
@@ -3749,12 +4016,16 @@ if (initialRoute.ticket) {
  * palette is resolved from the tokens before anything draws. A `?theme=` link
  * is a deliberate destination, so it is remembered — otherwise the next reload
  * would silently disagree with the screen (the same rule tenant links follow). */
+// prd/63 F29: a `?theme=` link is a *view*, not a preference change. Visiting
+// a colleague's light link must not flip this user's stored default to light;
+// only the toggle writes the preference (`setTheme(..., { save: true })`, the
+// click handler's default).
 setTheme(
   initialRoute.theme
     || normalizeTheme(document.documentElement.dataset.theme)
     || readTheme()
     || DEFAULT_THEME,
-  { save: Boolean(initialRoute.theme), repaint: false },
+  { save: false, repaint: false },
 );
 // prd/28 §3: phone is list-first. A first visit lands on the Delivery list;
 // a stored choice (the user opened Timeline last time) is respected. An

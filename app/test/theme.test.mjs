@@ -316,13 +316,16 @@ test('the page wires the toggle, the boot order and the URL', () => {
   assert.match(main, /timeline\.schedule\(\);\n    blockingMap\.schedule\(\);\n    queueChart\.schedule\(\);/);
   assert.match(main, /\$\('theme-toggle'\)\.addEventListener\('click'/);
   assert.match(main, /setTheme\(otherTheme\(state\.theme\)\)/);
-  // applied before the first paint, from URL → data-theme → storage → dark
-  assert.match(main, /setTheme\(\n  initialRoute\.theme\n    \|\| normalizeTheme\(document\.documentElement\.dataset\.theme\)\n    \|\| readTheme\(\)\n    \|\| DEFAULT_THEME,\n  \{ save: Boolean\(initialRoute\.theme\), repaint: false \},/);
+  // applied before the first paint, from URL → data-theme → storage → dark.
+  // prd/63 F29: a `?theme=` link is a view, not a preference — it is never
+  // written to storage (only the toggle saves).
+  assert.match(main, /setTheme\(\n  initialRoute\.theme\n    \|\| normalizeTheme\(document\.documentElement\.dataset\.theme\)\n    \|\| readTheme\(\)\n    \|\| DEFAULT_THEME,\n  \{ save: false, repaint: false \},/);
+  assert.match(main, /if \(route\.theme && route\.theme !== state\.theme\) setTheme\(route\.theme, \{ save: false \}\)/);
   // the capture carries the theme onto its clone (the SVG root is the wrapper)
   assert.match(main, /wrapper\.setAttribute\('data-theme', document\.documentElement\.dataset\.theme \|\| 'dark'\)/);
   // the route carries it, and a `?theme=` link is applied on navigation
   assert.match(main, /theme: state\.theme === 'light' \? 'light' : null/);
-  assert.match(main, /if \(route\.theme && route\.theme !== state\.theme\) setTheme\(route\.theme\)/);
+  assert.match(main, /if \(route\.theme && route\.theme !== state\.theme\) setTheme\(route\.theme, \{ save: false \}\)/);
   assert.match(main, /setTheme,\n  get theme\(\) \{ return state\.theme; \}/);
 
   // the CSS: a light block that re-points the same names

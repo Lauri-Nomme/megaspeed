@@ -146,6 +146,7 @@ test('P-2: unknown or absent parameters are ignored, not trusted', () => {
   assert.deepEqual(parseRoute('', ''), {
     tenant: null, view: null, ticket: null, timeframe: null, scope: null,
     sprint: null, from: null, to: null, theme: null,
+    metric: null, bucket: null, policy: null,
   });
   assert.equal(parseRoute('?view=bogus', '').view, null);
   assert.equal(parseRoute('?tenant=del', '').view, null);

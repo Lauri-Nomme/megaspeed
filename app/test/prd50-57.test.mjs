@@ -72,14 +72,14 @@ test('a ticket segment shows its cohort median × and the toggle hides it', () =
     },
   };
   const shown = segmentBar(payload);
-  assert.match(shown, /review rounds<\/span> <b>20 h<\/b>/);
-  assert.match(shown, /median 10 h · 2\.0×/);
+  assert.match(shown, /review rounds<\/span> <b>2 d 4 h<\/b>/);
+  assert.match(shown, /median 1 d 2 h · 2\.0×/);
   // the small-N segment keeps its hours but has no contrast
   assert.match(shown, /merge → done<\/span> <b>5 h<\/b>/);
   assert.equal((shown.match(/benchmark-contrast/g) || []).length, 1);
   const off = segmentBar(payload, { benchmark: false });
-  assert.doesNotMatch(off, /median 10 h/);
-  assert.match(off, /20 h/);
+  assert.doesNotMatch(off, /median 1 d 2 h/);
+  assert.match(off, /2 d 4 h/);
 });
 
 test('the ticket cycle stat carries the multiple of the completed cohort', () => {
@@ -95,7 +95,7 @@ test('the ticket cycle stat carries the multiple of the completed cohort', () =>
     },
   });
   assert.match(html, /4th fastest of 11/);
-  assert.match(html, /median 80 h · 1\.1×/);
+  assert.match(html, /median 10 d 0 h · 1\.1×/);
 });
 
 test('a delivery row renders its wait next to the window cohort median', () => {

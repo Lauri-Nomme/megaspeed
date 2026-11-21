@@ -259,7 +259,10 @@ class CalibrationTests(StoreCase):
         self.assertEqual(queueing["queue_recovery"], simulation.QUEUE_RECOVERY)
         self.assertEqual(queueing["service_share"], simulation.SERVICE_SHARE)
         self.assertEqual(queueing["attention_max_sigma"], simulation.ATTENTION_MAX_SIGMA)
-        self.assertIn("queue_recovery", queueing["note"])
+        # prd/63 V-B: the note is user-facing words, not constant names; the
+        # constants stay disclosed in the payload.
+        self.assertNotIn("queue_recovery", queueing["note"])
+        self.assertIn("fixed share", queueing["note"])
 
     def test_a_heavier_queue_recovery_raises_the_baseline(self):
         """The gate turns on the constant: 1.0 (no recovery) under-predicts.
@@ -728,6 +731,25 @@ class UtilisationTests(StoreCase):
         self.assertTrue(any("saturated" in w for w in summary["warnings"]))
         self.assertEqual(summary["drain_hours"], 300.0)
         self.assertTrue(any("drain ran" in w for w in summary["warnings"]))
+
+    def test_requests_are_per_replication_not_a_sixfold_sum(self):
+        """prd/63 V-B: "REQUESTS ≈640" was the pooled sum over replications."""
+        pooled = {
+            "drain": 0.0,
+            "cycles": [1.0], "leads": [1.0], "active": [0.5], "touches": [1],
+            "resources": {
+                "FrMo": {"person": "FrMo", "role": "sentinel", "busy": 60.0,
+                         "requests": 600, "wait": 50.0, "peak_queue": 3},
+            },
+            "prs": 6, "merged": 6, "declined": 0, "backlog_max": 0,
+            "backlog_end": 0, "escalated": 0, "stack_wait_timeouts": 0,
+        }
+        summary = simulation._summary(
+            {}, simulation.Scenario(), pooled, 6, 480.0, 24.0
+        )
+        row = summary["resources"][0]
+        self.assertEqual(row["requests"], 100.0)      # 600 / 6 replications
+        self.assertEqual(row["requests_total"], 600)  # the pooled sum stays visible
 
     def test_the_reported_utilisation_is_busy_over_the_horizon(self):
         calibration = self.calibrate(Fixture(n_prs=320, days=20))

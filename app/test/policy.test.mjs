@@ -229,7 +229,8 @@ test('prd/37 §5: every knob control has a real label (a11y)', () => {
     assert.match(markup, new RegExp(`aria-describedby="policy-knob-${knob.key}-note"`));
   }
   // the lab says a scenario can compose knobs (sentinel + SLA), not one at a time
-  assert.match(markup, /combine knobs/);
+  // prd/63 F21: presets compose, and the helper says so.
+  assert.match(markup, /Presets <b>add to<\/b> the current/);
   assert.match(markup, /sentinel \+ review SLA/);
 });
 

@@ -147,7 +147,7 @@ test('a ticket scope matches the rows that name the ticket', () => {
 test('prd/38: the page lands on Overview and closes the drawer on a view change', () => {
   const main = read('main.js');
   assert.match(main, /page: 'overview'/);
-  assert.match(main, /if \(page !== state\.page\) closeDrawer\(\)/);
+  assert.match(main, /if \(page !== state\.page\) \{\n    closeDrawer\(\);/);
   // a ticket opened from another view also closes it
   assert.match(main, /state\.ticketFrom = state\.page;\n    closeDrawer\(\);/);
   // phone entry is the same front door (mobile.js owns the helper)

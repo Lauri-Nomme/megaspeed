@@ -51,12 +51,18 @@ export function segmentPhase(key) {
   return SEGMENT_PHASE[key] || SEGMENT_PHASE.created_ready;
 }
 
-/** "45 h", "0 h", "—" — hours are the analysis unit, never a fake duration. */
+/**
+ * "3 d 0 h", "45 min", "—" — the one duration language (prd/63 V-B).
+ *
+ * The page used to print "73.3 h" beside "21 d 0 h" and "192 h" for the same
+ * PR the header priced as "24 d 0 h". Every business duration goes through
+ * `fmtHours`, so the ticket can never use a second unit.
+ */
 export function segmentHours(hours) {
   if (hours == null) return '—';
   const value = Number(hours);
   if (!isFinite(value)) return '—';
-  return `${Math.round(value * 10) / 10} h`;
+  return fmtHours(value);
 }
 
 function pct(share) {
@@ -76,6 +82,21 @@ function shortStamp(iso) {
 }
 
 /** The segment bar: one block per segment, absent blocks are hatched. */
+const MATERIAL_GAP_HOURS = 8;
+
+/** What a segment's hours were *not*: a no-PR gap or a reopen loop (V-A7). */
+export function segmentCaveat(row) {
+  if (!row) return '';
+  const bits = [];
+  if ((row.no_pr_open_hours || 0) >= MATERIAL_GAP_HOURS) {
+    bits.push(`${segmentHours(row.no_pr_open_hours)} with no PR open`);
+  }
+  if ((row.rework_hours || 0) > 0) {
+    bits.push(`${segmentHours(row.rework_hours)} is the reopen loop`);
+  }
+  return bits.join(' · ');
+}
+
 export function segmentBar(payload, { benchmark = true } = {}) {
   const segments = (payload && payload.segments) || {};
   const rows = segments.rows || [];
@@ -99,11 +120,11 @@ export function segmentBar(payload, { benchmark = true } = {}) {
     // median uses the same business-hour renderer, so "20 h" and "median 10 h"
     // cannot be read on two different clocks.
     const contrast = benchmark ? benchmarkText(row.benchmark, { format: segmentHours }) : '';
+    const caveat = segmentCaveat(row);
     const title = `${row.label} — ${segmentHours(row.hours)}` +
       (contrast ? ` (${contrast})` : '') +
       ` (${pct(row.share)} of the measured cycle, ${pct(row.efficiency)} active)` +
-      (row.no_pr_open_hours > 0
-        ? ` · ${segmentHours(row.no_pr_open_hours)} with no PR open` : '') +
+      (caveat ? ` · ${caveat}` : '') +
       (row.inverted ? ' · boundaries out of order, so no wait' : '');
     return {
       key: row.key,
@@ -129,31 +150,50 @@ export function segmentBar(payload, { benchmark = true } = {}) {
     const swatch = row.available
       ? `<i style="background:${phase.color}"></i>`
       : `<i class="hatch" style="--c:${phase.color}"></i>`;
+    const caveat = row.available ? segmentCaveat(row) : '';
     return `<span class="ticket-seg-key${row.available ? '' : ' zero'}"
       title="${esc(row.available
-        ? `${row.label} · ${pct(row.efficiency)} active${row.no_pr_open_hours > 0 ? ` · ${segmentHours(row.no_pr_open_hours)} with no PR open` : ''}`
+        ? `${row.label} · ${pct(row.efficiency)} active${caveat ? ` · ${caveat}` : ''}`
         : row.reason || '')}">
-      ${swatch}<span>${esc(row.label)}</span> ${value}</span>`;
+      ${swatch}<span>${esc(row.label)}</span> ${value}${
+        caveat ? `<span class="seg-caveat">${esc(caveat)}</span>` : ''}</span>`;
   }).join('')}</div>`;
   return `${bar}${legend}`;
 }
 
-/** The boundary timestamps, with the missing ones named. */
+/**
+ * The boundary timestamps, with the missing ones named.
+ *
+ * prd/63 F17: the chips are drawn in **clock order**, not lifecycle order, and
+ * a boundary the store dated before its lifecycle predecessor carries a `!`
+ * with the pair named. DEL-183 lists `READY 13:00` before `REFINED 13:20`;
+ * the old lifecycle order showed the later stamp first and asserted a sequence
+ * the events do not support.
+ */
 export function boundaryChips(payload) {
-  const boundaries = (payload && payload.segments && payload.segments.boundaries) || {};
-  const entries = Object.entries(boundaries);
-  if (!entries.length) return '';
-  return `<div class="ticket-boundaries">${entries.map(([name, entry]) => (
-    entry.available
-      ? `<span class="ticket-boundary mono${entry.out_of_order ? ' quirk' : ''}" title="${
-          entry.out_of_order
-            ? `data quirk: the raw ${esc(name)} boundary is ${esc(entry.raw_ts ? shortStamp(entry.raw_ts) : 'out of order')} (${esc(entry.out_of_order.reason)}), clamped to the cycle`
-            : `the ${esc(name)} boundary`
-        }">
-          <span class="k">${esc(name)}</span>${esc(shortStamp(entry.ts))}${entry.out_of_order ? ' <span class="quirk-mark">!</span>' : ''}</span>`
-      : `<span class="ticket-boundary missing mono" title="${esc(entry.reason || 'missing')}">
-          <span class="k">${esc(name)}</span>missing</span>`
-  )).join('')}</div>`;
+  const segments = (payload && payload.segments) || {};
+  const boundaries = segments.boundaries || {};
+  if (!Object.keys(boundaries).length) return '';
+  const order = Array.isArray(segments.boundary_order) && segments.boundary_order.length
+    ? segments.boundary_order
+    : Object.keys(boundaries);
+  return `<div class="ticket-boundaries">${order.map((name) => {
+    const entry = boundaries[name] || {};
+    if (!entry.available) {
+      return `<span class="ticket-boundary missing mono" title="${esc(entry.reason || 'missing')}">
+        <span class="k">${esc(name)}</span>missing</span>`;
+    }
+    const quirk = entry.out_of_order || entry.order_quirk;
+    const quirkText = entry.out_of_order
+      ? `data quirk: the raw ${name} boundary is ${entry.raw_ts ? shortStamp(entry.raw_ts) : 'out of order'} (${entry.out_of_order.reason}), clamped to the cycle`
+      : (entry.order_quirk
+        ? `data quirk: ${name} is dated after ${entry.order_quirk.after} on the clock but follows it in the lifecycle — shown in clock order, not reordered`
+        : `the ${name} boundary`);
+    return `<span class="ticket-boundary mono${quirk ? ' quirk' : ''}" data-boundary="${esc(name)}"
+        data-order-quirk="${entry.order_quirk ? 'true' : 'false'}"
+        title="${esc(quirkText)}">
+      <span class="k">${esc(name)}</span>${esc(shortStamp(entry.ts))}${quirk ? ' <span class="quirk-mark">!</span>' : ''}</span>`;
+  }).join('')}</div>`;
 }
 
 /** A mini lifecycle bar for one PR, in the PR-gantt phase colours. */
@@ -280,6 +320,40 @@ export function worklogBlock(payload) {
     </dl>`;
 }
 
+const ATTR_LABELS = {
+  actor_kind: 'by',
+  from_status: 'from',
+  to_status: 'to',
+  points: 'estimate',
+  sprint_id: 'sprint',
+  time_spent_seconds: 'time spent',
+  log_delay_seconds: 'logged late by',
+  log_delay_bucket: 'log delay',
+  push_class: 'push',
+  at_start: 'at sprint start',
+  sentinel: 'sentinel',
+  cause: 'cause',
+  summary_class: 'change kind',
+};
+
+/** prd/63 F17/V-B: attributes are labelled facts, never a raw `k=v` dump. */
+export function attributeFacts(attributes) {
+  return Object.entries(attributes || {}).map(([key, value]) => {
+    const label = ATTR_LABELS[key] || key.replace(/_/g, ' ');
+    let text = String(value);
+    if (key === 'time_spent_seconds' || key === 'log_delay_seconds') {
+      text = segmentHours(Number(value) / 3600);
+    } else if (key === 'actor_kind') {
+      text = value === 'bot' ? 'a bot' : 'a human';
+    } else if (key === 'log_delay_bucket') {
+      text = String(value).replace(/_/g, ' ');
+    } else if (typeof value === 'boolean') {
+      text = value ? 'yes' : 'no';
+    }
+    return { key, label, text };
+  });
+}
+
 /** The story's own events (status / sprint / points / worklog), newest last. */
 export function eventsList(payload, { limit = 40 } = {}) {
   const events = (payload && payload.events) || [];
@@ -288,13 +362,16 @@ export function eventsList(payload, { limit = 40 } = {}) {
   }
   const shown = events.slice(-limit);
   const rows = shown.map((event) => {
-    const attrs = Object.entries(event.attributes || {})
-      .map(([key, value]) => `${key}=${value}`).join(' ');
+    const facts = attributeFacts(event.attributes)
+      .map(({ key, label, text }) =>
+        `<span class="event-attr" data-attr="${esc(key)}"><span class="k">${esc(label)}</span>
+          <span class="v mono">${esc(text)}</span></span>`)
+      .join(' ');
     return `<tr>
       <td class="mono c-since" data-label="when">${esc(stamp(event.ts))}</td>
       <td class="mono" data-label="activity">${esc(event.activity)}</td>
       <td class="mono c-who" data-label="actor">${esc(event.actor)}</td>
-      <td class="mono muted c-attrs" data-label="attributes">${esc(attrs)}</td>
+      <td class="c-attrs" data-label="attributes">${facts || '<span class="muted">—</span>'}</td>
     </tr>`;
   }).join('');
   const more = events.length > shown.length
@@ -320,13 +397,38 @@ export function ticketStats(payload, { benchmark = true } = {}) {
   const largest = segments.largest_label;
   const total = (segments.rows || []).length;
   const reopened = payload.reopened || segments.reopened;
+  const change = payload.change || {};
+  const quirk = payload.quirk || {};
+  // prd/63 F17: a tenant with no STORY object (del3) showed "0/8 segments"
+  // beside a merged PR. Say what the store does have — the PR-side cycles —
+  // instead of counting story segments that cannot exist.
+  if (!payload.story) {
+    const prs = payload.prs || [];
+    return `<span class="stat-inline"><b>no STORY object</b> in this dataset</span>
+      <span class="stat-inline"><b>${prs.length}</b> PR${prs.length === 1 ? '' : 's'} measured</span>
+      ${prs.map((pr) => `<span class="stat-inline">#${esc(pr.number)} ${esc(pr.state)}${
+        pr.cycle_hours == null ? '' : ` · ${esc(segmentHours(pr.cycle_hours))}`}${
+        pr.censored ? ' <span class="muted">right-censored</span>' : ''}</span>`).join('')}`;
+  }
   return `<span class="stat-inline"><b>${cycle == null ? '–' : esc(segmentHours(cycle))}</b> cycle</span>
     ${benchmarkLine(payload, { benchmark })}
+    ${change.unmerged_share
+      ? `<span class="stat-inline attention" data-unmerged-share="${esc(change.unmerged_share)}"
+           title="${esc(`lines changed in open PRs ÷ lines changed in all of this story's PRs — ${change.lines_unmerged} of ${change.lines_total} changed lines`)}">
+           <b>${Math.round(change.unmerged_share * 100)}%</b> of the change unmerged</span>`
+      : ''}
     <span class="stat-inline"><b>${segments.measured ?? 0}</b>/${total} segments</span>
     <span class="stat-inline"><b>${payload.pr_count ?? 0}</b> PR${payload.pr_count === 1 ? '' : 's'}</span>
     ${story.points != null ? `<span class="stat-inline"><b>${esc(story.points)}</b> points</span>` : ''}
     ${reopened ? `<span class="stat-inline"><b>reopened</b> ${segments.reopen_count ? `×${esc(segments.reopen_count)}` : ''}</span>` : ''}
-    ${largest ? `<span class="stat-inline">most in <b>${esc(largest)}</b> (${pct(segments.largest_share)})</span>` : ''}`;
+    ${largest ? `<span class="stat-inline">most in <b>${esc(largest)}</b> (${pct(segments.largest_share)})${
+      (segments.largest_no_pr_open_hours || 0) >= MATERIAL_GAP_HOURS
+        ? ` — ${esc(segmentHours(segments.largest_no_pr_open_hours))} with no PR open` : ''}</span>` : ''}
+    ${quirk.count
+      ? `<span class="stat-inline quirk-stat" data-quirk="${quirk.count}"
+           title="${esc(`out-of-order boundaries: ${(quirk.clamped || []).join(', ') || '—'}${quirk.order && quirk.order.length ? `; ${quirk.order.map((item) => `${item.boundary} after ${item.after}`).join('; ')}` : ''}`)}">
+           <b>${quirk.count}</b> boundary quirk${quirk.count === 1 ? '' : 's'}</span>`
+      : ''}`;
 }
 
 /**
@@ -347,14 +449,20 @@ export function benchmarkLine(payload, { benchmark = true } = {}) {
   };
   // prd/46 §6: rank n of n is the slowest story, not an "87th fastest" —
   // name the fact rather than a rank that reads as praise.
+  // prd/63 V-A6: a Done-with-open-PR story's cycle is measured to Jira's done,
+  // not to the merge. The rank is still a fact about that clock — say which.
+  const unmerged = payload && payload.change && payload.change.unmerged_share;
   const position = benchmarkData.rank === benchmarkData.n
     ? `slowest of ${benchmarkData.n}`
     : `${ordinal(benchmarkData.rank)} fastest of ${benchmarkData.n}`;
+  const positionText = unmerged
+    ? `${position} to Jira done`
+    : position;
   const contrast = benchmark
     ? benchmarkText(benchmarkData.contrast, { format: segmentHours })
     : '';
   const parts = [
-    position,
+    positionText,
     // prd/57: when the contrast is on it already carries "median …"; otherwise
     // the plain median still answers "how does this compare".
     contrast || (benchmarkData.median_hours == null
@@ -365,7 +473,10 @@ export function benchmarkLine(payload, { benchmark = true } = {}) {
       : `${benchmarkData.points}-pt median ${segmentHours(benchmarkData.points_median_hours)}`,
   ].filter(Boolean);
   const title = `${benchmarkData.basis || ''}${benchmarkData.censored
-    ? ' · this story is still open, so its cycle is right-censored at the snapshot' : ''}`;
+    ? ' · this story is still open, so its cycle is right-censored at the snapshot'
+    : ''}${unmerged
+    ? ` · the cycle is measured to the ticket's done, not to its unmerged PR (${Math.round(unmerged * 100)} % of the change), so this is not a delivery rank`
+    : ''}`;
   return `<span class="stat-inline benchmark" data-benchmark-rank="${benchmarkData.rank}"
       title="${esc(title)}">${esc(parts.join(' · '))}</span>`;
 }
@@ -452,17 +563,25 @@ export function ticketMarkup(payload, { base = '', benchmark = true } = {}) {
       `assignee ${story.assignee || '—'}`,
       `created ${stamp(story.created)}`,
       story.closed ? `closed ${stamp(story.closed)}` : 'not closed',
-      story.summary_class ? story.summary_class : '',
+      // prd/63 V-B: `· other` was an unlabelled closed-vocabulary value.
+      story.summary_class ? `change kind ${story.summary_class}` : '',
     ].filter(Boolean).join(' · ')
     : 'the store holds no story object for this key; the PR rows are the only evidence';
   const openPrs = payload.open_prs || [];
   const reopened = payload.reopened || segments.reopened;
+  const change = payload.change || {};
   // prd/36 §3/§4: the end state and any censored PR are stated in the head, so
   // the headline can never look like a clean close while a PR is still open.
+  // prd/63 V-A6: the unmerged share of the *change* is stated too.
   const endPills = [
     reopened ? `<span class="pill warning" title="the story moved out of done and back">reopened${
       payload.reopen_count ? ` ×${esc(payload.reopen_count)}` : ''}</span>` : '',
     ...openPrs.map((pr) => `<span class="pill waiting" title="still open at the snapshot — right-censored">PR #${esc(pr.number)} open · ${esc(openPrState(pr))}</span>`),
+    change.unmerged_share
+      ? `<span class="pill blocked" data-change-unmerged="${esc(change.unmerged_share)}"
+           title="${esc(`${change.lines_unmerged} of ${change.lines_total} changed lines are in an open PR — the ticket is Done, the change is not`)}">
+           ${Math.round(change.unmerged_share * 100)} % of the change unmerged</span>`
+      : '',
   ].filter(Boolean).join(' ');
   return `
     <div class="ticket-head">
@@ -476,12 +595,31 @@ export function ticketMarkup(payload, { base = '', benchmark = true } = {}) {
       <p class="clock-note" id="ticket-clock">${esc(clockNote(payload))}</p>
     </div>
     <p class="impact ticket-answer" id="ticket-answer" data-kind="${esc(payload.answer_kind || '')}">${esc(payload.answer || '')}</p>
+    <nav class="ticket-links" aria-label="this ticket elsewhere">
+      <span class="overline">this ticket elsewhere</span>
+      <button type="button" class="chip" data-ticket-open="timeline">Timeline</button>
+      <button type="button" class="chip" data-ticket-open="delivery">Delivery rows</button>
+      <button type="button" class="chip" data-ticket-open="blocking">Blocking map</button>
+      ${(payload.prs || []).map((pr) => `<button type="button" class="chip ticket-pr-link"
+        data-ticket-pr-open="${esc(pr.object_id)}"
+        title="open PR #${esc(pr.number)} in the drawer">#${esc(pr.number)} ${esc(String(pr.repo || '').split('/').pop())}</button>`).join('')}
+    </nav>
     <div class="ticket-grid">
       <section class="ticket-panel wide">
-        <h2 class="policy-h">cycle · ${(segments.rows || []).length} segments</h2>
-        ${segmentBar(payload, { benchmark })}
-        ${boundaryChips(payload)}
-        <p class="panel-note">${esc(segments.heuristic || '')}${segments.hours_mode === 'business' ? '' : ' · wall-clock hours (no calendar configured)'}</p>
+        <h2 class="policy-h">${payload.story
+          ? `cycle · ${(segments.rows || []).length} segments`
+          : 'lifecycle · no story history'}</h2>
+        ${payload.story
+          ? `${segmentBar(payload, { benchmark })}
+             ${boundaryChips(payload)}
+             <p class="panel-note">${esc(segments.heuristic || '')}${segments.hours_mode === 'business' ? '' : ' · wall-clock hours (no calendar configured)'}${
+               payload.active ? ` Active work: ${esc(segmentHours(payload.active.segment_hours))} inside the segments (${esc(payload.active.note)}), ${esc(segmentHours(payload.active.pr_hours))} on the PR clock.` : ''}${
+               (segments.rework_segments || []).length
+                 ? ` The reopen loop is priced inside ${esc(segments.rework_segments.map((item) => item.label).join(', '))} (${esc(segmentHours(segments.rework_hours))}).`
+                 : ''}</p>`
+          : `<p class="empty-row">This dataset has no Jira story history for ${esc(key)}, so the eight story
+               segments cannot exist — the PR rows below are the code's own measured lifecycle.
+               That is why PR-side boundaries read “missing” here while a merged PR is listed.</p>`}
       </section>
       <section class="ticket-panel">
         <h2 class="policy-h">sprints</h2>
@@ -521,6 +659,11 @@ export function ticketMarkdown(payload, base = '') {
     ...((payload.open_prs || []).length
       ? ['', `**still open:** ${(payload.open_prs || []).map((pr) =>
         `#${pr.number} (right-censored) — ${openPrState(pr)}`).join('; ')}`]
+      : []),
+    ...(payload.change && payload.change.unmerged_share
+      ? [`**unmerged change:** ${Math.round(payload.change.unmerged_share * 100)} % ` +
+        `(${payload.change.lines_unmerged} of ${payload.change.lines_total} changed lines) — ` +
+        'the cycle is measured to the ticket\'s done, not to a shipped change']
       : []),
     '',
     '| segment | hours | share | active |',

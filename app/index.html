@@ -23,6 +23,8 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+<!-- prd/63 F19: the first Tab stop skips the nine sidebar items. -->
+<a class="skip-link" href="#main">skip to content</a>
 <div class="app" id="app">
   <header class="topbar">
     <button type="button" class="nav-toggle" id="nav-toggle" aria-label="views"
@@ -109,19 +111,22 @@
       </div>
     </nav>
 
-    <main class="main" id="main">
+    <main class="main" id="main" tabindex="-1">
       <div class="pagehead">
         <h1 id="page-title">Timeline</h1>
         <p class="question" id="page-question">Where does the time go?</p>
       </div>
 
       <div class="scopebanner" id="scopebanner" hidden></div>
+      <!-- prd/63 F14: a fallback (unknown tenant/view/timeframe/scope) is
+           stated once, never silent. -->
+      <div class="routenotice" id="route-notice" role="status" hidden></div>
 
       <div class="meta" id="meta">
         <span id="provenance">loading…</span>
         <span class="dot">·</span>
         <span id="honesty"></span>
-        <span class="dot">·</span>
+        <span class="dot" id="dot-honesty">·</span>
         <span class="timebasis" id="timebasis" title="prd/19: business hours when the tenant has a calendar, wall-clock otherwise">wall-clock hours</span>
         <span class="range-meta mono" id="range-meta" hidden></span>
         <span class="build mono" id="app-version" hidden
@@ -159,9 +164,6 @@
           <span class="grow"></span>
           <span class="hint" id="timeline-hint">drag to pan · wheel to zoom · arrows pan · +/− zoom · Home fits</span>
         </div>
-        <!-- prd/26 P6: the sprint lens — bands are on the canvas, this strip is
-             the sprint view (scope + carry-over) and a click sets the window -->
-        <div class="sprint-strip" id="sprint-strip" hidden></div>
         <div class="stage timeline-stage" id="stage">
           <!-- prd/33 §3: the canvas is a fixed-height window on the lane list;
                this container scrolls a spacer of the list's full height and the
@@ -176,6 +178,11 @@
             <p class="muted">Run <code>python3 -m ingest --fixture --n 50</code> and reload.</p>
           </div>
         </div>
+        <!-- prd/63 F24: the canvas is the page's answer, so it sits above the
+             sprint strip / at-risk list / carry-over prose. prd/26 P6: the
+             strip is the sprint view (scope + carry-over); a click sets the
+             window. -->
+        <div class="sprint-strip" id="sprint-strip" hidden></div>
       </section>
 
       <!-- Trend (prd/50): one headline metric per week or sprint -->
@@ -196,7 +203,7 @@
           <span class="grow"></span>
           <button type="button" class="chip" id="delivery-copy">Copy as Markdown</button>
           <button type="button" class="chip" data-benchmark-toggle aria-pressed="true"
-            title="showing the cohort median × next to each duration — click to hide it">median ×</button>
+            title="showing the cohort median × next to each duration — click to hide it">cohort median ×</button>
           <span class="hint" id="delivery-hint">click a row to inspect · right-click to pivot</span>
         </div>
         <div class="split">
@@ -216,7 +223,7 @@
           <span class="grow"></span>
           <div class="stats-strip" id="ticket-stats"></div>
           <button type="button" class="chip" data-benchmark-toggle aria-pressed="true"
-            title="showing the cohort median × next to each duration — click to hide it">median ×</button>
+            title="showing the cohort median × next to each duration — click to hide it">cohort median ×</button>
           <button type="button" class="chip" id="ticket-copy">Copy as Markdown</button>
         </div>
         <div id="ticket-body"></div>
@@ -256,7 +263,7 @@
           </label>
           <span class="grow"></span>
           <button type="button" class="chip" data-benchmark-toggle aria-pressed="true"
-            title="showing the cohort median × next to each response time — click to hide it">median ×</button>
+            title="showing the cohort median × next to each response time — click to hide it">cohort median ×</button>
           <span class="hint">WIP = items waiting · completions in grey · click a row to scope</span>
         </div>
         <div class="stage queue-stage" id="queue-stage">
@@ -303,7 +310,8 @@
         </div>
       </section>
 
-      <aside class="drawer" id="drawer" hidden aria-live="polite"></aside>
+      <aside class="drawer" id="drawer" hidden aria-live="polite" tabindex="-1"
+             role="dialog" aria-label="pull request detail"></aside>
       <div class="menu" id="menu" role="menu" hidden></div>
     </main>
   </div>

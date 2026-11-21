@@ -212,13 +212,21 @@ class CloudLabEquivalenceTests(unittest.TestCase):
         )
 
         # -- DC: the existing --jira source, straight against the lab --------
-        cls.dc = scrape(
-            cls.cfg,
-            HttpTransport(BASE_URL, user=USER, password=PASSWORD),
-            "jira-dc",
-            out=cls.root / "dc.tgz",
-            state_dir=cls.root / "dc.state",
-        )
+        try:
+            cls.dc = scrape(
+                cls.cfg,
+                HttpTransport(BASE_URL, user=USER, password=PASSWORD),
+                "jira-dc",
+                out=cls.root / "dc.tgz",
+                state_dir=cls.root / "dc.state",
+            )
+        except Exception as exc:  # noqa: BLE001 - optional live lab
+            if "403" in str(exc) or "401" in str(exc):
+                raise unittest.SkipTest(
+                    f"Jira lab reachable at {BASE_URL} but this account cannot "
+                    "read its boards (permission denied)"
+                ) from None
+            raise
         cls.dc_bundle = read_bundle(cls.root / "dc.tgz")
 
         # -- Cloud: the emulation proxy in front of the same lab ------------

@@ -482,6 +482,21 @@ def summary(con) -> dict:
         "SELECT prs_seen, prs_kept, prs_dropped FROM ingest_runs"
         " WHERE prs_seen > 0 ORDER BY as_of DESC LIMIT 1"
     ).fetchone()
+    # prd/63 F27/V-B: a combined tenant has more than one source; the Sources
+    # page must show each run, not only the latest one's name.
+    runs = [
+        {
+            "source": row[0],
+            "as_of": iso(row[1]) if row[1] else None,
+            "prs_seen": int(row[2] or 0),
+            "prs_kept": int(row[3] or 0),
+            "prs_dropped": int(row[4] or 0),
+        }
+        for row in con.execute(
+            "SELECT source, as_of, prs_seen, prs_kept, prs_dropped"
+            " FROM ingest_runs ORDER BY as_of"
+        ).fetchall()
+    ]
     return {
         "events": int(events or 0),
         "prs": counts.get("PR", 0),
@@ -497,6 +512,7 @@ def summary(con) -> dict:
         "prs_seen": int(pr_run[0]) if pr_run else 0,
         "prs_kept": int(pr_run[1]) if pr_run else 0,
         "prs_dropped": int(pr_run[2]) if pr_run else 0,
+        "runs": runs,
     }
 
 

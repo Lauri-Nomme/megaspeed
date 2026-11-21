@@ -20,7 +20,10 @@ unstated definitions. Conform to `docs/concepts.md` §6.
 
 1. **Sprint "done" by end** — a story is "done in S" iff it reached `done` by S's end; show the
    **done-by-end / done-late / never** breakdown, and derive carry-over from "committed but not done by
-   S's end" (not only from an explicit re-add).
+   S's end" (not only from an explicit re-add). Beside the membership verdict, show the **window
+   velocity**: every story/point that reached done inside the sprint's dates, with carry-overs from
+   earlier sprints credited (`window_done` / `window_carry_in`). "Committed" uses the sprint's start
+   **day**, not its exact start second (plan-day grace).
 2. **At-stake additive** — each at-stake hour is attributed to exactly one rule (the most specific); a
    rule that is a subset of another is no longer double-counted in the headline total.
 3. **Drill-down sorted by impact** (wait-hours descending), so "affected first" is literally true.

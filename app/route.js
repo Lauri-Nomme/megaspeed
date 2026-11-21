@@ -79,11 +79,18 @@ function normalizeView(view) {
 export function serializeRoute({
   tenant = null, view = null, ticket = null, timeframe = null, scope = null,
   sprint = null, from = null, to = null, theme = null,
+  trendMetric = null, trendBucket = null, policy = null,
 } = {}) {
   const params = new URLSearchParams();
   if (tenant) params.set('tenant', String(tenant));
   if (view) params.set('view', String(view));
   if (timeframe) params.set('tf', String(timeframe));
+  // prd/63 F30: the Trend tab pair is view state, not a session-local setting;
+  // a shared link opens the same metric and granularity.
+  if (trendMetric) params.set('metric', String(trendMetric));
+  if (trendBucket) params.set('bucket', String(trendBucket));
+  // prd/63 F21: a policy-lab scenario is shareable too (compact JSON).
+  if (policy) params.set('policy', typeof policy === 'string' ? policy : JSON.stringify(policy));
   // prd/37 §4: the sprint lens is a filter with a range — both go in the URL so
   // a copied link lands on the same sprint, the same stories and the same window.
   if (sprint != null && sprint !== '') params.set('sprint', String(sprint));
@@ -119,16 +126,39 @@ export function serializeRoute({
  * `?scope=repo:…` form carries, so an API-style link (the endpoints take
  * `repo=`) lands on the repo-scoped view too.
  */
+/** The Trend metrics prd/50 exposes (mirrors app/trend.js / analysis/trend.py). */
+export const ROUTE_TREND_METRICS = [
+  'flow_efficiency', 'cycle_median', 'on_time', 'wait_hours', 'merged', 'open',
+];
+
 export function parseRoute(search = '', hash = '') {
   const params = new URLSearchParams(String(search || ''));
   const ticket = ticketFromHash(hash);
   const repo = params.get('repo') || null;
+  const policy = params.get('policy') || '';
   return {
     tenant: params.get('tenant') || null,
     // A ticket hash is the ticket view, whatever a stale `view` says.
     view: ticket ? 'ticket' : normalizeView(params.get('view')),
     ticket,
     timeframe: params.get('tf') || null,
+    // prd/63 F30: unknown values are ignored (the default tab shows), never
+    // trusted into a broken request.
+    metric: ROUTE_TREND_METRICS.includes(params.get('metric') || '')
+      ? params.get('metric') : null,
+    bucket: ['week', 'sprint'].includes(params.get('bucket') || '')
+      ? params.get('bucket') : null,
+    // prd/63 F21: a compact scenario object, or null when absent/invalid.
+    policy: (() => {
+      if (!policy) return null;
+      try {
+        const parsed = JSON.parse(policy);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+          ? parsed : null;
+      } catch {
+        return null;
+      }
+    })(),
     scope: parseScope(params.get('scope')) || (repo
       ? { kind: 'repo', value: repo, label: repo }
       : null),

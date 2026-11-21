@@ -552,10 +552,12 @@ class CarryOverTests(StoreCase):
         payload = self.payload(self.fixture())
         suggestion = by_id(payload, "jira-carry-over")
         self.assertIsNotNone(suggestion)
-        self.assertEqual(
-            suggestion["title"],
-            "2 stories committed but not done by their sprint's close",
-        )
+        # prd/63 F10: the window basis is stated in the title (the sprint strip
+        # counts the whole store and may be larger).
+        self.assertTrue(suggestion["title"].startswith(
+            "2 stories committed but not done by their sprint's close"
+        ))
+        self.assertIn("day window", suggestion["title"])
         self.assertEqual(suggestion["severity"], "critical")   # 2 of 3 ≥ 25%
         self.assertEqual(suggestion["evidence"]["carried_over"], 2)
         self.assertEqual(suggestion["evidence"]["late"], 1)
@@ -626,6 +628,37 @@ class SprintDeliveryTests(StoreCase):
         self.assertEqual([row["key"] for row in metric["rows"]],
                          ["ENG-2", "ENG-3"])
         self.assertEqual(metric["rows"][0]["status"], "late")
+
+    def test_velocity_counts_work_finished_in_the_sprint_dates(self):
+        """prd/63 V-A9/V-C3: membership is not the team's output.
+
+        A story finished inside the sprint's dates but never committed to it is
+        credited to the *window* (and counted as a carry-in), while the
+        membership verdict stays what it was.
+        """
+        fx = self.fixture()
+        # finished inside sprint 1's dates, committed to nothing here
+        fx.story("ENG-4", T0, points=8, state="done",
+                 closed=T0 + timedelta(days=12))
+        fx.status("ENG-4", T0 + timedelta(days=2), "in_progress")
+        fx.status("ENG-4", T0 + timedelta(days=12), "done",
+                  from_status="in_progress")
+        metric = self.metric(fx, "sprint_delivery")
+        row = metric["sprints"][0]
+        self.assertEqual(row["done_by_end"], 1)          # membership verdict
+        self.assertEqual(row["window_done"], 2)          # ENG-1 + ENG-4
+        self.assertEqual(row["window_own"], 1)
+        self.assertEqual(row["window_carry_in"], 1)
+        self.assertEqual(row["window_points"], 11)
+        self.assertEqual(row["window_carry_in_points"], 8)
+        # the rule states both, so "1 of 3" cannot read as "1 shipped"
+        payload = self.payload(fx)
+        suggestion = by_id(payload, "sprint-on-time")
+        self.assertIsNotNone(suggestion)
+        self.assertIn("the team finished 2 stories (11 pts) in its dates",
+                      suggestion["title"])
+        self.assertEqual(suggestion["evidence"]["window_done"], 2)
+        self.assertEqual(suggestion["evidence"]["window_carry_in"], 1)
 
     def test_done_by_end_excludes_a_story_whose_prs_never_merged(self):
         """prd/43 §5: Jira Done is not delivery.

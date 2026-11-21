@@ -118,9 +118,16 @@ export function fmtAge(ms, now = Date.now()) {
   if (delta < MINUTE) return 'just now';
   if (delta < HOUR) return `${Math.round(delta / MINUTE)} min ago`;
   if (delta < DAY) return `${Math.round(delta / HOUR)} h ago`;
-  // wall clock: say "calendar", never the business-hour `d` (prd/35)
-  const days = Math.round(delta / DAY);
-  return `${days} calendar day${days === 1 ? '' : 's'} ago`;
+  // wall clock: say "calendar", never the business-hour `d` (prd/35).
+  // prd/63 F22: "3 calendar days ago" counts whole calendar dates, so 3 d 15 h
+  // must not round up to 4. Under a week the remainder is stated too; past
+  // that, whole calendar days are the readable fact.
+  const days = Math.floor(delta / DAY);
+  const rest = Math.round((delta - days * DAY) / HOUR);
+  if (days < 7) {
+    return `${days} calendar day${days === 1 ? '' : 's'}${rest ? ` ${rest} h` : ''} ago`;
+  }
+  return `${days} calendar days ago`;
 }
 
 export function fmtBucket(ms) {
