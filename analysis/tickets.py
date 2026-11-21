@@ -143,7 +143,63 @@ def _ball_phase(latest) -> str:
     return latest.phase
 
 
-def _pr_rows(court: ballcourt.BallCourt, states: list) -> list[dict]:
+def _approved_unmerged(court: ballcourt.BallCourt, state,
+                       latest) -> dict | None:
+    """A PR every reviewer approved and that closed without a merge (prd/51).
+
+    This is the same predicate ``jira.rework`` uses for its
+    ``approved_unmerged`` group — the last status vector's roster is non-empty
+    and every reviewer on it approved, the PR never merged, and it is closed
+    (an *open* fully-approved PR can still merge, so it is not a lost delivery
+    yet). The fields are the group's own: who approved, when, who closed it,
+    whether that closer is a bot, and the business hours from the final
+    approval to the close (DEL-161: #34 approved by DaKo + FrMo, declined by
+    the bot 23 d 3 h later).
+
+    ``None`` when the finding does not apply, so a normal merged PR carries
+    nothing on the ticket page.
+    """
+    pr = state.pr
+    if pr.get("state") == "merged" or pr.get("closed_ts") is None:
+        return None
+    if latest is None or not latest.roster:
+        return None
+    approved = set(latest.approved or ())
+    if not approved or approved != set(latest.roster):
+        return None
+    approvals = [
+        event["_ts"] for event in state.events
+        if event["activity"] == "pr_approved"
+    ]
+    if not approvals:
+        return None
+    approved_at = max(approvals)
+    closed_at = pr["closed_ts"]
+    if closed_at <= approved_at:
+        return None
+    closed_by = next(
+        (
+            event["actor"] for event in reversed(state.events)
+            if event["activity"] in ("pr_declined", "pr_closed")
+        ),
+        None,
+    )
+    return {
+        "approved_by": sorted(approved),
+        "approved_at": _iso(approved_at),
+        "closed_at": _iso(closed_at),
+        # the store may not name the closer (an old scrape); the page then
+        # says "closed unmerged after approval" and invents no bot (prd/64 F-15).
+        "closed_by": closed_by,
+        "bot_closed": bool(closed_by and closed_by in (court.bots or set())),
+        "hours": round(
+            court.business_hours(pr["actor"], approved_at, closed_at), 2
+        ),
+    }
+
+
+def _pr_rows(court: ballcourt.BallCourt, states: list,
+             ticket_closed: datetime | None = None) -> list[dict]:
     rows: list[dict] = []
     for state in states:
         pr = state.pr
@@ -237,6 +293,22 @@ def _pr_rows(court: ballcourt.BallCourt, states: list) -> list[dict]:
             "ticket_keys": list(pr.get("ticket_keys") or ()),
             "opened": _iso(opened),
             "closed": _iso(closed),
+            # prd/64 F-14: the ticket page must flag a PR opened *after* the
+            # story closed — the same finding the Overview/Delivery done-open
+            # panel carries, priced on the same clock (the PR author's
+            # business hours). A PR opened before the close carries nothing.
+            "opened_after_close": bool(
+                ticket_closed is not None and opened is not None
+                and opened > ticket_closed
+            ),
+            "opened_after_close_hours": (
+                round(court.business_hours(pr["actor"], ticket_closed, opened), 2)
+                if (ticket_closed is not None and opened is not None
+                    and opened > ticket_closed) else 0.0
+            ),
+            # prd/64 F-15: approved by every reviewer and closed unmerged —
+            # the delivery the story lost (DEL-161 #34).
+            "approved_unmerged": _approved_unmerged(court, state, latest),
             "cycle_hours": cycle,
             "commit_count": len(state.commits),
             # prd/63 V-A6: the change size and whether it shipped. These are the
@@ -1178,6 +1250,52 @@ def _change_note(change: dict | None) -> str:
     )
 
 
+def _opened_after_close_note(prs: list[dict]) -> str:
+    """Name every PR opened after the ticket closed (prd/64 F-14).
+
+    The Overview/Delivery done-open panel already calls the PR opened after
+    Jira closed the ticket "a stronger finding: the work cannot have been part
+    of the delivered story". The ticket page must say the same thing, with the
+    same business-hour duration, so the summary row and the page it links to
+    cannot disagree.
+    """
+    parts = [
+        f"PR #{pr['number']} opened "
+        f"{jira.human_hours(pr.get('opened_after_close_hours'))} after the ticket "
+        "closed — the work cannot have been part of the delivered story."
+        for pr in prs if pr.get("opened_after_close")
+    ]
+    return (" " + " ".join(parts)) if parts else ""
+
+
+def _approved_unmerged_note(prs: list[dict]) -> str:
+    """Name every approved-but-never-merged PR, with its lost hours (F-15).
+
+    The classification is the ``approved_unmerged`` one ``analysis/jira.py``
+    derives for Rules and Sprint-at-risk; this only renders the same finding on
+    the ticket page, with the same business-hour clock. When the store cannot
+    name the closer the sentence says so rather than inventing a bot.
+    """
+    parts = []
+    for pr in prs:
+        finding = pr.get("approved_unmerged")
+        if not finding:
+            continue
+        who = " + ".join(finding.get("approved_by") or ()) or "every reviewer"
+        lost = jira.human_hours(finding.get("hours"))
+        closer = finding.get("closed_by")
+        if closer:
+            by = f"the bot {closer}" if finding.get("bot_closed") else closer
+            close = f"closed unmerged by {by}"
+        else:
+            close = "closed unmerged after approval"
+        parts.append(
+            f"PR #{pr['number']} was approved by {who} and {close} — {lost} "
+            "lost from the final approval."
+        )
+    return (" " + " ".join(parts)) if parts else ""
+
+
 def _answer(
     key: str,
     story: jira.Story | None,
@@ -1218,6 +1336,8 @@ def _answer(
         if explained is not None and float(explained) < 1.0 else 0
     )
     pr_state = _open_pr_state(open_prs) if open_prs else ""
+    after_close = _opened_after_close_note(prs)
+    unmerged_note = _approved_unmerged_note(prs)
     censor_note = ""
     if censored and unmeasured:
         censor_note = f"{unmeasured} % unmeasured"
@@ -1233,6 +1353,7 @@ def _answer(
             f"Done in Jira, but PR {numbers} is still open (right-censored); "
             "the cycle is measured to the ticket's done, not to that PR."
         )
+        prefix += after_close
         prefix += _change_note(change)
         if censor_note:
             prefix += f" {censor_note}"
@@ -1283,7 +1404,7 @@ def _answer(
         body = (
             f"the store cannot say where {key}'s time went because no "
             f"segment has both boundaries — the {boundary} boundary is missing "
-            f"({first['reason']}).{reopen_note}{suffix}{quirk_note}"
+            f"({first['reason']}).{reopen_note}{unmerged_note}{suffix}{quirk_note}"
         )
         return _after_prefix(prefix, body), "unmeasurable"
     total = segments["total_hours"]
@@ -1305,10 +1426,11 @@ def _answer(
             f"took because the {boundary} boundary is missing "
             f"({first['reason']}); the {len(measured)} of {len(segments['rows'])} "
             f"segments it can measure cover {jira.human_hours(total)}, most of it "
-            f"in {biggest['label']} ({jira.human_hours(biggest['hours'])}, {percent}%)"
+            f"in {biggest['label']} ({jira.human_hours(biggest['hours'])}, {percent}% "
+            "of measured)"
             f"{gap_clause}."
             f"{(' ' + gap_sentence) if gap_sentence else ''}"
-            f"{reopen_note}{suffix}{quirk_note}"
+            f"{reopen_note}{unmerged_note}{suffix}{quirk_note}"
         )
         return _after_prefix(prefix, body), "partial"
     efficiency = segments["efficiency"]
@@ -1339,7 +1461,7 @@ def _answer(
         f"{span}: most of it went to {biggest['label']} "
         f"({jira.human_hours(biggest['hours'])}, {percent}% of the measured cycle)"
         f"{gap_clause}. {active} of the measured time was active work."
-        f"{(' ' + gap_sentence) if gap_sentence else ''}{suffix}{quirk_note}"
+        f"{(' ' + gap_sentence) if gap_sentence else ''}{unmerged_note}{suffix}{quirk_note}"
     )
     # prd/63 V-A6: a Done-in-Jira story with an open PR has a *measured ticket
     # cycle* but a censored change; the kind says so, so the page never calls
@@ -1392,7 +1514,10 @@ def ticket(
     # the QA segment as missing (with the boundary named) instead of silently
     # folding it into "done".
     segments = _segments(court, cycle, verification=jira.uses_verification(data))
-    prs = _pr_rows(court, states)
+    prs = _pr_rows(
+        court, states,
+        cycle.boundaries.get("done") if cycle is not None else None,
+    )
     open_threads: dict[tuple[str, int], int] = {}
     for thread in threads or ():
         if thread.get("closed_at") is not None:

@@ -13,7 +13,7 @@
  * every string here is testable with `node --test`.
  */
 
-import { fmtAbsolute, fmtHours, esc } from './format.js';
+import { fmtAbsolute, fmtHours, fmtCalendarDuration, esc } from './format.js';
 import { PHASE } from './timeline.js';
 import { ticketHref } from './tickets.js';
 import { color, onPalette } from './theme.js';
@@ -208,20 +208,24 @@ export function boundaryChips(payload) {
     : Object.keys(boundaries);
   return `<div class="ticket-boundaries">${order.map((name) => {
     const entry = boundaries[name] || {};
+    // prd/64 F-21: the chip and its tooltip read like English ("PR OPEN",
+    // "IN VERIFICATION"); the raw key stays in `data-boundary` for selectors,
+    // and the uppercase styling remains CSS (text-transform), not the data.
+    const label = name.replace(/_/g, ' ');
     if (!entry.available) {
       return `<span class="ticket-boundary missing mono" title="${esc(entry.reason || 'missing')}">
-        <span class="k">${esc(name)}</span>missing</span>`;
+        <span class="k">${esc(label)}</span>missing</span>`;
     }
     const quirk = entry.out_of_order || entry.order_quirk;
     const quirkText = entry.out_of_order
-      ? `data quirk: the raw ${name} boundary is ${entry.raw_ts ? shortStamp(entry.raw_ts) : 'out of order'} (${entry.out_of_order.reason}), clamped to the cycle`
+      ? `data quirk: the raw ${label} boundary is ${entry.raw_ts ? shortStamp(entry.raw_ts) : 'out of order'} (${entry.out_of_order.reason}), clamped to the cycle`
       : (entry.order_quirk
-        ? `data quirk: ${name} is dated after ${entry.order_quirk.after} on the clock but follows it in the lifecycle — shown in clock order, not reordered`
-        : `the ${name} boundary`);
+        ? `data quirk: ${label} is dated after ${entry.order_quirk.after} on the clock but follows it in the lifecycle — shown in clock order, not reordered`
+        : `the ${label} boundary`);
     return `<span class="ticket-boundary mono${quirk ? ' quirk' : ''}" data-boundary="${esc(name)}"
         data-order-quirk="${entry.order_quirk ? 'true' : 'false'}"
         title="${esc(quirkText)}">
-      <span class="k">${esc(name)}</span>${esc(shortStamp(entry.ts))}${quirk ? ' <span class="quirk-mark">!</span>' : ''}</span>`;
+      <span class="k">${esc(label)}</span>${esc(shortStamp(entry.ts))}${quirk ? ' <span class="quirk-mark">!</span>' : ''}</span>`;
   }).join('')}</div>`;
 }
 
@@ -239,6 +243,52 @@ export function prPhaseBar(pr) {
 }
 
 /** The ticket's PRs: state, cycle, review rounds, push classes, censoring. */
+function afterCloseText(pr) {
+  // prd/64 F-14: a PR opened after Jira closed the ticket cannot have been part
+  // of the delivered story — the same finding as the done-open panel.
+  return pr && pr.opened_after_close
+    ? `opened ${segmentHours(pr.opened_after_close_hours)} after the ticket closed — the work cannot have been part of the delivered story`
+    : '';
+}
+
+function approvedUnmergedText(pr) {
+  // prd/64 F-15: every reviewer approved and the PR closed unmerged (DEL-161
+  // #34) — the delivery the story lost, never hidden on the ticket page.
+  const finding = pr && pr.approved_unmerged;
+  if (!finding || !(finding.approved_by || []).length) return '';
+  const who = finding.approved_by.join(' + ');
+  const closer = finding.closed_by
+    ? `closed unmerged by ${finding.bot_closed ? `the bot ${finding.closed_by}` : finding.closed_by}`
+    : 'closed unmerged after approval';
+  return `approved by ${who}, ${closer} — ${segmentHours(finding.hours)} lost`;
+}
+
+export function prFindingText(pr) {
+  return [afterCloseText(pr), approvedUnmergedText(pr)].filter(Boolean);
+}
+
+/**
+ * The findings as a full-width row under their PR, so the sentence is visible
+ * (a 190 px identity cell cannot hold it) and only rows that have one pay for
+ * the extra line. The compact pill names the state; the sentence states it.
+ */
+export function prFindingRow(pr, payload) {
+  const after = afterCloseText(pr);
+  const approved = approvedUnmergedText(pr);
+  if (!after && !approved) return '';
+  const badges = [
+    after ? '<span class="pill waiting">opened after the ticket closed</span>' : '',
+    approved ? '<span class="pill blocked">approved, never merged</span>' : '',
+  ].filter(Boolean).join(' ');
+  return `<tr class="pr-finding-row" data-pr="${esc(pr.object_id)}"
+      data-pr-ticket="${esc((payload && payload.key) || '')}"
+      ${after ? 'data-pr-after-close="true"' : ''}
+      ${approved ? 'data-pr-approved-unmerged="true"' : ''}>
+    <td colspan="7" class="c-attrs">${badges}
+      <span class="pr-finding">${esc([after, approved].filter(Boolean).join(' · '))}</span></td>
+  </tr>`;
+}
+
 export function prTable(payload, { benchmark = true } = {}) {
   const prs = (payload && payload.prs) || [];
   if (!prs.length) {
@@ -276,7 +326,7 @@ export function prTable(payload, { benchmark = true } = {}) {
       <td class="c-rounds num" data-label="rounds">${esc(pr.review_rounds)}</td>
       <td class="c-push mono" data-label="push classes">${classes}</td>
       <td class="c-bar" data-label="lifecycle">${prPhaseBar(pr)}</td>
-    </tr>`;
+    </tr>${prFindingRow(pr, payload)}`;
   }).join('');
   return `<table class="table ticket-prs">${head}<tbody>${body}</tbody></table>`;
 }
@@ -370,8 +420,14 @@ export function attributeFacts(attributes) {
   return Object.entries(attributes || {}).map(([key, value]) => {
     const label = ATTR_LABELS[key] || key.replace(/_/g, ' ');
     let text = String(value);
-    if (key === 'time_spent_seconds' || key === 'log_delay_seconds') {
+    if (key === 'time_spent_seconds') {
       text = segmentHours(Number(value) / 3600);
+    } else if (key === 'log_delay_seconds') {
+      // prd/64 F-22: the bucket is calendar days (`within_week` = at most 7
+      // calendar days), so the duration is a *calendar* duration. Formatting
+      // the same 76 h on the 8-business-hour "d" clock printed "9 d 4 h"
+      // beside "within week" — a contradiction the pair never had.
+      text = fmtCalendarDuration(Number(value) * 1000);
     } else if (key === 'actor_kind') {
       text = value === 'bot' ? 'a bot' : 'a human';
     } else if (key === 'log_delay_bucket') {
@@ -425,6 +481,7 @@ export function ticketStats(payload, { benchmark = true } = {}) {
   const cycle = segments.cycle_hours;
   const largest = segments.largest_label;
   const total = (segments.rows || []).length;
+  const measured = Number(segments.measured ?? 0);
   const reopened = payload.reopened || segments.reopened;
   const change = payload.change || {};
   const quirk = payload.quirk || {};
@@ -439,18 +496,33 @@ export function ticketStats(payload, { benchmark = true } = {}) {
         pr.cycle_hours == null ? '' : ` · ${esc(segmentHours(pr.cycle_hours))}`}${
         pr.censored ? ' <span class="muted">right-censored</span>' : ''}</span>`).join('')}`;
   }
-  return `<span class="stat-inline"><b>${cycle == null ? '–' : esc(segmentHours(cycle))}</b> cycle</span>
+  // prd/64 F-15: an open story's `cycle_hours` is its age to the snapshot, so
+  // the strip calls it age and prints the measured sum separately. The largest
+  // segment's share is a share of that measured sum — printing "(30%)" beside
+  // "32 d 4 h" read as 30 % of the age. One denominator per number.
+  const open = Boolean(story.censored
+    || (segments.boundaries && segments.boundaries.done
+      && !segments.boundaries.done.ts));
+  const partial = measured < total;
+  const measuredStat = (open || partial)
+    ? `<span class="stat-inline"><b>${segments.total_hours == null
+      ? '–' : esc(segmentHours(segments.total_hours))}</b> measured across <b>${measured}</b>/${total} segments</span>`
+    : `<span class="stat-inline"><b>${measured}</b>/${total} segments</span>`;
+  const shareLabel = open || partial
+    ? `${pct(segments.largest_share)} of measured`
+    : pct(segments.largest_share);
+  return `<span class="stat-inline"><b>${cycle == null ? '–' : esc(segmentHours(cycle))}</b> ${open ? 'age (open)' : 'cycle'}</span>
     ${benchmarkLine(payload, { benchmark })}
     ${change.unmerged_share
       ? `<span class="stat-inline attention" data-unmerged-share="${esc(change.unmerged_share)}"
            title="${esc(`lines changed in open PRs ÷ lines changed in all of this story's PRs — ${change.lines_unmerged} of ${change.lines_total} changed lines`)}">
            <b>${Math.round(change.unmerged_share * 100)}%</b> of the change unmerged</span>`
       : ''}
-    <span class="stat-inline"><b>${segments.measured ?? 0}</b>/${total} segments</span>
+    ${measuredStat}
     <span class="stat-inline"><b>${payload.pr_count ?? 0}</b> PR${payload.pr_count === 1 ? '' : 's'}</span>
     ${story.points != null ? `<span class="stat-inline"><b>${esc(story.points)}</b> points</span>` : ''}
     ${reopened ? `<span class="stat-inline"><b>reopened</b> ${segments.reopen_count ? `×${esc(segments.reopen_count)}` : ''}</span>` : ''}
-    ${largest ? `<span class="stat-inline">most in <b>${esc(largest)}</b> (${pct(segments.largest_share)})${
+    ${largest ? `<span class="stat-inline">most in <b>${esc(largest)}</b> (${shareLabel})${
       (segments.largest_no_pr_open_hours || 0) >= MATERIAL_GAP_HOURS
         ? ` — ${esc(segmentHours(segments.largest_no_pr_open_hours))} with no PR open` : ''}</span>` : ''}
     ${quirk.count
@@ -722,7 +794,8 @@ export function ticketMarkdown(payload, base = '') {
         ? ` (${benchmarkText(pr.cycle_benchmark, { format: segmentHours })})` : ''}${
         pr.cycle_benchmark && pr.cycle_benchmark.declined ? ' (declined — no merged-PR benchmark)' : ''} · ` +
       `${pr.review_rounds} review round${pr.review_rounds === 1 ? '' : 's'} · ` +
-      `pushes ${Object.entries(pr.push_classes || {}).map(([name, n]) => `${name}×${n}`).join(', ') || 'none'}`),
+      `pushes ${Object.entries(pr.push_classes || {}).map(([name, n]) => `${name}×${n}`).join(', ') || 'none'}` +
+      `${prFindingText(pr).length ? ` — ${prFindingText(pr).join('; ')}` : ''}`),
     '',
     `## sprints`,
     '',
