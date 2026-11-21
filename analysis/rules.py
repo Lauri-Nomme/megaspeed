@@ -1303,7 +1303,12 @@ def rework_loops(court: ballcourt.BallCourt, window) -> dict:
             state.pr, rounds=count, pushes=len(pushes),
             unapprovals=len(unapprovals), push_classes=sorted(classes),
             over_max_rounds=count > MAX_REVIEW_ROUNDS,
-            affected=count > MAX_REVIEW_ROUNDS,
+            # prd/64 F-06a: the rule asks for a cap at
+            # REVIEW_ROUND_CAP_TARGET (2), so "affected" is that same target —
+            # the conformance threshold (3) is a different, stricter line and
+            # must not decide which rows the rule highlights (`prs_over_target`
+            # is the count the card prints; the rows must agree with it).
+            affected=count > REVIEW_ROUND_CAP_TARGET,
         ))
     xs = [float(value) for value, _ in pairs]
     ys = [cycle for _, cycle in pairs]
@@ -3579,7 +3584,16 @@ def attribute_at_stake(suggestions: list[dict]) -> dict:
             ),
         )
         for suggestion in ordered:
-            if suggestion["at_stake"]["attributed_hours"] <= 0:
+            # prd/64 F-19: a rule with no priced hours (a correlation rule such
+            # as `jira-worklog-mismatch`, impact 0) must not be told its own
+            # score is "counted in #7" — that is a self-reference, and the rule
+            # has nothing to redirect. Only a rule with hours, absorbed by a
+            # *different* rule, points at the owner.
+            if (
+                suggestion["at_stake"]["attributed_hours"] <= 0
+                and suggestion["impact_hours"] > 0
+                and owner["id"] != suggestion["id"]
+            ):
                 suggestion["at_stake"]["attributed_to"] = owner["id"]
         pool_total = round(sum(s["at_stake"]["attributed_hours"] for s in ordered), 1)
         for suggestion in ordered:

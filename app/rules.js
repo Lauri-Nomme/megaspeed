@@ -130,6 +130,17 @@ export function evidenceLabel(key) {
   return label;
 }
 
+/** A key that names a duration in hours, whatever its shape.
+ *
+ * prd/64 F-18: `hours_per_round`, `hours_per_refinement`, `hours_per_extra_round`
+ * and a bare `hours` are one unit — the single duration language (`≈6 h 1 min`).
+ * Matching on the *word* rather than a hand-listed set means a new evidence key
+ * cannot smuggle a raw float back onto a card.
+ */
+export function isDurationKey(key) {
+  return /(^|_)hours?($|_)/.test(String(key || ''));
+}
+
 /** A concrete number from evidence, formatted by its unit. */
 export function evidenceValue(key, value) {
   if (value == null || value === '') return '–';
@@ -145,12 +156,18 @@ export function evidenceValue(key, value) {
     // rate rather than a duration.
     if (key === 'median_logged_hours') return fmtHours(value);
     if (key === 'median_hours_per_point') return fmtRate(value);
-    if (key.endsWith('_hours') || key === 'hours_per_round' || key === 'hours_per_refinement') return fmtImpact(value);
+    // prd/64 F-18: every hours-shaped key is a duration, including the bare
+    // `hours` and `hours_per_extra_round` the cards used to print as `283.6`.
+    if (isDurationKey(key)) return fmtImpact(value);
     // A share (flow efficiency, waiting share) is a fraction of one, not hours.
     if (key.startsWith('share') || key.endsWith('_share') || key.endsWith('_efficiency')) {
       return `${Math.round(value * 100)}%`;
     }
-    return Number.isInteger(value) ? String(value) : String(value);
+    if (Number.isInteger(value)) return String(value);
+    // prd/64 F-18 guard: a key that *looks* like a duration but slipped past
+    // `isDurationKey` (e.g. `hours_to_merge`) still must not print `6.01`.
+    if (/(^|_)(hour|minute|day|duration)/.test(String(key))) return fmtImpact(value);
+    return String(value);
   }
   return String(value);
 }
@@ -309,13 +326,17 @@ export function ruleItems(suggestion, metrics = {}, base = '') {
     // sprint's items — not every closed sprint's.
     rows = rows.filter((row) => String(row.sprint_id) === String(scope.sprint));
   }
-  // prd/37 §3: "affected first" must be literally true — sort by the wait
-  // hours the row carries (the impact), not by key. A metric's own order is
-  // the tie-break.
+  // prd/37 §3: "affected first" must be literally true — the rows the rule is
+  // about lead, then the wait hours the row carries (the impact), not its key.
+  // prd/64 F-06a: the impact sort alone buried the affected rows whenever the
+  // rule's "affected" test is not the sort's number (censoring, worklog,
+  // flow efficiency), so affected is the first key and impact the tie-break.
+  // A metric's own order is the last tie-break.
   rows = rows
     .map((row, index) => ({ row, index }))
     .sort((a, b) => (
-      impactOf(b.row, suggestion.metric) - impactOf(a.row, suggestion.metric)
+      Number(Boolean(b.row.affected)) - Number(Boolean(a.row.affected))
+      || impactOf(b.row, suggestion.metric) - impactOf(a.row, suggestion.metric)
       || a.index - b.index
     ))
     .map((entry) => entry.row);
@@ -537,18 +558,41 @@ export function ruleRow(suggestion, { base = '', metrics = {} } = {}) {
     </article>`;
 }
 
+/* prd/63 F28: a person-level list is a filter over the same payload, so every
+ * reader of `suggestions` (the list, the stats strip) must filter the same way.
+ */
+function isPersonRule(suggestion) {
+  return Boolean(suggestion && suggestion.scope && suggestion.scope.kind === 'person');
+}
+
 export function rulesStats(data) {
-  const suggestions = (data && data.suggestions) || [];
+  const all = (data && data.suggestions) || [];
+  // prd/64 F-05: on the `people (pseudonyms)` tab the strip counted the team
+  // rules behind an empty person list ("10 rules · 4 critical · ≈2.6k h" over
+  // "no person-level rule crosses its threshold"). The strip follows the tab.
+  const personLevel = Boolean(data && data.level === 'person');
+  const personRules = all.filter(isPersonRule);
+  const suggestions = personLevel ? personRules : all;
   const critical = suggestions.filter((s) => s.severity === 'critical').length;
   const stake = (data && data.at_stake) || null;
-  // prd/37 §2: the additive headline — never the sum of the per-rule estimates
-  const impact = stake && stake.hours != null
-    ? Number(stake.hours) || 0
-    : suggestions.reduce((sum, s) => sum + (Number(s.impact_hours) || 0), 0);
-  const overlap = stake && stake.overlap_hours ? Number(stake.overlap_hours) : 0;
+  // prd/37 §2: the additive headline — never the sum of the per-rule estimates.
+  // A person tab cannot quote the team pool's ceiling, so it adds the person
+  // rules' own attributed share (each hour is still counted once).
+  const impact = personLevel
+    ? suggestions.reduce((sum, s) => {
+      const own = s.at_stake && s.at_stake.attributed_hours != null
+        ? Number(s.at_stake.attributed_hours) : Number(s.impact_hours);
+      return sum + (Number.isFinite(own) ? own : 0);
+    }, 0)
+    : (stake && stake.hours != null
+      ? Number(stake.hours) || 0
+      : suggestions.reduce((sum, s) => sum + (Number(s.impact_hours) || 0), 0));
+  const overlap = !personLevel && stake && stake.overlap_hours
+    ? Number(stake.overlap_hours) : 0;
   const sample = (data && data.sample) || {};
   const dataset = (data && data.dataset) || {};
   const rules = suggestions.length;
+  const teamCount = all.length - personRules.length;
   const prs = sample.prs ?? 0;
   const datasetPrs = dataset.prs ?? null;
   const outside = dataset.prs_outside_window ?? 0;
@@ -560,7 +604,11 @@ export function rulesStats(data) {
   // prd/21: the ticket cohort travels next to the PR cohort; a store without the
   // Jira ingest shows no story count rather than a misleading zero.
   const stories = (data && data.jira && data.jira.available) ? (sample.stories ?? 0) : null;
-  return `<span class="stat-inline"><b>${rules}</b> rule${rules === 1 ? '' : 's'}</span>
+  const rulesLabel = personLevel
+    ? `<span class="stat-inline"><b>${rules}</b> person rule${rules === 1 ? '' : 's'}${
+      teamCount ? ` <span class="muted">(${teamCount} team)</span>` : ''}</span>`
+    : `<span class="stat-inline"><b>${rules}</b> rule${rules === 1 ? '' : 's'}</span>`;
+  return `${rulesLabel}
     <span class="stat-inline"><b class="${critical ? 'attention' : ''}">${critical}</b> critical</span>
     <span class="stat-inline" title="${esc(overlap
       ? `counted once: ${fmtImpact(overlap)} of overlapping rule estimates is not added again`
@@ -577,8 +625,7 @@ export function rulesStats(data) {
  * person heading. */
 export function personSignalNote(data, { below = true } = {}) {
   if (!data || data.level !== 'person') return '';
-  const personRules = (data.suggestions || [])
-    .filter((suggestion) => suggestion.scope && suggestion.scope.kind === 'person');
+  const personRules = (data.suggestions || []).filter(isPersonRule);
   if (personRules.length) return '';
   return 'No person-level rule crosses its threshold in this window' +
     (below ? '; the team tab names the team-level rules.' : '.');
@@ -592,12 +639,8 @@ export function rulesMarkup(data, {
   // filters: a person-level card shows only person-scoped rules, and when
   // there is none it says so (with the team count) instead of repeating them.
   const personLevel = Boolean(data && data.level === 'person');
-  const personRules = all.filter(
-    (suggestion) => suggestion.scope && suggestion.scope.kind === 'person',
-  );
-  const teamRules = all.filter(
-    (suggestion) => !(suggestion.scope && suggestion.scope.kind === 'person'),
-  );
+  const personRules = all.filter(isPersonRule);
+  const teamRules = all.filter((suggestion) => !isPersonRule(suggestion));
   const suggestions = personLevel ? personRules : all;
   const note = personSignalNote(data, { below: teamRules.length > 0 });
   const lab = labBestLine(data);
@@ -643,12 +686,15 @@ export function rulesMarkup(data, {
     }</p>`
     : '';
   if (!suggestions.length) {
+    // prd/64 F-05: `note` already says "no person-level rule crosses its
+    // threshold in this window"; printing the same sentence again below it made
+    // the empty state read twice. One statement, once.
+    const emptyLine = personLevel
+      ? 'No person-level rule crosses its threshold in this window.'
+      : 'No rule crosses its threshold in this window.';
     return `${banner}<div class="rules-empty">
-      ${note ? `<p>${esc(note)}${teamLink}</p>` : ''}
+      <p data-rules-empty>${note ? esc(note) : emptyLine}${teamLink}</p>
       ${lab ? `<p class="rules-lab" data-lab-best>${esc(lab)}</p>` : ''}
-      <p>${personLevel
-        ? 'No person-level rule crosses its threshold in this window.'
-        : 'No rule crosses its threshold in this window.'}</p>
       <p class="muted">${personLevel
         ? `Person rules name a pseudonym and a per-person threshold; ${teamRules.length} team rule${teamRules.length === 1 ? ' is' : 's are'} on the team tab.`
         : 'That is a result, not a missing screen: first review under 24 h, cycle time under 9 d (72 business hours), two review rounds or fewer, no lost approvals. Widen the timeframe or switch to people to check the per-person rules.'}</p>
@@ -703,9 +749,7 @@ export function rulesMarkdown(data, base = '') {
   if (!data) return '';
   const all = data.suggestions || [];
   const personLevel = data.level === 'person';
-  const personRules = all.filter(
-    (suggestion) => suggestion.scope && suggestion.scope.kind === 'person',
-  );
+  const personRules = all.filter(isPersonRule);
   // prd/63 F28: the export follows the toggle. On the people tab it lists the
   // person rules only; the team rules are a heading and a count, not a repeat.
   const listed = personLevel ? personRules : all;
@@ -755,6 +799,8 @@ export function rulesMarkdown(data, base = '') {
     const facts = evidenceItems(suggestion.evidence)
       .map((fact) => `${fact.label} ${markdownLinkTickets(fact.value, base)}`).join(' · ');
     const shared = suggestion.at_stake && suggestion.at_stake.attributed_to
+      && suggestion.at_stake.attributed_to !== suggestion.id
+      && Number(suggestion.at_stake.pool_rules) >= 2
       ? ` — counted in #${suggestion.at_stake.attributed_to_rank}` : '';
     lines.push(
       `## ${suggestion.rank}. ${suggestion.title}`,
