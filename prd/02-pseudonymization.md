@@ -21,10 +21,11 @@ The scraped data and the primary datastore (or any view of it) may contain:
 (the scraped raw zone, the store's content columns, and any LLM view of them). It does **not** forbid
 *first-party* metadata the team enters directly into megaspeed — calendar overrides, scope/timeframe
 preferences, and dated **annotations** ("we adopted the 4 h review SLA after the retro") are the team's
-own words, not scraped content. They live **outside** the store (tenant files such as
-`calendar.yaml` / `annotations.yaml`), never enter the event log, and never feed the raw→label
-classifier or the analysis LLM's view of the store. The "no free-text columns" rule is a property of the
-*store*, not a blanket ban on the team writing a note in a tenant-side file.
+own words, not scraped content. A team annotation lives in its own allowlisted `annotations` table (never
+the event log, never the raw→label classifier); the "no free-text columns" rule is a property of the
+*content* tables, and `annotations.note` is the one documented first-party free-text column
+(`ingest/store.py` exempts it from the whitespace heuristic, and the canary still proves no *scraped*
+raw text reaches the store).
 
 Two subtleties worth writing down before they bite us:
 

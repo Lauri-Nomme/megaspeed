@@ -675,8 +675,10 @@ These are comparisons, not new units. Each names its cohort and its basis wherev
 - The store and every API response contain only **ticket keys, abbreviated actor pseudonyms, timestamps
   and enumerated closed-vocabulary labels**. No raw **imported-from-Bitbucket/Jira** description, comment,
   diff, commit message, or workflow status name ever crosses into the store or the API. The rule is about
-  *scraped* content — a tenant-side, first-party file (calendar overrides, dated annotations) is the
-  team's own metadata, lives **outside** the store, and never enters the event log or the classifier.
+  *scraped* content — first-party team metadata (calendar overrides, dated annotations) lives in its own
+  allowlisted table (never the event log or the classifier), and `annotations.note` is the one documented
+  first-party free-text column (`store.verify` exempts it; the canary still proves no *scraped* raw text
+  reaches the store).
 - All classifications are a projection onto a closed set (`taxonomy.py`); "other" is the explicit
   "could not decide" escape hatch, never free text.
 

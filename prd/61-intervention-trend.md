@@ -54,10 +54,10 @@ stability sentence; the panel's "compare this metric" links to the prd/62 guardr
 vocabulary** for the change *type* (`review SLA`, `WIP limit`, `PR size cap`, `sentinel added`, `sentinel rotation`,
 `refinement change`, `other`) plus one numeric value where it applies (hours / commits / limit), a date, and an
 optional **free-text note** in the team's own words (e.g. "adopted after the retro; rollback is a 2-click revert").
-The note is **first-party metadata** — the team typed it into megaspeed, it is not scraped Bitbucket/Jira content, it
-lives outside the store (a tenant file), and it never enters the event log or the classifier — so it does not touch
-the pseudonymisation contract (prd/02 §"Scope"). The `kind` stays enumerated so the chart/label is renderable and
-testable; the optional `note` is where the nuance lives. Delete is a two-step inline confirm.
+The note is **first-party metadata** — the team typed it into megaspeed, it is not scraped Bitbucket/Jira content, so
+it lives in the store (an `annotations` row, never the event log) and never touches the classifier — so it does not
+violate the pseudonymisation contract (prd/02 §"Scope"). The `kind` stays enumerated so the chart/label is renderable
+and testable; the optional `note` is where the nuance lives. Delete is a two-step inline confirm.
 
 **Honesty language (exact).** `A before/after is not an experiment: it compares two samples of items either side of
 the change, with everything else that also changed. The interval is the answer.` ·
@@ -71,25 +71,42 @@ width. No horizontal scroll, no hover-only affordance (tap-and-hold for the popo
 
 ## Technical design
 
-### Annotations (a tenant file, not the store)
+### Annotations (a store table — the honest default)
 
-`data/<tenant>/annotations.yaml`, next to `calendar.yaml` — **outside** the pseudonymised DuckDB store, so the event
-log stays ingest-only and `--verify` is untouched. Entry:
+Annotations are **first-party team metadata**, not scraped content, so they live in the store like every other
+mutable datum — one DuckDB, one backup, one transactional write, one cache invalidation, queryable alongside the
+events. New table in `schema.sql`:
 
-```yaml
-- {id: a1, date: 2026-10-08, kind: review_sla, value: 4, note: "adopted after the retro; rollback = revert the policy"}
-- {id: a2, date: 2026-09-01, kind: wip_limit, value: 6, note: null}
+```sql
+CREATE TABLE IF NOT EXISTS annotations (
+    annotation_id VARCHAR PRIMARY KEY,   -- stable id (uuid)
+    created_at    TIMESTAMP NOT NULL,
+    date          DATE NOT NULL,         -- the change date shown on the axis
+    kind          VARCHAR NOT NULL,      -- closed vocabulary (below)
+    value         DOUBLE,                -- hours / commits / limit, or null
+    note          VARCHAR,               -- FIRST-PARTY free text (the team's own words) — see the contract carve-out
+    scope         VARCHAR,               -- optional repo
+);
 ```
 
 `kind ∈ {review_sla, wip_limit, size_cap, sentinel_added, sentinel_rotation, refinement_change, other}`;
-`value` numeric or null; `note` optional free text (first-party, tenant-side — **not** scraped content, never
-in the store); `scope` optional (a repo). The `kind`/`value` renders a closed label
-(`review_sla` + 4 → "review SLA 4 h"); the `note` is the team's own words, stored verbatim in the tenant file.
-Written atomically (temp + rename), validated on write, re-read when its mtime changes.
+`value` numeric or null; `note` optional free text; `scope` optional (a repo). The `kind`/`value` renders a closed
+label (`review_sla` + 4 → "review SLA 4 h"); the `note` is the team's own words, stored verbatim.
 
-`analysis/annotations.py`: `load(tenant_dir)`, `save(...)`, `catalogue()`, `render(entry)`, `validate(entry)`.
-**Calendar spans** are derived, never entered twice: `calendar.summary()["holidays"]["dated"]` (resolved dates,
-including the half-days) and `vacation_list()`.
+**Contract carve-out (why a free-text column is allowed here).** `prd/02`'s "no free-text columns" rule is about
+*imported content* (descriptions/comments/diffs/commit messages). `annotations.note` is first-party, never scraped,
+never touched by the classifier/LLM, so it is only false-positive-prone for the store's heuristic — not a
+violation. Concretely, in `ingest/store.py`:
+- add `annotations` to `ALLOWED` (the table + its declared columns);
+- exempt `annotations.note` from the whitespace `_scan` (the "a stored string must hold a pseudonym/key/enum,
+  not prose" heuristic), with a comment naming it the **one** first-party free-text column;
+- **every** other rule still applies to the table's other columns, and the canary test still proves no
+  *scraped* raw text reaches the store. A migration adds the table to existing stores (empty).
+
+`analysis/annotations.py`: `load(con)`, `save(con, entry)`, `delete(con, id)`, `catalogue()`, `render(entry)`,
+`validate(entry)` — all against the store; **calendar spans** are still derived, never entered twice
+(`calendar.summary()["holidays"]["dated"]`, `vacation_list()`). A write bumps the store stamp, so the existing
+`_trend_cache` invalidation already covers a new annotation (no separate mtime key needed).
 
 ### Metrics (no new definitions)
 
@@ -171,16 +188,18 @@ TRIALS = 10_000
   "censored_before": 9, "censored_after": 4, "note": "…" }
 ```
 
-`GET|POST /api/annotations`, `DELETE /api/annotations/{id}` — validated, atomic write; 400 only on an **unknown
-`kind`** (the type is enumerated so the chart/label is renderable); the optional `note` is free text and is stored
-verbatim in the tenant file (not the store) — it is first-party metadata, not scraped content. 409/`unavailable`
-when the server has no tenant dir (read-only mirror installs still *read* annotations).
+`GET|POST /api/annotations`, `DELETE /api/annotations/{id}` — validated, written transactionally to the store's
+`annotations` table; 400 only on an **unknown `kind`** (the type is enumerated so the chart/label is renderable);
+the optional `note` is free text (first-party metadata) and is stored verbatim in the `annotations` table — the
+one allowlisted first-party free-text column (see the contract carve-out above). 409/`unavailable` only when the
+store is read-only (a mirror install still *reads* annotations).
 
 ### Cache and invalidation
 
-Extend `_trend_cache` keys with `annotations_mtime` (so an added marker invalidates the chart) and
-`(metric, split, bucket)` for `/trend/compare`; a compare result is cached 32 entries. A new store stamp or a
-calendar edit invalidates both. The bootstrap seed is derived from the same key, so a cached and a cold call agree.
+Extend `_trend_cache` keys with `(metric, split, bucket)` for `/trend/compare`; a compare result is cached 32
+entries. A new store stamp (which an annotation write bumps) or a calendar edit invalidates both; no separate
+annotations-mtime key is needed because the rows live in the store. The bootstrap seed is derived from the same
+key, so a cached and a cold call agree.
 
 ### Edge cases
 
@@ -203,8 +222,7 @@ at exactly 20 %; determinism (same seed → identical CI); censored items exclud
 `tests/test_stability.py` — Theil–Sen slope on a known series (+1.0/wk on the del-combined WIP); `filling` on
 del-combined (WIP +1.0 vs throughput +0.3) and `overload` on a flat-throughput fixture; `stable` on a flat series;
 `dead_wip` when WIP ≫ KM median; `insufficient` with 3 buckets; only `overload` refuses a forecast.
-`tests/test_annotations.py` — round-trip POST/GET/DELETE; every kind renders; an unknown kind → 400; a free-text `note` is accepted and stored verbatim (tenant file only, never the store); atomic
-write (no partial file on a failed save); mtime invalidates the trend cache. `tests/test_trend.py` — `cycle_p85`
+`tests/test_annotations.py` — round-trip POST/GET/DELETE; every kind renders; an unknown kind → 400; a free-text `note` is accepted and stored verbatim in the `annotations` table; the store's `verify` passes with the allowlisted table + the `note` carve-out, and still rejects a free-text column on any *content* table; a transactional write leaves no partial row. `tests/test_trend.py` — `cycle_p85`
 equals `rules.cycle_time`'s p85; spans include the 20 Aug holiday; in-progress bucket excluded from the compare.
 `tests/test_server.py` — endpoint validation/cache. `app/test/prd61.test.mjs` — marker positions, span bands,
 verdict pill wording, four outcomes, phone markup (no hover-only), Markdown export.
@@ -217,7 +235,7 @@ verdict pill wording, four outcomes, phone markup (no hover-only), Markdown expo
 - The stability strip flags `filling` on del-combined (WIP 6 → 17, +1.0/wk vs throughput 8.2/wk, +0.3/wk; arrivals
   10.1/wk vs departures 8.2/wk, +25 items) and prints the Little's-Law sentence (`implied 1.4 wk vs measured
   0.6 wk`, `dead_wip`); the 20 Aug holiday span renders from the calendar with no manual entry.
-- Annotation CRUD round-trips, an unknown kind is a 400, a free-text note is accepted (tenant file only), and a second annotation in the same bucket forces `cant_tell`.
+- Annotation CRUD round-trips, an unknown kind is a 400, a free-text note is accepted into the `annotations` table (the store `verify` passes), and a second annotation in the same bucket forces `cant_tell`.
 - Every before/after on screen shows both `n`s, the CI and one of the four outcomes — never a bare p-value; the
   in-progress bucket never appears on either side.
 - Tests green (Python + node), including prd/45 conformance.
@@ -230,7 +248,7 @@ throughput series and the WIP flag), **62** (guardrails get the same before/afte
 `docs/concepts.md` §6 with *annotation* (a closed-vocabulary dated policy change), *before/after comparison* (item
 distributions either side of a split, with CI and outcome) and *stability flag* (Theil–Sen WIP/throughput slopes).
 
-Does **not**: claim causality or replace an experiment; put a note (or any free text) into the
-**store/classifier/LLM view** (the note is tenant-side metadata only, never imported); add AI attribution;
-benchmark against other teams; send alerts; forecast (prd/60); annotate automatically (if the product guessed a
-policy change, "did it work" would become "did the product's guess work").
+Does **not**: claim causality or replace an experiment; let a note (or any free text) reach the
+**event log / classifier / LLM view** (the note is first-party metadata in its own allowlisted table, never imported);
+add AI attribution; benchmark against other teams; send alerts; forecast (prd/60); annotate automatically (if the
+product guessed a policy change, "did it work" would become "did the product's guess work").
