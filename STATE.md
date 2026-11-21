@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1224** (`tests/`) + **99** (`scrape/tests`) + **453** (node `app/test`) green.
+Tests: **1260** (`tests/`) + **99** (`scrape/tests`) + **469** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -21,6 +21,11 @@ Tests: **1224** (`tests/`) + **99** (`scrape/tests`) + **453** (node `app/test`)
 - **Rolled first-pass yield (prd/62)** — %C&A per step and rolled (7.6 % at 90 d, 8.6 % at 120 d),
   a DORA-style stability panel (reopen 5.5 %, failed verification 4.1 %, review bounce 23.3 %), and a
   measured guardrail beside every speed lever; "held constant" is printed with its baseline.
+- **Throughput forecast (prd/60)** — a seeded 10,000-resample bootstrap over weekly **stories**
+  delivered (never points), with the interval as the headline (`20–30 of 30 · by 15 Dec`, P50 26,
+  24.5 % chance of all 30), the P85 date, the at-risk adjustment, and three honest refusals
+  (sparse / erratic / WIP overload — reading prd/61's flag). del-combined is `filling`: it forecasts,
+  but says the interval is optimistic and to plan at P85.
 - **QA hardening (prd/64)** — all 22 findings of the v0.11.1 free-exploring pass: phone clipping/touch
   targets, the `person:CaOs` holder leak, no fabricated refinement cost on a Jira-less store, Overview
   no longer mutates with a Queue toggle, affected-first rule drills, ticket detail age-vs-measured and
