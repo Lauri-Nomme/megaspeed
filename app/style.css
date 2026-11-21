@@ -2496,7 +2496,8 @@ tr.response-row:hover td, tr.response-row:focus-visible td { background: var(--b
 
 /* Stability: four compact tiles of *deliveries*, each with its cohort and n. */
 .stability-tiles {
-  display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+  display: grid;
+  grid-template-columns: minmax(0, .8fr) minmax(0, .9fr) minmax(0, 1fr) minmax(0, 1.7fr);
   gap: 1px; margin: 8px 0 4px; background: var(--border-hairline);
   border: 1px solid var(--border-hairline); border-radius: var(--radius-control);
   overflow: hidden;
@@ -2634,6 +2635,136 @@ tr.response-row:hover td, tr.response-row:focus-visible td { background: var(--b
 .aging-replan .c-id { width: 220px; }
 .aging-replan .c-age { width: 120px; }
 .aging-replan .c-who { width: auto; }
+/* prd/58 — the constraint verdict and the exploit → elevate ladder.
+ *
+ * A full-bleed panel with a hairline top rule (no shadow, no card grid): one
+ * claim, its numbers, and the ladder. Colour is state only — the constraint
+ * pill is a warning tint, a blocked elevation a neutral outline. Never red:
+ * a blocked elevation is a decision, not a fire.
+ */
+.verdict-panel {
+  border-top: 2px solid var(--warning-line, var(--border-control));
+  padding-bottom: calc(var(--density-pad) + 2px);
+}
+.verdict-panel .panel-head { flex-wrap: wrap; }
+.verdict-sentence {
+  margin: 2px 14px 4px; max-width: 112ch;
+  font-size: 17px; line-height: 1.45; font-weight: 600; color: var(--text-primary);
+}
+.verdict-tie {
+  margin: 0 14px 4px; font-size: 12px; color: var(--text-secondary); font-style: italic;
+}
+.verdict-meta { margin: 0 14px 8px; font-size: 12px; color: var(--text-secondary); }
+.verdict-pools {
+  display: grid;
+  grid-template-columns: minmax(0, .8fr) minmax(0, .9fr) minmax(0, 1fr) minmax(0, 1.7fr);
+  gap: 0 18px; margin: 8px 14px; padding: 6px 0;
+  border-top: 1px solid var(--border-hairline);
+  border-bottom: 1px solid var(--border-hairline);
+}
+.verdict-pools .vrow {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  min-width: 0;
+}
+.verdict-pools dt {
+  font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--text-secondary); white-space: nowrap;
+}
+.verdict-pools dd { margin: 0; font-size: 15px; font-weight: 700; text-align: right; white-space: nowrap; }
+.verdict-pools .clock-tag {
+  font-size: 9.5px; text-transform: none; letter-spacing: 0;
+  color: var(--text-tertiary);
+}
+.verdict-pools .phone-only { display: none; }
+.verdict-phone-only { display: none; }
+.verdict-clock {
+  margin: 4px 14px 8px; font-size: 12px; color: var(--text-tertiary);
+}
+.verdict-ladder { list-style: none; margin: 6px 0 0; padding: 0; }
+.verdict-ladder .rung { border-top: 1px solid var(--border-hairline); }
+.verdict-ladder .rung-line {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  min-height: 34px; padding: 4px 14px; cursor: pointer;
+}
+.verdict-ladder .rung-blocked .rung-line { cursor: default; }
+.verdict-ladder .rung-step {
+  min-width: 86px; font-size: 12px; font-weight: 600; letter-spacing: .02em;
+}
+.verdict-ladder .rung-count { font-size: 11px; }
+.verdict-ladder .rung-lab-inline { font-size: 11px; font-style: italic; }
+.verdict-ladder .rung-body {
+  padding: 0 14px 10px 110px;
+}
+.verdict-ladder .rung-rules, .verdict-ladder .rung-items {
+  list-style: none; margin: 0 0 6px; padding: 0;
+}
+.verdict-ladder .rung-rules li {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  padding: 3px 0; font-size: var(--body-font);
+}
+.verdict-ladder .rung-items-note {
+  margin: 6px 0 2px; font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: .06em; color: var(--text-tertiary);
+}
+.verdict-ladder .rung-items li {
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+  padding: 2px 0; font-size: 11.5px; color: var(--text-secondary);
+}
+.verdict-ladder .rung-lab {
+  margin: 4px 0 0; font-size: 11.5px; font-style: italic; color: var(--text-secondary);
+}
+.verdict-ladder .rung-rule-link {
+  font-size: var(--body-font); color: var(--text-primary); text-align: left;
+  background: none; border: 0; padding: 0; cursor: pointer;
+}
+.verdict-ladder .rung-rule-link:hover,
+.verdict-ladder .rung-rule-link:focus-visible { color: var(--link-strong); text-decoration: underline; }
+.verdict-ladder .rung-lab-fact { cursor: help; border-bottom: 1px dotted var(--border-control); }
+.verdict-ladder .lab-sep { color: var(--text-tertiary); }
+.verdict-ladder .rung-holder { margin: 4px 0 0; font-size: 11.5px; color: var(--text-secondary); }
+.verdict-ladder .rung-honesty {
+  margin: 3px 0 0; font-size: 11px; color: var(--text-tertiary);
+}
+.verdict-ladder .rung-reason { font-size: 12px; color: var(--text-primary); }
+.verdict-blocked-note {
+  margin: 0 14px 8px 110px; font-size: 11.5px; color: var(--text-tertiary);
+}
+.verdict-next { margin: 6px 14px 0; }
+.verdict-next summary { font-size: 11.5px; color: var(--text-secondary); cursor: pointer; }
+.verdict-next .table { margin-top: 6px; }
+.verdict-banner {
+  display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap;
+  padding: 7px 14px; margin-bottom: 8px;
+  border-top: 1px solid var(--border-hairline);
+  border-bottom: 1px solid var(--border-hairline);
+  background: var(--bg-surface-raised);
+}
+.verdict-banner .banner-text { font-size: 12.5px; }
+.rules-disclosure-bar {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 10px; flex-wrap: wrap; padding: 4px 14px;
+}
+.rules-disclosure-bar .muted { font-size: 11.5px; }
+.rules-next { margin: 8px 14px; }
+.rules-next > summary { font-size: 12px; color: var(--text-secondary); cursor: pointer; }
+.rules-next .rules-list { margin-top: 6px; }
+
+@media (max-width: 640px) {
+  /* prd/58 §Phone: the sentence keeps its words, the definition list drops to
+   * two rows, and the ladder becomes three stacked rows with 44 px targets. */
+  .verdict-sentence { font-size: 15px; margin: 2px 12px 4px; }
+  .verdict-pools { grid-template-columns: 1fr; margin: 8px 12px; }
+  .verdict-pools .phone-hide { display: none; }
+  .verdict-pools .phone-only { display: flex; }
+  .verdict-phone-only { display: block; }
+  .verdict-pools .vrow { min-height: 26px; }
+  .verdict-ladder .rung-line { min-height: 44px; padding: 6px 12px; }
+  .verdict-ladder .rung-body { padding: 0 12px 10px; }
+  .verdict-blocked-note { margin: 0 12px 8px; }
+  .verdict-ladder .rung-step { min-width: 72px; }
+  .verdict-next { margin: 6px 12px 0; }
+}
+
 @media (max-width: 640px) {
   /* the waterfall becomes four stacked rows; the tiles go 2 × 2 (prd/62) */
   .yield-waterfall { flex-direction: column; gap: 8px; }

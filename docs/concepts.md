@@ -598,6 +598,32 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
 - **Derivation**: per §2 constraint; **bots excluded, sentinel named**; a "mean wait N d" must use the
   §1 "d" (8 business hours = one working day).
 
+### Station, removable pool and the constraint verdict (prd/58)
+- **Station** — one of six fixed stages of the story value stream: `refine` (`created → ready`), `plan`
+  (`ready → sprint`), `start` (`sprint → in progress`), `develop` (`in progress → PR open`), `review`
+  (`PR open → first review` + `review rounds` + `final approval → merge`), `verify` (`merge →
+  verification` + `verification → done`). The stations **partition** the nine segments (§5): every
+  segment belongs to exactly one station, so two stations can never price the same wait.
+- **Removable pool** — a station's open wait an action can remove now: `live_hours` (in-station age of
+  open stories with a live PR — no open PR and no human event for 10 business days is `dead`, never
+  live) + `tail_hours` (Σ over completed stories of `max(0, station_hours − p85_station)`, where
+  `station_hours` is that story's sum over the station's segments). It is **not** the station's total
+  and is never added to `history_hours`; the tail is read against the station's own p85, so "abnormal"
+  means abnormal *for this team*.
+- **Constraint verdict** — the station with the largest removable pool, reported with its holder split,
+  its ties (within 10 %), and the adjacent findings (`dead` stories, `unmerged` PRs). One per store,
+  window and repo scope. **One canonical clock**: the pools are **story-clock** business hours measured
+  from the segment boundaries the ticket page draws (the assignee's calendar); the review detail's
+  holders are the **PR ball clock** (§2, each holder priced on their own calendar) and are never summed
+  with the story hours. Response time (§9) is a third metric and is never the verdict — that is why the
+  card can name one queue without the person-vs-role-vs-response ambiguity.
+- **The ladder (exploit → subordinate → elevate)** — the verdict's action order. `exploit` (chase the
+  owned items, review SLA, a round cap, clean the inputs) and `subordinate` (WIP/size policy) stay open
+  while their rules fire; `elevate` (more capacity: a second sentinel, reviewer spread) is **blocked**
+  while exploit items are still owed, and every rung carries the policy lab's own verdict (§6
+  "Policy-lab cross-check"). Lower-ranked rules are disclosed behind "next constraint"; the `measured`
+  diagnostics (survival, sprint on-time, worklog cross-check) never carry a rung and are never hidden.
+
 ### Rules / suggestions
 - **Definition**: the ranked "speed up delivery" suggestions, each with its evidence count and the
   items behind it (drill-down).

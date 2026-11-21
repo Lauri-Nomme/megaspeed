@@ -30,6 +30,8 @@ one failure this whole feature exists to prevent.
                                         in-flight age vs the team's own p50/p85/p95
                                         and the ranked chase list (prd/59)
     GET  /api/insights?level=&days=&repo=&tenant=   ranked "change this" rules (prd/17)
+    GET  /api/verdict?tenant=&days=&repo=           the one constraint, its holders,
+                                        and the exploit/elevate ladder (prd/58)
     GET  /api/pr-size?tenant=&size_commits=&size_lines=
                                         PR-size distributions + caps (prd/39)
     GET  /api/sprints?days=&tenant=     sprint lens (prd/26 P6): bands, scope
@@ -156,6 +158,7 @@ from analysis import rules as insights_rules  # noqa: E402  (prd/17 suggestions)
 from analysis import simulation as policy_lab  # noqa: E402  (prd/23 policy lab)
 from analysis import tickets as ticket_view  # noqa: E402  (prd/25 ticket detail)
 from analysis import trend as trend_view  # noqa: E402  (prd/50 time series)
+from analysis import verdict as verdict_view  # noqa: E402  (prd/58 the verdict)
 from ingest import store as pstore  # noqa: E402  (read helpers + schema guard only)
 from ingest import taxonomy  # noqa: E402  (closed vocabularies, read-only)
 from server import query as query  # noqa: E402  (filters, paging, aggregation)
@@ -1033,6 +1036,7 @@ ANALYSIS_PARAMS = {
     "delivery": ("days", "repo"),
     "aging": ("kind", "stage", "only", "days", "repo", "limit", "thresholds"),
     "insights": ("level", "days", "size_commits", "size_lines", "repo"),
+    "verdict": ("days", "repo"),
     "sprints": ("days",),
     "trend": ("metric", "bucket", "days", "repo"),
     "simulate": ("days", "scenario", "seed", "tolerance", "replications", "repo"),
@@ -1484,6 +1488,99 @@ def insights(request: Request):
     # sentinel" is answerable next to the worklog card without visiting Queue.
     payload["legend"] = analyse.person_legend(court, jira.stories if jira else None)
     return payload
+
+
+# prd/58: the constraint verdict. One entry per (tenant, store, calendar,
+# window, repo, advice window). The heavy inputs — the ball court, the ticket
+# layer and the prd/43 advice report — are already cached per (store, calendar,
+# window), so this endpoint adds one cohort pass and one rules pass, not five
+# simulations. A new ingest or a calendar edit makes the old key unreachable.
+_verdict_lock = threading.Lock()
+_verdict_cache: dict[tuple, dict] = {}
+VERDICT_CACHE_SIZE = 32
+
+
+@app.get("/api/verdict")
+def verdict(request: Request):
+    """The one current constraint, its holders, and the exploit → elevate ladder.
+
+    prd/58: the station with the largest **removable** pool (live in-station wait
+    + the completed stories' station hours above the station's own p85), on the
+    story clock. The review detail's holders are the PR ball clock and are never
+    summed with it. Every rung carries the policy lab's verdict from the *same*
+    cached prd/43 advice payload ``/api/insights`` uses, and ``elevate`` is
+    ``blocked`` while ``exploit`` items are still owed.
+
+    ``available: false`` with a stated reason (never a zero-filled card) when the
+    window has fewer than 20 completed stories or the largest pool is under one
+    waiting week; the full ranking still travels in ``pools``. An unknown repo is
+    a 400 listing the store's repos, never an empty verdict.
+    """
+    unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["verdict"]))
+    if unknown is not None:
+        return unknown
+    try:
+        days = _num_param(request, "days", minimum=0, maximum=3650)
+    except ValueError as exc:
+        return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["verdict"])))
+    try:
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    try:
+        with store_conn(path) as con:
+            bundle = _analysis_bundle(con, tenant, path)
+            try:
+                repo = _repo_param(request, bundle.court)
+            except ValueError as exc:
+                return _bad_request(
+                    str(exc), valid=list(_params(ANALYSIS_PARAMS["verdict"])),
+                )
+            jira = bundle.jira(con)
+            court, jira = _repo_scope(bundle.court, jira, repo)
+            # The same window /api/insights uses, so the advice cache entry (and
+            # the lab note on each rung) is literally the same object.
+            window = insights_rules.window_for(court, _days(days), jira)
+            key = (
+                tenant, str(path), _file_stamp(path), _calendar_key(tenant),
+                days, repo or "", pstore.iso(window[1]),
+            )
+            with _verdict_lock:
+                hit = _verdict_cache.get(key)
+            if hit is not None:
+                return JSONResponse(hit, headers={"X-Tenant": tenant})
+            cross_check = _advice_payload(
+                con, tenant, path, court, jira, window, repo,
+            )
+            # The ladder needs the *ranked* suggestions (titles, impact hours),
+            # exactly the list Rules shows. No new metric is computed here.
+            insights = insights_rules.insights(
+                court, bundle.threads(con), window, level="team",
+                bots=bundle.bots(con), sizes=bundle.sizes(con), jira=jira,
+                policy_lab=cross_check,
+                implied=(cross_check or {}).get("implied_yield"),
+                aging=_aging_thresholds(
+                    tenant, path, court, jira, window, repo,
+                    aging_view.thresholds_mode(),
+                ),
+            )
+            payload = verdict_view.verdict(
+                court, jira, window, insights.get("suggestions") or (),
+                cross_check,
+            )
+    except Exception as exc:  # noqa: BLE001
+        return _store_error(exc)
+    payload.update({
+        "tenant": tenant,
+        "repo": repo,
+        "assumption": court.assumption,
+        **court.calendar_warning(),
+    })
+    with _verdict_lock:
+        if len(_verdict_cache) >= VERDICT_CACHE_SIZE:
+            _verdict_cache.clear()
+        _verdict_cache[key] = payload
+    return JSONResponse(payload, headers={"X-Tenant": tenant})
 
 
 @app.get("/api/pr-size")

@@ -387,6 +387,9 @@ def attach(suggestions: list[dict], cross_check: dict | None) -> None:
             "label": entry["label"],
             "cycle_percent": entry["cycle_percent"],
             "delivered_percent": entry["delivered_percent"],
+            # prd/58: the ladder distinguishes "no clear effect" from "modelled
+            # slower" without re-parsing the note prose.
+            "within_noise": entry["within_noise"],
             "contradiction": entry["contradiction"],
             "supports": entry["supports"],
             # name the metric the note models, so a reader can see why it is here
