@@ -45,14 +45,18 @@ test('the tooltip names where the identity came from', () => {
 
 /* ---- the wiring -------------------------------------------------------- */
 
-test('the build identity sits in the meta strip on every page', () => {
+test('the build identity sits in the sidebar footer on every page', () => {
   const html = read('index.html');
   assert.match(html, /id="app-version"/);
-  // prd/63 D: it used to be a fixed footer that sat on top of content. In the
-  // meta strip it is in the flow and never overlays a table row.
-  const meta = html.slice(html.indexOf('<div class="meta"'), html.indexOf('<!-- Timeline -->'));
-  assert.match(meta, /id="app-version"/);
+  // It replaces the old "read-only · pseudonymised" nav note, in the sidebar
+  // footer — in the nav's flow, never overlaying a table row.
+  const nav = html.slice(html.indexOf('<div class="nav-foot"'), html.indexOf('</nav>'));
+  assert.match(nav, /id="app-version"/);
+  assert.doesNotMatch(html, /nav-note/);
   assert.doesNotMatch(html, /class="app-footer"/);
+  // and it is NOT in the meta strip any more (one home, so it stops moving)
+  const meta = html.slice(html.indexOf('<div class="meta"'), html.indexOf('<!-- Timeline -->'));
+  assert.doesNotMatch(meta, /id="app-version"/);
 });
 
 test('main.js fetches /api/meta once and renders it', () => {
@@ -71,11 +75,11 @@ test('main.js fetches /api/meta once and renders it', () => {
 
 test('the version line is in flow, never fixed over content', () => {
   const css = read('style.css');
-  assert.match(css, /\.meta \.build \{ color: var\(--text-tertiary\)/);
+  assert.match(css, /\.nav-foot \.build \{ color: var\(--text-tertiary\)/);
   // prd/63 D: no fixed build footer may overlay the content again.
   assert.doesNotMatch(css, /\.app-footer/);
   // no rule may hide the build label itself; only the empty `[hidden]` state
   // (a server older than /api/meta) is display:none.
   assert.doesNotMatch(css, /\.build\s*\{[^}]*display: none/s);
-  assert.match(css, /\.meta \.build\[hidden\] \{ display: none; \}/);
+  assert.match(css, /\.nav-foot \.build\[hidden\] \{ display: none; \}/);
 });

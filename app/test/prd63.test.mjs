@@ -301,8 +301,8 @@ test('prd/63 D: the Delivery median-× reason and the size-rule reason are state
 
 test('prd/63 D: the build tag is in flow and the phone columns wrap', () => {
   const html = read('index.html');
-  const meta = html.slice(html.indexOf('<div class="meta"'), html.indexOf('<!-- Timeline -->'));
-  assert.match(meta, /id="app-version"/);
+  const nav = html.slice(html.indexOf('<div class="nav-foot"'), html.indexOf('</nav>'));
+  assert.match(nav, /id="app-version"/);
   assert.doesNotMatch(html, /class="app-footer"/);
   const css = read('style.css');
   assert.doesNotMatch(css, /\.app-footer/);

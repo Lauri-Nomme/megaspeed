@@ -666,7 +666,6 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .nav-item.on { background: var(--bg-control-active); color: var(--text-primary); font-weight: 500; }
 .nav-foot { margin-top: auto; padding: 0 9px; display: flex; flex-direction: column; gap: 2px; }
 #nav-count { font-size: 10.5px; color: var(--text-secondary); }
-.nav-note { font-size: 10px; color: var(--text-tertiary); }
 
 /* --- main column ------------------------------------------------------- */
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -713,8 +712,8 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
  * (the third "Done in Jira" row at 1600 px, the TICKET EVENTS heading on a
  * phone). In the flow it is always visible and never overlays anything.
  * Tertiary: it is identity, never a status. */
-.meta .build { color: var(--text-tertiary); font-size: 10.5px; }
-.meta .build[hidden] { display: none; }
+.nav-foot .build { color: var(--text-tertiary); font-size: 10.5px; }
+.nav-foot .build[hidden] { display: none; }
 .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
