@@ -107,7 +107,7 @@ test('B16: the people level admits when it has no person signal', () => {
   const team = { level: 'person', suggestions: [{ scope: { kind: 'team' } }] };
   const note = personSignalNote(team);
   assert.match(note, /No person-level rule crosses its threshold/);
-  assert.match(note, /team rules below still apply/);
+  assert.match(note, /the team tab names the team-level rules/);
   const empty = personSignalNote({ level: 'person', suggestions: [] }, { below: false });
   assert.equal(empty, 'No person-level rule crosses its threshold in this window.');
   assert.equal(personSignalNote({ level: 'team', suggestions: [] }), '');
@@ -134,7 +134,10 @@ test('B16: the Markdown heading never says "(person)" over team rules', () => {
     note: '',
   };
   const markdown = rulesMarkdown(data);
-  assert.match(markdown, /\(team — no person-level signal in this window\)/);
+  // prd/63 F28: the export follows the people toggle (no team rules under it)
+  assert.match(markdown, /\(people — none\)/);
+  assert.match(markdown, /1 team rule is on the team tab/);
+  assert.doesNotMatch(markdown, /1 PR merged with no approval/);
   assert.match(markdown, /1 PR opened over 1 calendar day/);
   assert.doesNotMatch(markdown, /1 PRs/);
 });

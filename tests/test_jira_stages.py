@@ -388,10 +388,11 @@ class WorkflowLifecycleTests(StoreCase):
         metric = self.metric(workflow_fixture(), "waiting_time_decomposition")
         self.assertTrue(metric["available"])
         self.assertEqual(metric["stories_decomposed"], 1)
-        # the eight segments stay, with the last one split in two
+        # the segments stay, with the last one split in two
         self.assertEqual(metric["order"], [
             "created_ready", "ready_sprint", "sprint_in_progress",
-            "in_progress_pr_open", "pr_open_first_review", "review_rounds",
+            "in_progress_pr_open", "pr_open_reviewer_added",
+            "pr_open_first_review", "review_rounds",
             "final_approval_merge", "merge_verification", "verification_done",
         ])
         self.assertEqual(
@@ -401,6 +402,8 @@ class WorkflowLifecycleTests(StoreCase):
                 "ready_sprint": 0.0,            # no sprint membership
                 "sprint_in_progress": 0.0,
                 "in_progress_pr_open": 10.0,    # started +20 → PR open +30
+                # prd/63 V-C6: reviewers asked at open → a measured zero
+                "pr_open_reviewer_added": 0.0,
                 "pr_open_first_review": 5.0,    # +30 → first review +35
                 "review_rounds": 5.0,           # +35 → approval +40
                 "final_approval_merge": 10.0,   # +40 → merge +50
@@ -427,7 +430,7 @@ class WorkflowLifecycleTests(StoreCase):
         finally:
             con.close()
         rows = {row["key"]: row for row in payload["segments"]["rows"]}
-        self.assertEqual(len(rows), 9)
+        self.assertEqual(len(rows), 10)
         self.assertNotIn("merge_done", rows)
         self.assertTrue(rows["verification_done"]["available"])
         self.assertEqual(rows["verification_done"]["hours"], 30.0)
@@ -504,13 +507,13 @@ class BackwardCompatTests(StoreCase):
         finally:
             con.close()
 
-    def test_an_unconfigured_store_keeps_the_eight_segments(self):
+    def test_an_unconfigured_store_keeps_the_same_segments(self):
         metric = self.metric(legacy_fixture(), "waiting_time_decomposition")
         self.assertTrue(metric["available"])
         self.assertEqual(metric["order"], list(jira.SEGMENT_KEYS))
         self.assertNotIn("merge_verification", metric["segments"])
         self.assertNotIn("verification_done", metric["segments"])
-        # exactly today's numbers: eight segments, merge→done at the end
+        # exactly today's numbers, merge→done at the end
         self.assertEqual(
             {key: entry["hours"] for key, entry in metric["segments"].items()},
             {
@@ -518,6 +521,8 @@ class BackwardCompatTests(StoreCase):
                 "ready_sprint": 0.0,            # no sprint membership
                 "sprint_in_progress": 0.0,
                 "in_progress_pr_open": 10.0,    # started +30 → PR open +40
+                # prd/63 V-C6: reviewers asked at open → a measured zero
+                "pr_open_reviewer_added": 0.0,
                 "pr_open_first_review": 5.0,    # +40 → first review +45
                 "review_rounds": 5.0,           # +45 → approval +50
                 "final_approval_merge": 30.0,   # approval +50 → merge +80

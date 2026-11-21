@@ -139,13 +139,24 @@ export function trendChart(payload) {
   }).join('');
   const paths = trendPaths(geometry).map((points) => `<polyline points="${points}"
     fill="none" stroke="${line}" stroke-width="2" stroke-linejoin="round"/>`).join('');
-  const dots = geometry.points.filter((entry) => entry.y != null).map((entry) => `<circle
+  const dots = geometry.points.filter((entry) => entry.y != null).map((entry) => {
+    // prd/63 F8/V-A5: a bucket whose cohort is partly still open is
+    // right-censored — its median is over the survivors. The dot is hollow and
+    // titled so, instead of looking as settled as the others.
+    const censored = Boolean(entry.point.censored);
+    return `<circle
       cx="${entry.x}" cy="${entry.y}" r="${entry.point.in_progress ? 3 : 3.4}"
+      class="trend-dot${censored ? ' censored' : ''}"
       data-trend-point="${esc(entry.point.label)}"
       data-in-progress="${entry.point.in_progress ? 'true' : 'false'}"
-      ${entry.point.in_progress ? `fill="#fff" stroke="${line}" stroke-width="2"` : `fill="${line}"`}>
-      <title>${esc(`${entry.point.label}: ${trendValue(entry.point.value, unit)}${entry.point.in_progress ? ' (in progress)' : ''}`)}</title>
-    </circle>`).join('');
+      data-censored="${censored ? 'true' : 'false'}"
+      ${entry.point.in_progress || censored
+        ? `fill="none" stroke="${line}" stroke-width="${censored ? 1.2 : 2}"`
+        : `fill="${line}"`}>
+      <title>${esc(`${entry.point.label}: ${trendValue(entry.point.value, unit)}${entry.point.in_progress ? ' (in progress)' : ''}${censored
+        ? ` (right-censored: ${entry.point.censored} PR${entry.point.censored === 1 ? '' : 's'} opened in the bucket still open)` : ''}`)}</title>
+    </circle>`;
+  }).join('');
   const stamps = geometry.points.map((entry) => Date.parse(entry.point.start));
   const axis = [0, geometry.points.length - 1].map((index) => `<text
       x="${index === 0 ? PAD.left : WIDTH - PAD.right}" y="${HEIGHT - 8}"
@@ -160,16 +171,27 @@ export function trendChart(payload) {
   </svg>`;
 }
 
+/** Does a bucket's N clear the payload's minimum-cohort floor? */
+function summaryMinNReached(point, payload) {
+  const minN = Number((payload && payload.summary && payload.summary.min_n) ?? (payload && payload.min_n));
+  if (!Number.isFinite(minN) || minN <= 0) return true;
+  if (point && point.in_progress) return true; // labelled, never a headline
+  return Number(point && point.n || 0) >= minN;
+}
+
 /** The same series as a table — readable without hovering, and copyable. */
 export function trendTable(payload) {
   const points = (payload && payload.points) || [];
   if (!points.length) return '';
   const rows = points.map((point) => `<tr data-trend-row="${esc(point.label)}"
-      class="${point.in_progress ? 'in-progress' : ''}">
+      class="${point.in_progress ? 'in-progress' : ''}${point.censored ? ' censored' : ''}">
       <td class="mono" data-label="bucket">${esc(point.label)}</td>
       <td class="c-dur num" data-label="${esc(payload.label)}">${esc(trendValue(point.value, payload.unit))}${
-        point.in_progress ? ' <span class="muted">in progress</span>' : ''}</td>
-      <td class="c-dur num" data-label="n">${esc(point.n == null ? '–' : point.n)}</td>
+        point.in_progress ? ' <span class="muted">in progress</span>' : ''}${
+        point.censored ? ` <span class="muted" title="right-censored: this bucket's cohort includes PRs that are still open">right-censored${
+          point.censored ? ` (${esc(point.censored)} open)` : ''}</span>` : ''}</td>
+      <td class="c-dur num" data-label="n">${esc(point.n == null ? '–' : point.n)}${
+        summaryMinNReached(point, payload) ? '' : ' <span class="muted" title="below the minimum cohort — drawn, not headlined">low n</span>'}</td>
     </tr>`).join('');
   return `<table class="table compact trend-table"><thead><tr>
       <th>bucket</th><th class="c-dur num">${esc(payload.label || 'value')}</th>
@@ -184,19 +206,54 @@ export function trendStats(payload) {
   // prd/63 B8: the headline is the latest *settled* bucket (the server already
   // chose it), names its label and its N, and never compares against an empty
   // in-progress bucket.
+  // prd/63 F8/V-A5: the headline also respects the metric's minimum cohort
+  // (n ≥ min_n). When no bucket clears it the strip says so instead of
+  // quoting an n=1 / n=3 number as a trend; the latest low-N bucket is named
+  // so the reader knows which one was skipped.
   const latest = summary.latest;
   const label = summary.latest_label;
   const active = (summary.in_progress || [])[0];
+  const minN = summary.min_n;
+  const below = Array.isArray(summary.below_min) ? summary.below_min : [];
+  const lowAfter = Array.isArray(summary.low_n_after_headline)
+    ? summary.low_n_after_headline : [];
+  if (latest == null) {
+    const newest = below.length ? below[below.length - 1] : null;
+    return `<span class="stat-inline"><b>–</b> no bucket meets the n≥${esc(minN ?? 5)} floor${
+      newest ? ` (the latest measured bucket, ${esc(newest.label)}, has n=${esc(newest.n)})` : ''}</span>
+      <span class="stat-inline"><b>${summary.measured_buckets || 0}</b>/${summary.buckets || 0} buckets measured</span>
+      ${active ? `<span class="stat-inline"><b>${esc(active)}</b> in progress</span>` : ''}`;
+  }
   return `<span class="stat-inline"><b>${latest == null ? '–' : esc(trendValue(latest, payload.unit))}</b> latest${
     label ? ` (${esc(label)}${summary.latest_n != null ? ` · n=${esc(summary.latest_n)}` : ''})` : ''}${
     summary.latest_provisional ? ' <span class="muted">provisional</span>' : ''}</span>
     <span class="stat-inline"><b>${summary.measured_buckets || 0}</b>/${summary.buckets || 0} buckets measured</span>
     ${summary.change == null ? '' : `<span class="stat-inline">${esc(trendChange(summary, payload.unit))} since the first measured bucket</span>`}
+    ${summary.latest_censored
+      ? `<span class="stat-inline censored" title="the bucket is right-censored: PRs opened in it have not merged yet, so they cannot enter the median">right-censored${summary.latest_censored_n
+        ? ` · ${esc(summary.latest_censored_n)} from that bucket still open` : ''}</span>`
+      : ''}
+    ${lowAfter.length
+      ? `<span class="stat-inline muted" title="a bucket below the minimum cohort is drawn and named, but is not the headline">${esc(lowAfter.length)} newer bucket${lowAfter.length === 1 ? '' : 's'} below n≥${esc(minN ?? 5)}${lowAfter.length ? ` (${esc(lowAfter.join(', '))})` : ''}</span>`
+      : ''}
     ${active ? `<span class="stat-inline"><b>${esc(active)}</b> in progress${summary.latest_provisional ? '' : ' (not in the headline)'}</span>` : ''}`;
 }
 
+/** The error state a failed `/api/trend` fetch renders — never a spinner. */
+export function trendErrorMarkup(message) {
+  const text = String(message || 'the request failed');
+  return `<div class="trend-error" role="alert" data-trend-error="true">
+    <p><b>The trend did not load.</b> ${esc(text)}</p>
+    <p class="muted">This is the request's error, not an empty chart: the metric,
+      bucket and scope are still in the URL, so a retry (or reload) asks the
+      server the same question again.</p>
+    <button type="button" class="chip" data-trend-retry>Retry the trend</button>
+  </div>`;
+}
+
 /** Tabs + chart + table. `bucket` switches week/sprint. */
-export function trendMarkup(payload, { bucket = 'week', enabled = true } = {}) {
+export function trendMarkup(payload, { bucket = 'week', enabled = true, error = null } = {}) {
+  if (error) return trendErrorMarkup(error);
   if (!payload) return '<p class="empty-row">Loading the trend…</p>';
   const tabs = `<div class="trend-toolbar">
       <div class="seg" id="trend-metrics" role="tablist" aria-label="metric">${trendTabs(payload)}</div>
@@ -210,11 +267,15 @@ export function trendMarkup(payload, { bucket = 'week', enabled = true } = {}) {
   if (!payload.available && !(payload.points || []).length) {
     return `${tabs}<p class="empty-row">${esc(payload.note || 'No trend for this metric in this store.')}</p>`;
   }
+  const censored = (payload.points || []).filter((point) => point.censored).length;
   return `${tabs}
     <div class="trend-body" ${enabled ? '' : 'data-benchmark-off="true"'}>
       ${trendChart(payload)}
       ${trendTable(payload)}
     </div>
+    ${censored ? `<p class="panel-note" data-trend-censored="${censored}">a hollow point is
+      right-censored: the bucket's cohort still has open PRs, so only the merged ones
+      can enter its value.</p>` : ''}
     ${payload.note ? `<p class="panel-note">${esc(payload.note)}</p>` : ''}`;
 }
 
@@ -229,7 +290,8 @@ export function trendMarkdown(payload) {
     `| bucket | ${payload.label || 'value'} | n |`,
     '| --- | --- | --- |',
     ...(payload.points || []).map((point) =>
-      `| ${point.label}${point.in_progress ? ' (in progress)' : ''} | ` +
+      `| ${point.label}${point.in_progress ? ' (in progress)' : ''}${
+        point.censored ? ` (right-censored${point.censored ? `: ${point.censored} still open` : ''})` : ''} | ` +
       `${trendValue(point.value, payload.unit)} | ${point.n == null ? '–' : point.n} |`),
   ];
   return lines.join('\n');

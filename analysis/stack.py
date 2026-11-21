@@ -538,8 +538,8 @@ def metrics(court: ballcourt.BallCourt, window: tuple[datetime, datetime]) -> di
     available = graph.refs > 0
     if not available:
         note = (
-            "no PR carries source/target ref digests: the store predates prd/22, "
-            "so the stack DAG cannot be derived (re-ingest to measure it)"
+            "no PR carries source/target ref digests: this store predates the stack "
+            "measurement, so the stack DAG cannot be derived (re-ingest to measure it)"
         )
     elif not stacks:
         note = "every PR targets its own branch (or main): the corpus has no stacked PRs"

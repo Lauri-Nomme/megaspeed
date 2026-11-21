@@ -98,13 +98,22 @@ export function latenessLine(metric) {
 /** One bar per point size: median logged hours, plus its story count. */
 export function pointsBars(metric) {
   const byPoints = (metric && metric.logged_by_points) || {};
+  // prd/63 V-A4: the map arrives through JSON, where a size key is a string —
+  // and a store can serialise "1.0" (DuckDB returns the points column as a
+  // float). A size is a label, so read every key as a number and look the
+  // value up by that number: "1.0", 1 and "1" are the same bucket.
   const sizes = Object.keys(byPoints)
     .map(Number)
     .filter((value) => Number.isFinite(value))
     .sort((a, b) => a - b);
-  const max = sizes.reduce((best, size) => Math.max(best, Number(byPoints[size]) || 0), 0);
+  const lookup = new Map();
+  for (const [key, value] of Object.entries(byPoints)) {
+    const size = Number(key);
+    if (Number.isFinite(size)) lookup.set(size, value);
+  }
+  const max = sizes.reduce((best, size) => Math.max(best, Number(lookup.get(size)) || 0), 0);
   return sizes.map((size) => {
-    const hours = Number(byPoints[String(size)]) || 0;
+    const hours = Number(lookup.get(size)) || 0;
     return {
       points: size,
       hours,

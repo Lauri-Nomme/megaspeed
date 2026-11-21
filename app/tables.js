@@ -62,6 +62,27 @@ export function waitingLabel(row) {
 }
 
 /**
+ * Who approved a PR, for the drawer's "approvals" fact.
+ *
+ * prd/63 regression: the drawer read `row.approved`, which the delivery row
+ * never carried, so a 1/2-approved PR printed "approvals: none". Prefer the
+ * real approver names (both payloads carry them now); fall back to the count
+ * the row has always had, and never say "none" when the count says otherwise.
+ */
+export function approvalsLabel(source) {
+  if (!source) return 'none';
+  const names = Array.isArray(source.approved)
+    ? source.approved.filter(Boolean).map(String)
+    : [];
+  if (names.length) return names.join(', ');
+  const count = Number(source.reviewers_approved || 0);
+  if (count > 0) {
+    return `${count} approval${count === 1 ? '' : 's'} (the store holds the count, not the names)`;
+  }
+  return 'none';
+}
+
+/**
  * prd/40: the one-line state of a PR, from the server's status vector.
  *
  * "needs rework by X · 2/3 reviewers pending · ready to merge since T" — the
@@ -264,9 +285,16 @@ export function scopeTargets(entity) {
 }
 
 /** The delivery list as Markdown: the same rows and wording as the table. */
-export function deliveryMarkdown(rows, meta, base = '') {
+export function deliveryMarkdown(rows, meta, base = '', { tab = null, counts = null } = {}) {
+  // prd/63 F6: the export covers the active tab, so its title names it —
+  // "Delivery list — 1 open item" on the Blocked tab hid that it was 1 of 8.
+  const label = TABS.find((entry) => entry.id === tab);
+  const total = counts && counts.all != null ? Number(counts.all) : null;
+  const title = label && total != null && rows.length !== total
+    ? `Delivery list — ${label.label}: ${rows.length} of ${total}`
+    : `Delivery list — ${rows.length} open item${rows.length === 1 ? '' : 's'}`;
   const header = [
-    `# Delivery list — ${rows.length} open item${rows.length === 1 ? '' : 's'}`,
+    `# ${title}`,
     '',
     meta ? `_${meta}_` : '',
     '',
@@ -350,6 +378,19 @@ export function sentinelNames(rows) {
     }
   }
   return [...names].sort();
+}
+
+/** What an empty "Needs attention" says — scoped, and never a false "nothing". */
+export function scopeEmptyAttention(scoped, scope, counts) {
+  const open = Number((counts && counts.open) || 0);
+  if (!scoped) return 'No open item is waiting right now.';
+  const label = esc((scope && (scope.label || scope.value)) || 'this scope');
+  if (!open) {
+    return `No open PR in ${label} — nothing is waiting, blocked or orphaned in this scope.`;
+  }
+  return `No open item in ${label} needs a nudge right now: ` +
+    `${open} open PR${open === 1 ? ' is a normal review' : 's are normal reviews'} — ` +
+    'none blocked, stalled, stale or waiting on one holder.';
 }
 
 /** The Overview card, or '' when nothing is orphaned and no ticket is Done-open. */
@@ -608,13 +649,35 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
   const waitHours = scopedWait;
   // prd/38 #25: the list is the actionable subset, not the whole table, so when
   // it is truncated say how many are left instead of silently showing six.
-  const attention = delivery ? tabRows(delivery, 'blocked').filter(
-    (row) => !scoped || matchesScope(row, scope),
-  ).concat(
-    tabRows(delivery, 'oldest').filter(
-      (row) => !row.blocked && (!scoped || matchesScope(row, scope)),
-    ),
-  ) : [];
+  // prd/63 V-A11: "needs attention" is the union of *every* set that needs a
+  // nudge in this scope — blocked, waiting over a week, an orphaned approval
+  // (any age), and a stale item — de-duplicated by PR. The card above could
+  // say "1 orphaned approval · 2 d 0 h" while this list said "No open item is
+  // waiting right now", because a 2-day orphan is neither blocked nor over a
+  // week. Scope the union, never the team-wide rows.
+  const scopedRows = delivery ? rowsForScope : [];
+  const attentionRows = [];
+  const seenAttention = new Set();
+  const pushAttention = (row) => {
+    if (!row || seenAttention.has(row.object_id)) return;
+    seenAttention.add(row.object_id);
+    attentionRows.push(row);
+  };
+  if (delivery) {
+    for (const row of tabRows(delivery, 'blocked')) {
+      if (!scoped || matchesScope(row, scope)) pushAttention(row);
+    }
+    for (const row of tabRows(delivery, 'oldest')) {
+      if (!row.blocked && (!scoped || matchesScope(row, scope))) pushAttention(row);
+    }
+    for (const row of orphanedApprovals(delivery)) {
+      if (!scoped || matchesScope(row, scope)) pushAttention(row);
+    }
+    for (const row of scopedRows) {
+      if (row.stale) pushAttention(row);
+    }
+  }
+  const attention = attentionRows;
   const rows = attention.slice(0, 6);
   const hidden = Math.max(0, attention.length - rows.length);
   const overloadedLabel = overloaded.length === 1 ? `overloaded ${one}` : `overloaded ${noun}`;
@@ -665,7 +728,7 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
                    data-go="delivery">+${hidden} more open item${hidden === 1 ? '' : 's'} →</button>
                    <span class="muted">the full triage list</span></p>`
               : ''}`
-    : '<div class="empty-row">No open item is waiting right now.</div>'}
+    : `<div class="empty-row">${scopeEmptyAttention(scoped, scope, counts)}</div>`}
       </section>
       <section class="panel">
         <div class="panel-head"><h2>Where waits accumulate</h2>

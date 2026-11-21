@@ -268,7 +268,7 @@ def by_id(payload: dict, suggestion_id: str) -> dict | None:
 # 1. waiting-time decomposition (prd/21 §1)
 # --------------------------------------------------------------------------- #
 class WaitingTimeTests(StoreCase):
-    def test_the_eight_segments_are_measured_exactly(self):
+    def test_the_segments_are_measured_exactly(self):
         metric = self.metric(balanced_fixture(), "waiting_time_decomposition")
         self.assertTrue(metric["available"])
         self.assertEqual(metric["stories"], 1)
@@ -279,6 +279,9 @@ class WaitingTimeTests(StoreCase):
             "ready_sprint": 10.0,
             "sprint_in_progress": 10.0,
             "in_progress_pr_open": 10.0,
+            # prd/63 V-C6: reviewers are on the roster at open in this fixture,
+            # so the "waiting for a reviewer" interval is a measured zero.
+            "pr_open_reviewer_added": 0.0,
             "pr_open_first_review": 10.0,
             "review_rounds": 20.0,          # first review +50 → approval +70
             "final_approval_merge": 10.0,

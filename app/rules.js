@@ -25,9 +25,63 @@ export function fmtImpact(hours) {
   return `≈${fmtHours(value)}`;
 }
 
-/** "median_hours" -> "median", "merged_prs" -> "merged PRs". */
+/** Evidence labels a reader can use: no snake_case, no internal doc nouns. */
+
+//: prd/63 V-B: the closed segment vocabulary, in the words the ticket page uses.
+const SEGMENT_LABELS = {
+  created_ready: 'created → ready',
+  ready_sprint: 'ready → sprint',
+  sprint_in_progress: 'sprint → in progress',
+  in_progress_pr_open: 'in progress → PR open',
+  pr_open_reviewer_added: 'PR open → reviewer added',
+  pr_open_first_review: 'waiting for a first review',
+  review_rounds: 'review rounds',
+  final_approval_merge: 'final approval → merge',
+  merge_done: 'merge → done',
+  merge_verification: 'merge → verification',
+  verification_done: 'verification → done',
+};
+
+export function segmentLabel(key) {
+  return SEGMENT_LABELS[String(key)] || String(key || '').replace(/_/g, ' ');
+}
+
+//: prd/63 V-B: a metric id is an identifier; the rule card shows the question.
+const METRIC_LABELS = {
+  sprint_delivery: 'sprint delivery',
+  carry_over: 'carry-over',
+  comment_tax: 'comment tax',
+  rework_loops: 'review rounds',
+  survival: 'time to merge',
+  stale_prs: 'stale PRs',
+  worklog_cross_check: 'worklog',
+  waiting_time_decomposition: 'waiting time',
+  flow_efficiency: 'flow efficiency',
+  sentinel_tail: 'sentinel tail',
+  pr_size: 'PR size',
+  time_to_first_review: 'first review',
+  cycle_time: 'cycle time',
+  reviewer_responsiveness: 'reviewer response',
+  rebase_waste: 'rebase waste',
+  conformance: 'conformance',
+  sentinel_queue: 'sentinel queue',
+  vacation_blocking: 'vacation',
+  stacked_cascade: 'stacked PRs',
+  point_churn: 'point churn',
+  jira_conformance: 'Jira conformance',
+};
+
+export function metricLabel(id) {
+  return METRIC_LABELS[String(id)] || String(id || '').replace(/_/g, ' ');
+}
+
 export function evidenceLabel(key) {
   if (key === 'diff_size_pending') return 'diff size';
+  // prd/63 F28/V-B: the decomposition's segment key is a fact, not an
+  // identifier: "created_ready" reads as "biggest segment".
+  if (key === 'segment_key') return 'biggest segment';
+  // prd/63 V-A10: the relationship itself is a labelled fact.
+  if (key === 'relationship') return 'relationship';
   // prd/46 §5: the worklog card's headline evidence reads as prose.
   const worklog = {
     points_logged_correlation: 'points ↔ logged r',
@@ -76,6 +130,9 @@ export function evidenceLabel(key) {
 export function evidenceValue(key, value) {
   if (value == null || value === '') return '–';
   if (key === 'diff_size_pending') return value ? 'pending' : 'captured';
+  // prd/63 V-B: closed-vocabulary keys are rendered as their human segment
+  // names, not as `created_ready`.
+  if (key === 'segment_key') return segmentLabel(value);
   if (typeof value === 'boolean') return value ? 'yes' : 'no';
   if (typeof value === 'number') {
     // A policy target is fixed, not estimated, so it takes no `≈` (B19).
@@ -198,7 +255,9 @@ function drillItem(row, suggestion, base = '') {
     value = fmtHours(row.hours);
     detail = `only ${row.person || 'sentinel'} · since ${String(row.waiting_since || '').slice(0, 10)}`;
   } else if (metric === 'stale_prs') {
-    value = row.age_business_days == null ? fmtHours(row.age_hours) : `${row.age_business_days} business days`;
+    // prd/63 V-B: one duration language. "2.41 business days" was a second
+    // unit beside "2 d 1 h"; the age is business hours and fmtHours spells it.
+    value = fmtHours(row.age_hours);
     detail = (row.reasons || []).join(' · ');
   } else if (metric === 'point_churn') {
     value = `${row.events ?? 0} re-point${row.events === 1 ? '' : 's'}`;
@@ -330,8 +389,8 @@ function drillMarkup(suggestion, metrics, base) {
     </tr>`;
   }).join('');
   const cap = items.length > shown.length
-    ? `<p class="drill-more">showing the first ${shown.length} of ${items.length} — the
-        full list is in <span class="mono">metrics.${esc(suggestion.metric)}.rows</span></p>`
+    ? `<p class="drill-more">showing the first ${shown.length} of ${items.length} items
+        (each a link; the export carries the first 25)</p>`
     : '';
   return `<details class="rule-drill" data-rule-drill="${esc(suggestion.id)}">
     <summary><span>${count}</span>
@@ -408,7 +467,10 @@ export function ruleRow(suggestion, { base = '', metrics = {} } = {}) {
       <div class="rule-main">
         <div class="rule-top">
           <span class="pill ${esc(severity)}">${esc(severity)}</span>
-          <span class="rule-metric mono">${esc(suggestion.metric)}</span>
+          <span class="rule-metric mono">${esc(metricLabel(suggestion.metric))}</span>
+          ${(suggestion.evidence || {}).relationship === 'correlation'
+            ? '<span class="pill neutral" data-relationship="correlation" title="the two numbers move together; that is not proof that one causes the other">correlation</span>'
+            : ''}
           ${(suggestion.evidence || {}).live_state
             ? '<span class="pill neutral" data-live-state="true" title="describes the live state at the snapshot, not only the chosen timeframe">live</span>'
             : ''}
@@ -479,21 +541,46 @@ export function personSignalNote(data, { below = true } = {}) {
     .filter((suggestion) => suggestion.scope && suggestion.scope.kind === 'person');
   if (personRules.length) return '';
   return 'No person-level rule crosses its threshold in this window' +
-    (below ? '; the team rules below still apply.' : '.');
+    (below ? '; the team tab names the team-level rules.' : '.');
 }
 
 export function rulesMarkup(data, { base = '', prSize = null, caps = null } = {}) {
-  const suggestions = (data && data.suggestions) || [];
-  const note = personSignalNote(data, { below: suggestions.length > 0 });
+  const all = (data && data.suggestions) || [];
+  // prd/63 F28: the `people` toggle used to relabel the same team list. It now
+  // filters: a person-level card shows only person-scoped rules, and when
+  // there is none it says so (with the team count) instead of repeating them.
+  const personLevel = Boolean(data && data.level === 'person');
+  const personRules = all.filter(
+    (suggestion) => suggestion.scope && suggestion.scope.kind === 'person',
+  );
+  const teamRules = all.filter(
+    (suggestion) => !(suggestion.scope && suggestion.scope.kind === 'person'),
+  );
+  const suggestions = personLevel ? personRules : all;
+  const note = personSignalNote(data, { below: teamRules.length > 0 });
   const lab = labBestLine(data);
+  const teamLink = personLevel && teamRules.length && !suggestions.length
+    ? ` <button type="button" class="link" data-rule-level="team">show the ${teamRules.length} team rule${teamRules.length === 1 ? '' : 's'} →</button>`
+    : '';
+  // A person-level list is a filter, not the whole page: say where the team
+  // rules went (the toggle is the other tab).
+  const teamHint = personLevel && suggestions.length && teamRules.length
+    ? `<p class="rules-note" data-team-hint>Showing the ${suggestions.length} person-level rule${
+      suggestions.length === 1 ? '' : 's'}; the ${teamRules.length} team rule${
+      teamRules.length === 1 ? ' is' : 's are'} on the team tab. ${
+      `<button type="button" class="link" data-rule-level="team">show them →</button>`
+    }</p>`
+    : '';
   if (!suggestions.length) {
     return `<div class="rules-empty">
-      ${note ? `<p>${esc(note)}</p>` : ''}
+      ${note ? `<p>${esc(note)}${teamLink}</p>` : ''}
       ${lab ? `<p class="rules-lab" data-lab-best>${esc(lab)}</p>` : ''}
-      <p>No rule crosses its threshold in this window.</p>
-      <p class="muted">That is a result, not a missing screen: first review under 24 h, cycle
-        time under 9 d (72 business hours), two review rounds or fewer, no lost approvals.
-        Widen the timeframe or switch to people to check the per-person rules.</p>
+      <p>${personLevel
+        ? 'No person-level rule crosses its threshold in this window.'
+        : 'No rule crosses its threshold in this window.'}</p>
+      <p class="muted">${personLevel
+        ? `Person rules name a pseudonym and a per-person threshold; ${teamRules.length} team rule${teamRules.length === 1 ? ' is' : 's are'} on the team tab.`
+        : 'That is a result, not a missing screen: first review under 24 h, cycle time under 9 d (72 business hours), two review rounds or fewer, no lost approvals. Widen the timeframe or switch to people to check the per-person rules.'}</p>
     </div>
     ${worklogPanel((data && data.metrics && data.metrics.worklog_cross_check) || null)}
     ${prSizePanel(prSize, { caps })}
@@ -520,7 +607,8 @@ export function rulesMarkup(data, { base = '', prSize = null, caps = null } = {}
     if (index >= 0) rows.splice(index + 1, 0, worklog);
     else rows.push(worklog);
   }
-  return `${note ? `<p class="rules-note">${esc(note)}</p>` : ''}
+  return `${note ? `<p class="rules-note">${esc(note)}${teamLink}</p>` : ''}
+    ${teamHint}
     ${lab ? `<p class="rules-lab" data-lab-best>${esc(lab)}</p>` : ''}
     <div class="rules-list">${rows.join('')}</div>
     ${reworkPanel((data && data.rework) || null, { base })}`;
@@ -528,23 +616,39 @@ export function rulesMarkup(data, { base = '', prSize = null, caps = null } = {}
 
 export function rulesMarkdown(data, base = '') {
   if (!data) return '';
-  const note = personSignalNote(data, { below: (data.suggestions || []).length > 0 });
-  const personRules = (data.suggestions || [])
-    .some((suggestion) => suggestion.scope && suggestion.scope.kind === 'person');
+  const all = data.suggestions || [];
+  const personLevel = data.level === 'person';
+  const personRules = all.filter(
+    (suggestion) => suggestion.scope && suggestion.scope.kind === 'person',
+  );
+  // prd/63 F28: the export follows the toggle. On the people tab it lists the
+  // person rules only; the team rules are a heading and a count, not a repeat.
+  const listed = personLevel ? personRules : all;
+  const note = personLevel && !personRules.length
+    ? `No person-level rule crosses its threshold in this window; ` +
+      `${all.length} team rule${all.length === 1 ? ' is' : 's are'} on the team tab.`
+    : '';
   // B16: the heading must not claim "(person)" over team rules.
-  const level = data.level === 'person'
-    ? (personRules ? 'person' : 'team — no person-level signal in this window')
+  const level = personLevel
+    ? (personRules.length ? 'person' : 'people — none')
     : (data.level || 'team');
   const dataset = data.dataset || {};
   const outside = dataset.prs_outside_window || 0;
+  const prs = Number(data.sample.prs || 0);
+  const days = Number(data.sample.days || 0);
+  // prd/63 F28: "7 PRs opened before the window and is not in the cohort" mixed
+  // the cohort and the excluded set in one singular clause. Both are counts of
+  // PRs, so both pluralise.
+  const cohortLine = `${prs} PR${prs === 1 ? '' : 's'} opened over ` +
+    `${days} calendar day${days === 1 ? '' : 's'}` +
+    (outside
+      ? ` of a ${dataset.days}-day dataset — ${outside} PR${outside === 1 ? '' : 's'} ` +
+        `opened before the window ${outside === 1 ? 'is' : 'are'} not in the cohort`
+      : '');
   const lines = [
     `# Rules — what should we change first? (${level})`,
     '',
-    `_${data.sample.prs}${outside ? ` of ${dataset.prs}` : ''} PR` +
-      `${data.sample.prs === 1 && !outside ? '' : 's'} opened over ` +
-      `${data.sample.days} calendar day${data.sample.days === 1 ? '' : 's'}` +
-      (outside ? ` of a ${dataset.days}-day dataset — ${outside} PR${outside === 1 ? '' : 's'} ` +
-        'opened before the window and is not in the cohort' : '') + ` · ` +
+    `_${cohortLine} · ` +
       `${data.hours_mode === 'business' ? 'business hours (1 d = 8 h)' : 'wall-clock hours'} · ` +
       `snapshot ${data.as_of}_`,
     '',
@@ -558,7 +662,7 @@ export function rulesMarkdown(data, base = '') {
   }
   const lab = labBestLine(data);
   if (lab) lines.push(`_${lab}._`, '');
-  for (const suggestion of data.suggestions) {
+  for (const suggestion of listed) {
     const facts = evidenceItems(suggestion.evidence)
       .map((fact) => `${fact.label} ${markdownLinkTickets(fact.value, base)}`).join(' · ');
     const shared = suggestion.at_stake && suggestion.at_stake.attributed_to
@@ -567,10 +671,12 @@ export function rulesMarkdown(data, base = '') {
       `## ${suggestion.rank}. ${suggestion.title}`,
       '',
       `- severity: ${suggestion.severity}`,
-      `- metric: ${suggestion.metric}`,
+      `- metric: ${metricLabel(suggestion.metric)}`,
       `- impact: ${fmtImpact(suggestion.impact_hours)} (confidence ${suggestion.confidence})${shared}${
         (suggestion.evidence || {}).impact_assumed ? ' — assumed, not measured' : ''}`,
       `- rule: ${suggestion.suggestion}`,
+      ...((suggestion.evidence || {}).relationship === 'correlation'
+        ? ['- relationship: correlation — the two numbers move together; that is not proof that one causes the other'] : []),
       ...(suggestion.policy_lab && suggestion.policy_lab.note
         ? [`- policy lab${suggestion.policy_lab.best ? ' (best scenario)' : ''}: ${suggestion.policy_lab.note}`] : []),
       `- evidence: ${facts}`,

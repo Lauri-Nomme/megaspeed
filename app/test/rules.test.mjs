@@ -130,7 +130,9 @@ test('a long list states the cap and its cost', () => {
   const html = rulesMarkup(data, { base: '' });
   assert.equal((html.match(/data-drill-item=/g) || []).length, DRILL_LIMIT);
   assert.match(html, new RegExp(`showing the first ${DRILL_LIMIT} of ${DRILL_LIMIT + 5}`));
-  assert.match(html, /metrics\.rework_loops\.rows/);
+  // prd/63 V-B: no internal metric path in rendered prose
+  assert.doesNotMatch(html, /metrics\.rework_loops\.rows/);
+  assert.match(html, /each a link; the export carries the first 25/);
 });
 
 test('a metric with no rows renders no drill-down at all', () => {

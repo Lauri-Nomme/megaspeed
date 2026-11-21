@@ -286,6 +286,45 @@ class TrendValueTests(StoreCase):
         in_progress = [point for point in payload["points"] if point["in_progress"]]
         self.assertNotEqual(summary["latest_label"], in_progress[0]["label"])
 
+    def test_the_headline_needs_the_minimum_cohort_and_marks_censoring(self):
+        """prd/63 F8/V-A5: no n=1/n=3 headline, and a censored latest bucket.
+
+        The fixture's cycle median has one 5-PR week and one 2-PR week; the
+        weekly merged counts are exact. A ratio/median bucket below the floor
+        stays drawn and is listed as skipped, never quoted as "latest".
+        """
+        con, court, data, window = self.load()
+        try:
+            cycles = trend.trend(court, data, window, metric="cycle_median")
+            on_time = trend.trend(
+                court, data, window, metric="on_time", bucket="sprint",
+            )
+        finally:
+            con.close()
+        summary = cycles["summary"]
+        self.assertEqual(summary["min_n"], 5)
+        self.assertEqual(summary["latest_label"], "5 Jan")
+        self.assertEqual(summary["latest_n"], 5)
+        # the 12 Jan bucket (2 merged PRs) is drawn but below the floor
+        self.assertEqual(summary["below_min"], [{"label": "12 Jan", "n": 2}])
+        self.assertEqual(summary["low_n_after_headline"], ["12 Jan"])
+        # a partly-open bucket carries its censored cohort (1 PR still open)
+        flow = trend.trend(court, data, window, metric="flow_efficiency")
+        jan19 = next(p for p in flow["points"] if p["label"] == "19 Jan")
+        self.assertTrue(jan19["available"])
+        self.assertEqual(jan19["censored"], 1)
+        # an empty merged cohort is unavailable, not "cycle 0 h"
+        cycle19 = next(p for p in cycles["points"] if p["label"] == "19 Jan")
+        self.assertFalse(cycle19["available"])
+        self.assertEqual(cycle19["censored"], 1)
+        # one closed sprint per bucket is n=1: with a floor of 2 there is no
+        # headline to quote, and the payload says why.
+        self.assertEqual(on_time["summary"]["min_n"], 2)
+        self.assertIsNone(on_time["summary"]["latest"])
+        self.assertEqual(
+            [entry["n"] for entry in on_time["summary"]["below_min"]], [1, 1]
+        )
+
     def test_the_payload_names_the_metric_and_its_definition(self):
         con, court, data, window = self.load()
         try:
@@ -294,7 +333,10 @@ class TrendValueTests(StoreCase):
             con.close()
         self.assertEqual(payload["metric"], "cycle_median")
         self.assertEqual(payload["unit"], "hours")
-        self.assertIn("rules.cycle_time", payload["definition"])
+        # prd/63 V-B: rendered prose names the metric, never an internal module
+        # or function (`rules.cycle_time`).
+        self.assertIn("PR open → merged", payload["definition"])
+        self.assertNotIn("rules.", payload["definition"])
         self.assertEqual(
             [entry["id"] for entry in payload["metrics"]],
             ["flow_efficiency", "cycle_median", "on_time", "wait_hours",

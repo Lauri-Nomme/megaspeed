@@ -105,6 +105,10 @@ export function fmtCalendarDuration(ms) {
   if (hours < 24) return `${hours} h${mins % 60 ? ` ${mins % 60} min` : ''}`;
   const days = Math.floor(hours / 24);
   const rest = hours % 24;
+  // prd/63 V-B: a long wall-clock span is stated in whole calendar days. The
+  // hour remainder on a 802-day lifecycle ("802 calendar days 1 h") mixed two
+  // units in one sentence and added nothing; under a week the remainder stays.
+  if (days >= 7) return `${days} calendar day${days === 1 ? '' : 's'}`;
   return `${days} calendar day${days === 1 ? '' : 's'}${rest ? ` ${rest} h` : ''}`;
 }
 

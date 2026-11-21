@@ -279,7 +279,7 @@ class StoreCase(unittest.TestCase):
 # analysis/tickets.py
 # --------------------------------------------------------------------------- #
 class TicketCycleTests(StoreCase):
-    def test_the_eight_segments_and_the_boundary_timestamps(self):
+    def test_the_segments_and_the_boundary_timestamps(self):
         con, court, data = self.load()
         try:
             payload = tickets.ticket(court, data, "DEL-167")
@@ -294,7 +294,7 @@ class TicketCycleTests(StoreCase):
         self.assertEqual(payload["story"]["cycle_hours"], 90.0)
         segments = payload["segments"]
         self.assertEqual(segments["order"], list(jira.SEGMENT_KEYS))
-        self.assertEqual(segments["measured"], 8)
+        self.assertEqual(segments["measured"], 9)
         self.assertEqual(segments["total_hours"], 90.0)
         self.assertEqual(
             {row["key"]: row["hours"] for row in segments["rows"]},
@@ -303,6 +303,10 @@ class TicketCycleTests(StoreCase):
                 "ready_sprint": 10.0,
                 "sprint_in_progress": 10.0,
                 "in_progress_pr_open": 10.0,
+                # prd/63 V-C6: the reviewer was on the roster at open here, so
+                # "waiting for a reviewer" is a measured zero and the review
+                # wait keeps its 10 h.
+                "pr_open_reviewer_added": 0.0,
                 "pr_open_first_review": 10.0,
                 "review_rounds": 20.0,       # first review +50 → approval +70
                 "final_approval_merge": 10.0,
@@ -317,8 +321,8 @@ class TicketCycleTests(StoreCase):
         self.assertEqual(
             list(segments["boundaries"]),
             ["created", "refined", "ready", "sprint", "started", "in_review",
-             "in_verification", "pr_open", "first_review", "approval", "merged",
-             "done"],
+             "in_verification", "pr_open", "reviewer_added", "first_review",
+             "approval", "merged", "done"],
         )
         self.assertEqual(
             sorted(name for name, entry in segments["boundaries"].items()
@@ -330,6 +334,51 @@ class TicketCycleTests(StoreCase):
         # flow efficiency is per segment, and the worklog lands in sprint→started
         self.assertEqual(segments["rows"][2]["active_hours"], 4.0)
         self.assertEqual(segments["rows"][2]["efficiency"], 0.4)
+
+    def test_waiting_for_a_reviewer_is_its_own_interval(self):
+        """prd/63 V-C6: DEL-167 #53 sat three business days with no reviewer.
+
+        The first reviewer *add* is the new boundary; the wait before it is
+        named "waiting for a reviewer" and is separable from the first-review
+        wait, so a median first-review time cannot hide it.
+        """
+        fx = Fixture()
+        fx.story("DEL-310", T0, points=3, state="done",
+                 closed=T0 + timedelta(hours=60))
+        fx.pointed("DEL-310", T0 + timedelta(hours=10), 3)
+        fx.status("DEL-310", T0 + timedelta(hours=20), "in_progress")
+        fx.status("DEL-310", T0 + timedelta(hours=60), "done",
+                  from_status="in_progress")
+        # PR open +20; nobody asked until +44 (24 h later); first review +50
+        fx.pr(70, "AaAa", T0 + timedelta(hours=20), tickets=("DEL-310",),
+              closed=T0 + timedelta(hours=58))
+        fx.pr_event(70, "reviewer_changed", "AaAa", 24, change="added",
+                    reviewers=("RrRr",), people=("RrRr",), tickets=("DEL-310",))
+        fx.pr_event(70, "comment_added", "RrRr", 30, severity="suggestion",
+                    tickets=("DEL-310",))
+        fx.pr_event(70, "pr_approved", "RrRr", 34, tickets=("DEL-310",))
+        fx.pr_event(70, "pr_merged", "AaAa", 38, tickets=("DEL-310",))
+        con, court, data = self.load(fx)
+        try:
+            payload = tickets.ticket(court, data, "DEL-310")
+        finally:
+            con.close()
+        rows = {row["key"]: row for row in payload["segments"]["rows"]}
+        self.assertEqual(rows["pr_open_reviewer_added"]["hours"], 24.0)
+        self.assertEqual(rows["pr_open_reviewer_added"]["label"],
+                         "waiting for a reviewer")
+        self.assertEqual(rows["pr_open_first_review"]["hours"], 6.0)
+        self.assertEqual(rows["pr_open_reviewer_added"]["bounds"],
+                         ["pr_open", "reviewer_added"])
+        self.assertEqual(payload["segments"]["order"].count("pr_open_reviewer_added"), 1)
+        # the boundary is a real timestamp, and the two waits sum to the span
+        # from the PR opening to its first review
+        self.assertEqual(payload["segments"]["boundaries"]["reviewer_added"]["ts"],
+                         (T0 + timedelta(hours=44)).isoformat() + "Z")
+        self.assertEqual(
+            rows["pr_open_reviewer_added"]["hours"] + rows["pr_open_first_review"]["hours"],
+            30.0,
+        )
 
     def test_a_sprint_chip_measures_done_by_the_close_not_by_now(self):
         # prd/37: the ticket's sprint chip and the sprint lens share one
@@ -440,9 +489,12 @@ class TicketCycleTests(StoreCase):
         # prd/63 V-A6: a Done-in-Jira story with an open PR has a measured ticket
         # cycle but a censored change.
         self.assertEqual(payload["answer_kind"], "done_with_open_pr")
-        self.assertIn("DEL-167 took 90 h from created to done", payload["answer"])
+        # prd/63 V-B: one duration language — 90 business hours is "11 d 2 h",
+        # never "90 h" beside a "21 d 0 h" on the same page.
+        self.assertIn("DEL-167 took 11 d 2 h from created to done", payload["answer"])
         self.assertIn("review rounds", payload["answer"])
-        self.assertIn("20 h", payload["answer"])
+        self.assertIn("2 d 4 h", payload["answer"])
+        self.assertNotRegex(payload["answer"], r"\d+\.\d+ h")
         self.assertNotIn("cannot say", payload["answer"])
         # prd/63 V-A6: the unmerged share of the *change*, not only the fact
         # that a PR is open, and the headline kind says the delivery is censored.
@@ -907,8 +959,8 @@ class TicketApiTests(unittest.TestCase):
         self.assertEqual(reply.headers.get("x-tenant"), "del")
         self.assertEqual(body["key"], "DEL-167")
         self.assertEqual(body["story"]["points"], 8)
-        self.assertEqual(len(body["segments"]["rows"]), 8)
-        self.assertEqual(len(body["segments"]["boundaries"]), 12)
+        self.assertEqual(len(body["segments"]["rows"]), 9)
+        self.assertEqual(len(body["segments"]["boundaries"]), 13)
         self.assertEqual(body["pr_count"], 2)
         self.assertEqual(body["worklog"]["worklogs"], 1)
         self.assertEqual(body["sprints"]["memberships"][0]["sprint_id"], 1)

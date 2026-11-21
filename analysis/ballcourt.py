@@ -2342,6 +2342,11 @@ def delivery_list(
             "reviewers_total": len(roster),
             "reviewers_pending": len(pending),
             "reviewers_approved": len(approved),
+            # prd/63 regression: the drawer's "approvals: none" read `approved`
+            # from a row that never carried it, so a 1/2-approved PR looked
+            # unapproved. Name the approvers (the count alone cannot say who),
+            # matching the ticket payload's PR fact.
+            "approved": sorted(approved),
             "phase": phase_now,
             "last_phase": current.phase if current else "no events",
             "kind": kind,
