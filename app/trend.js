@@ -267,18 +267,50 @@ export function cumulativeFlowLegend(payload) {
     <span class="muted">cumulative PRs by stage, binned on each bucket's end</span></p>`;
 }
 
+/** What the min-N floor counts: the bucket cohort (`n`) or a sprint's stories.
+ *
+ * prd/64 F-17: a sprint bucket holds one sprint, so its `n` is always 1 and an
+ * `n≥2` bucket floor can never be met. The server sends `min_n_basis` so the
+ * strip and the table say "5 committed stories" instead of pretending to count
+ * buckets.
+ */
+function minNBasis(payload) {
+  if (!payload) return 'n';
+  return (payload.summary && payload.summary.min_n_basis) || payload.min_n_basis || 'n';
+}
+
 /** Does a bucket's N clear the payload's minimum-cohort floor? */
 function summaryMinNReached(point, payload) {
   const minN = Number((payload && payload.summary && payload.summary.min_n) ?? (payload && payload.min_n));
   if (!Number.isFinite(minN) || minN <= 0) return true;
   if (point && point.in_progress) return true; // labelled, never a headline
-  return Number(point && point.n || 0) >= minN;
+  const basis = minNBasis(payload);
+  return Number((point && point[basis]) || 0) >= minN;
+}
+
+/** The floor in its own words: "n≥5" or "5 committed stories". */
+function floorText(minN, payload) {
+  const floor = esc(minN ?? 5);
+  return minNBasis(payload) === 'stories'
+    ? `${floor} committed stories`
+    : `n≥${floor}`;
+}
+
+/** The cohort cell for one point, in the floor's own quantity. */
+function pointCohortText(point, payload) {
+  if (minNBasis(payload) === 'stories') {
+    const done = point && point.done_by_end != null ? point.done_by_end : '–';
+    const stories = point && point.stories != null ? point.stories : '–';
+    return `${done}/${stories} stories`;
+  }
+  return point && point.n != null ? String(point.n) : '–';
 }
 
 /** The same series as a table — readable without hovering, and copyable. */
 export function trendTable(payload) {
   const points = (payload && payload.points) || [];
   if (!points.length) return '';
+  const basis = minNBasis(payload);
   const rows = points.map((point) => `<tr data-trend-row="${esc(point.label)}"
       class="${point.in_progress ? 'in-progress' : ''}${point.censored ? ' censored' : ''}">
       <td class="mono" data-label="bucket">${esc(point.label)}</td>
@@ -286,12 +318,15 @@ export function trendTable(payload) {
         point.in_progress ? ' <span class="muted">in progress</span>' : ''}${
         point.censored ? ` <span class="muted" title="right-censored: this bucket's cohort includes PRs that are still open">right-censored${
           point.censored ? ` (${esc(point.censored)} open)` : ''}</span>` : ''}</td>
-      <td class="c-dur num" data-label="n">${esc(point.n == null ? '–' : point.n)}${
-        summaryMinNReached(point, payload) ? '' : ' <span class="muted" title="below the minimum cohort — drawn, not headlined">low n</span>'}</td>
+      <td class="c-dur num" data-label="${esc(basis === 'stories' ? 'stories' : 'n')}">${esc(pointCohortText(point, payload))}${
+        summaryMinNReached(point, payload) ? '' : ` <span class="muted" title="below the minimum cohort — ${
+          esc(floorText(Number(payload.summary && payload.summary.min_n), payload))} — drawn, not headlined">low n</span>`}</td>
     </tr>`).join('');
   return `<table class="table compact trend-table"><thead><tr>
       <th>bucket</th><th class="c-dur num">${esc(payload.label || 'value')}</th>
-      <th class="c-dur num" title="the cohort behind the point (PRs or sprints)">n</th>
+      <th class="c-dur num" title="${basis === 'stories'
+        ? 'the sprint\'s stories delivered by its close ÷ committed'
+        : 'the cohort behind the point (PRs or sprints)'}">${basis === 'stories' ? 'stories' : 'n'}</th>
     </tr></thead><tbody>${rows}</tbody></table>`;
 }
 
@@ -302,35 +337,53 @@ export function trendStats(payload) {
   // prd/63 B8: the headline is the latest *settled* bucket (the server already
   // chose it), names its label and its N, and never compares against an empty
   // in-progress bucket.
-  // prd/63 F8/V-A5: the headline also respects the metric's minimum cohort
-  // (n ≥ min_n). When no bucket clears it the strip says so instead of
-  // quoting an n=1 / n=3 number as a trend; the latest low-N bucket is named
-  // so the reader knows which one was skipped.
+  // prd/63 F8/V-A5: the headline also respects the metric's minimum cohort.
+  // When no bucket clears it the strip says so instead of quoting an n=1 / n=3
+  // number as a trend; the latest low-N bucket is named so the reader knows
+  // which one was skipped.
+  // prd/64 F-17: on a sprint bucket the floor counts the sprint's committed
+  // stories, so the headline reads "(S2 · 15/30 stories)" and the delta names
+  // the sprint it is measured from — never "n=1" or an n≥2 bucket floor that
+  // one sprint per bucket could never meet.
   const latest = summary.latest;
   const label = summary.latest_label;
   const active = (summary.in_progress || [])[0];
   const minN = summary.min_n;
+  const basis = minNBasis(payload);
   const below = Array.isArray(summary.below_min) ? summary.below_min : [];
   const lowAfter = Array.isArray(summary.low_n_after_headline)
     ? summary.low_n_after_headline : [];
   if (latest == null) {
     const newest = below.length ? below[below.length - 1] : null;
-    return `<span class="stat-inline"><b>–</b> no bucket meets the n≥${esc(minN ?? 5)} floor${
-      newest ? ` (the latest measured bucket, ${esc(newest.label)}, has n=${esc(newest.n)})` : ''}</span>
+    const detail = newest
+      ? (basis === 'stories'
+        ? ` (the latest measured sprint, ${esc(newest.label)}, has ${esc(newest.stories ?? '–')} committed stories)`
+        : ` (the latest measured bucket, ${esc(newest.label)}, has n=${esc(newest.n)})`)
+      : '';
+    return `<span class="stat-inline"><b>–</b> ${
+      basis === 'stories'
+        ? `no sprint meets the ${esc(minN ?? 5)} committed-story floor`
+        : `no bucket meets the n≥${esc(minN ?? 5)} floor`}${detail}</span>
       <span class="stat-inline"><b>${summary.measured_buckets || 0}</b>/${summary.buckets || 0} buckets measured</span>
       ${active ? `<span class="stat-inline"><b>${esc(active)}</b> in progress</span>` : ''}`;
   }
+  const cohort = basis === 'stories'
+    ? `${esc(summary.latest_done_by_end ?? '–')}/${esc(summary.latest_stories ?? '–')} stories`
+    : (summary.latest_n != null ? `n=${esc(summary.latest_n)}` : '');
+  const since = basis === 'stories' && summary.first_label
+    ? esc(summary.first_label)
+    : 'the first measured bucket';
   return `<span class="stat-inline"><b>${latest == null ? '–' : esc(trendValue(latest, payload.unit))}</b> latest${
-    label ? ` (${esc(label)}${summary.latest_n != null ? ` · n=${esc(summary.latest_n)}` : ''})` : ''}${
+    label ? ` (${esc(label)}${cohort ? ` · ${cohort}` : ''})` : ''}${
     summary.latest_provisional ? ' <span class="muted">provisional</span>' : ''}</span>
     <span class="stat-inline"><b>${summary.measured_buckets || 0}</b>/${summary.buckets || 0} buckets measured</span>
-    ${summary.change == null ? '' : `<span class="stat-inline">${esc(trendChange(summary, payload.unit))} since the first measured bucket</span>`}
+    ${summary.change == null ? '' : `<span class="stat-inline">${esc(trendChange(summary, payload.unit))} since ${since}</span>`}
     ${summary.latest_censored
       ? `<span class="stat-inline censored" title="the bucket is right-censored: PRs opened in it have not merged yet, so they cannot enter the median">right-censored${summary.latest_censored_n
         ? ` · ${esc(summary.latest_censored_n)} from that bucket still open` : ''}</span>`
       : ''}
     ${lowAfter.length
-      ? `<span class="stat-inline muted" title="a bucket below the minimum cohort is drawn and named, but is not the headline">${esc(lowAfter.length)} newer bucket${lowAfter.length === 1 ? '' : 's'} below n≥${esc(minN ?? 5)}${lowAfter.length ? ` (${esc(lowAfter.join(', '))})` : ''}</span>`
+      ? `<span class="stat-inline muted" title="a bucket below the minimum cohort is drawn and named, but is not the headline">${esc(lowAfter.length)} newer bucket${lowAfter.length === 1 ? '' : 's'} below ${floorText(minN, payload)}${lowAfter.length ? ` (${esc(lowAfter.join(', '))})` : ''}</span>`
       : ''}
     ${active ? `<span class="stat-inline"><b>${esc(active)}</b> in progress${summary.latest_provisional ? '' : ' (not in the headline)'}</span>` : ''}`;
 }
@@ -391,17 +444,19 @@ export function trendMarkup(payload, { bucket = 'week', enabled = true, error = 
 /** Copy-as-Markdown: the points, the annotations, the verdict and the stability. */
 export function trendMarkdown(payload, { compare = null } = {}) {
   if (!payload) return '';
+  const basis = minNBasis(payload);
+  const cohortHead = basis === 'stories' ? 'stories' : 'n';
   const lines = [
     `# ${payload.label || 'Trend'} per ${payload.bucket}`,
     '',
     `${payload.definition || ''}`,
     '',
-    `| bucket | ${payload.label || 'value'} | n |`,
+    `| bucket | ${payload.label || 'value'} | ${cohortHead} |`,
     '| --- | --- | --- |',
     ...(payload.points || []).map((point) =>
       `| ${point.label}${point.in_progress ? ' (in progress)' : ''}${
         point.censored ? ` (right-censored${point.censored ? `: ${point.censored} still open` : ''})` : ''} | ` +
-      `${trendValue(point.value, payload.unit)} | ${point.n == null ? '–' : point.n} |`),
+      `${trendValue(point.value, payload.unit)} | ${esc(pointCohortText(point, payload))} |`),
   ];
   const extra = [
     annotationMarkdown(payload),

@@ -317,12 +317,17 @@ class TrendValueTests(StoreCase):
         cycle19 = next(p for p in cycles["points"] if p["label"] == "19 Jan")
         self.assertFalse(cycle19["available"])
         self.assertEqual(cycle19["censored"], 1)
-        # one closed sprint per bucket is n=1: with a floor of 2 there is no
-        # headline to quote, and the payload says why.
-        self.assertEqual(on_time["summary"]["min_n"], 2)
+        # prd/64 F-17: a sprint bucket holds exactly one sprint, so the bucket
+        # count is not a sample. Its floor is the sprint's committed stories
+        # (≥5); this fixture's sprints commit 2 stories each, so there is still
+        # no headline to quote — and the payload says which quantity is short.
+        self.assertEqual(on_time["summary"]["min_n"], 5)
+        self.assertEqual(on_time["summary"]["min_n_basis"], "stories")
         self.assertIsNone(on_time["summary"]["latest"])
         self.assertEqual(
-            [entry["n"] for entry in on_time["summary"]["below_min"]], [1, 1]
+            on_time["summary"]["below_min"],
+            [{"label": "S1", "n": 1, "stories": 2},
+             {"label": "S2", "n": 1, "stories": 2}],
         )
 
     def test_the_payload_names_the_metric_and_its_definition(self):
