@@ -27,9 +27,7 @@ from pathlib import Path
 
 from . import fixtures as fixtures_mod
 from .config import Config, REPO_ROOT, filter_scope, load_config
-from .live import run
 from .scrape import DEFAULT_OVERLAP_HOURS
-from .store import connect, imported_scope, verify
 from .transport import BitbucketError, FixtureTransport, HttpTransport
 
 
@@ -187,6 +185,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.verify:
+        # Import side: DuckDB is needed here, not on the scrape side, so the
+        # scrape subcommand above must stay importable without it.
+        from .store import connect, imported_scope, verify
+
         if not cfg.db_path.exists():
             print(f"no store at {cfg.db_path} — run: python3 -m ingest --fixture --n 50", file=sys.stderr)
             return 2
@@ -280,6 +282,10 @@ def main(argv: list[str] | None = None) -> int:
                         file=sys.stderr,
                     )
                 limit = args.n
+
+        # The one-shot dev shortcut only: scrape + import in one process, which
+        # is why the import-side dependency is loaded here and nowhere else.
+        from .live import run
 
         report = run(
             cfg,
