@@ -64,6 +64,15 @@ import {
 
 const $ = (id) => document.getElementById(id);
 const LS_KEY = 'megaspeed.ui.v1';
+/* prd/64 F-09: the view a bare link — and an unusable `?view=` — lands on. */
+const DEFAULT_ENTRY_PAGE = 'overview';
+/* prd/64 F-04: the Overview's headline tiles query their own canonical levels,
+ * so the Queue/Blocking toggles cannot mutate another page's numbers. The
+ * measured wait is the role-level handover graph ("each handover once"); the
+ * overloaded/diagnosis tile is the person-level chart, because "overloaded"
+ * is a person aggregate (docs/concepts.md). Each tile names that basis. */
+const OVERVIEW_QUEUE_LEVEL = 'person';
+const OVERVIEW_BLOCKING_LEVEL = 'queue';
 
 const PAGES = {
   overview: { title: 'Overview', question: 'What needs attention?' },
@@ -131,6 +140,11 @@ const state = {
   agingSource: 'self',
   queues: null,
   blocking: null,
+  // prd/64 F-04: the Overview's own payloads, always fetched at the canonical
+  // levels above. The Queue/Blocking pages keep `queues` / `blocking` at the
+  // level their own toggle selects.
+  overviewQueues: null,
+  overviewBlocking: null,
   // prd/26 P6: the sprint lens (`/api/sprints`): bands, scope, carry-over.
   sprints: null,
   // prd/50: the trend view (`/api/trend`) and the metric/bucket being shown.
@@ -352,7 +366,10 @@ function presetWindow() {
  * never painted onto another view: those views show the preset window they
  * really query. */
 function renderTimeframe() {
-  const custom = state.timeframeCustom;
+  // prd/64 F-10: a sprint lens (or a brush/zoom) is a *timeline* window. On
+  // every other view the preset is what the data queries, so the preset stays
+  // pressed; only the timeline can show a custom chip.
+  const custom = state.page === 'timeline' && state.timeframeCustom;
   for (const button of $('timeframe').querySelectorAll('button[data-tf]')) {
     const active = !custom && button.dataset.tf === state.timeframe;
     button.setAttribute('aria-pressed', String(active));
@@ -848,15 +865,35 @@ async function ensureData(page) {
     }
     state.aging = cached(agingKey);
   }
-  if (page === 'blocking' || page === 'overview') {
+  if (page === 'blocking') {
     const key = `blocking:${tenant}:${state.timeframe}:${state.blockingLevel}:${repo}:${stamp}`;
     if (!cached(key)) state.cache.set(key, await getJSON(withTenant(`/api/blocking?level=${state.blockingLevel}&${q}`)));
     state.blocking = cached(key);
   }
-  if (page === 'queue' || page === 'overview') {
+  if (page === 'queue') {
     const key = `queues:${tenant}:${state.timeframe}:${state.queueLevel}:${repo}:${stamp}`;
     if (!cached(key)) state.cache.set(key, await getJSON(withTenant(`/api/queues?level=${state.queueLevel}&${q}`)));
     state.queues = cached(key);
+  }
+  if (page === 'overview') {
+    // prd/64 F-04: Overview never reads the levels the Queue/Blocking pages
+    // happen to have selected. It asks its own canonical questions — the
+    // role-level handover graph for the measured wait, the person-level chart
+    // for "overloaded" — and its labels quote those payloads' basis.
+    const blockingKey = `blocking:${tenant}:${state.timeframe}:${OVERVIEW_BLOCKING_LEVEL}:${repo}:${stamp}`;
+    if (!cached(blockingKey)) {
+      state.cache.set(blockingKey, await getJSON(withTenant(
+        `/api/blocking?level=${OVERVIEW_BLOCKING_LEVEL}&${q}`,
+      )));
+    }
+    state.overviewBlocking = cached(blockingKey);
+    const queueKey = `queues:${tenant}:${state.timeframe}:${OVERVIEW_QUEUE_LEVEL}:${repo}:${stamp}`;
+    if (!cached(queueKey)) {
+      state.cache.set(queueKey, await getJSON(withTenant(
+        `/api/queues?level=${OVERVIEW_QUEUE_LEVEL}&${q}`,
+      )));
+    }
+    state.overviewQueues = cached(queueKey);
   }
   if (page === 'trend') {
     // prd/50: one endpoint per metric+bucket; the cache key names both, so
@@ -1075,6 +1112,8 @@ function resetTenantData() {
   state.delivery = null;
   state.blocking = null;
   state.queues = null;
+  state.overviewBlocking = null;
+  state.overviewQueues = null;
   state.sprints = null;
   state.sprint = null;
   state.rules = null;
@@ -1112,6 +1151,9 @@ function resetTenantData() {
 async function setTenant(name, { silent = false } = {}) {
   if (!name) return;
   toggleTenantMenu(false);
+  // prd/64 F-09: a user edit is the end of the link that produced a fallback
+  // notice. Clear it before the switch's own notice (if any) replaces it.
+  if (!silent) setNotice('');
   if (name === state.tenant && state.meta) return;
   // prd/25: a ticket page survives a dataset switch — the key is looked up in
   // the new store, and its absence there is a stated 404, not a blank page.
@@ -1239,6 +1281,12 @@ function clearSprintFocus({ sync = true } = {}) {
   if (state.sprint == null) return;
   state.sprint = null;
   timeline.setSprintFocus(null);
+  // prd/64 F-13: focusing a sprint made the window custom. Clearing the lens
+  // must restore the preset the top bar still names (1q), not leave the canvas
+  // parked on the sprint's dates under a `custom` chip.
+  state.timeframeCustom = false;
+  applyTimeframeToTimeline();
+  renderTimeframe();
   renderSprintStrip();
   if (sync) syncUrl();
   saveUI();
@@ -1737,7 +1785,7 @@ async function applyRoute() {
       setScope(route.scope.kind, route.scope.value, { silent: true });
     }
     if (route.timeframe && TIMEFRAMES[route.timeframe] && route.timeframe !== state.timeframe) {
-      setTimeframe(route.timeframe);
+      setTimeframe(route.timeframe, { silent: true });
     }
     // prd/63 F30/F21: a shared Trend tab pair or lab scenario is route state.
     // prd/59: a `?tab=aging` link selects the Aging subset (and pins it, so the
@@ -1844,6 +1892,24 @@ function renderBlockingStats() {
        <span class="stat-inline">mean <b>${fmtHours(totals.mean_wait_hours || 0)}</b></span>
        <span class="stat-inline"><b>${totals.nodes || 0}</b> nodes</span>
        <span class="stat-inline muted">handover wait — not response time</span>`;
+}
+
+/* prd/64 F-11: the inspector's Blocking chip acts on the selected row, so the
+ * map opens with that row's station (or holder) selected instead of unpanned on
+ * the whole graph. Passing `select()` only when the node differs keeps it a
+ * focus rather than a toggle-off. */
+function focusBlockingRow(row) {
+  if (!row) return false;
+  const candidates = [
+    row.ball_label, row.ball, ...(row.waiting_on || []),
+    ...Object.keys(row.waiting_roles || {}), row.phase,
+  ].filter(Boolean);
+  const id = candidates.find((candidate) =>
+    blockingMap.nodes.some((node) => String(node.id) === String(candidate)));
+  if (!id) return false;
+  if (blockingMap.selected !== id) blockingMap.select(id);
+  renderBlockingStats();
+  return true;
 }
 
 async function openNodeQueue(node) {
@@ -2267,9 +2333,12 @@ function renderOverviewPage() {
   $('overview').innerHTML = verdictCard(state.verdict, { base: appBase() })
     + overviewMarkup({
     delivery: state.delivery,
-    queues: state.queues,
-    blocking: state.blocking,
-    queueLevel: state.queueLevel,
+    // prd/64 F-04: the canonical overview payloads, never the Queue/Blocking
+    // page's current level. The tiles and diagnosis therefore stay put when a
+    // toggle is flipped elsewhere, and their basis line is the truth.
+    queues: state.overviewQueues,
+    blocking: state.overviewBlocking,
+    queueLevel: OVERVIEW_QUEUE_LEVEL,
     scope: state.scope,
     base: appBase(),
   });
@@ -2380,6 +2449,26 @@ function selectRow(objectId) {
   }
 }
 
+/* prd/64 F-12: the drawer answers two different questions that used to share
+ * keys: the live status (`waiting on author: yes`, `CI: not running`) and the
+ * measured phase spans (`waiting on author · measured: —`). The spans sit under
+ * a PHASES subheading with distinct keys, so no key appears twice and the
+ * unobserved tail explains why a `yes` can sit beside a measured `—`. */
+const MEASURED_PHASES = ['waiting', 'active', 'review', 'ci', 'rebasing', 'unobserved'];
+
+function measuredPhaseFacts({ hoursOf, benchmarks = {}, calendar = false }) {
+  return [
+    ['PHASES', calendar ? 'measured spans · calendar time' : 'measured spans · business hours'],
+    ...MEASURED_PHASES.map((phase) => [
+      phase === 'unobserved'
+        ? 'unobserved (no events since the snapshot)'
+        : `${PHASE[phase].label} · measured`,
+      hoursOf(phase),
+      benchmarks[phase] || null,
+    ]),
+  ];
+}
+
 function openPrDrawer(pr, row = null) {
   // A timeline click has no row in hand; the delivery payload usually knows the
   // same PR, and its review facts are what make the drawer complete (M6).
@@ -2433,23 +2522,22 @@ function openPrDrawer(pr, row = null) {
       ? row.commits
       : (pr.commit_count ?? (pr.commits ? pr.commits.length : 0)))],
     ...(row ? [
-      ['waiting on author', row.author_open ? `yes · ${fmtHours(row.waiting_hours)}` : 'no'],
+      // prd/64 F-12: live status only. The duration belongs to the measured
+      // span below (and, for #66, to the unobserved tail, not a wait phase).
+      ['waiting on author', row.author_open ? 'yes' : 'no'],
       ['CI', row.ci ? 'running' : 'not running'],
       ['rebasing', row.rebasing ? 'yes' : 'no'],
       ['no events since', row.unobserved
         ? fmtStamp(Date.parse(row.unobserved_since || row.waiting_since))
         : 'events observed through the last event'],
     ] : []),
-    ...["waiting", "active", "review", "ci", "rebasing", "unobserved"].map((phase) => [
-      phase === 'unobserved'
-        ? 'unobserved (no events since the snapshot)'
-        : PHASE[phase].label,
-      phaseHours
+    ...measuredPhaseFacts({
+      hoursOf: (phase) => (phaseHours
         ? (phaseHours[phase] != null ? fmtHours(phaseHours[phase]) : '—')
-        : (totals.get(phase) ? fmtCalendarDuration(totals.get(phase)) : '—'),
-      // prd/57: a phase is read against its cohort (merged PRs' same phase).
-      row && row.phase_benchmarks ? row.phase_benchmarks[phase] : null,
-    ]),
+        : (totals.get(phase) ? fmtCalendarDuration(totals.get(phase)) : '—')),
+      benchmarks: (row && row.phase_benchmarks) || {},
+      calendar: !phaseHours,
+    }),
     ...(phaseHours ? [['phase total', fmtHours(Object.values(phaseHours).reduce(
       (sum, value) => sum + (Number(value) || 0), 0))]] : []),
   ];
@@ -2536,14 +2624,11 @@ function openTicketPrDrawer(pr) {
     ['no events since', pr.censored && pr.last_event
       ? `${fmtStamp(Date.parse(pr.last_event))} · ${pr.phase}`
       : 'events observed through the last event'],
-    ...['waiting', 'active', 'review', 'ci', 'rebasing', 'unobserved'].map((phase) => [
-      phase === 'unobserved'
-        ? 'unobserved (no events since the snapshot)'
-        : PHASE[phase].label,
-      phases.get(phase) ? fmtHours(phases.get(phase)) : '—',
+    ...measuredPhaseFacts({
+      hoursOf: (phase) => (phases.get(phase) ? fmtHours(phases.get(phase)) : '—'),
       // prd/57: each drawer phase is read against the merged-PR cohort.
-      (pr.phase_benchmarks || {})[phase] || null,
-    ]),
+      benchmarks: pr.phase_benchmarks || {},
+    }),
     ['phase total', phaseTotal ? fmtHours(phaseTotal) : '—'],
   ];
   openDrawer({
@@ -2601,9 +2686,13 @@ function openDeliveryPrDrawer(row) {
       ['waiting since', `${fmtStamp(Date.parse(row.waiting_since))} (${fmtHours(row.waiting_hours)})`],
       // prd/57: the wait and each measured phase are read against their cohorts.
       ['waiting', fmtHours(row.waiting_hours), row.wait_benchmark],
-      ...Object.entries(row.phase_hours || {}).map(([phase, hours]) => [
-        phase, fmtHours(hours), (row.phase_benchmarks || {})[phase] || null,
-      ]),
+      // prd/64 F-12: the measured spans are their own group with distinct keys,
+      // and the live status above stays the only bare `waiting on author`.
+      ...measuredPhaseFacts({
+        hoursOf: (phase) => (row.phase_hours && row.phase_hours[phase] != null
+          ? fmtHours(row.phase_hours[phase]) : '—'),
+        benchmarks: row.phase_benchmarks || {},
+      }),
       ['age', fmtHours(row.age_hours)],
       ['waiting on author', row.author_open ? 'yes' : 'no'],
       ['CI', row.ci ? 'running' : 'not running'],
@@ -2756,6 +2845,9 @@ function buildScopeOptions() {
 }
 
 function setScope(kind, value, { silent = false } = {}) {
+  // prd/64 F-09: a scope edit answers a new question, so a boot/route fallback
+  // notice no longer describes the screen. A route restore is not an edit.
+  if (!silent) setNotice('');
   const wasRepo = state.scope.kind === 'repo';
   state.scope = {
     kind,
@@ -2904,8 +2996,11 @@ function applyScopeToTimeline() {
 }
 
 // --------------------------------------------------------------- timeframe
-function setTimeframe(id) {
+function setTimeframe(id, { silent = false } = {}) {
   if (!TIMEFRAMES[id]) return;
+  // prd/64 F-09: choosing a timeframe answers the link's fallback. A route
+  // restore passes `silent` so a deep link's notice survives its own state.
+  if (!silent) setNotice('');
   // a preset timeframe leaves the sprint lens: the lens is a filter with its
   // own measured range, not a preset (prd/37 §4)
   if (state.sprint != null) {
@@ -3819,6 +3914,16 @@ document.addEventListener('submit', async (event) => {
   await recordAnnotation(form);
 });
 
+/* prd/64 F-11: the desktop Delivery list's inspector (#delivery-detail) renders
+ * the same chips as the drawer, but the drawer is closed there, so
+ * `state.drawerEntity` is null. Resolve the row the chip is attached to: inside
+ * the drawer the drawer's entity, otherwise the selected row. */
+function detailEntity(pivot, ui) {
+  return pivot && pivot.closest('#drawer')
+    ? ui.drawerEntity
+    : (ui.selection || ui.drawerEntity);
+}
+
 document.addEventListener('click', async (event) => {
   // prd/63 F19: a click on the page behind an open drawer closes it (Esc
   // already did; the pointer path was missing).
@@ -4158,15 +4263,19 @@ document.addEventListener('click', async (event) => {
   }
   const pivot = event.target.closest('[data-detail]');
   if (pivot) {
+    // prd/64 F-11: the desktop Delivery list's inspector (#delivery-detail)
+    // renders the same chips as the drawer, but the drawer is closed there, so
+    // `state.drawerEntity` is null. `detailEntity` resolves the row the chip is
+    // attached to: inside the drawer the drawer's entity, otherwise the row.
+    const entity = detailEntity(pivot, state);
     const action = pivot.dataset.detail;
     if (action === 'copy') {
-      await copyMarkdown(state.drawerEntity);
+      await copyMarkdown(entity);
     } else if (action === 'timeline') {
       // prd/38 #20 + prd/43 §3: scope to the ticket/PR the drawer came from —
       // never to the author. The entity's ticket can live at the top level (the
       // ticket-page drawer), on the PR (timeline/delivery) or on the row; one
       // helper reads all three, so the chip scopes the same from every opener.
-      const entity = state.drawerEntity;
       const scope = drawerTimelineScope(entity);
       const prId = entity?.pr?.id || entity?.row?.object_id || null;
       const keepRow = state.selection && state.selection.row ? state.selection.row : null;
@@ -4178,8 +4287,10 @@ document.addEventListener('click', async (event) => {
       await showPage('timeline');
       if (prId) timeline.focusPr(prId);
     } else if (action === 'blocking') {
+      const selectedRow = entity && entity.row ? entity.row : null;
       closeDrawer();
       await showPage('blocking');
+      focusBlockingRow(selectedRow);
     }
     return;
   }
@@ -4230,7 +4341,14 @@ async function copyMarkdown(entity) {
   const hoursMode = (state.delivery && state.delivery.hours_mode) || 'wall-clock';
   // prd/44 DES-5: the calendar fingerprint makes the copied number re-derivable
   const calendarId = (state.delivery && state.delivery.calendar_id) || '';
-  await copyText(entity ? entityMarkdown(entity, hoursMode, appBase(), calendarId) : '');
+  const markdown = entity ? entityMarkdown(entity, hoursMode, appBase(), calendarId) : '';
+  // prd/64 F-11: an empty export is not a copy. The old path wrote `""` to the
+  // clipboard and still flashed "copied as Markdown".
+  if (!markdown) {
+    flashStatus('nothing selected to copy as Markdown', 'stale');
+    return;
+  }
+  await copyText(markdown);
 }
 
 async function copyText(text) {
@@ -4371,6 +4489,13 @@ function restoreUI() {
   syncLevelSelects();
 }
 
+/* prd/64 F-09: a URL that names an unknown view must land on the default entry
+ * view, not on a stale stored page the link never asked for. A ticket hash is
+ * its own valid destination and keeps the page. */
+function unknownRouteView(rawView, hasTicket = false) {
+  return Boolean(rawView && !PAGES[rawView] && !hasTicket);
+}
+
 // -------------------------------------------------------------------- boot
 restoreUI();
 /* P-2: a pasted URL wins over the stored preference — that is what a deep link
@@ -4417,6 +4542,16 @@ if (initialRoute.tab) {
 if (initialRoute.metric) state.trendMetric = initialRoute.metric;
 if (initialRoute.bucket) state.trendBucket = initialRoute.bucket;
 if (initialRoute.policy) state.policyScenario = { ...defaultScenario(), ...initialRoute.policy };
+/* prd/64 F-09: an unusable `?view=` names a fallback, so the page must really
+ * be the default entry view — not a stale stored page the link never asked for
+ * (the notice promised "the default view"). A ticket hash is its own valid
+ * destination and keeps the page. */
+const rawRouteView = (() => {
+  try { return new URLSearchParams(location.search).get('view'); } catch { return null; }
+})();
+if (unknownRouteView(rawRouteView, Boolean(initialRoute.ticket))) {
+  state.page = DEFAULT_ENTRY_PAGE;
+}
 if (initialRoute.view && PAGES[initialRoute.view]) state.page = initialRoute.view;
 if (initialRoute.ticket) {
   state.page = 'ticket';
