@@ -33,6 +33,7 @@ import {
   agingCount, agingMarkdown, agingMarkup, agingRows, parseAgingView,
 } from '/aging.js';
 import { rulesMarkup, rulesStats, rulesMarkdown } from '/rules.js';
+import { verdictCard, verdictMarkdown } from '/verdict.js';
 import { sprintStrip } from '/sprints.js';
 import { ticketMarkdown, ticketMarkup, ticketStats } from '/ticket.js';
 import { trendMarkdown, trendMarkup, trendStats } from '/trend.js';
@@ -146,6 +147,10 @@ const state = {
   sprint: null,
   rules: null,
   rulesLevel: 'team',
+  // prd/58: the constraint verdict (Overview card + Rules banner) and the
+  // persisted "show all rules" toggle that restores the full list.
+  verdict: null,
+  showAllRules: false,
   // prd/39: the two PR-size distributions the Rules panel draws.
   prSize: null,
   policy: null,
@@ -861,6 +866,13 @@ async function ensureData(page) {
       )));
     }
     state.trend = cached(key);
+  }
+  if (page === 'overview' || page === 'rules') {
+    // prd/58: one verdict per (tenant, window, repo); the Rules banner and the
+    // Overview card are the same answer, never a second computation.
+    const key = `verdict:${tenant}:${state.timeframe}:${repo}:${stamp}`;
+    if (!cached(key)) state.cache.set(key, await getJSON(withTenant(`/api/verdict?${q}`)));
+    state.verdict = cached(key);
   }
   if (page === 'rules') {
     // prd/39: the distributions are cap-independent; the size *rule* is not, so
@@ -1981,6 +1993,8 @@ function renderRulesPage() {
       base: appBase(),
       prSize: state.prSize,
       caps: state.sizeCaps,
+      verdict: state.verdict,
+      showAllRules: state.showAllRules,
     })}`
     : '<div class="empty-row">Loading the rule engine…</div>';
   // prd/39: the panel's count/markers follow the sliders without a re-render.
@@ -2145,7 +2159,10 @@ async function runPolicyScenario(scenario) {
 
 // ----------------------------------------------------------------- overview
 function renderOverviewPage() {
-  $('overview').innerHTML = overviewMarkup({
+  // prd/58: the verdict is the first thing on the page — one claim above the
+  // chase card; the tiles and the triage list follow it.
+  $('overview').innerHTML = verdictCard(state.verdict, { base: appBase() })
+    + overviewMarkup({
     delivery: state.delivery,
     queues: state.queues,
     blocking: state.blocking,
@@ -3761,6 +3778,19 @@ document.addEventListener('click', async (event) => {
     await copyText(rulesMarkdown(state.rules, appBase()));
     return;
   }
+  if (event.target.closest('[data-verdict-copy]')) {
+    // prd/58: the card's own export — the claim, the ladder and the lab notes.
+    await copyText(verdictMarkdown(state.verdict, appBase()));
+    return;
+  }
+  if (event.target.closest('[data-rule-show-all]')) {
+    // prd/58: the disclosure toggle is a preference, like the density or the
+    // benchmark contrast. It changes what is shown, never a rank or at_stake.
+    state.showAllRules = !state.showAllRules;
+    saveUI();
+    renderPage();
+    return;
+  }
   if (event.target.closest('#ticket-copy')) {
     await copyText(state.ticket ? ticketMarkdown(state.ticket, appBase()) : '');
     return;
@@ -4096,6 +4126,8 @@ function saveUI() {
       blockingLevel: state.blockingLevel,
       queueLevel: state.queueLevel,
       rulesLevel: state.rulesLevel,
+      // prd/58: the "show all rules" disclosure state is a preference too.
+      showAllRules: state.showAllRules,
       policyScenario: state.policyScenario,
       // prd/50: the trend tab; prd/57: the benchmark contrast preference.
       trendMetric: state.trendMetric,
@@ -4163,6 +4195,7 @@ function restoreUI() {
   if (stored.rulesLevel === 'team' || stored.rulesLevel === 'person') {
     state.rulesLevel = stored.rulesLevel;
   }
+  if (typeof stored.showAllRules === 'boolean') state.showAllRules = stored.showAllRules;
   if (['flow_efficiency', 'cycle_median', 'on_time', 'wait_hours', 'merged', 'open']
     .includes(stored.trendMetric)) {
     state.trendMetric = stored.trendMetric;

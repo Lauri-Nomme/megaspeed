@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1053** (`tests/`) + **99** (`scrape/tests`) + **342** (node `app/test`) green.
+Tests: **1137** (`tests/`) + **99** (`scrape/tests`) + **383** (node `app/test`) green.
 
 ## Scrape (airgapped) — full value, reliable
 
@@ -52,6 +52,16 @@ Tests: **1053** (`tests/`) + **99** (`scrape/tests`) + **342** (node `app/test`)
   and the page states the lab's best scenario. The sentinel's response clock is gate-aware (last peer
   approval → response, ~6 h), the ticket-page Timeline chip scopes to the ticket, the overview tile
   counts people only, and sprint "by end" excludes Jira-done stories whose PRs never merged.
+- **Constraint verdict (prd/58)**: Overview opens with **one** claim — the station with the largest
+  *removable* wait pool (live in-station age + the completed stories' hours above the station's own p85)
+  on the story clock, with its PR-ball-clock holder split, its ties and its adjacent findings (no-live-PR
+  stories, Done-in-Jira-but-unmerged PRs). The exploit → subordinate → elevate ladder carries the policy
+  lab's own verdict per rung and **blocks** elevate while exploit items are owed; Rules shows the same
+  verdict as a banner, keeps the current rung's levers and the `measured` diagnostics in place, and
+  discloses every other lever behind "Rules for the next constraint" (a persisted Show-all toggle).
+  On del-combined the verdict is review / approval gate: 619 h removable (238 live + 382 tail), not
+  refinement's 2,420 h of history; exploit #53/#55/#60, round cap −13 %, SLA −9 %, sentinel "no clear
+  effect".
 - **Responsive** (≤640px): off-canvas drawer, two-row top bar, bottom-sheet detail, pinch/pan/tap touch,
   list-first entry + card-stacked tables. Desktop (1600px) and medium (900px) verified pixel-identical.
 - **Phone UX (post-review)**: ticket keys visible on the timeline (epic→story→PR hierarchy at every zoom,

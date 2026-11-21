@@ -12,6 +12,9 @@ import { linkifyTickets, markdownLinkTickets, ticketHref } from './tickets.js';
 import { reworkMarkdown, reworkPanel } from './rework.js';
 import { worklogMarkdown, worklogPanel, fmtRate } from './worklog.js';
 import { firstPassPanels, yieldMarkdown } from './yield.js';
+import {
+  verdictBanner, isDisclosedByDefault, currentRung, ruleRung,
+} from './verdict.js';
 
 const SEVERITY_LABEL = {
   critical: 'critical',
@@ -498,7 +501,7 @@ export function ruleRow(suggestion, { base = '', metrics = {} } = {}) {
     ? `assumed hours removed by this rule (${esc((suggestion.evidence || {}).impact_basis || 'an assumption')}); not a measured saving`
     : `estimated hours removed by this rule (impact × confidence ${esc(suggestion.confidence)}); the headline counts each cost pool once`;
   return `
-    <article class="rule sev-${esc(severity)}" data-rule="${esc(suggestion.id)}">
+    <article class="rule sev-${esc(severity)}" id="rule-${esc(suggestion.id)}" data-rule="${esc(suggestion.id)}">
       <div class="rule-rank mono" aria-hidden="true">${String(suggestion.rank).padStart(2, '0')}</div>
       <div class="rule-main">
         <div class="rule-top">
@@ -581,7 +584,9 @@ export function personSignalNote(data, { below = true } = {}) {
     (below ? '; the team tab names the team-level rules.' : '.');
 }
 
-export function rulesMarkup(data, { base = '', prSize = null, caps = null } = {}) {
+export function rulesMarkup(data, {
+  base = '', prSize = null, caps = null, verdict = null, showAllRules = false,
+} = {}) {
   const all = (data && data.suggestions) || [];
   // prd/63 F28: the `people` toggle used to relabel the same team list. It now
   // filters: a person-level card shows only person-scoped rules, and when
@@ -596,6 +601,35 @@ export function rulesMarkup(data, { base = '', prSize = null, caps = null } = {}
   const suggestions = personLevel ? personRules : all;
   const note = personSignalNote(data, { below: teamRules.length > 0 });
   const lab = labBestLine(data);
+  // prd/58: the same verdict as Overview's card, as a one-line banner, and the
+  // ladder's progressive disclosure. The current rung's levers stay expanded;
+  // every other lever sits behind "Rules for the next constraint". `measured`
+  // rules are diagnostics and never hidden; ranks and at_stake are untouched.
+  const banner = verdict ? verdictBanner(verdict) : '';
+  const rung = currentRung(verdict);
+  const rungLabel = (verdict && verdict.rule_rungs && verdict.rule_rungs.labels
+    && verdict.rule_rungs.labels[rung]) || null;
+  const disclosable = Boolean(verdict && verdict.available && rung);
+  const split = disclosable && !showAllRules
+    ? {
+      shown: suggestions.filter((suggestion) => isDisclosedByDefault(suggestion, verdict)),
+      hidden: suggestions.filter((suggestion) => !isDisclosedByDefault(suggestion, verdict)),
+    }
+    : { shown: suggestions, hidden: [] };
+  const measuredCount = split.shown.filter(
+    (suggestion) => ruleRung(suggestion.id, verdict) === 'measured',
+  ).length;
+  const disclosureBar = disclosable
+    ? `<div class="rules-disclosure-bar" data-rules-disclosure>
+        <span class="muted">${showAllRules
+          ? `showing all ${suggestions.length} rules — ranked by impact × confidence, exactly as before`
+          : `showing the ${esc(rungLabel || rung)} rung${measuredCount > 0 ? ` and ${measuredCount} measured diagnostic${measuredCount === 1 ? '' : 's'}` : ''}; ${split.hidden.length} lever${split.hidden.length === 1 ? '' : 's'} behind the next constraint`}</span>
+        <button type="button" class="chip" data-rule-show-all
+          aria-pressed="${showAllRules ? 'true' : 'false'}"
+          title="no rank and no at-stake number changes — only the default disclosure">${
+          showAllRules ? 'Show the current rung only' : 'Show all rules'}</button>
+      </div>`
+    : '';
   const teamLink = personLevel && teamRules.length && !suggestions.length
     ? ` <button type="button" class="link" data-rule-level="team">show the ${teamRules.length} team rule${teamRules.length === 1 ? '' : 's'} →</button>`
     : '';
@@ -609,7 +643,7 @@ export function rulesMarkup(data, { base = '', prSize = null, caps = null } = {}
     }</p>`
     : '';
   if (!suggestions.length) {
-    return `<div class="rules-empty">
+    return `${banner}<div class="rules-empty">
       ${note ? `<p>${esc(note)}${teamLink}</p>` : ''}
       ${lab ? `<p class="rules-lab" data-lab-best>${esc(lab)}</p>` : ''}
       <p>${personLevel
@@ -627,11 +661,15 @@ export function rulesMarkup(data, { base = '', prSize = null, caps = null } = {}
   // prd/39: the calibration panel sits next to the size rule (or after the list
   // when the rule does not fire), so the threshold the rule quotes is adjustable
   // exactly where it is read.
-  const rows = suggestions.map((suggestion) =>
+  const rows = split.shown.map((suggestion) =>
+    ruleRow(suggestion, { base, metrics: (data && data.metrics) || {} }));
+  const hiddenRows = split.hidden.map((suggestion) =>
     ruleRow(suggestion, { base, metrics: (data && data.metrics) || {} }));
   const panel = prSizePanel(prSize, { caps });
   if (panel) {
-    const index = suggestions.findIndex((suggestion) => suggestion.metric === 'pr_size');
+    // prd/58: the panel follows the *shown* rows; the size rule may be behind
+    // the next-constraint disclosure.
+    const index = split.shown.findIndex((suggestion) => suggestion.metric === 'pr_size');
     if (index >= 0) rows.splice(index + 1, 0, panel);
     else rows.push(panel);
   }
@@ -641,15 +679,23 @@ export function rulesMarkup(data, { base = '', prSize = null, caps = null } = {}
   // not (a trustworthy worklog is a result, not a missing panel).
   const worklog = worklogPanel((data && data.metrics && data.metrics.worklog_cross_check) || null);
   if (worklog) {
-    const index = suggestions.findIndex((suggestion) => suggestion.metric === 'worklog_cross_check');
+    const index = split.shown.findIndex((suggestion) => suggestion.metric === 'worklog_cross_check');
     if (index >= 0) rows.splice(index + 1, 0, worklog);
     else rows.push(worklog);
   }
-  return `${note ? `<p class="rules-note">${esc(note)}${teamLink}</p>` : ''}
+  return `${banner}${note ? `<p class="rules-note">${esc(note)}${teamLink}</p>` : ''}
     ${teamHint}
     ${lab ? `<p class="rules-lab" data-lab-best>${esc(lab)}</p>` : ''}
+    ${disclosureBar}
     ${firstPassPanels(data && data.metrics, { base })}
     <div class="rules-list">${rows.join('')}</div>
+    ${split.hidden.length ? `<details class="rules-next" data-next-constraint-rules>
+      <summary>Rules for the next constraint (${split.hidden.length})</summary>
+      <p class="panel-note">These levers belong to a lower-ranked constraint. Acting
+        on the rung above is the order; opening this list changes no rank and no
+        at-stake number.</p>
+      <div class="rules-list">${hiddenRows.join('')}</div>
+    </details>` : ''}
     ${reworkPanel((data && data.rework) || null, { base })}`;
 }
 

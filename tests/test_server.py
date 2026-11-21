@@ -851,3 +851,115 @@ class SummaryRunTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VerdictEndpointTests(unittest.TestCase):
+    """prd/58: ``/api/verdict`` — one constraint, the ladder, cache, 400s."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.dir = Path(cls.tmp.name).resolve()
+        # prd/58 needs a *ticket* cohort (20+ completed stories), which the
+        # Bitbucket fixture generator does not produce — use the verdict
+        # fixture's hand-written store for the available path, and the small
+        # PR-only store for the refusal.
+        from tests.test_verdict import ranked_store
+
+        cls.big = ranked_store().write(cls.dir / "ranked.duckdb")
+        cls.small = make_store(cls.dir, "small", n=5, seed=404)
+        cls.patches = [
+            mock.patch.object(app_module, "TENANTS_DIR", cls.dir),
+            mock.patch.object(app_module, "DEFAULT_TENANT", ""),
+            mock.patch.object(app_module, "bridge", BrowserBridge()),
+            mock.patch.object(app_module, "LOG", False),
+            mock.patch.dict(os.environ, {
+                app_module.HARNESS_TOKEN_ENV: TOKEN,
+                app_module.HARNESS_TOKEN_FILE_ENV: str(cls.dir / ".harness-token"),
+            }),
+        ]
+        for patch in cls.patches:
+            patch.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        for patch in reversed(cls.patches):
+            patch.stop()
+        cls.tmp.cleanup()
+
+    def verdict(self, **query):
+        return get("/api/verdict", **query)
+
+    def test_the_payload_is_one_constraint_a_clock_and_a_ladder(self):
+        reply = self.verdict(tenant="ranked")
+        self.assertEqual(reply.status, 200, reply.text)
+        payload = reply.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(reply.headers["x-tenant"], "ranked")
+        self.assertEqual(payload["tenant"], "ranked")
+        self.assertTrue(payload["available"])
+        self.assertIsNotNone(payload["constraint"])
+        for key in ("as_of", "hours_mode", "window", "constraint", "pools",
+                    "holders", "adjacent", "exploit", "ladder", "next",
+                    "available", "note", "basis", "rule_rungs", "current_rung"):
+            self.assertIn(key, payload)
+        self.assertIn(payload["constraint"]["station"],
+                      ("refine", "plan", "start", "develop", "review", "verify"))
+        # one clock per concept: the pool is the story clock, the holders the
+        # PR ball clock — never summed, and both labelled
+        self.assertEqual(payload["constraint"]["clock"], "story")
+        self.assertEqual(payload["constraint"]["hours_kind"], "story")
+        self.assertEqual(payload["holders"]["clock"], "pr-holder")
+        self.assertIn("story clock", payload["basis"])
+        self.assertIn("PR ball clock", payload["basis"])
+        self.assertEqual([row["step"] for row in payload["ladder"]],
+                         ["exploit", "subordinate", "elevate"])
+        for rung in payload["ladder"]:
+            self.assertIn(rung["state"], ("open", "blocked", "done"))
+            self.assertIn("note", rung)
+            # a blocked elevation is always the exploit rung's consequence
+            if rung["step"] == "elevate" and rung["state"] == "blocked":
+                exploit = next(item for item in payload["ladder"]
+                               if item["step"] == "exploit")
+                self.assertEqual(exploit["state"], "open")
+                self.assertIn("exploit first", rung["reason"])
+
+    def test_a_window_under_min_n_refuses_with_a_stated_reason(self):
+        payload = self.verdict(tenant="small").json()
+        self.assertFalse(payload["available"])
+        self.assertIn("needs 20", payload["note"])
+        # a refusal is not a zero-filled card: the ranking and the ladder stay
+        self.assertTrue(payload["pools"])
+        self.assertEqual(payload["ladder"][0]["step"], "exploit")
+
+    def test_an_unknown_repo_is_a_400_listing_the_repos(self):
+        reply = self.verdict(tenant="ranked", repo="nope/nope")
+        self.assertEqual(reply.status, 400, reply.text)
+        body = reply.json()
+        self.assertFalse(body["ok"])
+        self.assertIn("repo must be one of", body["error"])
+
+    def test_an_unknown_parameter_is_rejected_not_ignored(self):
+        reply = self.verdict(tenant="ranked", level="person")
+        self.assertEqual(reply.status, 400, reply.text)
+        self.assertIn("level", reply.json()["error"])
+
+    def test_the_second_request_is_cached_and_the_lab_runs_once(self):
+        # a fresh (store, window) so the assertion measures this test's calls
+        with app_module._verdict_lock:
+            app_module._verdict_cache.clear()
+        with app_module._advice_lock:
+            app_module._advice_cache.clear()
+        real_verdict = app_module.verdict_view.verdict
+        real_advice = app_module._advice_payload
+        with mock.patch.object(
+            app_module.verdict_view, "verdict", side_effect=real_verdict,
+        ) as built, mock.patch.object(
+            app_module, "_advice_payload", side_effect=real_advice,
+        ) as advice:
+            first = self.verdict(tenant="ranked", days=31)
+            second = self.verdict(tenant="ranked", days=31)
+            self.assertEqual(first.status, 200, first.text)
+            self.assertEqual(second.body, first.body)
+            self.assertEqual(built.call_count, 1)      # one build, not two
+            self.assertEqual(advice.call_count, 1)     # the lab's report is shared
