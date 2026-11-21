@@ -36,6 +36,9 @@ export const SCOPE_KINDS = ['person', 'role', 'ticket', 'repo'];
  * the default. theme.js owns the closed set; this only spells it in the URL. */
 export const ROUTE_THEMES = THEMES;
 
+/** prd/59: the Delivery subsets a `?tab=` link can name. */
+export const ROUTE_TABS = ['blocked', 'oldest', 'aging', 'all'];
+
 export const TITLE_SUFFIX = ' — megaspeed';
 export const FALLBACK_TITLE = 'megaspeed';
 
@@ -79,11 +82,14 @@ function normalizeView(view) {
 export function serializeRoute({
   tenant = null, view = null, ticket = null, timeframe = null, scope = null,
   sprint = null, from = null, to = null, theme = null,
-  trendMetric = null, trendBucket = null, policy = null,
+  trendMetric = null, trendBucket = null, policy = null, tab = null,
 } = {}) {
   const params = new URLSearchParams();
   if (tenant) params.set('tenant', String(tenant));
   if (view) params.set('view', String(view));
+  // prd/59: the Delivery subset; only a known id is written so a stale state
+  // cannot mint a link this build does not understand.
+  if (tab && ROUTE_TABS.includes(String(tab))) params.set('tab', String(tab));
   if (timeframe) params.set('tf', String(timeframe));
   // prd/63 F30: the Trend tab pair is view state, not a session-local setting;
   // a shared link opens the same metric and granularity.
@@ -142,6 +148,10 @@ export function parseRoute(search = '', hash = '') {
     view: ticket ? 'ticket' : normalizeView(params.get('view')),
     ticket,
     timeframe: params.get('tf') || null,
+    // prd/59: `?tab=aging` selects the Aging subset; an unknown id is ignored
+    // (the default tab shows) rather than trusted into a broken view.
+    tab: ROUTE_TABS.includes(params.get('tab') || '')
+      ? params.get('tab') : null,
     // prd/63 F30: unknown values are ignored (the default tab shows), never
     // trusted into a broken request.
     metric: ROUTE_TREND_METRICS.includes(params.get('metric') || '')

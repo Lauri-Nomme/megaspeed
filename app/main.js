@@ -29,6 +29,9 @@ import {
   matchesScope, waitingLabel, weekLabel, scopeTargets, doneOpenMarkup,
   scopedDeliveryRows, approvalsLabel,
 } from '/tables.js';
+import {
+  agingCount, agingMarkdown, agingMarkup, agingRows, parseAgingView,
+} from '/aging.js';
 import { rulesMarkup, rulesStats, rulesMarkdown } from '/rules.js';
 import { sprintStrip } from '/sprints.js';
 import { ticketMarkdown, ticketMarkup, ticketStats } from '/ticket.js';
@@ -118,6 +121,13 @@ const state = {
   // B11: an explicitly chosen tab (or a restored one) is never auto-switched.
   tabPinned: false,
   delivery: null,
+  // prd/59: the aging view on the Delivery list. `agingView` encodes the kind
+  // and stage (`story:cycle`, `pr:review`, `story:in_review`), and the two
+  // controls are per-user preferences, like the benchmark toggle.
+  aging: null,
+  agingView: 'story:cycle',
+  agingOnly: false,
+  agingSource: 'self',
   queues: null,
   blocking: null,
   // prd/26 P6: the sprint lens (`/api/sprints`): bands, scope, carry-over.
@@ -493,6 +503,8 @@ function routeFields() {
     ticket: state.page === 'ticket' ? state.ticketKey : null,
     timeframe: state.timeframe,
     scope: state.scope,
+    // prd/59: the Delivery subset is route state, so `?tab=aging` is a link.
+    tab: state.page === 'delivery' ? state.tab : null,
     // prd/37 §4: a selected sprint travels with its measured range, so the lens
     // (filter + band + window) is shareable, not just the window.
     sprint: usesSprint ? state.sprint : null,
@@ -809,6 +821,22 @@ async function ensureData(page) {
     const key = `delivery:${tenant}:${state.timeframe}:${repo}:${stamp}`;
     if (!cached(key)) state.cache.set(key, await getJSON(withTenant(`/api/delivery?${q}`)));
     state.delivery = cached(key);
+  }
+  if (page === 'delivery') {
+    // prd/59: one request per (kind, stage, only, threshold source), cached like
+    // the delivery list; the tab count and the table read the same payload.
+    const view = parseAgingView(state.agingView);
+    const agingKey = `aging:${tenant}:${state.timeframe}:${repo}:${view.kind}:${view.stage}:${
+      state.agingOnly ? 'live' : 'all'}:${state.agingSource}:${stamp}`;
+    if (!cached(agingKey)) {
+      state.cache.set(agingKey, await getJSON(withTenant(
+        `/api/aging?kind=${encodeURIComponent(view.kind)}` +
+        `&stage=${encodeURIComponent(view.stage)}` +
+        `&only=${state.agingOnly ? 'live' : 'all'}` +
+        `&thresholds=${encodeURIComponent(state.agingSource)}&${q}`,
+      )));
+    }
+    state.aging = cached(agingKey);
   }
   if (page === 'blocking' || page === 'overview') {
     const key = `blocking:${tenant}:${state.timeframe}:${state.blockingLevel}:${repo}:${stamp}`;
@@ -1276,36 +1304,61 @@ function renderDeliveryPage() {
     <button type="button" role="tab" data-tab="${tab.id}"
       aria-selected="${state.tab === tab.id}" class="${state.tab === tab.id ? 'on' : ''}">
       ${esc(tab.label)} <span class="num">${counts[tab.id]}</span></button>`).join('');
+  const aging = state.tab === 'aging';
   $('delivery-table').innerHTML = data
-    ? deliveryTable(data, state.tab, {
-      scope: deliveryScope(),
-      benchmark: state.benchmark,
-      base: appBase(),
-      rowFilter: sprintKeys.size ? (row) => rowInSprint(row, sprintKeys) : null,
-      sprintLabel: sprintKeys.size ? `S${state.sprint}` : null,
-    })
+    ? (aging
+      ? agingMarkup(state.aging, {
+        base: appBase(),
+        phone: isPhone(),
+        onlyLive: state.agingOnly,
+        view: state.agingView,
+        source: state.agingSource,
+        // the table follows the same scope + sprint lens as the tab count, so
+        // the number and the rows below it cannot disagree
+        rowFilter: (row) => agingMatchesScope(row, deliveryScope())
+          && (!sprintKeys.size
+            || (Boolean(row.ticket) && sprintKeys.has(String(row.ticket)))),
+      })
+      : deliveryTable(data, state.tab, {
+        scope: deliveryScope(),
+        benchmark: state.benchmark,
+        base: appBase(),
+        rowFilter: sprintKeys.size ? (row) => rowInSprint(row, sprintKeys) : null,
+        sprintLabel: sprintKeys.size ? `S${state.sprint}` : null,
+      }))
     : '<div class="empty-row">Loading the triage list…</div>';
   // prd/63 B9: the Overview's "Done in Jira, PR open →" now lands on a list
   // that actually contains the set, scoped like the rest of this page.
+  // prd/59: the Aging tab is its own list; the Done-open panel belongs to the
+  // PR tables below it, not to the aging chart.
   const extra = $('delivery-extra');
   if (extra) {
-    extra.innerHTML = data
+    extra.innerHTML = data && !aging
       ? doneOpenMarkup(data, {
         base: appBase(), scope: deliveryScope(), id: 'done-open-delivery',
       })
       : '';
   }
-  $('delivery-assumption').textContent = data
-    ? `${data.assumption} · snapshot ${fmtStamp(Date.parse(data.snapshot))} ` +
-      `(every age on this page is priced to it) · ` +
-      (state.scope.kind === 'all'
-        ? `${data.counts.open} open items, ${data.counts.waiting_over_week} of them waiting over a week`
-        : `${scopedDeliveryRows(data, deliveryScope()).length} open items in this scope ` +
-          `(${data.counts.open} team-wide), ${scopedDeliveryRows(data, deliveryScope())
-            .filter((row) => !row.blocked && row.waiting_hours >=
-              Number((data.counts && data.counts.waiting_week_hours) || 40)).length} of them waiting over a week`) +
-      `. ${data.impact_note}.`
-    : '';
+  // prd/59: the aging tab is priced on its own payload's clock; the delivery
+  // table keeps its wait-hours sentence. Never mix the two.
+  const agingData = state.aging;
+  $('delivery-assumption').textContent = aging
+    ? (agingData
+      ? `${agingData.assumption} · snapshot ${fmtStamp(Date.parse(agingData.as_of))} · ` +
+        `${agingData.thresholds_mode === 'fixed' ? 'fixed thresholds' : 'self-calibrated thresholds'} · ` +
+        `${agingData.note}`
+      : '')
+    : (data
+      ? `${data.assumption} · snapshot ${fmtStamp(Date.parse(data.snapshot))} ` +
+        `(every age on this page is priced to it) · ` +
+        (state.scope.kind === 'all'
+          ? `${data.counts.open} open items, ${data.counts.waiting_over_week} of them waiting over a week`
+          : `${scopedDeliveryRows(data, deliveryScope()).length} open items in this scope ` +
+            `(${data.counts.open} team-wide), ${scopedDeliveryRows(data, deliveryScope())
+              .filter((row) => !row.blocked && row.waiting_hours >=
+                Number((data.counts && data.counts.waiting_week_hours) || 40)).length} of them waiting over a week`) +
+        `. ${data.impact_note}.`
+      : '');
   // B9: the detail panel must not describe a row the table no longer contains.
   // A scope change (or a refresh) re-renders the table, so re-resolve the
   // selection against the new rows and drop it when it is out of scope.
@@ -1343,6 +1396,23 @@ function renderDeliveryPage() {
     const unobservedNote = unobserved && unobserved < scopedRows.length
       ? ` · ${unobserved} unobserved`
       : '';
+    if (aging) {
+      // prd/59: the tab's honesty line is its own — the cohort and its n, the
+      // band counts from the same rows, and the scope sentence.
+      const a = state.aging || {};
+      const c = a.counts || {};
+      setHonesty(
+        `${c.open || 0} in flight · ${c.live || 0} live · ${c.over_p85 || 0} past p85` +
+        `${c.dead ? ` · ${c.dead} no live PR` : ''}` +
+        `${c.insufficient ? ` · ${c.insufficient} insufficient history` : ''} · ` +
+        `${a.kind === 'pr' ? 'PR clock' : 'story clock'} · ` +
+        (filtered ? `filtered to ${scopeSuffix}` : 'whole team') +
+        ` · chase = age − p85, ranked (${(a.feed && a.feed.items || []).length} item${
+          (a.feed && a.feed.items || []).length === 1 ? '' : 's'})`,
+      );
+      renderDeliveryDetail();
+      return;
+    }
     setHonesty(
       `${counts.all} open item${counts.all === 1 ? '' : 's'} in view · ` +
       `${counts.blocked} blocked · ${counts.oldest} waiting over a week (${weekLabel(data)}) · ` +
@@ -1356,9 +1426,17 @@ function renderDeliveryPage() {
   renderDeliveryDetail();
 }
 
+/** prd/59: refetch the aging payload after a control change, then repaint. */
+async function reloadAging() {
+  await ensureData('delivery');
+  renderDeliveryPage();
+  saveUI();
+}
+
 /** Counts follow the scope, so the tab number always matches the rows below it. */
 function scopedTabCounts(data, sprintKeys = null) {
-  if (!data) return { blocked: 0, oldest: 0, all: 0 };
+  const agingTotal = scopedAgingRows(sprintKeys).length;
+  if (!data) return { blocked: 0, oldest: 0, aging: agingTotal, all: 0 };
   const rows = data.rows.filter((row) => matchesScopeRow(row)
     && (!sprintKeys || !sprintKeys.size || rowInSprint(row, sprintKeys)));
   // prd/41 B3: the same 40-business-hour week the payload states, never a
@@ -1367,8 +1445,41 @@ function scopedTabCounts(data, sprintKeys = null) {
   return {
     blocked: rows.filter((row) => row.blocked).length,
     oldest: rows.filter((row) => !row.blocked && row.waiting_hours >= week).length,
+    // prd/59: the tab count is the aging payload's own rows, filtered by the
+    // same scope and sprint lens, so it cannot disagree with the table below it.
+    aging: agingTotal,
     all: rows.length,
   };
+}
+
+/**
+ * prd/59: an aging row under the page's scope. The row's holders are its
+ * `holder` entries (person + role) and its ticket is its story key, so the
+ * same `matchesScope` answers "waiting on X" and "this repo/ticket" here.
+ */
+function agingMatchesScope(row, scope) {
+  if (!scope) return true;
+  return matchesScope({
+    ...row,
+    tickets: [row.ticket].filter(Boolean),
+    waiting_on: (row.holder || []).map((holder) => holder.person),
+    waiting_roles: Object.fromEntries(
+      (row.holder || []).map((holder) => [holder.person, holder.role]),
+    ),
+  }, scope);
+}
+
+/** The aging rows the active scope and sprint lens keep (prd/59 tab count). */
+function scopedAgingRows(sprintKeys = null) {
+  const payload = state.aging;
+  if (!payload) return [];
+  const scope = deliveryScope();
+  let rows = agingRows(payload, { onlyLive: state.agingOnly });
+  if (scope) rows = rows.filter((row) => agingMatchesScope(row, scope));
+  if (sprintKeys && sprintKeys.size) {
+    rows = rows.filter((row) => row.ticket && sprintKeys.has(String(row.ticket)));
+  }
+  return rows;
 }
 
 function matchesScopeRow(row) {
@@ -1382,6 +1493,16 @@ function deliveryScope() {
 
 function renderDeliveryDetail() {
   const container = $('delivery-detail');
+  if (state.tab === 'aging') {
+    // prd/59: an aging row is a doorway (#ticket/KEY), not a PR drawer row;
+    // the detail column states that instead of inviting a selection that is
+    // not there.
+    container.classList.remove('has-selection');
+    container.innerHTML = `<p class="empty-detail">The aging list opens each item’s ticket page.
+      The strip shows in-flight age against the team’s own p50/p85/p95; the rows are
+      ranked by hours at risk (age − p85).</p>`;
+    return;
+  }
   const row = state.selection && state.selection.row;
   // prd/28: on a phone the panel is a bottom sheet; it exists only while a row
   // is selected, so the list keeps the full viewport until the user asks for
@@ -1579,6 +1700,12 @@ async function applyRoute() {
       setTimeframe(route.timeframe);
     }
     // prd/63 F30/F21: a shared Trend tab pair or lab scenario is route state.
+    // prd/59: a `?tab=aging` link selects the Aging subset (and pins it, so the
+    // auto-switch cannot move the reader off the linked view).
+    if (route.tab && route.tab !== state.tab) {
+      state.tab = route.tab;
+      state.tabPinned = true;
+    }
     if (route.metric && route.metric !== state.trendMetric) state.trendMetric = route.metric;
     if (route.bucket && route.bucket !== state.trendBucket) state.trendBucket = route.bucket;
     if (route.policy) {
@@ -3514,7 +3641,22 @@ document.addEventListener('input', (event) => {
   );
 });
 
-document.addEventListener('change', (event) => {
+document.addEventListener('change', async (event) => {
+  // prd/59: the aging cohort (story cycle / PR review / PR cycle / a stage) and
+  // the threshold source are two selects on one tab.
+  const agingView = event.target.closest('[data-aging-view]');
+  if (agingView) {
+    state.agingView = agingView.value;
+    await reloadAging();
+    syncUrl();
+    return;
+  }
+  const agingSource = event.target.closest('[data-aging-source]');
+  if (agingSource) {
+    state.agingSource = agingSource.value === 'fixed' ? 'fixed' : 'self';
+    await reloadAging();
+    return;
+  }
   const slider = event.target.closest('[data-pr-size]');
   if (!slider) return;
   setSizeCaps(
@@ -3593,6 +3735,18 @@ document.addEventListener('click', async (event) => {
   }
   if (!event.target.closest('#tenant-switcher')) toggleTenantMenu(false);
   if (event.target.closest('#delivery-copy')) {
+    if (state.tab === 'aging') {
+      // prd/59: the export is the ranked list, with each item's band, holder
+      // and ×p85 — the same order the table shows.
+      const keys = sprintStoryKeys();
+      await copyText(agingMarkdown(state.aging, {
+        base: appBase(),
+        onlyLive: state.agingOnly,
+        rowFilter: (row) => agingMatchesScope(row, deliveryScope())
+          && (!keys.size || (Boolean(row.ticket) && keys.has(String(row.ticket)))),
+      }));
+      return;
+    }
     const data = state.delivery;
     const rows = data ? tabRows(data, state.tab).filter((row) => matchesScopeRow(row)) : [];
     await copyText(deliveryMarkdown(
@@ -3721,6 +3875,17 @@ document.addEventListener('click', async (event) => {
     state.tabPinned = true;
     renderDeliveryPage();
     saveUI();
+    // prd/59: `?tab=aging` is a shareable destination (the Overview tile and a
+    // pasted URL land on the same subset), so the tab is route state.
+    syncUrl();
+    return;
+  }
+  // prd/59: "Only live" hides abandoned work — a view choice, not a refetch of
+  // the delivery list.
+  const agingOnly = event.target.closest('[data-aging-only]');
+  if (agingOnly) {
+    state.agingOnly = !state.agingOnly;
+    await reloadAging();
     return;
   }
   const lens = event.target.closest('[data-lens]');
@@ -3800,6 +3965,12 @@ document.addEventListener('click', async (event) => {
   }
   const go = event.target.closest('[data-go]');
   if (go) {
+    // prd/59: the Overview tile "waiting over a week" lands on the Aging tab,
+    // so the destination names the subset it wants.
+    if (go.dataset.tab) {
+      state.tab = go.dataset.tab;
+      state.tabPinned = true;
+    }
     await showPage(go.dataset.go);
     // prd/63 B9: a link can name the section it lands on (the Delivery page's
     // Done-in-Jira list), so the target is visible instead of merely "on that
@@ -3917,6 +4088,10 @@ function saveUI() {
       lanes: timeline.dim,
       timeframe: state.timeframe,
       tab: state.tab,
+      // prd/59: the aging cohort and its two controls are preferences too.
+      agingView: state.agingView,
+      agingOnly: state.agingOnly,
+      agingSource: state.agingSource,
       lens: state.lens,
       blockingLevel: state.blockingLevel,
       queueLevel: state.queueLevel,
@@ -3970,6 +4145,13 @@ function restoreUI() {
   if (stored.tab) {
     state.tab = stored.tab;
     state.tabPinned = true;
+  }
+  if (typeof stored.agingView === 'string' && /^(story|pr):[a-z_]+$/.test(stored.agingView)) {
+    state.agingView = stored.agingView;
+  }
+  if (typeof stored.agingOnly === 'boolean') state.agingOnly = stored.agingOnly;
+  if (stored.agingSource === 'fixed' || stored.agingSource === 'self') {
+    state.agingSource = stored.agingSource;
   }
   if (LENSES[stored.lens]) state.lens = stored.lens;
   if (stored.blockingLevel && BLOCKING_LEVELS.includes(stored.blockingLevel)) {
@@ -4047,6 +4229,10 @@ if (initialRoute.timeframe && TIMEFRAMES[initialRoute.timeframe]) {
 }
 if (initialRoute.scope) state.scope = initialRoute.scope;
 if (initialRoute.sprint != null) state.sprint = initialRoute.sprint;
+if (initialRoute.tab) {
+  state.tab = initialRoute.tab;
+  state.tabPinned = true;
+}
 // prd/63 F30/F21: the Trend tab pair and the lab scenario win over storage.
 if (initialRoute.metric) state.trendMetric = initialRoute.metric;
 if (initialRoute.bucket) state.trendBucket = initialRoute.bucket;

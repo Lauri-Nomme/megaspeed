@@ -26,6 +26,9 @@ one failure this whole feature exists to prevent.
     GET  /api/blocking?level=&days=&repo=&tenant=   wait-hours handover graph (prd/05)
     GET  /api/queues?level=&days=&repo=&tenant=     per-person WIP / throughput series
     GET  /api/delivery?days=&repo=&tenant=          triage list: blocked / oldest waiting
+    GET  /api/aging?tenant=&days=&repo=&kind=&stage=&only=&limit=
+                                        in-flight age vs the team's own p50/p85/p95
+                                        and the ranked chase list (prd/59)
     GET  /api/insights?level=&days=&repo=&tenant=   ranked "change this" rules (prd/17)
     GET  /api/pr-size?tenant=&size_commits=&size_lines=
                                         PR-size distributions + caps (prd/39)
@@ -146,6 +149,7 @@ STORE_RETRY_DELAY = max(0.0, float(os.environ.get("MEGASPEED_STORE_RETRY_DELAY",
 sys.path.insert(0, str(REPO_ROOT))
 from analysis import ballcourt as analyse  # noqa: E402  (read-only projections)
 from analysis import advice as advice_crosscheck  # noqa: E402  (prd/43 §1)
+from analysis import aging as aging_view  # noqa: E402  (prd/59 aging WIP)
 from analysis import calendar as workcal  # noqa: E402  (prd/19 business hours)
 from analysis import jira as jira_analysis  # noqa: E402  (prd/21 sprints)
 from analysis import rules as insights_rules  # noqa: E402  (prd/17 suggestions)
@@ -1027,6 +1031,7 @@ ANALYSIS_PARAMS = {
     "blocking": ("level", "days", "repo"),
     "queues": ("level", "days", "bucket_hours", "repo"),
     "delivery": ("days", "repo"),
+    "aging": ("kind", "stage", "only", "days", "repo", "limit", "thresholds"),
     "insights": ("level", "days", "size_commits", "size_lines", "repo"),
     "sprints": ("days",),
     "trend": ("metric", "bucket", "days", "repo"),
@@ -1207,6 +1212,122 @@ def delivery(request: Request):
         return _store_error(exc)
 
 
+# --------------------------------------------------------------------------- #
+# aging WIP (prd/59): in-flight age vs the team's own percentiles + the chase
+# --------------------------------------------------------------------------- #
+_aging_lock = threading.Lock()
+_aging_cache: dict[tuple, dict] = {}
+_aging_threshold_cache: dict[tuple, dict] = {}
+AGING_CACHE_SIZE = 32
+
+
+def _aging_thresholds(tenant: str, path: Path, court, jira, window,
+                      repo: str | None, mode: str) -> dict:
+    """The two rule thresholds, cached per (store, calendar, window, repo).
+
+    Thresholds depend only on the cohort and the window, so ``/api/aging``,
+    ``/api/insights`` (the rule evidence) and prd/58's exploit pool share one
+    computation instead of three.
+    """
+    key = (
+        tenant, str(path), _file_stamp(path), _calendar_key(tenant),
+        window[0], window[1], repo or "", mode,
+    )
+    with _aging_lock:
+        hit = _aging_threshold_cache.get(key)
+    if hit is not None:
+        return hit
+    payload = aging_view.rule_thresholds(court, jira, window, mode=mode)
+    with _aging_lock:
+        if len(_aging_threshold_cache) >= AGING_CACHE_SIZE:
+            _aging_threshold_cache.clear()
+        _aging_threshold_cache[key] = payload
+    return payload
+
+
+@app.get("/api/aging")
+def aging(request: Request):
+    """In-flight age against the cohort's own p50/p85/p95, and the chase list.
+
+    Every row states which clock priced it (story cycle, story stage, PR review
+    or PR cycle); the two clocks are never summed. ``kind=story|pr`` and
+    ``stage`` pick the cohort, ``only=live|all`` hides abandoned work (the
+    Overview tile arrives with ``all`` so the dead items are seen once), and
+    ``thresholds=self|fixed`` restores the old 5 bd and 24 h constants. An
+    unknown stage is a 400 listing the stages this store can answer.
+
+    ``feed`` is the chase data source prd/54 and prd/58 read: ``chase`` is the
+    ranked list of live items past the cohort's p85, ``hours_at_risk`` the
+    removable wait it carries, and ``replan`` the abandoned items (no live PR —
+    close or re-plan, never chase).
+    """
+    unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["aging"]))
+    if unknown is not None:
+        return unknown
+    try:
+        days = _num_param(request, "days", minimum=0, maximum=3650)
+        limit = _int_param(request, "limit", default=None, minimum=1, maximum=1000)
+        kind = (request.query_params.get("kind") or "story").strip()
+        if kind not in aging_view.KINDS:
+            raise ValueError(
+                f"kind must be one of {', '.join(aging_view.KINDS)}"
+            )
+        only = (request.query_params.get("only") or "all").strip()
+        if only not in ("live", "all"):
+            raise ValueError("only must be 'live' or 'all'")
+        mode = aging_view.normalize_mode(request.query_params.get("thresholds"))
+        stage = (request.query_params.get("stage") or "").strip() or None
+    except ValueError as exc:
+        return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["aging"])))
+    try:
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    try:
+        with store_conn(path) as con:
+            bundle = _analysis_bundle(con, tenant, path)
+            try:
+                repo = _repo_param(request, bundle.court)
+            except ValueError as exc:
+                return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["aging"])))
+            jira = bundle.jira(con)
+            court, jira = _repo_scope(bundle.court, jira, repo)
+            window = aging_view.window_for(court, jira, _days(days))
+            key = (
+                tenant, str(path), _file_stamp(path), _calendar_key(tenant),
+                window[0], window[1], repo or "", kind, stage or "", only,
+                limit or 0, mode,
+            )
+            with _aging_lock:
+                hit = _aging_cache.get(key)
+            if hit is not None:
+                return JSONResponse(hit, headers={"X-Tenant": tenant})
+            payload = aging_view.payload(
+                court, jira, kind=kind, stage=stage, only=only, limit=limit,
+                window=window, mode=mode,
+            )
+    except ValueError as exc:
+        return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["aging"])))
+    except Exception as exc:  # noqa: BLE001
+        return _store_error(exc)
+    payload.update({
+        "tenant": tenant,
+        "repo": repo,
+        "calendar_id": court.calendar_id,
+        "assumption": court.assumption,
+        **court.calendar_warning(),
+        "thresholds_mode": mode,
+        "rule_thresholds": _aging_thresholds(
+            tenant, path, court, jira, window, repo, mode,
+        ),
+    })
+    with _aging_lock:
+        if len(_aging_cache) >= AGING_CACHE_SIZE:
+            _aging_cache.clear()
+        _aging_cache[key] = payload
+    return JSONResponse(payload, headers={"X-Tenant": tenant})
+
+
 # prd/43 §1: the Rules ↔ Policy-lab cross-check. It runs the lab's *preset*
 # scenarios (not one per rule — that is the larger follow-up the PRD defers), so
 # five forecast runs per (store, calendar, window) are cached and every Rules
@@ -1322,6 +1443,12 @@ def insights(request: Request):
                 jira=jira, caps=caps,
                 policy_lab=_advice_payload(
                     con, tenant, path, court, jira, window, repo,
+                ),
+                # prd/59: the rules quote the same self-calibrated thresholds
+                # the Aging tab shows, from one cached computation.
+                aging=_aging_thresholds(
+                    tenant, path, court, jira, window, repo,
+                    aging_view.thresholds_mode(),
                 ),
             )
     except Exception as exc:  # noqa: BLE001

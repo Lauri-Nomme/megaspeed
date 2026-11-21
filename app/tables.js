@@ -15,6 +15,9 @@ import { legendMarkup } from './queues.js';
 export const TABS = [
   { id: 'blocked', label: 'Blocked' },
   { id: 'oldest', label: 'Oldest waiting' },
+  // prd/59: the fourth subset answers the same question with age against the
+  // team's own finished work; its count comes from the aging payload's rows.
+  { id: 'aging', label: 'Aging' },
   { id: 'all', label: 'All' },
 ];
 
@@ -112,10 +115,12 @@ export function reviewStateLine(row) {
 }
 
 export function tabCounts(data) {
-  if (!data) return { blocked: 0, oldest: 0, all: 0 };
+  if (!data) return { blocked: 0, oldest: 0, aging: 0, all: 0 };
   return {
     blocked: data.counts.blocked,
     oldest: data.counts.oldest_waiting,
+    // prd/59: the Aging count is the aging payload's own, never this table's.
+    aging: 0,
     all: data.counts.all,
   };
 }
@@ -694,7 +699,9 @@ export function overviewMarkup({ delivery, queues, blocking, queueLevel = 'queue
         <span class="stat-k">blocked</span>
         <span class="stat-note">${counts.blocked ? 'waiting on a change, not on a person' : 'nothing blocked'}</span></div>
       <div class="stat"><span class="stat-n">${counts.oldest_waiting}</span>
-        <span class="stat-k">waiting over a week</span>
+        <button type="button" class="stat-k link" data-go="delivery" data-tab="aging"
+          title="open the Aging tab: these items' age against the team's own finished work"
+          >waiting over a week →</button>
         <span class="stat-note">${weekLabel(delivery)} · of ${counts.open} open item${counts.open === 1 ? '' : 's'}${
           counts.stale ? ` · ${counts.stale} stale` : ''}</span></div>
       <div class="stat"><span class="stat-n">≈${fmtHours(waitHours).replace(' ', ' ')}</span>

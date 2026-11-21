@@ -206,6 +206,29 @@ class SourceConformanceTests(unittest.TestCase):
                     offenders.append(f"{name}:{number}: {line.strip()}")
         self.assertEqual(offenders, [], "an ad-hoc duration string in the UI: " + "\n".join(offenders))
 
+    def test_a_self_calibrated_threshold_is_never_rendered_without_its_source(self):
+        """prd/59: a threshold is a claim about a cohort; its n travels with it.
+
+        The rules price from the metric's calibrated threshold (never a bare
+        module constant) and quote the source, and the aging view prints the
+        source + n next to every tick.
+        """
+        rules_text = (REPO_ROOT / "analysis" / "rules.py").read_text()
+        self.assertIn('2 * sp["limit_hours"]', rules_text)
+        self.assertIn('3 * st["threshold_hours"]', rules_text)
+        self.assertIn('"limit_hours": sp["limit_hours"]', rules_text)
+        self.assertIn('"threshold_source": sp.get("threshold_source")', rules_text)
+        self.assertIn('"threshold_source": st.get("threshold_source")', rules_text)
+        aging_text = (REPO_ROOT / "analysis" / "aging.py").read_text()
+        self.assertIn("MIN_N = 20", aging_text)
+        self.assertIn('"insufficient history', aging_text)
+        # the band vocabulary is closed and never reuses "stale" (prd/34 owns it)
+        self.assertNotIn("stale", aging_text.split("BANDS = (")[1].split(")")[0])
+        ui = (REPO_ROOT / "app" / "aging.js").read_text()
+        self.assertIn("block.source", ui)
+        self.assertIn("n = ${block.n}", ui)
+        self.assertIn("insufficient history", ui.lower())
+
     def test_the_stale_segment_label_is_gone(self):
         """concepts.md §5: the first segment is `created → ready`, not `ready → refined`."""
         offenders = []
