@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1260** (`tests/`) + **99** (`scrape/tests`) + **469** (node `app/test`) green.
+Tests: **1262** (`tests/`) + **99** (`scrape/tests`) + **498** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -30,6 +30,11 @@ Tests: **1260** (`tests/`) + **99** (`scrape/tests`) + **469** (node `app/test`)
   targets, the `person:CaOs` holder leak, no fabricated refinement cost on a Jira-less store, Overview
   no longer mutates with a Queue toggle, affected-first rule drills, ticket detail age-vs-measured and
   post-close PRs, sprint on-time floor by committed stories, and the baked version.
+- **Release QA (prd/65)** — the 10 findings on the new surfaces: repo-scoped aging rows, one
+  censoring sentence, the forecast's degenerate-label collision, the phone Trend bar, the annotation
+  flash echo, scope-consistent aging counts/chart/re-plan, non-colliding percentile labels, the
+  policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
+  22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
 
 ## Scrape (airgapped) — full value, reliable
 

@@ -1,16 +1,17 @@
 # Final Verification + Adversarial QA Pass — megaspeed `v0.12.0` RC
 
-- **Commit SHA tested:** `19287c5` (`19287c59`, app reports `v0.11.1-27-g19287c59` via git checkout and `v0.12.0` via `git archive` / `VERSION`)
+- **Commit SHA tested:** `19287c5` (initial pass) → **`0acfa69`** (final re-verification after `prd/65` fixes; app reports `v0.11.1-35-g0acfa69d` via git checkout and `v0.12.0` via `git archive` / `VERSION`)
 - **Tenants verified:** `del-combined` (2,529 events · 131 PRs · 100 stories · 3 sprints) and `del3` (1,484 events · 131 PRs · 0 stories · 0 sprints), isolated under `/tmp/opencode/qa-v012-final/`
 - **Viewports & themes:** Desktop (`1600×1000`) and Phone (`412×915`), Dark and Light themes
-- **Automated test suites:** Python `tests` (all pass), Python `scrape/tests` (all pass), Node `app/test/*.mjs` (469/469 pass)
-- **Screenshots:** `/tmp/opencode/qa-v012-final/shots/01-overview-verdict-dark.png` … `11-phone-forecast-dark.png`
+- **Automated test suites:** Python `tests` (1,262 pass), Python `scrape/tests` (99 pass), Node `app/test/*.mjs` (498/498 pass)
+- **Screenshots:** `/tmp/opencode/qa-v012-final/shots/01-overview-verdict-dark.png` … `14-reverify-trend-phone-dark.png`
 
 ---
 
 ## 1. Executive Verdict
 
-**Verdict: Conditional ship (shippable as `v0.12.0` once 2 new-surface bugs are triaged/fixed) — all 22 `prd/64` findings are 100 % FIXED with zero regressions to `v0.11.1` surfaces, while the new `v0.12.0` decision layer (`prd/58`–`62`) has 2 functional bugs on the new Aging and Forecast surfaces (`N-01` repo-scoped story aging rows filter to 0 client-side; `N-02` degenerate `30–30` forecast bar overlaps end labels as `"3030"` and omits `Copy as Markdown`).**
+**Final Verdict (`0acfa69`): SHIPPABLE as `v0.12.0` — all 22 `prd/64` findings (`F-01`..`F-22`) and all 10 `prd/65` new-surface findings (`N-01`..`N-10`) are 100 % FIXED across desktop (`1600×1000`) and phone (`412×915`) in both dark and light themes, with zero regressions (see §7 for the `0acfa69` re-verification table).**
+*(Initial `19287c5` verdict prior to `prd/65`: Conditional ship — all 22 `prd/64` findings were 100 % FIXED with zero regressions to `v0.11.1` surfaces, while the new `v0.12.0` decision layer had 10 findings `N-01`..`N-10`, all now fixed in `0acfa69`.)*
 
 ---
 
@@ -269,3 +270,29 @@ All screenshots captured from the isolated verification server on `19287c5` and 
 | `09-timeline-forecast-dark.png` | `1600×1000` | Dark | Timeline `#sprint-strip` with `FORECAST` card (`30–30 of 30 · by 27 Nov`, `What the model can't see`, `delivered if the blocked items hold: 27`, `Will it land?` button, and `"3030"` end-label overlap `N-02`). |
 | `10-timeline-forecast-light.png` | `1600×1000` | Light | Timeline `#sprint-strip` and `FORECAST` card in Light theme with `S1 lens` active. |
 | `11-phone-forecast-dark.png` | `412×915` | Dark | Phone `#sprint-strip` and `FORECAST` card (`30–30 of 30`, `by 27 Nov · P50 30`, `5 at risk →` expanded in place, 32px bar, `scrollWidth === 412`). |
+| `12-reverify-aging-desktop-dark.png` | `1600×1000` | Dark | Re-verification (`0acfa69`): Aging tab (`Story cycle`) showing non-overlapping tick labels (`N-06`), single meta/censor lines (`N-07`), and untruncated `story` / `91 calendar days` / re-plan `WHY` columns (`N-08`). |
+| `13-reverify-forecast-desktop-dark.png` | `1600×1000` | Dark | Re-verification (`0acfa69`): Timeline `FORECAST` card showing deduplicated `"30"` end label and new `Copy as Markdown` chip (`N-02`). |
+| `14-reverify-trend-phone-dark.png` | `412×915` | Dark | Re-verification (`0acfa69`): Phone Trend view with wrapped 11-tab `#trend-metrics` bar and `documentElement.scrollWidth === 412` (`N-03`). |
+
+---
+
+## 7. Re-verification (prd/65 fixes)
+
+- **Commit SHA re-verified:** `0acfa69` (`0acfa69d`, app reports `v0.11.1-35-g0acfa69d` via git checkout and `v0.12.0` via `VERSION`)
+- **Final Verdict (`0acfa69`):** **SHIPPABLE as `v0.12.0` — all 22 `prd/64` findings (`F-01`..`F-22`) and all 10 `prd/65` new-surface findings (`N-01`..`N-10`) are 100 % FIXED across desktop (`1600×1000`) and phone (`412×915`) in both dark and light themes, with zero regressions.**
+
+**Summary counts:** **10 FIXED · 0 PARTIAL · 0 NOT FIXED**
+
+| ID | Finding | Status | Re-verification Evidence (`0acfa69`) |
+| --- | --- | --- | --- |
+| **N-01** | `scope=repo:DEL/delivery-api&tab=aging` (`Story cycle`) filtered all story rows to 0 client-side while chip and chart showed 7 | **FIXED** | Under `scope=repo:DEL/delivery-api` on `Story cycle`, all four surfaces agree on **7**: tab badge reads `"Aging 7"`, `[data-aging-counts]` chip reads `"7 open · 5 past p85 · 4 no live PR"`, `[data-aging-table]` renders `7` rows, strip chart plots `7` dots, `#aging-replan` renders `4` rows, and `#honesty` reads `"7 in flight · 3 live · 5 past p85 · 4 no live PR · story clock · filtered to the delivery-api repo · chase = age − p85, ranked (1 item)"`. |
+| **N-02** | Timeline forecast on Sprint 3 (`30–30`) overlapped `.forecast-ends` into `"3030"` and lacked `Copy as Markdown` | **FIXED** | When `P15 = P50 = P85 = 30`, `.forecast-ends` renders a single `<span>30</span>` at `left: 100%` on both desktop (`width: 14px`) and phone (`width: 14px`, no `"3030"` collision). `#forecast-card` now carries `[data-forecast-copy]` (`Copy as Markdown`), which exports `# Forecast — 30–30 of 30 · by 27 Nov` with interval, by-date, P50, `p(reach)`, throughput stats, P85 date, `What the model can't see` links with `?tenant=del-combined`, ceiling (`27`), method, caveat, seed, and `_forecast for [del-combined](http://127.0.0.1:8794/?tenant=del-combined)_`. On a sparse refusal (`days=7`), `[data-forecast-copy]` exports `# Forecast — refused\n\nNot enough history to forecast: 1 week observed, 8 needed.\n\n_No interval: this window cannot support a forecast, so the reason is stated and no number is invented._` with no forecast digits. See `13-reverify-forecast-desktop-dark.png`. |
+| **N-03** | Phone (`412×915`) `#trend-metrics` bar overflowed horizontally (`scrollWidth: 717px`) | **FIXED** | At `412×915` (dark & light), `#trend-metrics` has `flexWrap: "wrap"`, wraps its 11 metric tabs cleanly across 4 rows (`barClientW: 412`, `barScrollW: 412`), and `document.documentElement.scrollWidth === 412` across all 11 views/tabs (`overview`, `delivery`, `delivery_aging`, `timeline`, `trend`, `blocking`, `queue`, `rules`, `policy`, `sources`, `ticket`). See `14-reverify-trend-phone-dark.png`. |
+| **N-04** | Recording or deleting an annotation had its `"recorded …"` flash status overwritten ~1 s later by the `/ws` `changed` broadcast | **FIXED** | Submitting `review SLA 4 h` (`2026-10-08`) sets `#status` to `"recorded review SLA 4 h"` at `t = 300 ms` and holds `"recorded review SLA 4 h"` across the `/ws` echo at `t = 1400 ms` and `t = 3600 ms` before returning to `"live · 2529 events · del-combined"`. Deleting the annotation holds `"annotation deleted"` at both `t = 300 ms` and `t = 1400 ms`. |
+| **N-05** | `person:CaOs` on Aging left `[data-aging-counts]`, strip chart dots, `#honesty`, and `#aging-replan` unscoped | **FIXED** | Under `scope=person:CaOs`: on `PR review`, badge is `"Aging 1"`, chip is `"1 open · 1 past p85"`, table has `1` row, chart has `1` dot, `#honesty` reads `"1 in flight · 1 live · 1 past p85 · PR clock · filtered to CaOs (waiting on it) · chase = age − p85, ranked (1 item)"`, and `#aging-replan` is absent (`0` rows). On `Story cycle`, badge is `"Aging 0"`, chip is `"0 open · 0 past p85"`, table has `0` rows, chart has `0` dots, `#honesty` reads `"0 in flight · 0 live · 0 past p85 · story clock · filtered to CaOs (waiting on it) · chase = age − p85, ranked (0 items)"`, and `#aging-replan` is absent (`0` rows). |
+| **N-06** | Desktop `.aging-tick-labels` (`p50`, `p75`, `p85`, `p95`) overlapped horizontally | **FIXED** | Measured bounding boxes on desktop (`1600×1000`): on `Story cycle`, `p50` (`[194.0, 269.9]`), `p85` (`[281.9, 357.7]`), `p95` (`[369.7, 445.6]`) have `12px` gaps (`overlaps: []`). On `PR review`, `p50` (`[194.0, 263.5]`), `p75` (`[275.5, 345.1]`), `p85` (`[357.1, 426.6]`), `p95` (`[438.6, 508.2]`) have `12px` gaps (`overlaps: []`). See `12-reverify-aging-desktop-dark.png`. |
+| **N-07** | `.aging-meta` duplicated the vacation/calendar sentence and the censoring sentence twice | **FIXED** | On the Aging tab, `.aging-meta` reads `"Ages are business hours on the holder’s calendar; a person on vacation accrues none. Calendar days in brackets."` (`vacCount === 1`) and `.aging-censor` reads `"An age is a censored duration — the item has not finished yet; compare it with finished work, never add it to a cycle-time median."` (`cenCount === 1`). |
+| **N-08** | Desktop Aging table `.c-kind`, `.c-age`, and `#aging-replan .c-who` truncated text with ellipses | **FIXED** | At `1600×1000`, `.table.aging td.c-kind` (`clientW: 68, scrollW: 68, truncated: false`) displays full `"story"`, `.table.aging td.c-age` (`clientW: 195, scrollW: 195, truncated: false`) displays full `"64 d 4 h 91 calendar days"`, and `#aging-replan td.c-who` (`clientW: 708, scrollW: 708, truncated: false`) displays full `"no open PR and no human event for 10 business days — abandoned work, not a slow review"`. See `12-reverify-aging-desktop-dark.png`. |
+| **N-09** | Trend `Before/after` panel printed the censoring disclosure sentence twice | **FIXED** | With split `2026-10-08` on Trend, `.verdict-sentence` reads `"Can't tell at this n: 48 items before, 25 after — the interval spans zero, so this data cannot separate the change from noise."` and `.censored` below the table reads `"7 open item(s) before and 5 after are excluded and counted: a running age is not a completed duration."` (`censoredSentenceCount === 1`). |
+| **N-10** | Policy lab `cap PRs at 3 commits` (`size3`) guardrail showed `rounds 1.5 → 1.5` instead of `PRs per 100 commits` | **FIXED** | Clicking `[data-preset="size3"]` in Policy lab renders `[data-policy-guardrail]` as `guardrail: PRs per 100 commits <b class="guardrail-warn">20.2 → 42.2</b> · reopen held at 5.5 %` with warning tint (`rgb(251, 205, 88)`), matching Rules. |
+
