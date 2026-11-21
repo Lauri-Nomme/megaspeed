@@ -8,7 +8,9 @@ against Cloud's surface, and returns the same payloads, so
 What is different (prd/24):
 
 * **Base path** -- ``/rest/api/3`` instead of ``/rest/api/2``.
-* **Auth** -- a Bearer PAT (``MEGASPEED_JIRA_CLOUD_TOKEN``), never Basic.
+* **Auth** -- a Bearer PAT (``MEGASPEED_JIRA_CLOUD_TOKEN``), or the account
+  e-mail + API token (``MEGASPEED_JIRA_CLOUD_USER`` +
+  ``MEGASPEED_JIRA_CLOUD_API_TOKEN``, Basic) -- the usual Cloud method.
 * **Search** -- ``/rest/api/3/search/jql`` is *cursor* paged
   (``nextPageToken`` / ``isLast``), where DC pages with ``startAt``.
 * **Custom-field ids** -- Cloud's documented ids (``customfield_10014`` Epic

@@ -23,7 +23,8 @@ for a human.
 
 Configuration comes from the same environment as the scraper
 (``MEGASPEED_JIRA_BASE_URL`` + credentials, or
-``MEGASPEED_JIRA_CLOUD_BASE_URL`` + ``MEGASPEED_JIRA_CLOUD_TOKEN``), with
+``MEGASPEED_JIRA_CLOUD_BASE_URL`` + a Bearer PAT, or + the account e-mail and
+API token), with
 ``--config`` for a TOML file.
 """
 
@@ -40,18 +41,24 @@ VALUE_LIMIT = 200
 
 
 def client_from_config(cfg: Config, *, cloud: bool):
-    """Build the read-only client the scraper would use (and probe it once)."""
+    """Build the read-only client the scraper would use (no request yet)."""
     from .transport import HttpTransport
 
     if cloud:
         if not cfg.jira_cloud_base_url:
             raise SystemExit(
                 "jira cloud mode needs MEGASPEED_JIRA_CLOUD_BASE_URL (and"
-                " MEGASPEED_JIRA_CLOUD_TOKEN); in dev that is the proxy URL"
+                " MEGASPEED_JIRA_CLOUD_TOKEN, or MEGASPEED_JIRA_CLOUD_USER +"
+                " MEGASPEED_JIRA_CLOUD_API_TOKEN); in dev that is the proxy URL"
             )
         from .jira_cloud import CloudJiraClient
 
-        transport = HttpTransport(cfg.jira_cloud_base_url, token=cfg.jira_cloud_token)
+        transport = HttpTransport(
+            cfg.jira_cloud_base_url,
+            token=cfg.jira_cloud_token,
+            user=cfg.jira_cloud_user,
+            password=cfg.jira_cloud_api_token,
+        )
         client = CloudJiraClient(
             transport, page_limit=cfg.jira_page_limit, tempo=cfg.jira_tempo
         )
@@ -73,8 +80,90 @@ def client_from_config(cfg: Config, *, cloud: bool):
             transport, page_limit=cfg.jira_page_limit, min_interval=0.05,
             tempo=cfg.jira_tempo,
         )
-    client.check()
     return client
+
+
+def _auth_method(cfg: Config, cloud: bool) -> str:
+    """Which credentials the client will send, named but never printed."""
+    if cloud:
+        if cfg.jira_cloud_token:
+            return "Bearer PAT (MEGASPEED_JIRA_CLOUD_TOKEN)"
+        if cfg.jira_cloud_user:
+            return (
+                f"Basic {cfg.jira_cloud_user} "
+                "(MEGASPEED_JIRA_CLOUD_API_TOKEN)"
+            )
+        return "none — no Cloud credentials are set"
+    if cfg.jira_auth_token:
+        return "Bearer PAT (MEGASPEED_JIRA_TOKEN)"
+    if cfg.jira_auth_user:
+        return f"Basic {cfg.jira_auth_user} (MEGASPEED_JIRA_PASSWORD)"
+    return "none — no Jira credentials are set"
+
+
+def auth_help(cfg: Config, *, cloud: bool, errors: list[str]) -> str:
+    """The 403/401 diagnostic: what was sent, what to try, no secrets."""
+    base = cfg.jira_cloud_base_url if cloud else cfg.jira_base_url
+    method = _auth_method(cfg, cloud)
+    lines = [
+        f"cannot authenticate to {base}",
+        *[f"  {error}" for error in errors],
+        f"  auth sent: {method}",
+        "next:",
+    ]
+    if cloud:
+        lines += [
+            "  1. Cloud API token (the usual method): set",
+            "     MEGASPEED_JIRA_CLOUD_USER=<your account e-mail>",
+            "     MEGASPEED_JIRA_CLOUD_API_TOKEN=<token from id.atlassian.com>",
+            "  2. Cloud Personal Access Token: set MEGASPEED_JIRA_CLOUD_TOKEN",
+            "     (Bearer); it must be enabled for the site and the account",
+            "  3. Against the local emulation proxy, the PAT is the proxy's --pat,",
+            "     not a Cloud token",
+            "  4. A 403 on every path can also be an Atlassian IP allowlist / SSO",
+            "     policy or a reverse proxy rejecting the request",
+        ]
+    else:
+        lines += [
+            "  1. MEGASPEED_JIRA_TOKEN (Bearer PAT), or",
+            "     MEGASPEED_JIRA_USER + MEGASPEED_JIRA_PASSWORD (Basic)",
+            "  2. a 403 on every path can be a reverse proxy or an IP allowlist",
+        ]
+    return "\n".join(lines)
+
+
+def probe_auth(client, *, cloud: bool, cfg: Config) -> dict:
+    """Prove the credentials work; fall back to ``/myself`` when ``serverInfo`` fails.
+
+    ``/serverInfo`` is the cheap probe, but some Cloud sites and proxies block
+    it for token users while ``/myself`` still works. A failed ``serverInfo``
+    therefore is not fatal: identity + field reads are the real test. Only when
+    both paths fail do we stop, with an actionable 401/403 diagnostic.
+    """
+    base = "/rest/api/3" if cloud else "/rest/api/2"
+    errors: list[str] = []
+    try:
+        info = client.check() or {}
+        return {"ok": True, "version": info.get("version"),
+                "via": f"{base}/serverInfo", "warning": ""}
+    except Exception as exc:  # transport/HTTP error, keep the detail
+        errors.append(f"{base}/serverInfo: {exc}")
+    try:
+        me = client._get(f"{base}/myself", kind="myself") or {}   # noqa: SLF001
+        who = (me.get("displayName") or me.get("emailAddress")
+               or me.get("name") or me.get("accountId") or "unknown")
+        return {
+            "ok": True,
+            "version": None,
+            "via": f"{base}/myself",
+            "account": who,
+            "warning": (
+                f"{errors[0]} — continuing via {base}/myself as {who}"
+            ),
+        }
+    except Exception as exc:
+        errors.append(f"{base}/myself: {exc}")
+    raise SystemExit(auth_help(cfg, cloud=cloud, errors=errors))
 
 
 def team_candidates(fields: list[dict]) -> list[dict]:
@@ -120,18 +209,21 @@ def _issue_type(issue: dict) -> str:
     return str(value or "?")
 
 
-def inspect(client, issue_key: str | None = None, *, catalogue: bool = False) -> dict:
+def inspect(client, issue_key: str | None = None, *, catalogue: bool = False,
+            version=None, auth: dict | None = None) -> dict:
     """The field catalogue and (optionally) one ticket's field values.
 
     ``catalogue=True`` lists every field; an issue additionally reports the
     fields on that ticket's screen with their values. The team candidates are
     reported both ways, so the command still identifies the field when the
-    ticket's value is null.
+    ticket's value is null. ``version``/``auth`` come from :func:`probe_auth`
+    so the report says which probe path proved the credentials.
     """
     fields = list(client.fields() or [])
     by_id = {str(entry.get("id") or ""): entry for entry in fields if entry.get("id")}
     report: dict = {
-        "version": (client.check() or {}).get("version"),
+        "version": version,
+        "auth": auth or {},
         "requests": client.requests,
         "scope": "cloud" if client.__class__.__name__.startswith("Cloud") else "dc",
         "fields": [],
@@ -196,6 +288,12 @@ def render(report: dict) -> str:
         f"jira {report.get('version') or '?'} · {scope.upper()} · "
         f"{report.get('requests', 0)} requests · read-only"
     )
+    auth = report.get("auth") or {}
+    if auth.get("warning"):
+        lines.append(f"auth           {auth['warning']}")
+    elif auth.get("via"):
+        who = f" as {auth['account']}" if auth.get("account") else ""
+        lines.append(f"auth           ok via {auth['via']}{who}")
     issue = report.get("issue")
     if issue:
         lines.append(
@@ -256,12 +354,26 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _utf8_console() -> None:
+    """Windows consoles default to cp1252; this output has ``·``, ``—`` and ``…``."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):  # a captured/StringIO stream
+            pass
+
+
 def main(argv: list[str] | None = None) -> int:
+    _utf8_console()
     args = build_parser().parse_args(argv)
     try:
         cfg = load_config(args.config)
         client = client_from_config(cfg, cloud=args.cloud)
-        report = inspect(client, args.issue, catalogue=args.list or not args.issue)
+        auth = probe_auth(client, cloud=args.cloud, cfg=cfg)
+        report = inspect(
+            client, args.issue, catalogue=args.list or not args.issue,
+            version=auth.get("version"), auth=auth,
+        )
     except SystemExit as exc:
         print(str(exc.code) if exc.code not in (0, None) else "bad configuration", file=sys.stderr)
         return 2

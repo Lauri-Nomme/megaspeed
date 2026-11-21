@@ -99,11 +99,17 @@ def _jira_transport(cfg: Config, args) -> tuple[object, str, int | None, object 
             if not cfg.jira_cloud_base_url:
                 raise SystemExit(
                     "jira cloud mode needs MEGASPEED_JIRA_CLOUD_BASE_URL (and"
-                    " MEGASPEED_JIRA_CLOUD_TOKEN); in dev that is the proxy URL"
+                    " MEGASPEED_JIRA_CLOUD_TOKEN, or MEGASPEED_JIRA_CLOUD_USER +"
+                    " MEGASPEED_JIRA_CLOUD_API_TOKEN); in dev that is the proxy URL"
                 )
             from .jira_cloud import CloudJiraClient
 
-            transport = HttpTransport(cfg.jira_cloud_base_url, token=cfg.jira_cloud_token)
+            transport = HttpTransport(
+                cfg.jira_cloud_base_url,
+                token=cfg.jira_cloud_token,
+                user=cfg.jira_cloud_user,
+                password=cfg.jira_cloud_api_token,
+            )
             client = CloudJiraClient(transport, page_limit=cfg.jira_page_limit, tempo=tempo)
             client.check()
             return transport, "jira-cloud", args.limit, client
@@ -416,7 +422,8 @@ def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
     ap.add_argument("--jira-cloud", action="store_true",
                     help="scrape Jira **Cloud** (v3 + Bearer PAT, prd/24) instead of DC;"
                          " implies --jira and reads MEGASPEED_JIRA_CLOUD_BASE_URL"
-                         " + MEGASPEED_JIRA_CLOUD_TOKEN")
+                         " + MEGASPEED_JIRA_CLOUD_TOKEN, or MEGASPEED_JIRA_CLOUD_USER"
+                         " + MEGASPEED_JIRA_CLOUD_API_TOKEN (Basic)")
     ap.add_argument("--tempo", action="store_true",
                     help="read worklogs through the Tempo add-on instead of Jira's native"
                          " worklog (prd/30); implies --jira, and applies to --jira-cloud too")

@@ -33,7 +33,13 @@ from ingest.bundle import read_bundle
 from ingest.config import Config, load_config, parse_teams
 from ingest.importer import import_bundle
 from ingest.jira import JiraClient
-from ingest.jira_fields import inspect, render
+from ingest.jira_fields import (
+    _auth_method,
+    auth_help,
+    inspect,
+    probe_auth,
+    render,
+)
 from ingest.progress import ProgressReporter
 from ingest.scrape_jira import (
     JiraCollected,
@@ -152,6 +158,16 @@ class TeamConfigTests(unittest.TestCase):
     def test_a_team_set_does_not_need_a_prefix_list(self):
         cfg = self.load(MEGASPEED_JIRA_TEAMS="Platform", MEGASPEED_TICKET_PROJECTS="")
         self.assertEqual(cfg.ticket_projects, ())
+
+    def test_cloud_email_plus_api_token_is_a_credential(self):
+        # The standard Cloud method; a Bearer PAT is not the only option.
+        cfg = self.load(
+            MEGASPEED_JIRA_CLOUD_BASE_URL="https://acme.atlassian.net",
+            MEGASPEED_JIRA_CLOUD_USER="me@acme.test",
+            MEGASPEED_JIRA_CLOUD_API_TOKEN="tok",
+        )
+        self.assertTrue(cfg.has_jira_cloud_credentials)
+        self.assertEqual(cfg.jira_cloud_user, "me@acme.test")
 
 
 class BaseScopeTests(unittest.TestCase):
@@ -470,8 +486,75 @@ class _FieldClient:
     def check(self):
         return {"version": "9.17.5"}
 
+    def _get(self, path: str, params: dict | None = None, kind: str | None = None):
+        return {"displayName": "Lauri"}
+
     def issue(self, key: str, changelog: bool = True):
         return self._issue
+
+
+class AuthProbeTests(unittest.TestCase):
+    """Cloud auth: serverInfo can 403 while /myself works; both fail = diagnose."""
+
+    class _Client:
+        requests = 2
+
+        def __init__(self, server_error=None, myself=None):
+            self.server_error = server_error
+            self.myself = myself
+
+        def check(self):
+            if self.server_error:
+                raise RuntimeError(self.server_error)
+            return {"version": "9.17.5"}
+
+        def _get(self, path, params=None, kind=None):
+            if self.myself is None:
+                raise RuntimeError("403 Forbidden for " + path)
+            return self.myself
+
+    def _cfg(self, **values):
+        return Config(
+            db_path=Path("/tmp/x.duckdb"), identity_path=Path("/tmp/x.json"),
+            ticket_regex=REGEX, key_shape=SHAPE, repos=[],
+            jira_cloud_base_url="https://acme.atlassian.net", **values,
+        )
+
+    def test_a_serverinfo_block_falls_back_to_myself(self):
+        client = self._Client("403 Forbidden for /rest/api/3/serverInfo",
+                              {"displayName": "Lauri"})
+        auth = probe_auth(client, cloud=True, cfg=self._cfg())
+        self.assertTrue(auth["ok"])
+        self.assertIsNone(auth["version"])
+        self.assertIn("/myself", auth["via"])
+        self.assertIn("Lauri", auth["warning"])
+
+    def test_both_paths_failing_names_the_cloud_credential_options(self):
+        client = self._Client("403 Forbidden for /rest/api/3/serverInfo")
+        with self.assertRaises(SystemExit) as caught:
+            probe_auth(client, cloud=True, cfg=self._cfg())
+        message = str(caught.exception.code)
+        self.assertIn("MEGASPEED_JIRA_CLOUD_USER", message)
+        self.assertIn("MEGASPEED_JIRA_CLOUD_API_TOKEN", message)
+        self.assertIn("MEGASPEED_JIRA_CLOUD_TOKEN", message)
+        self.assertIn("auth sent: none", message)
+
+    def test_the_method_is_named_but_the_secret_never_printed(self):
+        cfg = self._cfg(jira_cloud_user="me@acme.test",
+                        jira_cloud_api_token="super-secret-token")
+        message = auth_help(cfg, cloud=True, errors=["403"])
+        self.assertIn("Basic me@acme.test", message)
+        self.assertNotIn("super-secret-token", message)
+        self.assertEqual(
+            _auth_method(cfg, True),
+            "Basic me@acme.test (MEGASPEED_JIRA_CLOUD_API_TOKEN)",
+        )
+
+    def test_basic_cloud_credentials_are_recognised(self):
+        cfg = self._cfg(jira_cloud_user="me@acme.test",
+                        jira_cloud_api_token="tok")
+        self.assertTrue(cfg.has_jira_cloud_credentials)
+        self.assertFalse(self._cfg().has_jira_cloud_credentials)
 
 
 class FieldInspectorTests(unittest.TestCase):
@@ -523,6 +606,19 @@ class FieldInspectorTests(unittest.TestCase):
         report = inspect(_FieldClient(fields), None, catalogue=True)
         self.assertEqual(report["team_candidates"], [])
         self.assertIn("may not have", render(report))
+
+    def test_the_auth_path_is_reported(self):
+        report = inspect(
+            _FieldClient(self.FIELDS), None, catalogue=True, version=None,
+            auth={"ok": True, "via": "/rest/api/3/myself", "account": "Lauri",
+                  "warning": (
+                      "403 Forbidden for /rest/api/3/serverInfo — continuing via"
+                      " /rest/api/3/myself as Lauri"
+                  )},
+        )
+        text = render(report)
+        self.assertIn("via /rest/api/3/myself as Lauri", text)
+        self.assertIn("serverInfo", text)
 
 
 if __name__ == "__main__":  # pragma: no cover

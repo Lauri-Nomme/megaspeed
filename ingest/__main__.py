@@ -91,7 +91,8 @@ def _legacy_parser() -> argparse.ArgumentParser:
     ap.add_argument("--jira-cloud", action="store_true",
                     help="ingest Jira **Cloud** (v3 + Bearer PAT, prd/24) instead of DC;"
                          " implies --jira and reads MEGASPEED_JIRA_CLOUD_BASE_URL"
-                         " + MEGASPEED_JIRA_CLOUD_TOKEN")
+                         " + MEGASPEED_JIRA_CLOUD_TOKEN, or MEGASPEED_JIRA_CLOUD_USER"
+                         " + MEGASPEED_JIRA_CLOUD_API_TOKEN (Basic)")
     ap.add_argument("--project", action="append", default=None, metavar="KEY",
                     help="--jira: override the configured Jira projects (repeatable)")
     ap.add_argument("--team", action="append", default=None, metavar="NAME",

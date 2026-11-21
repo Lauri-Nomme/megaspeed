@@ -130,17 +130,21 @@ story_points_field = ""
 teams = []
 team_field = ""
 
-# Jira Cloud (prd/24): the same ticket layer over Cloud's v3 API + a Bearer PAT.
-# Credentials come from the environment only:
-#   MEGASPEED_JIRA_CLOUD_TOKEN   (a Cloud Personal Access Token)
-# and the base URL from MEGASPEED_JIRA_CLOUD_BASE_URL (env wins over this file).
+# Jira Cloud (prd/24): the same ticket layer over Cloud's v3 API.
+# Auth is one of two methods (environment only):
+#   MEGASPEED_JIRA_CLOUD_USER=<account e-mail> +
+#   MEGASPEED_JIRA_CLOUD_API_TOKEN=<token from id.atlassian.com>   (Basic)
+#   MEGASPEED_JIRA_CLOUD_TOKEN   (a Cloud Personal Access Token, Bearer)
+# A PAT wins when both are set. Most Cloud sites use the first method; a 403
+# on /serverInfo with a PAT usually means the site has no PAT support/enablement.
+# The base URL comes from MEGASPEED_JIRA_CLOUD_BASE_URL (env wins over this file).
 # In development that is the local emulation proxy in front of the DC lab:
 #   python3 -m proxy.cloud_jira_proxy --upstream http://127.0.0.1:8090 \
 #       --port 8091 --pat cloud-lab-pat --user admin --password admin-lab-pw
 #   export MEGASPEED_JIRA_CLOUD_BASE_URL=http://127.0.0.1:8091
 #   export MEGASPEED_JIRA_CLOUD_TOKEN=cloud-lab-pat
 #   .venv/bin/python -m ingest scrape --jira-cloud --live --project DEL --probe
-# Production: cloud_base_url = "https://acme.atlassian.net" + a real PAT.
+# Production: cloud_base_url = "https://acme.atlassian.net" + email/API token.
 cloud_base_url = ""    # e.g. https://acme.atlassian.net (or the local proxy)
 
 # prd/29: the installation's *actual* workflows, projected onto the closed stage

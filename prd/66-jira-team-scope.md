@@ -90,7 +90,20 @@ MEGASPEED_JIRA_EPICS=DEL-1 MEGASPEED_JIRA_TEAMS="Platform" python3 -m ingest scr
     --jira --live --out export/epic-platform.tgz
 ```
 
-## Tests (`tests/test_jira_team_scope.py`, 38)
+## Authentication (Cloud)
+
+Cloud accepts two methods, and the client supports both:
+
+- **account e-mail + API token** (Basic) — `MEGASPEED_JIRA_CLOUD_USER` +
+  `MEGASPEED_JIRA_CLOUD_API_TOKEN`; the usual Cloud method;
+- **Personal Access Token** (Bearer) — `MEGASPEED_JIRA_CLOUD_TOKEN`; wins when both are set.
+
+The inspector probes `/rest/api/3/serverInfo` and, if that is blocked, falls back to `/rest/api/3/myself`.
+Only when both fail does it stop — printing the exact paths, the method actually sent, and the env vars
+to fix. A `403` on both paths is usually a PAT on a site that expects an API token, a site with no PAT
+enablement, or an IP allowlist/SSO policy.
+
+## Tests (`tests/test_jira_team_scope.py`, 44)
 
 - config: env/file/flags, trim + dedupe (case preserved), long-value error, teams need no prefix list;
 - the key/epic/project criterion is unchanged by a team (`base_scope`), and the intersection keeps the

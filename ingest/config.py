@@ -194,6 +194,10 @@ class Config:
     jira_cloud_base_url: str = ""
     #: Cloud Personal Access Token -- Bearer auth, never Basic.
     jira_cloud_token: str = ""
+    #: Cloud account e-mail + API token -- Basic auth, the standard Cloud
+    #: method for a user API token. Used when ``jira_cloud_token`` is empty.
+    jira_cloud_user: str = ""
+    jira_cloud_api_token: str = ""
     #: Read worklogs through the Tempo add-on instead of Jira's native worklog
     #: endpoint (prd/30). Applies to both DC and Cloud; the reduced events are
     #: the same either way.
@@ -217,7 +221,10 @@ class Config:
 
     @property
     def has_jira_cloud_credentials(self) -> bool:
-        return bool(self.jira_cloud_token)
+        return bool(
+            self.jira_cloud_token
+            or (self.jira_cloud_user and self.jira_cloud_api_token)
+        )
 
     @property
     def has_jira_credentials(self) -> bool:
@@ -565,6 +572,13 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
             "MEGASPEED_JIRA_CLOUD_BASE_URL", jira.get("cloud_base_url", "")
         ).rstrip("/"),
         jira_cloud_token=os.environ.get("MEGASPEED_JIRA_CLOUD_TOKEN", ""),
+        # prd/24 + the inspector: Cloud's usual auth is the account e-mail plus
+        # an API token (Basic). A PAT (Bearer) still wins when both are set.
+        jira_cloud_user=os.environ.get(
+            "MEGASPEED_JIRA_CLOUD_USER",
+            os.environ.get("MEGASPEED_JIRA_CLOUD_EMAIL", ""),
+        ).strip(),
+        jira_cloud_api_token=os.environ.get("MEGASPEED_JIRA_CLOUD_API_TOKEN", ""),
         jira_tempo=_env_flag(
             os.environ.get("MEGASPEED_JIRA_TEMPO"), jira.get("tempo", False)
         ),
@@ -582,7 +596,9 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     if config.jira_cloud_base_url and not config.has_jira_cloud_credentials:
         raise SystemExit(
             "MEGASPEED_JIRA_CLOUD_BASE_URL is set but no credentials: set"
-            " MEGASPEED_JIRA_CLOUD_TOKEN (a Cloud Personal Access Token)"
+            " MEGASPEED_JIRA_CLOUD_TOKEN (a Cloud Personal Access Token, Bearer)"
+            " or MEGASPEED_JIRA_CLOUD_USER=<account e-mail> +"
+            " MEGASPEED_JIRA_CLOUD_API_TOKEN=<API token> (Basic)"
         )
     try:
         config.llm_url = classify.validate_llm_url(config.llm_url)
