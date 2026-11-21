@@ -18,6 +18,7 @@
 
 import { fmtDay, fmtHours, esc } from './format.js';
 import { ticketLink } from './tickets.js';
+import { forecastCard } from './forecast.js';
 
 /** The payload's bands as `{id, label, start, end, stories, ...}` in milliseconds. */
 export function sprintBands(data) {
@@ -202,6 +203,8 @@ export function atRiskMarkup(data, { base = '' } = {}) {
   const count = risk.count ?? rows.length;
   const points = risk.points_at_risk ?? 0;
   const head = `<div class="panel-head"><h2>Sprint ${esc(risk.sprint_id)} at risk</h2>
+      <button type="button" class="chip forecast-open" data-forecast-open="${esc(risk.sprint_id)}"
+        title="the same forecast card, scoped to this sprint">Will it land?</button>
       <span class="pill ${count ? 'warning' : 'healthy'}" data-at-risk-count="${count}">${count} stor${count === 1 ? 'y' : 'ies'} · ${points} pts</span>
       <span class="muted">${risk.done_by_end ?? 0} of ${risk.stories ?? 0} delivered by the snapshot${
         risk.planned_end ? ` · plan ends ${esc(risk.planned_end)}` : ''}</span></div>`;
@@ -299,8 +302,14 @@ function focusLine(data, focus) {
 }
 
 /** The sprint strip: one row per sprint, plus the out-of-scope and carry lists. */
-export function sprintStrip(data, { base = '', focus = null } = {}) {
+export function sprintStrip(data, { base = '', focus = null, forecast = null,
+  forecastTarget = null } = {}) {
   if (!data || !data.available) return '';
+  // prd/60: the forecast card answers the page's question first ("Will we land
+  // what we committed?"); the sprint strip below is the same lens, item by item.
+  // A store with no sprint layer (or a failed forecast fetch) draws no card
+  // rather than a permanent "reading…" panel.
+  const card = forecast ? forecastCard(forecast, { target: forecastTarget, base }) : '';
   const sprints = data.sprints || [];
   const rows = sprints.map((sprint) => {
     const start = Date.parse(sprint.band_start);
@@ -361,7 +370,7 @@ export function sprintStrip(data, { base = '', focus = null } = {}) {
     ? `<span class="sprint-ontime" title="done by end ÷ committed, per closed sprint; target ${Math.round((delivery.target_share || 0) * 100)} %">${
       delivery.on_time_sprints || 0}/${delivery.measured_sprints} sprints on time</span>`
     : '';
-  return `<div class="sprint-strip" role="group" aria-label="sprints">
+  return `${card}<div class="sprint-strip" role="group" aria-label="sprints">
     <div class="sprint-strip-head">
       <span class="sprint-strip-title">sprints</span>
       <span class="sprint-scope-line">${esc(sprintScopeLine(data))}</span>

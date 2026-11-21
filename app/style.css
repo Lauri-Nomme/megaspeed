@@ -887,6 +887,107 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .sprint-out > summary:hover { color: var(--text-primary); }
 .sprint-out .muted { color: var(--text-tertiary); }
 
+/* --- forecast (prd/60): the interval is the headline ---------------------- */
+/* The bar is *encoding*, so it is neutral accent, never state. It turns
+   --warning only when even the optimistic edge misses (p85 < target), and
+   never red: a forecast is information, not an incident. */
+.forecast-card {
+  border-bottom: 1px solid var(--border-hairline);
+  background: var(--bg-surface-raised);
+  padding: 8px 14px 10px;
+}
+.forecast-card.flash { animation: forecast-flash .6s ease; }
+@keyframes forecast-flash {
+  from { background: var(--primary-tint-bg); }
+  to { background: var(--bg-surface-raised); }
+}
+.forecast-overline {
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--text-tertiary);
+}
+.forecast-headline {
+  margin: 2px 0 0; font-size: 17px; font-weight: 700; line-height: 1.25;
+  color: var(--text-primary); font-variant-numeric: tabular-nums;
+}
+.forecast-subline {
+  margin: 1px 0 8px; font-size: 13px; color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+}
+.forecast-bar {
+  position: relative; width: 100%; height: 32px;
+  background: var(--info-wash); border-radius: 3px;
+}
+.forecast-span {
+  position: absolute; top: 0; bottom: 0;
+  background: var(--info-accent); opacity: .22;
+}
+.forecast-p50 {
+  position: absolute; top: 0; bottom: 0; width: 2px; margin-left: -1px;
+  background: var(--info-accent);
+}
+.forecast-target-hair {
+  position: absolute; top: -2px; bottom: -2px; width: 1px; margin-left: -0.5px;
+  background: var(--text-primary); opacity: .65;
+}
+.forecast-ends {
+  position: relative; height: 14px; margin-top: 2px;
+  font-size: 11px; color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+.forecast-ends span {
+  position: absolute; transform: translateX(-50%);
+  white-space: nowrap;
+}
+.forecast-ends span:first-child { transform: translateX(0); }
+.forecast-ends span:last-child { transform: translateX(-100%); }
+.forecast-card.warn .forecast-span,
+.forecast-card.warn .forecast-p50 { background: var(--warning); }
+.forecast-card.warn .forecast-bar { background: var(--warning-wash); }
+.forecast-blind { margin-top: 7px; font-size: 12px; color: var(--text-secondary); }
+.forecast-blind-head { margin: 0; font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--text-tertiary); }
+.forecast-blind-head .muted { text-transform: none; letter-spacing: 0; margin-left: 8px; }
+.forecast-risk-rows { margin: 3px 0 0; padding-left: 16px; font-size: 12px; color: var(--text-secondary); }
+.forecast-risk-rows li { margin: 1px 0; }
+.forecast-blind-count { margin: 4px 0 0; font-size: 12px; color: var(--text-secondary); }
+.forecast-method { margin: 8px 0 0; font-size: 11px; color: var(--text-tertiary); }
+.forecast-caveat { margin: 3px 0 0; font-size: 11px; color: var(--text-tertiary); font-style: italic; }
+.forecast-params {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-top: 8px; font-size: 11px; color: var(--text-secondary);
+}
+.forecast-params .control { display: inline-flex; align-items: center; gap: 4px; }
+.forecast-params input {
+  height: 22px; width: 64px; padding: 0 4px;
+  background: var(--bg-control); border: 1px solid var(--border-control);
+  border-radius: var(--radius-control); color: var(--text-primary);
+  font-size: 11px; font-variant-numeric: tabular-nums;
+}
+.forecast-params input[type="date"] { width: 116px; }
+.forecast-dot { color: var(--text-tertiary); }
+.forecast-scope-note { margin: 2px 0 6px; font-size: 11px; color: var(--text-tertiary); font-style: italic; }
+.forecast-refusal { margin: 3px 0; font-size: 13px; color: var(--text-primary); }.forecast-refusal.minor { color: var(--text-secondary); font-size: 12px; }
+.forecast-handoff { margin-top: 7px; }
+.forecast-phone { display: none; }
+.forecast-phone-risk {
+  margin-top: 3px; padding: 0; background: none; border: 0; cursor: pointer;
+  color: var(--link); font-size: 13px; font-family: inherit; text-align: left;
+}
+
+@media (max-width: 640px) {
+  /* prd/60 §Phone: three lines + a disclosure, a 32 px bar with only the three
+   * numbers. No axis, no chart, no horizontal scroll. */
+  .forecast-card { padding: 7px 12px 9px; }
+  .forecast-desktop { display: none; }
+  .forecast-phone { display: block; }
+  .forecast-phone .forecast-headline { font-size: 17px; }
+  .forecast-phone .forecast-subline { margin: 0 0 4px; font-size: 13px; }
+  .forecast-phone .forecast-bar { height: 32px; max-width: 100%; }
+  .forecast-phone .forecast-ends { height: 15px; }
+  .forecast-phone .forecast-risk-rows { margin-top: 6px; }
+  .forecast-phone .forecast-refusal { font-size: 13px; }
+  .forecast-card { max-width: 100%; overflow-x: hidden; }
+}
+
 /* --- story-level rework (prd/51) ---------------------------------------- */
 /* The panel is a set of collapsed groups: the count is the headline, the
    ticket rows are the evidence. A zero group stays visible ("none"). */

@@ -147,6 +147,11 @@ const state = {
   overviewBlocking: null,
   // prd/26 P6: the sprint lens (`/api/sprints`): bands, scope, carry-over.
   sprints: null,
+  // prd/60: the forecast card (`/api/forecast?target=sprint:<id>`), the sprint
+  // it describes, and the user's inline target override.
+  forecast: null,
+  forecastSprint: null,
+  forecastTarget: null,
   // prd/50: the trend view (`/api/trend`) and the metric/bucket being shown.
   trend: null,
   // prd/63 F1: a failed trend fetch is an error state in the body, never a
@@ -1115,6 +1120,9 @@ function resetTenantData() {
   state.overviewBlocking = null;
   state.overviewQueues = null;
   state.sprints = null;
+  state.forecast = null;
+  state.forecastSprint = null;
+  state.forecastTarget = null;
   state.sprint = null;
   state.rules = null;
   state.prSize = null;
@@ -1234,7 +1242,10 @@ function renderSprintStrip() {
   const host = $('sprint-strip');
   if (!host) return;
   const markup = state.sprints
-    ? sprintStrip(state.sprints, { base: appBase(), focus: state.sprint })
+    ? sprintStrip(state.sprints, {
+      base: appBase(), focus: state.sprint,
+      forecast: state.forecast, forecastTarget: state.forecastTarget,
+    })
     : '';
   host.innerHTML = markup;
   host.hidden = !markup;
@@ -3282,6 +3293,42 @@ async function loadSprints(seq) {
   return state.sprints;
 }
 
+/* prd/60: the forecast is one endpoint (`/api/forecast`) scoped to the active
+ * sprint — the same scope prd/52's at-risk block has (the two entry points open
+ * one card). A store with no sprint layer, or a server older than the endpoint,
+ * simply draws no card — the sprint strip below still works. The payload is
+ * cached server-side, keyed by its own store/calendar stamp, so this is one
+ * cheap request per view. */
+async function loadForecast(seq) {
+  const active = state.sprints ? state.sprints.active : null;
+  const sid = active;
+  if (sid == null) {
+    state.forecast = null;
+    state.forecastSprint = null;
+    return null;
+  }
+  const changedSprint = state.forecastSprint !== sid;
+  try {
+    const query = new URLSearchParams({ target: `sprint:${sid}` });
+    const payload = await getJSON(withTenant(`/api/forecast?${query}`));
+    if (seq !== loadSeq) return null;
+    state.forecast = payload && payload.ok ? payload : null;
+    state.forecastSprint = sid;
+    const requested = payload && payload.request ? payload.request.n : null;
+    // The target is view state: keep the user's override for the same sprint
+    // (the card re-reads the pre-computed quantiles), but a new sprint starts
+    // from its own requested scope.
+    if (changedSprint || state.forecastTarget == null || requested == null) {
+      state.forecastTarget = requested;
+    }
+  } catch (err) {
+    if (seq !== loadSeq) return null;
+    state.forecast = null;
+    state.forecastSprint = null;
+  }
+  return state.forecast;
+}
+
 /** Show the cap and offer to lift it, with the cost stated (QA round 2, G5). */
 function renderLoadAll() {
   const button = $('load-all');
@@ -3419,6 +3466,8 @@ async function load({ force = false } = {}) {
     await loadObjects(seq);
     if (seq !== loadSeq) return;
     await loadSprints(seq);
+    if (seq !== loadSeq) return;
+    await loadForecast(seq);
     if (seq !== loadSeq) return;
   } catch (err) {
     if (seq !== loadSeq) return;
@@ -3857,6 +3906,38 @@ document.addEventListener('input', (event) => {
 });
 
 document.addEventListener('change', async (event) => {
+  // prd/60: the target control re-reads the payload's pre-computed quantiles —
+  // a re-render, never a new simulation and never an interpolation.
+  const forecastTarget = event.target.closest('[data-forecast-target-input]');
+  if (forecastTarget) {
+    const value = Math.round(Number(forecastTarget.value));
+    if (!Number.isFinite(value) || value < 0) return;
+    state.forecastTarget = value;
+    renderSprintStrip();
+    return;
+  }
+  // prd/60: a new deadline is a new question to the same endpoint (a different
+  // window legitimately gives a different interval); the target input above is
+  // the pure re-render.
+  const forecastBy = event.target.closest('[data-forecast-by-input]');
+  if (forecastBy && state.forecastSprint != null && forecastBy.value) {
+    const query = new URLSearchParams({
+      target: `sprint:${state.forecastSprint}`,
+      by: forecastBy.value,
+    });
+    if (state.forecastTarget != null) query.set('n', String(state.forecastTarget));
+    try {
+      const payload = await getJSON(withTenant(`/api/forecast?${query}`));
+      if (payload && payload.ok) {
+        state.forecast = payload;
+        state.forecastTarget = payload.request ? payload.request.n : state.forecastTarget;
+        renderSprintStrip();
+      }
+    } catch (err) {
+      setStatus(`forecast failed: ${err.message}`, 'stale');
+    }
+    return;
+  }
   // prd/61: the before/after panel's split and metric are two selects on one
   // block; changing either asks the same endpoint one new question.
   const compareSplit = event.target.closest('[data-compare-split]');
@@ -4046,6 +4127,44 @@ document.addEventListener('click', async (event) => {
       scopeToSprint({
         id: sprintRow.dataset.sprintId, start, end,
       });
+    }
+    return;
+  }
+  const forecastToggler = event.target.closest('[data-forecast-risk-toggle]');
+  if (forecastToggler) {
+    const rows = forecastToggler.parentElement
+      && forecastToggler.parentElement.querySelector('[data-forecast-phone-rows]');
+    if (rows) {
+      rows.hidden = !rows.hidden;
+      forecastToggler.setAttribute('aria-expanded', String(!rows.hidden));
+    }
+    return;
+  }
+  // prd/60: both entry points open the same card. The "Will it land?" button on
+  // prd/52's block scrolls to it (the card is already scoped to the active
+  // sprint, the same scope the at-risk list has).
+  const forecastOpen = event.target.closest('[data-forecast-open]');
+  if (forecastOpen) {
+    if (!state.forecast) await loadForecast(loadSeq);
+    renderSprintStrip();
+    const card = $('forecast-card');
+    if (card) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      card.classList.add('flash');
+      setTimeout(() => card.classList.remove('flash'), 700);
+    }
+    return;
+  }
+  // prd/60: the refusals hand off to their owners — prd/61's stability strip for
+  // an overloaded queue, prd/52/59's named rows for a small set.
+  const handoff = event.target.closest('[data-forecast-handoff]');
+  if (handoff) {
+    if (handoff.dataset.forecastHandoff === 'prd61') {
+      await showPage('trend');
+      await setTrendView({ metric: 'throughput_stories', bucket: 'week' });
+    } else {
+      const risk = $('sprint-at-risk');
+      if (risk) risk.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
     return;
   }

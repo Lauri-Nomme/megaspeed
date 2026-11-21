@@ -166,9 +166,11 @@ from analysis import aging as aging_view  # noqa: E402  (prd/59 aging WIP)
 from analysis import annotations as annotation_view  # noqa: E402  (prd/61)
 from analysis import before_after as before_after_view  # noqa: E402  (prd/61)
 from analysis import calendar as workcal  # noqa: E402  (prd/19 business hours)
+from analysis import forecast as forecast_view  # noqa: E402  (prd/60 forecast)
 from analysis import jira as jira_analysis  # noqa: E402  (prd/21 sprints)
 from analysis import rules as insights_rules  # noqa: E402  (prd/17 suggestions)
 from analysis import simulation as policy_lab  # noqa: E402  (prd/23 policy lab)
+from analysis import stability as stability_view  # noqa: E402  (prd/61)
 from analysis import tickets as ticket_view  # noqa: E402  (prd/25 ticket detail)
 from analysis import trend as trend_view  # noqa: E402  (prd/50 time series)
 from analysis import verdict as verdict_view  # noqa: E402  (prd/58 the verdict)
@@ -1115,6 +1117,7 @@ ANALYSIS_PARAMS = {
     "verdict": ("days", "repo"),
     "sprints": ("days",),
     "trend": ("metric", "bucket", "days", "repo"),
+    "forecast": ("days", "repo", "n", "by", "horizon_weeks", "target", "sprint", "confidence"),
     "trend-compare": ("metric", "split", "bucket", "days", "repo"),
     "annotations": ("repo",),
     "simulate": ("days", "scenario", "seed", "tolerance", "replications", "repo"),
@@ -1809,6 +1812,13 @@ def sprints(request: Request):
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
     start, end = window
+    # prd/60: every sprint band links to the one forecast endpoint, scoped to
+    # that sprint — the card never re-implements the model on the sprint payload.
+    for band in payload.get("sprints") or []:
+        if band.get("sprint_id") is not None:
+            band["forecast_url"] = (
+                f"/api/forecast?target=sprint:{band['sprint_id']}"
+            )
     payload.update({
         "ok": True,
         "tenant": tenant,
@@ -1824,6 +1834,169 @@ def sprints(request: Request):
             "days": round(max(0.0, (end - start).total_seconds()) / 86400.0, 1),
         },
     })
+    return JSONResponse(payload, headers={"X-Tenant": tenant})
+
+
+# --------------------------------------------------------------------------- #
+# forecast (prd/60): how many, by when — a seeded bootstrap over weekly counts
+# --------------------------------------------------------------------------- #
+# Two caches, keyed exactly like the trend's: the series once per
+# (tenant, store+calendar stamp, window, repo), and the assembled forecast per
+# (series key, n, periods, horizon, target). The cache exists for consistency
+# (one interval per request), not speed: 10k trials × ≤26 periods is ~2 ms.
+_forecast_lock = threading.Lock()
+_forecast_series_cache: dict[tuple, dict] = {}
+_forecast_cache: dict[tuple, dict] = {}
+FORECAST_SERIES_CACHE_SIZE = 32
+FORECAST_CACHE_SIZE = 128
+
+
+@app.get("/api/forecast")
+def forecast(request: Request):
+    """How many of the target will land, by when — with the refusals stated.
+
+    ``target`` is ``sprint:<id>``, ``epic:<key>`` or ``open``; ``n`` overrides
+    the target's own size; ``by`` is ``sprint`` (the sprint's planned close) or
+    an ISO date; ``days`` is the history window. The answer is an interval
+    (P15/P50/P85), the p(reach) curve and the P85 date — or ``available:false``
+    with the reason. A target (or a sprint's remaining scope) under five items
+    ``delegate``s to prd/52's risk list: it is a risk question, not a throughput
+    question.
+    """
+    unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["forecast"]))
+    if unknown is not None:
+        return unknown
+    try:
+        days = _num_param(request, "days", minimum=0, maximum=3650)
+        n = _int_param(request, "n", default=None, minimum=0, maximum=100_000)
+        horizon_weeks = _int_param(
+            request, "horizon_weeks", default=forecast_view.DEFAULT_HORIZON_WEEKS,
+            minimum=1, maximum=forecast_view.MAX_HORIZON_WEEKS,
+        )
+        by = forecast_view.parse_by(request.query_params.get("by"))
+        confidence = (
+            request.query_params.get("confidence") or "p15-p85"
+        ).strip().replace("–", "-").lower()
+        if confidence not in ("p15-p85",):
+            raise ValueError("confidence is fixed at P15–P85 for this forecast")
+        target = (request.query_params.get("target") or "open").strip()
+        # the sprint id is accepted as its own parameter too (a band link can be
+        # `/api/forecast?sprint=3`); it maps to the one canonical target form.
+        sprint_param = (request.query_params.get("sprint") or "").strip()
+        if sprint_param:
+            if target not in ("", "open"):
+                raise ValueError("pass target=sprint:<id> or sprint=<id>, not both")
+            if not sprint_param.isdigit():
+                raise ValueError("sprint must be an integer sprint id")
+            target = f"sprint:{sprint_param}"
+    except ValueError as exc:
+        return _bad_request(
+            str(exc), valid=list(_params(ANALYSIS_PARAMS["forecast"]))
+        )
+    try:
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    try:
+        with store_conn(path) as con:
+            bundle = _analysis_bundle(con, tenant, path)
+            try:
+                repo = _repo_param(request, bundle.court)
+            except ValueError as exc:
+                return _bad_request(
+                    str(exc), valid=list(_params(ANALYSIS_PARAMS["forecast"]))
+                )
+            stamp = _store_stamp(path)
+            jira = bundle.jira(con)
+            court, jira = _repo_scope(bundle.court, jira, repo)
+            window = insights_rules.window_for(court, _days(days), jira)
+            try:
+                resolved = forecast_view.resolve_request(
+                    court, jira, target=target, n=n, by=by,
+                    as_of=court.snapshot,
+                )
+            except ValueError as exc:
+                return _bad_request(
+                    str(exc), valid=list(_params(ANALYSIS_PARAMS["forecast"]))
+                )
+            # a closed sprint is a backtest: the sample stops at its start, so
+            # the model cannot see the outcome it is being asked to explain.
+            cutoff = resolved.get("cutoff")
+            series_window = window
+            if cutoff:
+                cut = forecast_view.parse_moment(cutoff)
+                if cut is not None and cut > window[0]:
+                    series_window = (window[0], min(window[1], cut))
+            series_key = (
+                tenant, stamp, _calendar_key(tenant), days, repo or "",
+                cutoff or "",
+            )
+            with _forecast_lock:
+                cached = _forecast_series_cache.get(series_key)
+            if cached is None:
+                series = forecast_view.throughput(court, jira, series_window)
+                wip = stability_view.payload(court, jira, series_window)
+                cached = (series, wip)
+                with _forecast_lock:
+                    if len(_forecast_series_cache) >= FORECAST_SERIES_CACHE_SIZE:
+                        _forecast_series_cache.clear()
+                    _forecast_series_cache[series_key] = cached
+            series, wip = cached
+            forecast_key = (
+                series_key, resolved["n"], resolved["periods"],
+                horizon_weeks, resolved["target"], resolved["by"],
+            )
+            with _forecast_lock:
+                hit = _forecast_cache.get(forecast_key)
+            if hit is not None:
+                return JSONResponse(hit, headers={"X-Tenant": tenant})
+            risk = None
+            scope = resolved.get("sprint") or {}
+            if scope.get("sprint_id") is not None:
+                # prd/52's rows are an *adjustment*: the forecast names the items
+                # it cannot see (the ceiling if they do not hold).
+                lens = jira_analysis.sprints(court, jira, window)
+                if lens.get("active") == scope["sprint_id"]:
+                    risk = lens.get("at_risk")
+            payload = forecast_view.payload(
+                court, jira, series_window,
+                n=resolved["n"], periods=resolved["periods"],
+                target=resolved["target"], by=resolved["by"],
+                horizon_weeks=horizon_weeks,
+                risk=risk, tenant=tenant,
+                as_of=pstore.iso(court.snapshot),
+                sprint=scope, delivered_now=resolved["delivered_now"],
+                series=series, wip=wip,
+                start=resolved["start"],
+                backtest=resolved.get("backtest", False),
+            )
+    except Exception as exc:  # noqa: BLE001
+        return _store_error(exc)
+    payload.update({
+        "ok": True,
+        "tenant": tenant,
+        "repo": repo,
+        "as_of": pstore.iso(court.snapshot),
+        "hours_mode": court.hours_mode,
+        "calendar_id": court.calendar_id,
+        "assumption": court.assumption,
+        **court.calendar_warning(),
+        "jira": jira.summary() if jira is not None else None,
+        "window": {
+            "start": pstore.iso(window[0]),
+            "end": pstore.iso(window[1]),
+            "days": round(max(0.0, (window[1] - window[0]).total_seconds()) / 86400.0, 1),
+        },
+        "request": {
+            **payload.get("request", {}),
+            "confidence": "P15–P85",
+            "horizon_weeks": horizon_weeks,
+        },
+    })
+    with _forecast_lock:
+        if len(_forecast_cache) >= FORECAST_CACHE_SIZE:
+            _forecast_cache.clear()
+        _forecast_cache[forecast_key] = payload
     return JSONResponse(payload, headers={"X-Tenant": tenant})
 
 

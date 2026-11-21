@@ -546,6 +546,37 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
   trusts the store's `at_start` marker); the recall is the day, not the second.
 - **Purpose**: "2 committed / 28 adopted" cannot be a strict-timestamp artefact.
 
+### Throughput forecast (prd/60)
+- **Definition**: a bootstrap distribution over **stories delivered per week** — a count, never points — that
+  answers "how many, by when". The answer is an **interval** (`how_many` P15/P50/P85, capped at the target),
+  `p_reach_target` (the share of trials whose *uncapped* total reaches it, so a capped "30" is never read as
+  "likely 30"), and the P85 date. The weekly series is the sprint lens' delivered population: a story whose
+  final `done` boundary falls in the Monday bucket **and no open PR names it** (Jira done + open PR is
+  `unmerged`, not delivered); the bucket containing the snapshot is partial and excluded.
+- **Derivation**: `analysis/forecast.py`. 10,000 resamples with replacement of the observed weekly counts
+  (empirical, no normal assumption), seeded `crc32(tenant|as_of|n|periods|horizon)` so two fetches of the same
+  store answer identically. `when` cumulates draws until the remaining target is covered and reports the
+  period index at P50/P85/P95 plus `unfinished_share`; a period's date is its last day. "By" uses P85 and "how
+  many" uses P15 (the 85 % edge convention below). prd/52's risk classes are **adjustments, not inputs**: the
+  model's number and the ceiling with `done-unmerged`/`no-live-pr` items removed are reported as two counts,
+  never blended.
+- **Refusals** (no numbers, a sentence and a reason): `sparse` (< 8 settled weeks), `erratic` (CV > 0.6, or a
+  flat zero series) and `overload` (prd/61's flag: WIP rising while throughput is flat or falling — Little's
+  Law says the interval would be optimistic). `filling` only warns. A target (or a sprint's remaining scope)
+  under five items **delegates** to prd/52/59: it is a risk question, not a throughput question. A store with
+  no Jira layer forecasts merged PRs and its unit says PRs, never stories.
+- **Purpose**: answer "how much can I take?" with the range, the confidence and the refusal conditions on
+  screen — never a single point estimate.
+
+### The 85 % edge convention (prd/59/60)
+- **Definition**: a forward-looking number is quoted at the **confident edge**: a date ("by 27 Dec") uses
+  P85 because a date is a promise, and a "how many" uses P15 for the same reason (the low edge of the count
+  is what you can plan on). Both are the same 85 % confidence, read from opposite tails.
+- **Derivation**: nearest-rank quantiles over the bootstrap distribution; the count is capped at the target,
+  so the payload always carries `p_reach_target` beside it.
+- **Purpose**: a plan built on the median is late half the time; the convention makes "by" and "how many"
+  defensible in the same sentence, and states which edge each number uses.
+
 ### Sprint at risk (prd/52)
 - **Definition**: the stories committed to the **active** sprint that its own done-by-snapshot count
   does not deliver, each with a risk class, who owes the next action, and the current wait. A closed
