@@ -681,7 +681,7 @@ class SprintDeliveryTests(StoreCase):
         self.assertEqual(
             suggestion["title"],
             "S1 delivered 1 of 3 committed stories (33%) by its close "
-            "(30% by points) — 1 finished late, 1 still open",
+            "(30% of points delivered) — 1 finished late, 1 still open",
         )
         self.assertEqual(suggestion["severity"], "critical")
         self.assertEqual(suggestion["impact_hours"], 48.0)
@@ -733,6 +733,30 @@ class SprintDeliveryTests(StoreCase):
         self.assertIn("2 adopted mid-sprint", suggestion["title"])
         self.assertEqual(suggestion["evidence"]["committed"], 3)
         self.assertEqual(suggestion["evidence"]["adopted"], 2)
+
+    def test_a_start_day_add_is_committed_not_adopted(self):
+        """prd/63 C13: the split uses the sprint's start *day*.
+
+        S2 added three stories at 09:30 to a sprint that started at 09:00; the
+        old strict timestamp counted them as "adopted mid-sprint". A story
+        added the next day is still adopted.
+        """
+        fx = Fixture()
+        fx.sprint(1, T0, end=T0 + timedelta(days=14),
+                  closed=T0 + timedelta(days=14))
+        for key, delay in (
+            ("ENG-1", timedelta(0)),
+            ("ENG-2", timedelta(minutes=30)),
+            ("ENG-3", timedelta(days=1)),
+        ):
+            fx.story(key, T0, points=1, state="done",
+                     closed=T0 + timedelta(days=5))
+            fx.add_to_sprint(key, T0 + delay, 1)
+            fx.status(key, T0 + timedelta(days=1), "in_progress")
+        metric = self.metric(fx, "sprint_delivery")
+        row = metric["sprints"][0]
+        self.assertEqual(row["committed"], 2)
+        self.assertEqual(row["adopted"], 1)
 
     def test_the_drill_down_matches_the_headline_sprint(self):
         """prd/41 B8: rule 04 said "S1 …" but listed S1 + S2's 3 items."""

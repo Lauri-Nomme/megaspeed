@@ -708,22 +708,13 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 #honesty:empty { display: none; }
 .timebasis { color: var(--text-tertiary); }
 .timebasis::before { content: "· "; color: var(--border-control); }
-/* prd/32 + P-3: the build identity (tag · short SHA) is a small fixed
- * bottom-left footer — the conventional place for a build stamp — so it stays on
- * every page without crowding the provenance strip. Tertiary: it is identity,
- * never a status. On desktop it clears the sidebar; on a phone the sidebar is
- * off-canvas, so it can sit at the real left edge. */
-.app-footer {
-  position: fixed;
-  left: 190px;
-  bottom: 6px;
-  z-index: 8;
-  pointer-events: none;
-  padding: 0 4px;
-  background: var(--bg-app);
-}
-.app-footer .build { color: var(--text-tertiary); font-size: 10.5px; }
-.app-footer .build[hidden] { display: none; }
+/* prd/32 + prd/63 D: the build identity (tag · short SHA) lives in the meta
+ * strip. It used to be a fixed bottom-left footer and sat on top of content
+ * (the third "Done in Jira" row at 1600 px, the TICKET EVENTS heading on a
+ * phone). In the flow it is always visible and never overlays anything.
+ * Tertiary: it is identity, never a status. */
+.meta .build { color: var(--text-tertiary); font-size: 10.5px; }
+.meta .build[hidden] { display: none; }
 .sr-only {
   position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
   overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
@@ -903,6 +894,8 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .rework-hint { color: var(--text-tertiary); }
 .rework-hours { margin-left: auto; color: var(--text-secondary); }
 .rework-table { margin-top: 4px; }
+/* prd/63 D: "#34 delivery-web" needs its column, not an ellipsis */
+.panel .table.rework-table .c-dur { width: 150px; }
 .rework-empty { margin: 4px 0 2px; }
 /* prd/52: the at-risk table inside the sprint strip */
 .at-risk-panel { padding: 6px 0 0; }
@@ -967,7 +960,10 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
   display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 12px; margin-top: 6px;
 }
-.blocking-text-grid table { font-size: 11.5px; }
+/* prd/63 D: the text twin's two columns truncated both edges of the same
+ * phrase ("PRs waited on the …"); wrap them instead. */
+.blocking-text-grid table { font-size: 11.5px; table-layout: auto; }
+.blocking-text-grid td { white-space: normal; }
 @media (max-width: 1100px) {
   .blocking-text-grid { grid-template-columns: minmax(0, 1fr); }
 }
@@ -1096,13 +1092,18 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .table tr.row:hover { background: var(--bg-surface); }
 .table tr.selected { background: var(--select-wash); }
 .table.compact td { height: calc(var(--row-h) - 4px); }
-.table .c-state { width: 122px; }
+/* prd/63 B9/D: the status cell carries pills (blocked/stale/unobserved). It
+ * used to be a fixed 122 px with nowrap, so the pills were in the DOM but
+ * clipped (and the Overview's "waiting 1w+" left a stray ellipsis). Let the
+ * cell wrap its pills and give the holder column the room it needs. */
+.table .c-state { width: 168px; white-space: normal; }
 .table .c-id { width: auto; }
-.table .c-who { width: 132px; color: var(--text-secondary); }
+.table .c-who { width: 170px; color: var(--text-secondary); }
 .table .c-phase { width: 92px; }
 .table .c-since { width: 156px; color: var(--text-secondary); }
 .table .c-dur { width: 96px; }
 .table .c-impact { width: 122px; }
+.table td.c-state .pill { white-space: normal; height: auto; min-height: 18px; }
 .table .keys { color: var(--link); font-family: var(--font-mono); }
 .table .id { color: var(--text-primary); }
 .table .repo { color: var(--text-secondary); font-size: 11px; margin-left: 6px; }
@@ -1114,29 +1115,31 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .panel .table { table-layout: fixed; }
 .panel .table th { position: static; }
 .panel .table th, .panel .table td { padding: 0 8px; }
-.panel .table .c-state { width: 112px; }
+.panel .table .c-state { width: 150px; white-space: normal; }
 .panel .table .c-id { width: auto; }
-.panel .table .c-who { width: 92px; }
-.panel .table .c-dur { width: 96px; }
+.panel .table .c-who { width: 170px; }
+.panel .table .c-dur { width: 110px; }
 .panel .table tr:first-child td { padding-top: 2px; }
 
 /* prd/46 §6: the delivery split must scroll, not paint over its inspector,
    and the TICKET / PR cell must not collapse to "…". The table keeps a usable
    minimum width and the wrap owns the horizontal scroll. */
 .table-wrap { min-width: 0; overflow-x: auto; }
-.delivery { min-width: 1040px; }
-.delivery .c-state { width: 132px; }
-.delivery .c-id { width: 270px; }
-.delivery .c-who { width: 150px; }
+.delivery { min-width: 1120px; }
+.delivery .c-state { width: 210px; white-space: normal; }
+.delivery .c-id { width: 250px; }
+.delivery .c-who { width: 190px; white-space: normal; }
 .delivery .c-phase { width: 100px; }
 .delivery .c-since { width: 150px; }
-.delivery .c-dur { width: 96px; }
+.delivery .c-dur { width: 110px; }
 .delivery .c-impact { width: 110px; }
 /* prd/46 §6: the response table's "6 h 2 min" / "24 (63 d 0 h)" cells were
    clipped at 1600 px by the panel's 96 px number column. */
 #queue-response { overflow-x: auto; }
-.response-panel .response-table { min-width: 720px; }
-.response-panel .response-table .c-dur { width: 120px; }
+.response-panel .response-table { min-width: 900px; }
+/* prd/63 D: "6 h 2 min (median 3 h 2 min · 2.0×) ×3.1" was clipped by a
+ * 120 px cell. The panel has the room; widen it and let a long contrast wrap. */
+.response-panel .response-table .c-dur { width: 190px; white-space: normal; }
 .response-panel .response-table .c-who { width: 180px; }
 .empty-row { padding: 18px 14px; color: var(--text-secondary); font-size: var(--body-font); }
 
@@ -1169,6 +1172,7 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
   font-family: var(--font-mono);
   border: 1px solid transparent;
   white-space: nowrap;
+  max-width: 100%;
 }
 .pill::before {
   content: "";
@@ -1321,6 +1325,13 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .rule.sev-critical .rule-impact { color: var(--critical); }
 .rule-title { margin: 3px 0 2px; font-size: var(--rule-title); font-weight: 600; }
 .rule-action { margin: 0; font-size: var(--rule-action); color: var(--text-secondary); max-width: 118ch; }
+/* prd/63 C14: a rule the lab contradicted carries the badge in the body, not
+ * only a footnote under it, so the advice is not read as a proven lever. */
+.rule-caveat {
+  margin: 6px 0 0; padding: 5px 9px; max-width: 118ch; font-size: var(--body-font);
+  color: var(--warning); background: var(--warning-tint);
+  border-left: 2px solid var(--warning-line); border-radius: var(--radius-control);
+}
 /* prd/43 §1: an assumption is a footnote, never a saving. */
 .rule-assumed {
   margin: 3px 0 0; font-size: calc(var(--body-font) - 2px);
@@ -1378,7 +1389,7 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 46ch;
 }
 .drill tr.affected td:first-child { box-shadow: inset 2px 0 0 var(--warning); padding-left: 6px; }
-.drill td.drill-detail { color: var(--text-secondary); }
+.drill td.drill-detail { color: var(--text-secondary); white-space: normal; }
 .drill-link { color: var(--link); text-decoration: none; }
 .drill-link:hover { color: var(--link-strong); text-decoration: underline; }
 .drill-key { margin-left: 6px; font-size: 10.5px; }
@@ -1715,8 +1726,6 @@ a.child.ticket-link { color: var(--link); }
   .ticket-jump { order: 7; flex-basis: 100%; }
   .ticket-jump input { width: auto; flex: 1; height: 36px; }
   .ticket-jump button { width: 44px; height: 36px; }
-  /* P-3: the sidebar is off-canvas here, so bottom-left is the real left edge. */
-  .app-footer { left: 10px; bottom: 4px; }
   .ctx-row {
     display: flex;
     order: 6;
@@ -2037,6 +2046,8 @@ a.child.ticket-link { color: var(--link); }
     align-items: baseline;
     height: auto;
     min-height: 44px;
+    min-width: 0;
+    max-width: 100%;
     padding: 6px 9px;
     white-space: normal;
   }
@@ -2052,6 +2063,9 @@ a.child.ticket-link { color: var(--link); }
   /* -- ticket detail -------------------------------------------------- */
   .ticket-head { padding: 12px 12px 2px; }
   .ticket-head h2 { font-size: 17px; }
+  /* prd/63 D: a long state pill ("PR #66 open · …") must wrap, not widen the
+     document past 412 px. */
+  .ticket-head .pill { white-space: normal; height: auto; min-height: 18px; }
   .ticket-answer { margin: 10px 12px; font-size: 13px; }
   .ticket-panel { padding: 12px 12px 16px; }
   .ticket-boundaries { gap: 6px 12px; }
@@ -2137,6 +2151,10 @@ a.child.ticket-link { color: var(--link); }
   margin: 6px 0 10px; font-size: var(--body-font); color: var(--text-secondary);
 }
 .prsize-corr .muted { display: block; margin-top: 2px; }
+.prsize-why {
+  margin: 2px 0 8px; font-size: var(--body-font); color: var(--text-secondary);
+}
+.prsize-why:empty { display: none; }
 
 /* M5: scope added after the sprint started. */
 .sprint-added { color: var(--warning); }
@@ -2163,7 +2181,10 @@ a.child.ticket-link { color: var(--link); }
 .worklog-top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .worklog-top h3 { margin: 0; font-size: 13px; font-weight: 600; }
 .worklog-headline { margin: 6px 0 10px; max-width: 780px; font-size: var(--row-font); }
-.worklog-bars {
+/* prd/63 A3: the Rules chart has its own class. It used to reuse
+ * `.worklog-bars`, which collided with the ticket page's column layout and
+ * (the later rule winning) collapsed those bars to 2 px. One name, one owner. */
+.worklog-chart {
   display: flex; align-items: flex-end; gap: 10px; height: 78px;
   padding: 4px 2px 0; border-bottom: 1px solid var(--border-hairline);
 }
@@ -2210,7 +2231,18 @@ a.child.ticket-link { color: var(--link); }
 }
 .chase-panel .panel-head { flex-wrap: wrap; }
 .chase-panel .c-action { width: 88px; text-align: right; }
-.chase-link { text-decoration: none; white-space: nowrap; }
+/* prd/63 C14/B9: the holder cell is the actionable part; never clip it. */
+.chase-panel .table { table-layout: auto; }
+.chase-panel .c-id { width: 210px; }
+.chase-panel .c-who, .chase-panel .c-dur { white-space: normal; }
+.chase-panel .c-who { width: 210px; }
+/* prd/63 A6: a generated link (and the chase action) uses the link token, not
+ * the browser default blue — #0000EE on #292B2E was 1.51:1 in the dark theme. */
+.chase-link {
+  color: var(--link); text-decoration: none; white-space: nowrap;
+  background: none; border: 0; font: inherit; cursor: pointer;
+}
+.chase-link:hover, .chase-link:focus-visible { color: var(--link-strong); text-decoration: underline; }
 .chase-actions { display: flex; flex-wrap: wrap; gap: 4px 18px; margin-top: 6px; }
 .chase-sla, .chase-done-open { margin: 0; font-size: var(--body-font); color: var(--text-secondary); }
 

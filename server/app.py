@@ -31,7 +31,7 @@ one failure this whole feature exists to prevent.
                                         PR-size distributions + caps (prd/39)
     GET  /api/sprints?days=&tenant=     sprint lens (prd/26 P6): bands, scope
                                         (in/out of a sprint) and carry-over
-    GET  /api/trend?tenant=&metric=…&bucket=&days=
+    GET  /api/trend?tenant=&metric=…&bucket=&days=&repo=
                                         one headline metric as a time series,
                                         bucketed by week or sprint (prd/50)
     GET  /api/simulate?days=&scenario=&repo=&tenant= policy lab: calibrated model,
@@ -1015,7 +1015,7 @@ ANALYSIS_PARAMS = {
     "delivery": ("days", "repo"),
     "insights": ("level", "days", "size_commits", "size_lines", "repo"),
     "sprints": ("days",),
-    "trend": ("metric", "bucket", "days"),
+    "trend": ("metric", "bucket", "days", "repo"),
     "simulate": ("days", "scenario", "seed", "tolerance", "replications", "repo"),
     "pr-size": ("size_commits", "size_lines"),
 }
@@ -1488,7 +1488,9 @@ def trend(request: Request):
     accumulating), and the active sprint is named when the store has one. The
     payload carries the metric catalogue, its definition, and a summary
     (first → latest change), so the chart and the tab labels come from one
-    answer.
+    answer. ``repo`` narrows the cohort exactly like the other analysis views
+    (prd/49): the buckets are recomputed on that repo's PRs, never a silent
+    whole-store series.
     """
     unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["trend"]))
     if unknown is not None:
@@ -1511,19 +1513,28 @@ def trend(request: Request):
         tenant, path = _tenant_of(request)
     except UnknownTenant as exc:
         return _tenant_error(exc.args[0])
-    key = (
-        tenant, _file_stamp(path), _calendar_key(tenant),
-        days, bucket, metric,
-    )
-    with _trend_lock:
-        hit = _trend_cache.get(key)
-    if hit is not None:
-        return JSONResponse(hit, headers={"X-Tenant": tenant})
     try:
         with store_conn(path) as con:
             bundle = _analysis_bundle(con, tenant, path)
-            court = bundle.court
+            # prd/49 + prd/63 A1: the trend is a scope-aware view like every
+            # other analysis endpoint. The repo is validated against the store
+            # (an unknown one is a 400 listing the real ones) and the cohort is
+            # narrowed before any bucket is evaluated, so `repo=` cannot 400 a
+            # view that persists the scope.
+            try:
+                repo = _repo_param(request, bundle.court)
+            except ValueError as exc:
+                return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["trend"])))
+            key = (
+                tenant, _file_stamp(path), _calendar_key(tenant),
+                days, bucket, metric, repo or "",
+            )
+            with _trend_lock:
+                hit = _trend_cache.get(key)
+            if hit is not None:
+                return JSONResponse(hit, headers={"X-Tenant": tenant})
             jira = bundle.jira(con)
+            court, jira = _repo_scope(bundle.court, jira, repo)
             window = insights_rules.window_for(court, _days(days), jira)
             payload = trend_view.trend(
                 court, jira, window, metric=metric, bucket=bucket,
@@ -1533,6 +1544,7 @@ def trend(request: Request):
     payload.update({
         "ok": True,
         "tenant": tenant,
+        "repo": repo,
         "as_of": pstore.iso(court.snapshot),
         "hours_mode": court.hours_mode,
         "calendar_id": court.calendar_id,

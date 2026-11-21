@@ -189,8 +189,12 @@ function trendPayload(overrides = {}) {
         label: '26 Jan', in_progress: true, available: true, value: 0.35, n: 2 },
     ],
     summary: {
-      first: 0.25, latest: 0.35, change: 0.1, buckets: 4,
+      // prd/63 B8: the headline is the latest *settled* bucket (12 Jan), not
+      // the in-progress one (26 Jan) — which is plotted and labelled only.
+      first: 0.25, latest: 0.3, change: 0.05, buckets: 4,
       measured_buckets: 3, in_progress: ['26 Jan'],
+      latest_label: '12 Jan', latest_n: 4, first_label: '5 Jan', first_n: 5,
+      latest_provisional: false, settled_buckets: 2,
     },
     metrics: [
       { id: 'flow_efficiency', label: 'Flow efficiency', unit: 'ratio', higher_is_better: true },
@@ -259,12 +263,14 @@ test('the trend page has metric tabs, a bucket switch and the table', () => {
   assert.match(trendMarkup(null), /Loading the trend/);
 });
 
-test('the trend stats and Markdown quote the latest and the active bucket', () => {
+test('the trend stats and Markdown quote the latest settled bucket', () => {
   const stats = trendStats(trendPayload());
-  assert.match(stats, /35\.0%<\/b> latest/);
+  // prd/63 B8: latest = 12 Jan (n=4), never the in-progress 26 Jan point
+  assert.match(stats, /30\.0%<\/b> latest \(12 Jan · n=4\)/);
   assert.match(stats, /3<\/b>\/4 buckets measured/);
-  assert.match(stats, /\+10\.0 pts since the first bucket/);
-  assert.match(stats, /26 Jan<\/b> in progress/);
+  assert.match(stats, /\+5\.0 pts since the first measured bucket/);
+  assert.match(stats, /26 Jan<\/b> in progress \(not in the headline\)/);
+  assert.doesNotMatch(stats, /35\.0%<\/b> latest/);
   const markdown = trendMarkdown(trendPayload());
   assert.match(markdown, /# Flow efficiency per week/);
   assert.match(markdown, /\| 26 Jan \(in progress\) \| 35\.0% \| 2 \|/);

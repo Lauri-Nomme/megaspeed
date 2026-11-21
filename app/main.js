@@ -24,9 +24,9 @@ import {
   fmtHours, fmtRange, fmtStamp, esc, whoLabel,
 } from '/format.js';
 import {
-  TABS, tabCounts, tabRows, deliveryTable, overviewMarkup, detailMarkup,
-  impactSentence, entityMarkdown, deliveryMarkdown, reviewStateLine, matchesScope,
-  waitingLabel, weekLabel, scopeTargets,
+  TABS, tabCounts, tabRows, deliveryTable, overviewMarkup, overviewCounts,
+  detailMarkup, impactSentence, entityMarkdown, deliveryMarkdown, reviewStateLine,
+  matchesScope, waitingLabel, weekLabel, scopeTargets, doneOpenMarkup,
 } from '/tables.js';
 import { rulesMarkup, rulesStats, rulesMarkdown } from '/rules.js';
 import { sprintStrip } from '/sprints.js';
@@ -759,7 +759,9 @@ async function ensureData(page) {
   if (page === 'trend') {
     // prd/50: one endpoint per metric+bucket; the cache key names both, so
     // switching a tab is one cheap request and going back is free.
-    const key = `trend:${tenant}:${state.timeframe}:${state.trendMetric}:${state.trendBucket}:${stamp}`;
+    // prd/63 A1: the repo scope is part of the answer, so it is part of the
+    // cache key too — a repo switch must not serve the previous cohort's trend.
+    const key = `trend:${tenant}:${state.timeframe}:${state.trendMetric}:${state.trendBucket}:${repo}:${stamp}`;
     if (!cached(key)) {
       state.cache.set(key, await getJSON(withTenant(
         `/api/trend?metric=${encodeURIComponent(state.trendMetric)}` +
@@ -1171,9 +1173,19 @@ function renderDeliveryPage() {
       ${esc(tab.label)} <span class="num">${counts[tab.id]}</span></button>`).join('');
   $('delivery-table').innerHTML = data
     ? deliveryTable(data, state.tab, {
-      scope: deliveryScope(), benchmark: state.benchmark,
+      scope: deliveryScope(), benchmark: state.benchmark, base: appBase(),
     })
     : '<div class="empty-row">Loading the triage list…</div>';
+  // prd/63 B9: the Overview's "Done in Jira, PR open →" now lands on a list
+  // that actually contains the set, scoped like the rest of this page.
+  const extra = $('delivery-extra');
+  if (extra) {
+    extra.innerHTML = data
+      ? doneOpenMarkup(data, {
+        base: appBase(), scope: deliveryScope(), id: 'done-open-delivery',
+      })
+      : '';
+  }
   $('delivery-assumption').textContent = data
     ? `${data.assumption} · snapshot ${fmtStamp(Date.parse(data.snapshot))} · ` +
       `${data.counts.open} open items, ${data.counts.waiting_over_week} of them waiting over a week. ` +
@@ -1199,12 +1211,21 @@ function renderDeliveryPage() {
     const scopeSuffix = state.scope.kind === 'repo'
       ? `the ${repoLabel(state.scope.value)} repo`
       : `${state.scope.label} (waiting on it)`;
+    // prd/63 D: a pressed "median ×" chip with no contrast must say why
+    // (the delivery wait cohort is the open-PR window, often N < 10).
+    const waitBench = data.wait_benchmark;
+    const benchNote = !state.benchmark
+      ? 'median × hidden'
+      : (waitBench && !waitBench.available && waitBench.note
+        ? `median × unavailable — ${waitBench.note}`
+        : '');
     setHonesty(
       `${counts.all} open item${counts.all === 1 ? '' : 's'} in view · ` +
       `${counts.blocked} blocked · ${counts.oldest} waiting over a week (${weekLabel(data)}) · ` +
       `${data.counts.stale || 0} stale · ${data.counts.unobserved || 0} unobserved · ` +
       `impact = dependents × current wait (≈) · ` +
-      (filtered ? `filtered to ${scopeSuffix}` : 'whole team'),
+      (filtered ? `filtered to ${scopeSuffix}` : 'whole team') +
+      (benchNote ? ` · ${benchNote}` : ''),
     );
   }
   renderDeliveryDetail();
@@ -1293,7 +1314,13 @@ function clearDeliverySelection() {
  * it names where the time went, or the boundary the store is missing. */
 function appBase() {
   if (typeof location === 'undefined') return '';
-  return `${location.origin}${location.pathname}`;
+  const base = `${location.origin}${location.pathname}`;
+  // prd/63 A4: every generated link (Markdown exports, ticket anchors, the
+  // chase action) must name the tenant it was copied from. Without `?tenant=`
+  // a link opened on the default dataset — a different store with different
+  // numbers for the same key.
+  const tenant = tenantQuery();
+  return tenant ? `${base}?${tenant}` : base;
 }
 
 function renderTicketPage() {
@@ -1344,8 +1371,24 @@ function renderTicketPage() {
 }
 
 async function openTicket(key) {
-  const wanted = ticketKey(key);
-  if (!wanted) return;
+  // prd/63 A2: a deep link (#ticket/…) used to send anything to the server and
+  // leave "Loading the ticket…" if it was not a key. Normalise the case, then
+  // reject a malformed key client-side with a stated error — never a spinner.
+  const wanted = ticketFromQuery(key);
+  if (!wanted) {
+    if (state.page !== 'ticket') {
+      state.ticketFrom = state.page;
+      closeDrawer();
+    }
+    const shown = ticketKey(key).toUpperCase() || String(key || '');
+    state.ticketKey = shown;
+    state.ticket = null;
+    state.ticketError =
+      `“${shown}” is not a ticket key — a key looks like PROJ-123.`;
+    state.page = 'ticket';
+    renderPage();
+    return;
+  }
   if (state.page !== 'ticket') {
     state.ticketFrom = state.page;
     closeDrawer();
@@ -1365,9 +1408,18 @@ async function openTicket(key) {
   } catch (err) {
     if (state.ticketKey !== wanted) return;
     state.ticket = null;
-    state.ticketError = err.status === 404
-      ? `No ticket ${wanted} in dataset ${state.tenant || 'this store'}.`
-      : `Could not load ticket ${wanted}: ${err.message}`;
+    // prd/63 A2: a 404/400 is a stated result. The page's helper line below
+    // says what a ticket is, so the server's hint is not repeated verbatim.
+    if (err.status === 404) {
+      state.ticketError =
+        `No ticket ${wanted} in dataset ${state.tenant || 'this store'}.`;
+    } else if (err.status === 400) {
+      state.ticketError =
+        `That key is not a valid ticket in dataset ${state.tenant || 'this store'}: `
+        + `${(err.body && err.body.error) || err.message}.`;
+    } else {
+      state.ticketError = `Could not load ticket ${wanted}: ${err.message}`;
+    }
   }
   if (state.page === 'ticket' && state.ticketKey === wanted) renderPage();
 }
@@ -1478,9 +1530,10 @@ function renderBlockingStats() {
        <span class="stat-inline">waits on <b>${fmtHours(node.out_hours)}</b></span>
        <span class="stat-inline">WIP <b>${node.wip_now}</b></span>`
     : `<span class="stat-inline"><b>${totals.edges || 0}</b> edges</span>
-       <span class="stat-inline"><b>${fmtHours(totals.hours || 0)}</b> measured wait</span>
+       <span class="stat-inline"><b>${fmtHours(totals.hours || 0)}</b> queue-wait hours</span>
        <span class="stat-inline">mean <b>${fmtHours(totals.mean_wait_hours || 0)}</b></span>
-       <span class="stat-inline"><b>${totals.nodes || 0}</b> nodes</span>`;
+       <span class="stat-inline"><b>${totals.nodes || 0}</b> nodes</span>
+       <span class="stat-inline muted">handover wait — not response time</span>`;
 }
 
 async function openNodeQueue(node) {
@@ -1526,6 +1579,9 @@ function renderQueuePage() {
     setHonesty(
       `${streams.length} stream${streams.length === 1 ? '' : 's'} · ` +
       `WIP sampled every ${data.bucket_hours} h over ${data.window.days} calendar days · ` +
+      // prd/63 C11: name this clock. The response table below is a different
+      // metric (added-as-reviewer → first response), never "the constraint".
+      `this table/mean is queue wait (person-hours) — response time is the table below · ` +
       (filtered ? `filtered to ${state.scope.label}` : 'whole team'),
     );
   }
@@ -1705,6 +1761,37 @@ function updatePrSizePanel() {
   if (split) {
     split.textContent = ` · ${counts.overCommits} over commits · ${counts.overLines} over changed lines`;
   }
+  // prd/63 D: moving the sliders must either fire the pr_size rule or say why
+  // it does not — "the same caps drive the pr_size rule" was a promise the page
+  // never kept when the rule's condition failed.
+  const why = root.querySelector('[data-pr-size-why]');
+  if (why) why.textContent = prSizeWhy();
+}
+
+/** Why the pr_size rule does or does not appear at the chosen caps. */
+function prSizeWhy() {
+  const metrics = state.rules && state.rules.metrics;
+  const ps = metrics && metrics.pr_size;
+  if (!ps) return '';
+  const suggestion = ((state.rules && state.rules.suggestions) || [])
+    .find((entry) => entry.id === 'pr-size');
+  if (suggestion) {
+    return `At these caps the PR-size rule fires: ${suggestion.title}.`;
+  }
+  if (Number(ps.large_prs) < 2 || Number(ps.small_prs) < 2) {
+    return `No PR-size rule at these caps: only ${ps.large_prs || 0} large and ` +
+      `${ps.small_prs || 0} small PRs — a large-vs-small comparison needs at least 2 of each.`;
+  }
+  const large = ps.large_median_first_review_hours;
+  const small = ps.small_median_first_review_hours;
+  if (large == null || small == null) {
+    return 'No PR-size rule at these caps: a group has no measured first review, so there is nothing to compare.';
+  }
+  if (!(large > small)) {
+    return `No PR-size rule at these caps: large PRs' first reviews are not slower ` +
+      `(${fmtHours(large)} vs ${fmtHours(small)} for smaller ones).`;
+  }
+  return 'No PR-size rule at these caps.';
 }
 
 function persistSizeCaps() {
@@ -1767,15 +1854,17 @@ function renderOverviewPage() {
     blocking: state.blocking,
     queueLevel: state.queueLevel,
     scope: state.scope,
+    base: appBase(),
   });
   // B7 + prd/56 §4: the overview really does narrow under a scope, so its
   // disclosure says which scope rather than claiming it shows the whole team.
-  const counts = state.delivery ? state.delivery.counts : null;
+  // prd/63 B7: the header counts come from the same filtered set as the tiles.
+  const counts = state.delivery ? overviewCounts(state.delivery, state.scope) : null;
   setHonesty(counts
-    ? `${counts.open} open items · ${counts.blocked} blocked · ` +
+    ? `${counts.open} open item${counts.open === 1 ? '' : 's'} · ${counts.blocked} blocked · ` +
       (state.scope.kind === 'all'
         ? 'whole team in the window'
-        : `scoped to ${state.scope.kind} ${state.scope.label} — tiles and rows are filtered to it`)
+        : `filtered to ${state.scope.kind} ${state.scope.label} — tiles and rows are the same set`)
     : '');
 }
 
@@ -2809,7 +2898,10 @@ async function load({ force = false } = {}) {
   renderLegend();
   renderPhaseLegend();
   renderLoadAll();
-  if (state.page !== 'timeline') await ensureData(state.page);
+  // prd/63 A2: a ticket page owns its own fetch (openTicket) and its own
+  // 404/400 state. Fetching it here threw out of load() on an unknown key, so
+  // __megaspeedReady never fired and the page sat on "Loading the ticket…".
+  if (state.page !== 'timeline' && state.page !== 'ticket') await ensureData(state.page);
   renderPage();
   syncChromeHeight();
   setStatus(liveStatusText(), 'live');
@@ -3043,9 +3135,6 @@ async function domToImage(element, rect, { viewport = false, elementRect = null 
     .shot .sidebar { height: auto !important; }
     .shot:not(.viewport) .drawer { position: static !important; width: auto; box-shadow: none; }
     .shot .app { min-height: 0 !important; }
-    /* P-3: the fixed build footer is part of the still frame; pin it to the
-       capture's bottom-left instead of letting foreignObject stack it. */
-    .shot .app-footer { position: absolute !important; left: 0 !important; bottom: 0 !important; }
     .shot .table th { top: auto !important; }
     /* prd/28: a phone capture is the viewport, not the off-canvas drawer. The
        drawer is painted only when it is open, as an overlay on the page. */
@@ -3228,13 +3317,21 @@ document.addEventListener('click', async (event) => {
     const action = menuItem.dataset.menu;
     closeMenu();
     if (action === 'copy') await copyMarkdown(entity);
-    else if (action === 'clear') { setScope('all', 'all'); await showPage('timeline'); }
+    // prd/63 A5: clearing the scope stays where the user is; jumping to the
+    // timeline made "Clear scope" a navigation, not a scope undo.
+    else if (action === 'clear') { setScope('all', 'all'); }
     else if (action === 'person' && entity) {
       const person = menuItem.dataset.person
         || entity.author || (entity.pr && entity.pr.actor) || (entity.row && entity.row.author);
       if (person) setScope('person', person);
     } else if (action === 'timeline') {
+      // prd/63 A5: "Open in timeline" acts on the row that was right-clicked —
+      // the same ticket/PR scope and focus the drawer's Timeline chip uses.
+      const scope = drawerTimelineScope(entity);
+      const prId = entity?.pr?.id || entity?.row?.object_id || null;
+      if (scope) setScope(scope.kind, scope.value, { silent: true });
       await showPage('timeline');
+      if (prId) timeline.focusPr(prId);
     }
     return;
   }
@@ -3395,6 +3492,14 @@ document.addEventListener('click', async (event) => {
     flashStatus(`size caps reset to ${DEFAULT_SIZE_CAPS.commits} / ${DEFAULT_SIZE_CAPS.lines}`, 'live');
     return;
   }
+  // prd/63 C12: the chase action opens the PR drawer (the same holder facts
+  // the row shows), not only the ticket page. The ticket link stays a doorway.
+  const chaseOpen = event.target.closest('[data-chase-open]');
+  if (chaseOpen) {
+    const target = findDeliveryRow(chaseOpen.dataset.chaseOpen);
+    if (target) openDeliveryPrDrawer(target);
+    return;
+  }
   // prd/38 #12: a ticket's PR row opens the PR drawer.
   const prRow = event.target.closest('tr.pr-row[data-pr]');
   if (prRow) {
@@ -3418,6 +3523,13 @@ document.addEventListener('click', async (event) => {
   const go = event.target.closest('[data-go]');
   if (go) {
     await showPage(go.dataset.go);
+    // prd/63 B9: a link can name the section it lands on (the Delivery page's
+    // Done-in-Jira list), so the target is visible instead of merely "on that
+    // page somewhere".
+    if (go.dataset.anchor) {
+      const anchor = document.getElementById(go.dataset.anchor);
+      if (anchor && anchor.scrollIntoView) anchor.scrollIntoView({ block: 'start' });
+    }
     return;
   }
   if (event.target.closest('[data-drawer="close"]')) {

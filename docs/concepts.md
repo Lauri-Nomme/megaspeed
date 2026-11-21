@@ -624,9 +624,10 @@ These are comparisons, not new units. Each names its cohort and its basis wherev
 
 ### Chase action ("what to do now", prd/54)
 - **Definition**: the delivery list's own holder fact, read as an action: an **orphaned approval** is an
-  open PR whose only remaining reviewer is the sentinel, or a stale PR with the sentinel still owing.
-  A normal review with a peer still pending is not one — the sentinel's precedence gate has not opened
-  (`§2`), so the peer is the current constraint.
+  open PR with **at least one approval** whose only remaining reviewer is the sentinel. A normal review
+  with a peer still pending is not one — the sentinel's precedence gate has not opened (`§2`), so the
+  peer is the current constraint. A stale PR with no approval yet (the peer owes the first review) or
+  with the author owing a fix is not one either: nudging the sentinel would change nothing.
 - **Derivation**: `orphanedApprovals` in `app/tables.js` over `delivery.rows` (`waiting_on`,
   `waiting_roles`, `stale`); every row links to its `#ticket/KEY` page and names who owes. The
   review-SLA line links to the policy lab's own `sla4` preset — the model's number is printed there,
@@ -643,9 +644,11 @@ These are comparisons, not new units. Each names its cohort and its basis wherev
 - **Purpose**: the first-class list of finished work the team cannot deliver or count.
 
 ### Scope added after start
-- **Definition**: a story added to a sprint after the sprint's measured start without the store's
+- **Definition**: a story added to a sprint after the sprint's **start day** without the store's
   `at_start` membership marker. It was not part of the commitment the sprint was planned with.
-- **Derivation**: `sprint_added` events compared with the band's start.
+- **Derivation**: `sprint_added` events compared with the band's start **by day**, not by exact
+  timestamp: a planning session that adds a story at 09:30 to a sprint that starts at 09:00 was in the
+  room at the start. The recall is the day, so "2 committed / 28 adopted" cannot be a clock artefact.
 - **Purpose**: separate "committed" from "planned", so a delivery share is not read as a broken promise
   the team never made.
 

@@ -201,7 +201,9 @@ export function prTable(payload, { benchmark = true } = {}) {
       <td class="c-state" data-label="state">${state}</td>
       <td class="c-since mono" data-label="opened">${esc(stamp(pr.opened))}</td>
       <td class="c-dur num" data-label="cycle">${esc(segmentHours(pr.cycle_hours))}${
-        benchmarkInline(pr.cycle_benchmark, { enabled: benchmark, format: segmentHours })}</td>
+        benchmarkInline(pr.cycle_benchmark, { enabled: benchmark, format: segmentHours })}${
+        pr.cycle_benchmark && pr.cycle_benchmark.declined
+          ? ` <span class="muted" title="${esc(pr.cycle_benchmark.note || '')}">declined</span>` : ''}</td>
       <td class="c-rounds num" data-label="rounds">${esc(pr.review_rounds)}</td>
       <td class="c-push mono" data-label="push classes">${classes}</td>
       <td class="c-bar" data-label="lifecycle">${prPhaseBar(pr)}</td>
@@ -539,7 +541,8 @@ export function ticketMarkdown(payload, base = '') {
     ...(payload.prs || []).map((pr) => `- #${pr.number} ${pr.repo} · ${pr.state}` +
       `${pr.censored ? ' (right-censored)' : ''} · ${segmentHours(pr.cycle_hours)}` +
       `${benchmarkText(pr.cycle_benchmark, { format: segmentHours })
-        ? ` (${benchmarkText(pr.cycle_benchmark, { format: segmentHours })})` : ''} · ` +
+        ? ` (${benchmarkText(pr.cycle_benchmark, { format: segmentHours })})` : ''}${
+        pr.cycle_benchmark && pr.cycle_benchmark.declined ? ' (declined — no merged-PR benchmark)' : ''} · ` +
       `${pr.review_rounds} review round${pr.review_rounds === 1 ? '' : 's'} · ` +
       `pushes ${Object.entries(pr.push_classes || {}).map(([name, n]) => `${name}×${n}`).join(', ') || 'none'}`),
     '',

@@ -214,7 +214,7 @@ export function worklogPanel(metric) {
   const trend = trendSeries(metric);
   const headline = worklogHeadline(metric);
   const late = latenessLine(metric);
-  const byPoints = bars.length ? `<div class="worklog-bars" aria-label="median logged hours by story points">
+  const byPoints = bars.length ? `<div class="worklog-chart" aria-label="median logged hours by story points">
       ${bars.map((bar) => `<div class="worklog-bar" data-worklog-points="${bar.points}"
         title="${bar.points} pt stories log a median ${fmtHours(bar.hours)}">
         <i style="height:${Math.max(4, Math.round(bar.share * 100))}%"></i>

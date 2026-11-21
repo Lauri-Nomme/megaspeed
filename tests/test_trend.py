@@ -262,6 +262,30 @@ class TrendValueTests(StoreCase):
         self.assertIsNone(sprint["points"][2]["value"])
         self.assertTrue(sprint["points"][2]["in_progress"])
 
+    def test_the_summary_headline_is_the_latest_settled_bucket(self):
+        """prd/63 B8: the in-progress bucket is not "latest" and never a delta.
+
+        The 23 Feb bucket contains the snapshot and has no merged PR, so using
+        it as the headline produced "0 latest, −2 since the first bucket". The
+        latest settled week (2 Feb: PR 5 merged) is the headline instead.
+        """
+        con, court, data, window = self.load()
+        try:
+            payload = trend.trend(court, data, window, metric="merged")
+        finally:
+            con.close()
+        summary = payload["summary"]
+        settled = [point for point in payload["points"] if not point["in_progress"]]
+        self.assertEqual(summary["latest"], settled[-1]["value"])
+        self.assertEqual(summary["latest_label"], settled[-1]["label"])
+        self.assertEqual(summary["latest_label"], "16 Feb")
+        self.assertFalse(summary["latest_provisional"])
+        self.assertEqual(summary["in_progress"], ["23 Feb"])
+        self.assertEqual(summary["settled_buckets"], len(payload["points"]) - 1)
+        # the in-progress bucket's value is not the headline
+        in_progress = [point for point in payload["points"] if point["in_progress"]]
+        self.assertNotEqual(summary["latest_label"], in_progress[0]["label"])
+
     def test_the_payload_names_the_metric_and_its_definition(self):
         con, court, data, window = self.load()
         try:
@@ -440,3 +464,72 @@ class TrendApiTests(unittest.TestCase):
         self.assertEqual(first.status, 200)
         self.assertEqual(first.body, second.body)
         self.assertTrue(app_module._trend_cache)
+
+
+def two_repo_fixture() -> Fixture:
+    """Three PRs in ENG/api and two in ENG/web, all merged in week 1."""
+    fx = Fixture()
+    for number, repo in ((1, "ENG/api"), (2, "ENG/api"), (3, "ENG/api"),
+                         (4, "ENG/web"), (5, "ENG/web")):
+        opened = T0 + timedelta(hours=number)
+        fx.pr(number, "AaAa", opened, tickets=("OPS-1",), repo=repo,
+              closed=opened + timedelta(hours=24))
+        fx.pr_event(number, "comment_added", "RrRr", 8, repo=repo)
+        fx.pr_event(number, "pr_merged", "RrRr", 24, repo=repo)
+    return fx
+
+
+class TrendRepoScopeApiTests(unittest.TestCase):
+    """prd/63 A1: `/api/trend` accepts the repo scope and narrows the cohort."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.dir = Path(cls.tmp.name).resolve()
+        two_repo_fixture().write(cls.dir / "repos.duckdb")
+        cls.env = [
+            mock.patch.object(app_module, "TENANTS_DIR", cls.dir),
+            mock.patch.object(app_module, "DEFAULT_TENANT", ""),
+            mock.patch.object(app_module, "LOG", False),
+            mock.patch.object(
+                app_module, "CALENDAR_CONFIG", cls.dir / "no-calendar.yaml",
+            ),
+        ]
+        for patch in cls.env:
+            patch.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        for patch in reversed(cls.env):
+            patch.stop()
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        app_module._analysis_cache = None
+        app_module._trend_cache.clear()
+
+    def test_a_repo_scope_is_accepted_and_returns_that_cohort(self):
+        reply = get("/api/trend", tenant="repos", metric="merged",
+                    repo="ENG/web")
+        self.assertEqual(reply.status, 200, reply.body)
+        body = reply.json()
+        self.assertEqual(body["repo"], "ENG/web")
+        self.assertEqual(sum(point["value"] for point in body["points"]), 2)
+        self.assertEqual(reply.headers.get("x-tenant"), "repos")
+
+    def test_two_repo_scopes_are_two_answers(self):
+        api = get("/api/trend", tenant="repos", metric="merged",
+                  repo="ENG/api").json()
+        web = get("/api/trend", tenant="repos", metric="merged",
+                  repo="ENG/web").json()
+        self.assertEqual(sum(point["value"] for point in api["points"]), 3)
+        self.assertEqual(sum(point["value"] for point in web["points"]), 2)
+
+    def test_an_unknown_repo_is_a_400_listing_the_real_ones(self):
+        reply = get("/api/trend", tenant="repos", metric="merged",
+                    repo="ENG/nope")
+        self.assertEqual(reply.status, 400)
+        error = reply.json()["error"]
+        self.assertIn("unknown repo", error)
+        self.assertIn("ENG/api", error)
+        self.assertIn("ENG/web", error)

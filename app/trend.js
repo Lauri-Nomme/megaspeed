@@ -68,7 +68,9 @@ export function trendGeometry(payload) {
   const min = Math.min(...values);
   const max = Math.max(...values);
   const span = max - min || Math.abs(max) || 1;
-  const low = min - span * 0.12;
+  // prd/63 B8: no metric is negative, and a count axis must not invent a
+  // −2 tick under an empty bucket. Clamp the floor at zero.
+  const low = Math.max(0, min - span * 0.12);
   const high = max + span * 0.12;
   const stamps = points.map((point) => Date.parse(point.bucket_start || point.start));
   const t0 = Math.min(...stamps);
@@ -126,10 +128,15 @@ export function trendChart(payload) {
   // The in-progress bucket is shaded and named: a provisional point must not
   // look like a settled one (prd/50).
   const active = geometry.points.filter((entry) => entry.point.in_progress);
-  const bands = active.map((entry) => `<rect x="${(entry.x - 7).toFixed(1)}" y="${PAD.top}"
+  const bands = active.map((entry) => {
+    // prd/63 B8: the "in progress" label sat at the right edge and clipped to
+    // "in progre". Anchor it inside the plot when the bucket is the last one.
+    const anchor = entry.x > WIDTH - PAD.right - 46 ? 'end' : 'middle';
+    return `<rect x="${(entry.x - 7).toFixed(1)}" y="${PAD.top}"
       width="14" height="${plotH}" fill="${band}" opacity="0.16"/>
-    <text x="${entry.x.toFixed(1)}" y="${PAD.top - 6}" text-anchor="middle"
-      fill="${ink}" font-size="9.5">in progress</text>`).join('');
+    <text x="${entry.x.toFixed(1)}" y="${PAD.top - 6}" text-anchor="${anchor}"
+      fill="${ink}" font-size="9.5">in progress</text>`;
+  }).join('');
   const paths = trendPaths(geometry).map((points) => `<polyline points="${points}"
     fill="none" stroke="${line}" stroke-width="2" stroke-linejoin="round"/>`).join('');
   const dots = geometry.points.filter((entry) => entry.y != null).map((entry) => `<circle
@@ -174,12 +181,18 @@ export function trendTable(payload) {
 export function trendStats(payload) {
   if (!payload) return '';
   const summary = payload.summary || {};
-  const latest = (payload.points || []).filter((point) => point.available).slice(-1)[0];
+  // prd/63 B8: the headline is the latest *settled* bucket (the server already
+  // chose it), names its label and its N, and never compares against an empty
+  // in-progress bucket.
+  const latest = summary.latest;
+  const label = summary.latest_label;
   const active = (summary.in_progress || [])[0];
-  return `<span class="stat-inline"><b>${latest ? esc(trendValue(latest.value, payload.unit)) : '–'}</b> latest</span>
+  return `<span class="stat-inline"><b>${latest == null ? '–' : esc(trendValue(latest, payload.unit))}</b> latest${
+    label ? ` (${esc(label)}${summary.latest_n != null ? ` · n=${esc(summary.latest_n)}` : ''})` : ''}${
+    summary.latest_provisional ? ' <span class="muted">provisional</span>' : ''}</span>
     <span class="stat-inline"><b>${summary.measured_buckets || 0}</b>/${summary.buckets || 0} buckets measured</span>
-    ${summary.change == null ? '' : `<span class="stat-inline">${esc(trendChange(summary, payload.unit))} since the first bucket</span>`}
-    ${active ? `<span class="stat-inline"><b>${esc(active)}</b> in progress</span>` : ''}`;
+    ${summary.change == null ? '' : `<span class="stat-inline">${esc(trendChange(summary, payload.unit))} since the first measured bucket</span>`}
+    ${active ? `<span class="stat-inline"><b>${esc(active)}</b> in progress${summary.latest_provisional ? '' : ' (not in the headline)'}</span>` : ''}`;
 }
 
 /** Tabs + chart + table. `bucket` switches week/sprint. */

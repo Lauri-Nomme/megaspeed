@@ -317,8 +317,16 @@ def trend(
         })
 
     measured = [point for point in points if point["available"]]
-    first = next((point for point in measured), None)
-    latest = next((point for point in reversed(measured)), None)
+    # prd/63 B8: the bucket containing the snapshot is still accumulating, so
+    # it is not the headline and never a delta. "Merged PRs: 0 latest, −2 since
+    # the first bucket" was an empty in-progress week plotted as a collapse;
+    # the latest *measured* (settled) bucket is the headline. If every measured
+    # bucket is in progress (a one-week store) there is nothing settled to
+    # quote: keep the provisional point but say so.
+    settled = [point for point in measured if not point["in_progress"]]
+    headline = settled or measured
+    first = next((point for point in headline), None)
+    latest = next((point for point in reversed(headline)), None)
     change = None
     if first is not None and latest is not None and first is not latest:
         change = round(float(latest["value"]) - float(first["value"]), 4)
@@ -341,6 +349,14 @@ def trend(
             "change": change,
             "buckets": len(points),
             "measured_buckets": len(measured),
+            # prd/63 B8: the headline names its bucket and its cohort size, and
+            # says when it had to fall back to a provisional in-progress point.
+            "latest_label": latest["label"] if latest else None,
+            "latest_n": latest["n"] if latest else None,
+            "first_label": first["label"] if first else None,
+            "first_n": first["n"] if first else None,
+            "latest_provisional": bool(latest and latest["in_progress"]),
+            "settled_buckets": len(settled),
             "in_progress": [
                 point["label"] for point in points if point["in_progress"]
             ],

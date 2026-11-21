@@ -234,6 +234,28 @@ class TicketBenchmarkTests(StoreCase):
         self.assertEqual(target["cycle_benchmark"]["median"], 30.0)
         self.assertEqual(target["cycle_benchmark"]["multiple"], round(40 / 30, 2))
 
+    def test_a_declined_pr_is_not_benchmarked_against_merged_prs(self):
+        """prd/63 B10: a bot-declined zombie is not delivered work."""
+        fx = contrast_fixture()
+        for record in fx.objects:
+            if record["object_id"] == "PR:ENG/platform#50":
+                record["state"] = "declined"
+        con, court, data = self.load(fx)
+        try:
+            payload = tickets.ticket(court, data, "ENG-99")
+        finally:
+            con.close()
+        target = next(pr for pr in payload["prs"] if pr["number"] == 50)
+        block = target["cycle_benchmark"]
+        self.assertTrue(block["declined"])
+        self.assertFalse(block["available"])
+        self.assertIsNone(block["multiple"])
+        self.assertIn("declined", block["note"])
+        # phases are not compared with the merged-PR cohort either
+        for phase in target["phase_benchmarks"].values():
+            self.assertTrue(phase["declined"])
+            self.assertIsNone(phase["multiple"])
+
     def test_a_small_story_cohort_suppresses_every_ticket_contrast(self):
         court, data, payload = self.ticket(fx=contrast_fixture(stories=2))
         for row in payload["segments"]["rows"]:

@@ -191,13 +191,12 @@ test('prd/38 #20 / prd/43 #3: the Timeline chip scopes to the ticket and keeps t
   assert.match(read('timeline.js'), /this\.focusPrId === pr\.id/);
 });
 
-test('P-3: the build version is a fixed bottom-left footer, not the meta strip', () => {
+test('prd/63 D: the build version is in the meta strip, not a fixed overlay', () => {
   const html = read('index.html');
-  const footer = html.slice(html.indexOf('<footer class="app-footer"'));
-  assert.match(footer, /id="app-version"/);
   const meta = html.slice(html.indexOf('<div class="meta"'), html.indexOf('<!-- Timeline -->'));
-  assert.doesNotMatch(meta, /id="app-version"/);
+  assert.match(meta, /id="app-version"/);
+  assert.doesNotMatch(html, /class="app-footer"/);
   const css = read('style.css');
-  assert.match(css, /\.app-footer \{[^}]*position: fixed/s);
-  assert.match(css, /\.app-footer \{[^}]*bottom: 6px/s);
+  assert.doesNotMatch(css, /\.app-footer/);
+  assert.match(css, /\.meta \.build \{/);
 });

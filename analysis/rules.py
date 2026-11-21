@@ -3296,7 +3296,10 @@ def templates(
                 f"{adopted} adopted mid-sprint"
             )
         if points_share is not None and abs(points_share - share) >= 0.02:
-            title += f" ({round(points_share * 100)}% by points)"
+            # prd/63 C13: this is the *delivered* share by points, not the
+            # adopted share; "44 % by points" next to "28 adopted" read as if
+            # the adopted work were 44 % of the points.
+            title += f" ({round(points_share * 100)}% of points delivered)"
         if late:
             title += f" — {late} finished late"
         if unmerged:
