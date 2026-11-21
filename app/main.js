@@ -31,6 +31,7 @@ import {
 } from '/tables.js';
 import {
   agingCount, agingMarkdown, agingMarkup, agingRows, parseAgingView,
+  scopedAgingPayload,
 } from '/aging.js';
 import { rulesMarkup, rulesStats, rulesMarkdown } from '/rules.js';
 import { verdictCard, verdictMarkdown } from '/verdict.js';
@@ -488,6 +489,28 @@ function syncChromeHeight() {
 }
 
 let statusTimer = 0;
+/* prd/65 N-04: a write of ours bumps the store stamp, so the `/ws` watcher
+ * broadcasts `changed` ~1 s later and the reload that follows would replace
+ * "recorded review SLA 4 h" with the live line almost immediately. The
+ * confirmation is held for its normal flash duration: `refreshStatus()` (the
+ * liveness update every reload ends with) leaves the bar alone while it is
+ * fresh. Only the status *text* is held — the echo still reloads the data, and
+ * another writer's change still refreshes the view; it simply cannot talk over
+ * a confirmation the user just earned. */
+let statusHeldUntil = 0;
+
+/** Hold a confirmation on the status bar for `ms`, then return to live. */
+function flashStatusHeld(text, cls = 'ok', ms = 4000) {
+  flashStatus(text, cls, ms);
+  // after flashStatus: `setStatus` clears the hold, so arm it last.
+  statusHeldUntil = Date.now() + ms;
+}
+
+/** The liveness refresh a successful load ends with (respects a held flash). */
+function refreshStatus() {
+  if (Date.now() < statusHeldUntil) return;
+  setStatus(liveStatusText(), 'live');
+}
 
 function liveStatusText() {
   if (!state.meta) return 'connecting';
@@ -499,6 +522,10 @@ function liveStatusText() {
 
 function setStatus(text, cls = '') {
   clearTimeout(statusTimer);
+  // prd/65 N-04: any status the app says on purpose (a load, an error, another
+  // action) ends a held confirmation; only the reload's liveness refresh goes
+  // through `refreshStatus()`, and that one respects the hold.
+  statusHeldUntil = 0;
   $('status').textContent = text;
   $('status').className = `status ${cls}`.trim();
 }
@@ -1404,6 +1431,9 @@ function renderDeliveryPage() {
       aria-selected="${state.tab === tab.id}" class="${state.tab === tab.id ? 'on' : ''}">
       ${esc(tab.label)} <span class="num">${counts[tab.id]}</span></button>`).join('');
   const aging = state.tab === 'aging';
+  // prd/65 N-05: the scope + sprint lens as one predicate — the tab badge, the
+  // table, the chip, the dots, the honesty line and the re-plan list all read it.
+  const agingFilter = agingRowFilter(sprintKeys);
   $('delivery-table').innerHTML = data
     ? (aging
       ? agingMarkup(state.aging, {
@@ -1414,9 +1444,7 @@ function renderDeliveryPage() {
         source: state.agingSource,
         // the table follows the same scope + sprint lens as the tab count, so
         // the number and the rows below it cannot disagree
-        rowFilter: (row) => agingMatchesScope(row, deliveryScope())
-          && (!sprintKeys.size
-            || (Boolean(row.ticket) && sprintKeys.has(String(row.ticket)))),
+        rowFilter: agingFilter,
       })
       : deliveryTable(data, state.tab, {
         scope: deliveryScope(),
@@ -1440,12 +1468,14 @@ function renderDeliveryPage() {
   }
   // prd/59: the aging tab is priced on its own payload's clock; the delivery
   // table keeps its wait-hours sentence. Never mix the two.
+  // prd/65 N-07: the censoring/vacation sentences are stated once, in the tab
+  // body (`.aging-meta` / `.aging-censor`), so this bar no longer repeats the
+  // payload's `note` — the same two sentences a second time.
   const agingData = state.aging;
   $('delivery-assumption').textContent = aging
     ? (agingData
       ? `${agingData.assumption} · snapshot ${fmtStamp(Date.parse(agingData.as_of))} · ` +
-        `${agingData.thresholds_mode === 'fixed' ? 'fixed thresholds' : 'self-calibrated thresholds'} · ` +
-        `${agingData.note}`
+        `${agingData.thresholds_mode === 'fixed' ? 'fixed thresholds' : 'self-calibrated thresholds'}`
       : '')
     : (data
       ? `${data.assumption} · snapshot ${fmtStamp(Date.parse(data.snapshot))} ` +
@@ -1498,7 +1528,10 @@ function renderDeliveryPage() {
     if (aging) {
       // prd/59: the tab's honesty line is its own — the cohort and its n, the
       // band counts from the same rows, and the scope sentence.
-      const a = state.aging || {};
+      // prd/65 N-05: "the same rows" is literal — the counts, the chase item
+      // count and the chip read the payload scoped once by `agingFilter`, so
+      // `person:CaOs` cannot say 1 in the badge and 8 in the honesty line.
+      const a = scopedAgingPayloadNow(sprintKeys) || {};
       const c = a.counts || {};
       setHonesty(
         `${c.open || 0} in flight · ${c.live || 0} live · ${c.over_p85 || 0} past p85` +
@@ -1555,9 +1588,19 @@ function scopedTabCounts(data, sprintKeys = null) {
  * prd/59: an aging row under the page's scope. The row's holders are its
  * `holder` entries (person + role) and its ticket is its story key, so the
  * same `matchesScope` answers "waiting on X" and "this repo/ticket" here.
+ *
+ * The repo rule (prd/65 N-01): `/api/aging?repo=…` is applied *server-side* —
+ * the store joins each story to its PRs and returns only the stories that have
+ * a PR in that repo — and a story row carries neither `repo` nor `repo_short`
+ * (`analysis/aging.py` `_story_rows`). Re-testing the missing field here would
+ * filter every story to `false` while the chip and the strip (which read the
+ * payload, not this predicate) still said 7. One rule: for `kind === 'story'`
+ * under a repo scope the server's answer *is* the scope; PR rows keep the
+ * field check because they do carry their repository.
  */
 function agingMatchesScope(row, scope) {
   if (!scope) return true;
+  if (scope.kind === 'repo' && row && row.kind === 'story') return true;
   return matchesScope({
     ...row,
     tickets: [row.ticket].filter(Boolean),
@@ -1566,6 +1609,27 @@ function agingMatchesScope(row, scope) {
       (row.holder || []).map((holder) => [holder.person, holder.role]),
     ),
   }, scope);
+}
+
+/**
+ * prd/65 N-05: one predicate for every surface of the Aging tab — the tab
+ * badge, the table, the count chip, the strip dots, the honesty line and the
+ * re-plan list — so a person/role scope cannot filter one and leave another
+ * quoting the team's numbers.
+ */
+function agingRowFilter(sprintKeys = null) {
+  const scope = deliveryScope();
+  return (row) => agingMatchesScope(row, scope)
+    && (!sprintKeys || !sprintKeys.size
+      || (Boolean(row.ticket) && sprintKeys.has(String(row.ticket))));
+}
+
+/** The aging payload the tab renders: the server's answer, scoped once. */
+function scopedAgingPayloadNow(sprintKeys = null) {
+  return scopedAgingPayload(state.aging, {
+    onlyLive: state.agingOnly,
+    rowFilter: agingRowFilter(sprintKeys),
+  });
 }
 
 /** The aging rows the active scope and sprint lens keep (prd/59 tab count). */
@@ -2097,7 +2161,9 @@ async function recordAnnotation(form) {
     state.compare = null;
     await ensureData('trend');
     renderPage();
-    setStatus(`recorded ${(body.annotation && body.annotation.label) || 'the change'}`, 'ok');
+    // prd/65 N-04: held, so the /ws watcher echo ~1 s later cannot replace this
+    // confirmation with the live line before the reader has seen it.
+    flashStatusHeld(`recorded ${(body.annotation && body.annotation.label) || 'the change'}`);
   } catch (err) {
     flashStatus(`could not record the change: ${err.message}`, 'stale');
   }
@@ -2117,7 +2183,7 @@ async function deleteAnnotation(id) {
     state.compareSplit = '';
     await ensureData('trend');
     renderPage();
-    setStatus('annotation deleted', 'ok');
+    flashStatusHeld('annotation deleted');
   } catch (err) {
     flashStatus(`could not delete the annotation: ${err.message}`, 'stale');
   }
@@ -3441,7 +3507,9 @@ async function load({ force = false } = {}) {
     state.meta = health;
     state.snapshotAge = null;
     renderProvenance();
-    setStatus(liveStatusText(), 'live');
+    // prd/65 N-04: this is the path the annotation write's own `/ws` echo
+    // takes, so it must not talk over the "recorded …" confirmation.
+    refreshStatus();
     window.__megaspeedReady = true;
     return;
   }
@@ -3522,7 +3590,7 @@ async function load({ force = false } = {}) {
   if (state.page !== 'timeline' && state.page !== 'ticket') await ensureData(state.page);
   renderPage();
   syncChromeHeight();
-  setStatus(liveStatusText(), 'live');
+  refreshStatus();
   window.__megaspeedReady = true;
 }
 
@@ -3534,7 +3602,7 @@ function connect() {
   socket = new WebSocket(`${proto}://${location.host}/ws`);
 
   socket.onopen = () => {
-    if (state.meta) setStatus(liveStatusText(), 'live');
+    if (state.meta) refreshStatus();
   };
 
   socket.onclose = () => {
@@ -4068,8 +4136,7 @@ document.addEventListener('click', async (event) => {
       await copyText(agingMarkdown(state.aging, {
         base: appBase(),
         onlyLive: state.agingOnly,
-        rowFilter: (row) => agingMatchesScope(row, deliveryScope())
-          && (!keys.size || (Boolean(row.ticket) && keys.has(String(row.ticket)))),
+        rowFilter: agingRowFilter(keys),
       }));
       return;
     }

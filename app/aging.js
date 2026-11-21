@@ -141,6 +141,22 @@ export function bandBar(row, payload) {
     >${ticks}<b class="mark" style="left:${scale.pct(row.age_hours).toFixed(2)}%"></b></span>`;
 }
 
+/** The tick row: `p50 11 d 2 h · p85 15 d 7 h · p95 21 d 4 h`, in flow.
+ *
+ * prd/65 N-06: the desktop strip used to place these labels with `left: %`
+ * and `translateX(-50%)` on an axis scaled to the *oldest* item, so the
+ * finished-work percentiles clustered in the left third and overlapped by
+ * 7–45 px. One readable row in flow (wrapping, with gaps) cannot overlap on
+ * either stage; the axis keeps its dashed rules so the position is still
+ * visible without a label sitting on top of another.
+ */
+export function tickRow(payload) {
+  const scale = agingScale(payload);
+  return `<div class="aging-ticks" data-aging-ticks>${scale.ticks.map((tick) => `
+      <span data-tick="${tick.id}" title="${esc(`${tick.label} = ${fmtHours(tick.hours)}`)}"
+        >${tick.label} ${esc(fmtHours(tick.hours))}</span>`).join('')}</div>`;
+}
+
 /** One dot plot of in-flight age; desktop only (a phone gets the tick line). */
 export function agingChart(payload, { phone = false } = {}) {
   const block = thresholdOf(payload);
@@ -172,8 +188,7 @@ export function agingChart(payload, { phone = false } = {}) {
     <line class="aging-tick" data-chart-tick="${tick.id}"
       x1="${tick.pct.toFixed(2)}" x2="${tick.pct.toFixed(2)}" y1="8" y2="76"></line>`).join('');
   return `<div class="aging-strip" data-aging-chart>
-    <div class="aging-tick-labels" data-aging-ticks>${scale.ticks.map((tick) => `
-      <span data-tick="${tick.id}" style="left:${tick.pct.toFixed(2)}%">${tick.label} ${esc(fmtHours(tick.hours))}</span>`).join('')}</div>
+    ${tickRow(payload)}
     <svg class="aging-plot" viewBox="0 0 100 88" preserveAspectRatio="none" role="img"
       aria-label="in-flight age against the team’s own p50, p85 and p95">
       <line class="aging-base" x1="0" x2="100" y1="76" y2="76"></line>
@@ -276,15 +291,81 @@ export function replanList(payload) {
   </section>`;
 }
 
+/**
+ * The counts of the rows *on screen*, not the team's (prd/65 N-05).
+ *
+ * The payload's `counts` are computed server-side over every row of the
+ * cohort, which is right for `scope=all` and wrong the moment the page filters
+ * the rows client-side (person/role/ticket scopes, the sprint lens). The chip,
+ * the honesty line and the tab badge read this function instead, so all three
+ * describe the same list as the table.
+ */
+export function agingScopedCounts(rows, payload) {
+  const list = rows || [];
+  const block = thresholdOf(payload);
+  const p50 = block && block.p50 != null ? Number(block.p50) : null;
+  const base = (payload && payload.counts) || {};
+  return {
+    ...base,
+    open: list.length,
+    live: list.filter((row) => row.live === 'live' || row.live === 'unmerged').length,
+    dead: list.filter((row) => row.live === 'dead').length,
+    over_p50: p50 == null
+      ? 0
+      : list.filter((row) => row.age_hours != null && Number(row.age_hours) >= p50).length,
+    over_p85: list.filter((row) => row.band === 'aging' || row.band === 'very_old').length,
+    over_p95: list.filter((row) => row.band === 'very_old').length,
+    insufficient: list.filter((row) => row.band === 'insufficient').length,
+    unmerged: list.filter((row) => row.live === 'unmerged').length,
+    chase: list.filter((row) => (row.live === 'live' || row.live === 'unmerged')
+      && (row.band === 'aging' || row.band === 'very_old')).length,
+  };
+}
+
+/**
+ * The payload every surface of the Aging tab renders (prd/65 N-05).
+ *
+ * One `rowFilter`, applied once, produces one row list; the chart, the count
+ * chip, the table, the re-plan list and the honesty line all read *this*
+ * payload, so a scope can never filter one of them and leave another showing
+ * the team's numbers. The chase feed and the re-plan list are filtered by the
+ * rows that survived (the server derives both from the same rows).
+ */
+export function scopedAgingPayload(payload, { onlyLive = false, rowFilter = null } = {}) {
+  if (!payload) return payload;
+  // No client-side scope (the common case): the server's rows and counts are
+  // already the answer, and the chart keeps the payload's own order.
+  if (!rowFilter) return payload;
+  const kept = agingRows(payload, { onlyLive }).filter(rowFilter);
+  const ids = new Set(kept.map((row) => row.object_id));
+  const feed = payload.feed
+    ? {
+      ...payload.feed,
+      items: (payload.feed.items || []).filter((item) => ids.has(item.object_id)),
+      replan: (payload.feed.replan || []).filter((item) => ids.has(item.object_id)),
+    }
+    : payload.feed;
+  return {
+    ...payload,
+    rows: kept,
+    counts: agingScopedCounts(kept, payload),
+    feed,
+  };
+}
+
 /** The whole tab: controls, strip, ranked list and the honesty lines. */
 export function agingMarkup(payload, {
   base = '', phone = false, onlyLive = false, view = 'story:cycle',
   source = 'self', rowFilter = null,
 } = {}) {
   if (!payload) return '<div class="empty-row">Loading the aging view…</div>';
-  const block = thresholdOf(payload);
-  const options = agingViewOptions(payload);
-  const counts = payload.counts || {};
+  // prd/65 N-05: one scoped payload for the whole tab — the chip, the dots, the
+  // table and the re-plan list below all read these rows, so a scope cannot
+  // leave one of them quoting the team's numbers.
+  const scoped = scopedAgingPayload(payload, { onlyLive, rowFilter });
+  const block = thresholdOf(scoped);
+  const options = agingViewOptions(scoped);
+  const counts = scoped.counts || {};
   const controls = `<div class="aging-controls" data-aging-controls>
     <label class="aging-control"><span>Stage</span>
       <select data-aging-view aria-label="aging cohort">${options.map((option) => `
@@ -305,20 +386,20 @@ export function agingMarkup(payload, {
   const sourceLine = block && block.source_label
     ? `<span class="aging-source" data-threshold-source>${esc(block.source)} · ${esc(block.source_label)}</span>`
     : '';
-  return `<div class="aging-view" data-aging-view-root data-kind="${esc(payload.kind || '')}">
+  return `<div class="aging-view" data-aging-view-root data-kind="${esc(scoped.kind || '')}">
     ${controls}
     <div class="aging-head">
-      <h3>${esc(payload.kind === 'pr' ? 'PRs in flight' : 'Stories in flight')}
-        <span class="muted">${esc(payload.stage ? String(payload.stage).replace(/_/g, ' ') : '')}</span></h3>
+      <h3>${esc(scoped.kind === 'pr' ? 'PRs in flight' : 'Stories in flight')}
+        <span class="muted">${esc(scoped.stage ? String(scoped.stage).replace(/_/g, ' ') : '')}</span></h3>
       ${sourceLine}
     </div>
-    ${agingChart(payload, { phone })}
+    ${agingChart(scoped, { phone })}
     <p class="aging-meta">Ages are business hours on the holder’s calendar; a person on vacation accrues none.
-      Calendar days in brackets. ${esc(payload.note || '')}</p>
+      Calendar days in brackets.</p>
     <p class="aging-censor">An age is a censored duration — the item has not finished yet; compare it with
       finished work, never add it to a cycle-time median.</p>
-    ${agingTable(payload, { base, onlyLive, rowFilter })}
-    ${replanList(payload)}
+    ${agingTable(scoped, { base, onlyLive })}
+    ${replanList(scoped)}
   </div>`;
 }
 
