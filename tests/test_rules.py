@@ -718,6 +718,31 @@ class ReworkLoopTests(StoreCase):
         )
         self.assertIn("regression", payload["targets"]["hours_per_round_basis"])
 
+    def test_the_round_cap_rule_labels_its_correlation(self):
+        """prd/63 V-A10: r = 0.62 is a correlation, not a "measured lever".
+
+        Rounds and cycle co-vary by construction (every round is a push on the
+        same PR), so the card must not claim the cap was measured to cause the
+        saving. The evidence carries the relationship as a fact, and the rule's
+        prose says "correlation".
+        """
+        fx = Fixture()
+        for number, (rounds, cycle) in enumerate(
+            ((0, 20), (1, 30), (1, 34), (2, 45), (2, 52), (3, 70)), start=1
+        ):
+            fx.pr(number, "AaAa", state="merged", closed=T0 + timedelta(hours=cycle))
+            fx.event(number, "comment_added", "RrRr", 1, severity="suggestion")
+            for index in range(rounds):
+                fx.event(number, "pr_pushed", "AaAa", 2 + index * 3,
+                         push_class="content")
+            fx.event(number, "pr_approved", "RrRr", cycle - 1)
+            fx.event(number, "pr_merged", "RrRr", cycle)
+        suggestion = by_id(self.insights(fx), "round-cap")
+        self.assertEqual(suggestion["evidence"]["relationship"], "correlation")
+        self.assertIn("correlation", suggestion["suggestion"])
+        self.assertNotIn("measured lever", suggestion["suggestion"])
+        self.assertNotIn("measured lever", suggestion["title"])
+
     def test_the_round_cap_rule_carries_the_correlation_and_the_lab(self):
         """prd/43 §1: r ≈ 0.6, and the lab's round-cap is the best scenario.
 
@@ -1337,6 +1362,26 @@ class PrSizeTests(StoreCase):
         self.assertIn("Diff size is not captured yet", suggestion["suggestion"])
         self.assertTrue(suggestion["evidence"]["diff_size_pending"])
         self.assertEqual(suggestion["evidence"]["large_prs"], 2)
+
+    def test_a_cap_of_one_says_one_commit_not_one_commits(self):
+        # prd/63 regression: at cap 1 the title read "PRs over 1 commits".
+        # Two 12-commit PRs and two 1-commit PRs: at cap 1 both groups still
+        # have the two members the large-vs-small comparison needs.
+        fx = Fixture()
+        for number, commits, first_review in ((1, 12, 60), (2, 12, 50), (3, 1, 5), (4, 1, 8)):
+            fx.pr(number, "AaAa")
+            for _ in range(commits):
+                fx.commit(number)
+            fx.event(number, "comment_added", "RrRr", first_review,
+                     severity="suggestion")
+        suggestion = by_id(
+            self.insights(fx, caps={"commits": 1, "lines": 400}), "pr-size",
+        )
+        self.assertIsNotNone(suggestion)
+        self.assertIn("1 commit ", suggestion["title"] + " ")
+        self.assertNotIn("1 commits", suggestion["title"])
+        self.assertIn("under 1 commit", suggestion["suggestion"])
+        self.assertNotIn("1 commits", suggestion["suggestion"])
 
     def test_diff_size_uses_lines_when_the_store_has_them(self):
         metric = self.metric(self.lines_fixture(), "pr_size")

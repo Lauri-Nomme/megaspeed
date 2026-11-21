@@ -326,7 +326,7 @@ class SegmentLabelTests(StoreCase):
         self.assertEqual(row["bounds"], ["created", "ready"])
         self.assertEqual(row["hours"], 10.0)
 
-    def test_all_nine_segments_report_measured_over_nine(self):
+    def test_all_ten_segments_report_measured_over_ten(self):
         fx = Fixture()
         fx.sprint(1, T0, end=T0 + timedelta(days=30))
         fx.story("ENG-1", T0, state="done", closed=T0 + timedelta(hours=80))
@@ -341,8 +341,8 @@ class SegmentLabelTests(StoreCase):
         fx.pr_event(1, "pr_merged", "RrRr", 20)
         court, data, _window = self.jira_store(fx)
         payload = tickets.ticket(court, data, "ENG-1")
-        self.assertEqual(len(payload["segments"]["rows"]), 9)
-        self.assertEqual(payload["segments"]["measured"], 9)
+        self.assertEqual(len(payload["segments"]["rows"]), 10)
+        self.assertEqual(payload["segments"]["measured"], 10)
         self.assertNotIn("merge_done", payload["segments"]["order"])
 
 
@@ -379,9 +379,10 @@ class LifecycleHonestyTests(StoreCase):
         self.assertEqual(rounds["no_pr_open_share"], round(100 / 113, 4))
         # prd/41 B5: a material gap is named in the headline itself, and the
         # day count is rounded (never "12.5000001").
+        # prd/63 V-B: one duration language — "14 d 1 h", never "113 h"
         self.assertIn(
-            "review rounds (113 h, 66% of the measured cycle), "
-            "100 h of which had no PR open.",
+            "review rounds (14 d 1 h, 66% of the measured cycle), "
+            "12 d 4 h of which had no PR open.",
             payload["answer"],
         )
         self.assertIn("PR #2 started 12 d 4 h after PR #1 merged",
@@ -452,8 +453,8 @@ class LifecycleHonestyTests(StoreCase):
         self.assertEqual(payload["segments"]["cycle_first_done_hours"], 80.0)
         self.assertEqual(payload["segments"]["cycle_hours"], 100.0)
         self.assertIn("reopened", payload["answer"])
-        self.assertIn("80 h from created to the first done", payload["answer"])
-        self.assertIn("100 h to the final done", payload["answer"])
+        self.assertIn("10 d 0 h from created to the first done", payload["answer"])
+        self.assertIn("12 d 4 h to the final done", payload["answer"])
         # the reopen's own move back to ready is not the refinement boundary
         self.assertEqual(payload["segments"]["rows"][0]["hours"], 10.0)
 
@@ -469,7 +470,7 @@ class LifecycleHonestyTests(StoreCase):
         self.assertTrue(payload["reopened"])
         self.assertTrue(payload["story"]["censored"])
         self.assertEqual(payload["end_state"], "open")
-        self.assertIn("80 h from created to the first done", payload["answer"])
+        self.assertIn("10 d 0 h from created to the first done", payload["answer"])
         self.assertIn("still open", payload["answer"])
 
 

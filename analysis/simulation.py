@@ -651,10 +651,10 @@ def _stack_depth(court) -> dict:
         "max": max(depths) if available and depths else 0,
         "stacked_prs": sum(1 for d in depths if d > 0) if available else 0,
         "note": (
-            "derived from source/target ref digests (prd/22)"
+            "derived from the PRs' source/target ref digests"
             if available else
-            "no PR carries source/target ref digests: the store predates prd/22, "
-            "so the stack-depth knob cannot be calibrated (it is inert)"
+            "no PR carries source/target ref digests: this store predates the "
+            "stack-depth measurement, so the knob cannot be calibrated (it is inert)"
         ),
     }
 
@@ -997,7 +997,7 @@ def calibrate(court, window=None, conn=None, bots=None,
             "push_class": push_class,
             "push_class_note": (
                 "content = real rework; pure_rebase / rebase_conflict = a lost "
-                "approval that bought no review value (prd/05 rebase waste)"
+                "approval that bought no review value (rebase waste)"
             ),
         },
         "reviewers": reviewers,
@@ -1645,7 +1645,7 @@ def _summary(calibration: dict, scenario: Scenario, pooled: dict,
                     "(or one more server) buys more than any other change"
                     if bottleneck["utilisation"] >= 0.85 else
                     "no server is saturated; the remaining wait is attention "
-                    "latency, not capacity (prd/05: slow vs overloaded server)"
+                    "latency, not capacity (slow vs overloaded server)"
                 ),
             } if bottleneck else None
         ),

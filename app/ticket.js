@@ -31,6 +31,9 @@ export const SEGMENT_PHASE = {
   ready_sprint: { token: '--cat-2', color: '', phase: 'waiting', label: 'unscheduled' },
   sprint_in_progress: { token: '--cat-5', color: '', phase: 'waiting', label: 'committed' },
   in_progress_pr_open: { token: '--phase-active', color: '', phase: 'active', label: 'in progress' },
+  // prd/63 V-C6: the wait before anyone was asked to review is its own
+  // interval — review queuing, not review time.
+  pr_open_reviewer_added: { token: '--cat-4', color: '', phase: 'review', label: 'awaiting a reviewer' },
   pr_open_first_review: { token: '--phase-review', color: '', phase: 'review', label: 'in review' },
   review_rounds: { token: '--series-default', color: '', phase: 'review', label: 'review rounds' },
   final_approval_merge: { token: '--cat-1', color: '', phase: 'review', label: 'merge' },

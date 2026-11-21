@@ -40,16 +40,36 @@ BUCKETS = ("week", "sprint")
 DEFAULT_BUCKET = "week"
 DEFAULT_METRIC = "flow_efficiency"
 
+#: prd/63 F8/V-A5: the smallest cohort a bucket may have and still be quoted as
+#: the headline. A weekly ratio/median over 1–3 PRs is a noise number: "50.0 %
+#: latest (n=1)" and "−6 h 35 min since the first bucket" (n=3 vs n=3) read as
+#: a trend when they are one item. Five is the smallest group where a median is
+#: not just the middle item; the counts are exact and need no such floor; a
+#: sprint bucket's cohort is sprints, so two closed sprints is the minimum to
+#: compare.
+MIN_COHORT_N = 5
+MIN_N_BY_METRIC = {
+    "flow_efficiency": MIN_COHORT_N,
+    "cycle_median": MIN_COHORT_N,
+    "wait_hours": MIN_COHORT_N,
+    "on_time": 2,
+    # a count is exact: a week with zero merges is a measurement, not a sample
+    "merged": 0,
+    "open": 0,
+}
+
 #: The metric catalogue. ``definition`` names the function the point quotes, so
 #: "same cohort, no new definitions" is stated in the payload, not just here.
+#: ``min_n`` is the bucket cohort a headline needs (see ``MIN_COHORT_N``); it
+#: travels with the metric so the UI can say "n < 5" in the metric's own words.
 METRICS: dict[str, dict] = {
     "flow_efficiency": {
         "label": "Flow efficiency",
         "unit": "ratio",
         "higher_is_better": True,
         "definition": (
-            "active ÷ elapsed over the PRs opened in the bucket "
-            "(rules.flow_efficiency aggregate_efficiency)"
+            "active ÷ elapsed over the PRs opened in the bucket — the same "
+            "flow-efficiency number as the headline"
         ),
     },
     "cycle_median": {
@@ -57,8 +77,8 @@ METRICS: dict[str, dict] = {
         "unit": "hours",
         "higher_is_better": False,
         "definition": (
-            "median created → merged hours over the PRs opened in the bucket "
-            "(rules.cycle_time median_hours)"
+            "median PR open → merged hours over the PRs opened in the bucket "
+            "— the same cycle time as the headline"
         ),
     },
     "on_time": {
@@ -67,7 +87,7 @@ METRICS: dict[str, dict] = {
         "higher_is_better": True,
         "definition": (
             "done by the sprint's close ÷ committed stories, for the closed "
-            "sprints whose close falls in the bucket (jira.sprint_delivery)"
+            "sprints whose close falls in the bucket"
         ),
     },
     "wait_hours": {
@@ -75,15 +95,15 @@ METRICS: dict[str, dict] = {
         "unit": "hours",
         "higher_is_better": False,
         "definition": (
-            "waiting hours over the PRs opened in the bucket "
-            "(rules.flow_efficiency waiting_hours)"
+            "waiting hours over the PRs opened in the bucket — the same "
+            "wait total as the headline"
         ),
     },
     "merged": {
         "label": "Merged PRs",
         "unit": "count",
         "higher_is_better": True,
-        "definition": "PRs merged inside the bucket (throughput, concepts.md §1)",
+        "definition": "PRs merged inside the bucket (throughput)",
     },
     "open": {
         "label": "Open PRs",
@@ -91,7 +111,7 @@ METRICS: dict[str, dict] = {
         "higher_is_better": False,
         "definition": (
             "PRs open at the bucket's end (the snapshot for the active bucket) "
-            "— the WIP the queue view samples"
+            "— the work in progress the queue view samples"
         ),
     },
 }
@@ -101,9 +121,14 @@ def metric_ids() -> list[dict]:
     """The catalogue the UI builds its metric tabs from (kept in one place)."""
     return [
         {"id": key, "label": value["label"], "unit": value["unit"],
-         "higher_is_better": value["higher_is_better"]}
+         "higher_is_better": value["higher_is_better"],
+         "min_n": value.get("min_n")}
         for key, value in METRICS.items()
     ]
+
+
+for _metric_id, _min_n in MIN_N_BY_METRIC.items():
+    METRICS[_metric_id]["min_n"] = _min_n
 
 
 # --------------------------------------------------------------------------- #
@@ -186,6 +211,23 @@ def _label(moment: datetime, bucket: str) -> str:
 # --------------------------------------------------------------------------- #
 # one point per bucket, from the existing metric functions
 # --------------------------------------------------------------------------- #
+def _open_in_bucket(
+    court: ballcourt.BallCourt, start: datetime, end_inclusive: datetime,
+) -> int:
+    """PRs opened in the bucket that are still open (right-censored at the snapshot).
+
+    prd/63 F8/V-A5: the latest cycle bucket is survivor-biased — only the PRs
+    that already merged can enter the median. Counting the still-open cohort
+    lets the point carry a censored marker instead of looking settled.
+    """
+    return sum(
+        1 for state in court.prs
+        if state.pr["created_ts"] is not None
+        and start <= state.pr["created_ts"] <= end_inclusive
+        and state.pr["closed_ts"] is None
+    )
+
+
 def _point(
     metric: str,
     court: ballcourt.BallCourt,
@@ -207,6 +249,7 @@ def _point(
             "elapsed_hours": block["elapsed_hours"],
             "working_hours": block["working_hours"],
             "unavailable": not block["available"],
+            "censored": _open_in_bucket(court, start, end_inclusive),
         }
     if metric == "cycle_median":
         block = rules.cycle_time(court, window)
@@ -214,6 +257,7 @@ def _point(
             "p90_hours": block["p90_hours"],
             "cohort": block["cohort"],
             "censored_open": block["censored"]["open"],
+            "censored": int(block["censored"]["open"]),
         }
     if metric == "merged":
         count = sum(
@@ -320,16 +364,38 @@ def trend(
     # prd/63 B8: the bucket containing the snapshot is still accumulating, so
     # it is not the headline and never a delta. "Merged PRs: 0 latest, −2 since
     # the first bucket" was an empty in-progress week plotted as a collapse;
-    # the latest *measured* (settled) bucket is the headline. If every measured
-    # bucket is in progress (a one-week store) there is nothing settled to
-    # quote: keep the provisional point but say so.
+    # the latest *measured* (settled) bucket is the headline.
+    # prd/63 F8/V-A5: a bucket also needs the metric's minimum cohort. The old
+    # rule quoted any settled bucket, so "50.0 % latest (n=1)" and "2 d 1 h
+    # latest (9 Nov · n=3)" headlined noise and compared n=3 with n=3. The
+    # headline is the newest settled bucket with n ≥ min_n; a bucket below it
+    # stays drawn and is named as skipped, never silently promoted.
+    min_n_value = METRICS[metric].get("min_n")
+    min_n = int(MIN_COHORT_N if min_n_value is None else min_n_value)
     settled = [point for point in measured if not point["in_progress"]]
-    headline = settled or measured
-    first = next((point for point in headline), None)
-    latest = next((point for point in reversed(headline)), None)
+    below_min = [point for point in settled if int(point["n"] or 0) < min_n]
+    eligible = [point for point in settled if int(point["n"] or 0) >= min_n]
+    # A one-week (or one-sprint) store has no settled bucket: fall back to a
+    # provisional *in-progress* point only when it clears the same floor, and
+    # say so (``latest_provisional``).
+    provisional = [
+        point for point in measured
+        if point["in_progress"] and int(point["n"] or 0) >= min_n
+    ]
+    headline = eligible or provisional
+    first = headline[0] if headline else None
+    latest = headline[-1] if headline else None
     change = None
     if first is not None and latest is not None and first is not latest:
         change = round(float(latest["value"]) - float(first["value"]), 4)
+    # The newest settled bucket when it is not the headline, so the UI can say
+    # "9 Nov (n=3) is below the n≥5 floor" instead of hiding it.
+    latest_settled = settled[-1] if settled else None
+    skipped_after = (
+        [point["label"] for point in settled
+         if latest is not None and point["start"] > latest["start"]]
+        if latest is not None else [point["label"] for point in settled]
+    )
     active_sprint = next(
         (
             sprint for sprint in data.sprints.values()
@@ -357,6 +423,21 @@ def trend(
             "first_n": first["n"] if first else None,
             "latest_provisional": bool(latest and latest["in_progress"]),
             "settled_buckets": len(settled),
+            # prd/63 F8/V-A5: the minimum-N rule and the censored marker are
+            # facts in the payload, so every consumer states the same floor.
+            "min_n": min_n,
+            "latest_settled_label": (
+                latest_settled["label"] if latest_settled else None
+            ),
+            "latest_settled_n": latest_settled["n"] if latest_settled else None,
+            "below_min": [
+                {"label": point["label"], "n": point["n"]} for point in below_min
+            ],
+            "low_n_after_headline": skipped_after if latest is not None else [],
+            "latest_censored": bool(latest and latest.get("censored")),
+            "latest_censored_n": (
+                int(latest.get("censored") or 0) if latest else 0
+            ),
             "in_progress": [
                 point["label"] for point in points if point["in_progress"]
             ],

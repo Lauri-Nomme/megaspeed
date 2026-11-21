@@ -16,9 +16,9 @@ names a QA status, ``merge→done`` splits into ``merge→verification`` and
 ``verification→done`` so "time in QA" is measured rather than folded into
 "done". The ``ready``, ``in_review`` and ``in_verification`` boundaries come
 from the status stages; without a map they do not exist and are reported
-missing (an unconfigured store keeps the eight segments and today's numbers).
+missing (an unconfigured store keeps the same segments and today's numbers).
 
-The eight segments are built from three sources, joined on the story key:
+The segments are built from three sources, joined on the story key:
 
 * the story's own events — ``created``, ``status_changed`` (both ends are status
   *stages*, never a workflow name), ``pointed``, ``assigned``,
@@ -30,7 +30,7 @@ The eight segments are built from three sources, joined on the story key:
 Everything else in this module follows from those rows:
 
 ======================  ==========================================================
-``waiting_time_decomposition``  the 8 segments, hours + per-segment flow efficiency
+``waiting_time_decomposition``  the segments, hours + per-segment flow efficiency
 ``carry_over``          stories added to more than one sprint
 ``point_churn``         ``pointed`` events after the story started
 ``worklog_cross_check`` ``log_delay_bucket`` distribution + logged vs active hours
@@ -78,14 +78,22 @@ from ingest.store import iso, to_naive_utc
 from ingest.taxonomy import normalize_stage
 
 # --------------------------------------------------------------------------- #
-# the eight segments (prd/21)
+# the closed segment vocabulary (prd/21)
 # --------------------------------------------------------------------------- #
+# prd/63 V-C6: "waiting for a reviewer to be added" is its own interval. A PR
+# can sit for days before anyone is asked to review it — DEL-167 #53 waited
+# three business days with no reviewer on the roster — and that wait used to be
+# hidden inside "PR open → first review". The boundary is the first reviewer
+# *add* event on any of the story's PRs; a store that asks reviewers at open
+# supplies no add event, and the boundary falls back to `pr_open` (a measured
+# zero, not a missing boundary).
 SEGMENTS: tuple[tuple[str, str], ...] = (
     ("created_ready", "created → ready"),
     ("ready_sprint", "ready → sprint"),
     ("sprint_in_progress", "sprint → in progress"),
     ("in_progress_pr_open", "in progress → PR open"),
-    ("pr_open_first_review", "PR open → first review"),
+    ("pr_open_reviewer_added", "waiting for a reviewer"),
+    ("pr_open_first_review", "reviewer added → first review"),
     ("review_rounds", "review rounds"),
     ("final_approval_merge", "final approval → merge"),
     ("merge_done", "merge → done"),
@@ -108,7 +116,8 @@ SEGMENT_BOUNDS: dict[str, tuple[str, str]] = {
     "ready_sprint": ("ready", "sprint"),
     "sprint_in_progress": ("sprint", "started"),
     "in_progress_pr_open": ("started", "pr_open"),
-    "pr_open_first_review": ("pr_open", "first_review"),
+    "pr_open_reviewer_added": ("pr_open", "reviewer_added"),
+    "pr_open_first_review": ("reviewer_added", "first_review"),
     "review_rounds": ("first_review", "approval"),
     "final_approval_merge": ("approval", "merged"),
     "merge_done": ("merged", "done"),
@@ -158,7 +167,7 @@ def segment_hours(
 def segment_keys(boundaries: dict, *, verification: bool = False) -> tuple[str, ...]:
     """The segment order for one story (or one store).
 
-    The eight base segments, except that the last one is replaced by
+    The base segments, except that the last one is replaced by
     ``merge_verification`` + ``verification_done`` when the workflow has an
     ``in_verification`` stage (prd/29). ``verification`` says the *store* has the
     stage (so a story that never reached QA shows the segment as missing, with
@@ -172,7 +181,7 @@ def segment_keys(boundaries: dict, *, verification: bool = False) -> tuple[str, 
 
 NO_JIRA_NOTE = (
     "no Jira data in this store (no STORY objects): the ticket layer needs the "
-    "Jira ingest (prd/04). The PR-side metrics are unaffected."
+    "Jira ingest. The PR-side metrics are unaffected."
 )
 
 # v1 targets, stated in every payload that uses them (never a hidden constant).
@@ -653,7 +662,7 @@ def uses_verification(data: JiraData | None) -> bool:
     True when any story reached it. A store scraped with a stage map that names
     a QA status does; an unconfigured store never does (its QA status projects
     onto ``in_progress``), which is exactly how the unconfigured path keeps
-    today's eight segments.
+    today's segments.
     """
     if data is None:
         return False
@@ -820,7 +829,8 @@ def _ordered_segment_bounds(
     start = boundaries.get("created")
     chain = (
         "created", "ready", "sprint", "started", "pr_open",
-        "first_review", "approval", "merged", "in_verification", "done",
+        "reviewer_added", "first_review", "approval", "merged",
+        "in_verification", "done",
     )
     previous_name: str | None = None
     previous: datetime | None = None
@@ -945,6 +955,22 @@ def _cycle(story: Story) -> Cycle:
     pr_open = min((state.pr["created_ts"] for state in prs), default=None)
     reviews = [_first_review(state) for state in prs]
     first_review = min((ts for ts in reviews if ts is not None), default=None)
+    # prd/63 V-C6: when the first reviewer was *asked*. The roster add is its
+    # own event; a store that adds reviewers at open has none, so the boundary
+    # is the open instant (the wait is a measured zero). A late add of an
+    # extra reviewer after the first review is not the first ask: clamp it so
+    # the two waits cannot invert (the ordering pass would otherwise move the
+    # whole span into the review segment).
+    adds = sorted(
+        event["_ts"] for state in prs for event in state.events
+        if event["activity"] == "reviewer_changed"
+        and _attrs(event).get("change") == "added"
+    )
+    reviewer_added = adds[0] if adds else pr_open
+    if pr_open is not None and reviewer_added is not None and reviewer_added < pr_open:
+        reviewer_added = pr_open
+    if first_review is not None and reviewer_added is not None and reviewer_added > first_review:
+        reviewer_added = first_review
     merged = max((ts for ts in (_pr_merge(state) for state in prs) if ts is not None), default=None)
     approvals = [
         event["_ts"] for state in prs for event in state.events
@@ -962,6 +988,7 @@ def _cycle(story: Story) -> Cycle:
         "in_review": in_review,
         "in_verification": in_verification,
         "pr_open": pr_open,
+        "reviewer_added": reviewer_added,
         "first_review": first_review,
         "approval": approval,
         "merged": merged,
@@ -1077,7 +1104,7 @@ def waiting_time_decomposition(
     data: JiraData,
     window: tuple[datetime, datetime],
 ) -> dict:
-    """The eight segments: hours, share of cycle, and flow efficiency each.
+    """The segments: hours, share of cycle, and flow efficiency each.
 
     Per segment the payload reports the hours the cohort spent in it, its share
     of the measured total (that is the "the team spends X% of cycle time in the
@@ -2789,7 +2816,7 @@ def sprints(
     if not data.sprints and not available:
         note = (
             "no SPRINT object and no 'sprint_added' event in this store: the "
-            "sprint lens needs the Jira ingest (prd/04)"
+            "sprint lens needs the Jira ingest"
         )
     elif not data.sprints:
         note = (
@@ -2885,7 +2912,7 @@ def sprints(
         "heuristic": (
             "a story is in a sprint when a 'sprint_added' names it; the current "
             "sprint is the last add not removed afterwards; done-by-end is "
-            "measured at the sprint's close (concepts.md §6); carried over = "
+            "measured at the sprint's close; carried over = "
             "committed to a closed sprint but not done by its close; a band "
             "spans a SPRINT object's start to its completion, or to the "
             "snapshot while active"
@@ -2963,6 +2990,24 @@ def point_churn(
 # --------------------------------------------------------------------------- #
 # 4. worklog cross-check (prd/21 §4)
 # --------------------------------------------------------------------------- #
+def _size_key(points) -> str:
+    """A story-point size as a plain label: ``1``/``13``, never ``1.0``.
+
+    prd/63 V-A4: the points column comes back from DuckDB as a float, so
+    ``str(points)`` serialised ``"1.0"`` while every reader looks up ``"1"``.
+    A size is a name (the story was pointed at 1), not a measured quantity, so
+    an integral value is written without a decimal tail. A genuinely
+    fractional size (a half-point story) keeps its decimal.
+    """
+    try:
+        value = float(points)
+    except (TypeError, ValueError):
+        return str(points)
+    if value.is_integer():
+        return str(int(value))
+    return str(points)
+
+
 def worklog_cross_check(
     court: ballcourt.BallCourt,
     data: JiraData,
@@ -3139,8 +3184,15 @@ def worklog_cross_check(
         "median_hours_per_point": _median(per_point_all),
         # median logged hours by point size: "flat across 1–13 points" is the
         # plain-language form of the correlation.
+        # prd/63 V-A4: the keys are the *story sizes in plain numbers* — "1",
+        # "13", never "1.0". DuckDB returns the points column as a float, so
+        # ``str(points)`` used to serialise "1.0"; the card looked up "1" and
+        # every bucket read 0 min. A size is a label, not a measurement, so it
+        # is normalised once here (the JS reader is defensive too).
         "logged_by_points": {
-            str(points): _median([hours for size, hours in points_logged if size == points])
+            _size_key(points): _median(
+                [hours for size, hours in points_logged if size == points]
+            )
             for points in sorted({size for size, _ in points_logged})
         },
         # prd/53 §3: the historical trend, per week, of the same gap.

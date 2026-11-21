@@ -61,6 +61,7 @@ BOUNDARY_REASON: dict[str, str] = {
         "the workflow's QA status)"
     ),
     "pr_open": "no PR names this key",
+    "reviewer_added": "no reviewer is named on the PR's roster (a store that asks reviewers at open has none)",
     "first_review": "no reviewer action on its PRs",
     "approval": "no approval on its PRs",
     "merged": "no merged PR names this key",
@@ -71,7 +72,8 @@ BOUNDARY_REASON: dict[str, str] = {
 #: prd/29 stage boundaries).
 BOUNDARY_ORDER = (
     "created", "refined", "ready", "sprint", "started", "in_review",
-    "in_verification", "pr_open", "first_review", "approval", "merged", "done",
+    "in_verification", "pr_open", "reviewer_added", "first_review", "approval",
+    "merged", "done",
 )
 
 #: The order the *clock* should show (prd/63 F17). It differs from
@@ -81,7 +83,8 @@ BOUNDARY_ORDER = (
 #: predecessor on this list.
 BOUNDARY_CLOCK_ORDER = (
     "created", "refined", "ready", "sprint", "started", "pr_open",
-    "in_review", "first_review", "approval", "merged", "in_verification", "done",
+    "reviewer_added", "in_review", "first_review", "approval", "merged",
+    "in_verification", "done",
 )
 
 #: Only these boundaries have a strict, one-way dependency. `ready`/`refined`
@@ -731,10 +734,10 @@ def _gap_notes(biggest: dict, segments: dict) -> tuple[str, str]:
         return "", ""
     clause = ""
     if hours >= MATERIAL_GAP_HOURS:
-        clause = f", {hours:g} h of which had no PR open"
+        clause = f", {jira.human_hours(hours)} of which had no PR open"
     parts = []
     if hours < MATERIAL_GAP_HOURS:
-        parts.append(f"{hours:g} h of that segment had no PR open.")
+        parts.append(f"{jira.human_hours(hours)} of that segment had no PR open.")
     window_from = biggest.get("from") or ""
     window_to = biggest.get("to") or ""
     overlapping = [
@@ -1263,15 +1266,16 @@ def _answer(
         if censored:
             reopen_note = (
                 f" {key} was reopened {reopens} time"
-                f"{'' if reopens == 1 else 's'}: {first_hours:g} h from created to "
-                f"the first done, and still open at the snapshot "
-                f"({final_hours:g} h)."
+                f"{'' if reopens == 1 else 's'}: {jira.human_hours(first_hours)} "
+                "from created to the first done, and still open at the snapshot "
+                f"({jira.human_hours(final_hours)})."
             )
         else:
             reopen_note = (
                 f" {key} was reopened {reopens} time"
-                f"{'' if reopens == 1 else 's'}: {first_hours:g} h from created to "
-                f"the first done and {final_hours:g} h to the final done."
+                f"{'' if reopens == 1 else 's'}: {jira.human_hours(first_hours)} "
+                "from created to the first done and "
+                f"{jira.human_hours(final_hours)} to the final done."
             )
     if not measured:
         first = missing[0]
@@ -1300,8 +1304,8 @@ def _answer(
             f"the store cannot say how long the {first['label']} segment "
             f"took because the {boundary} boundary is missing "
             f"({first['reason']}); the {len(measured)} of {len(segments['rows'])} "
-            f"segments it can measure cover {total:g} h, most of it in "
-            f"{biggest['label']} ({biggest['hours']:g} h, {percent}%)"
+            f"segments it can measure cover {jira.human_hours(total)}, most of it "
+            f"in {biggest['label']} ({jira.human_hours(biggest['hours'])}, {percent}%)"
             f"{gap_clause}."
             f"{(' ' + gap_sentence) if gap_sentence else ''}"
             f"{reopen_note}{suffix}{quirk_note}"
@@ -1315,25 +1319,25 @@ def _answer(
         reopens = segments.get("reopen_count") or 1
         if censored:
             span = (
-                f"{key} took {first_hours:g} h from created to the first done, "
-                f"then was reopened and is still open ({final_hours:g} h to the "
-                "snapshot)"
+                f"{key} took {jira.human_hours(first_hours)} from created to the "
+                "first done, then was reopened and is still open "
+                f"({jira.human_hours(final_hours)} to the snapshot)"
             )
         else:
             span = (
-                f"{key} took {first_hours:g} h from created to the first done and "
-                f"{final_hours:g} h to the final done (reopened {reopens} "
-                f"time{'' if reopens == 1 else 's'})"
+                f"{key} took {jira.human_hours(first_hours)} from created to the "
+                f"first done and {jira.human_hours(final_hours)} to the final done "
+                f"(reopened {reopens} time{'' if reopens == 1 else 's'})"
             )
     else:
         cycle = segments["cycle_hours"]
         span = (
-            f"{key} took {cycle:g} h from created to done"
+            f"{key} took {jira.human_hours(cycle)} from created to done"
             if cycle is not None else f"{key}'s cycle is the measured window"
         )
     body = (
         f"{span}: most of it went to {biggest['label']} "
-        f"({biggest['hours']:g} h, {percent}% of the measured cycle)"
+        f"({jira.human_hours(biggest['hours'])}, {percent}% of the measured cycle)"
         f"{gap_clause}. {active} of the measured time was active work."
         f"{(' ' + gap_sentence) if gap_sentence else ''}{suffix}{quirk_note}"
     )

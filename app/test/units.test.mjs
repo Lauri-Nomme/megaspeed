@@ -46,7 +46,10 @@ test('the PR drawer calls a wall-clock span "calendar days", never d', () => {
     clockNote: 'timestamps are UTC · this drawer’s spans are elapsed calendar time; ' +
       'the delivery list and ticket page price waits in business hours on the team calendar',
   });
-  assert.match(markup, /90 calendar days 9 h/);
+  // prd/63 V-B: a long wall-clock span is whole calendar days — the hour
+  // remainder on a 90-day lifecycle added a second unit to one sentence.
+  assert.match(markup, /90 calendar days/);
+  assert.doesNotMatch(markup, /90 calendar days \d+ h/);
   assert.doesNotMatch(markup, /90 d/);
   assert.match(markup, /timestamps are UTC/);
   // the same 90-day span as *business* time is 5 working days a week, and the

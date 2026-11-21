@@ -27,6 +27,7 @@ import {
   TABS, tabCounts, tabRows, deliveryTable, overviewMarkup, overviewCounts,
   detailMarkup, impactSentence, entityMarkdown, deliveryMarkdown, reviewStateLine,
   matchesScope, waitingLabel, weekLabel, scopeTargets, doneOpenMarkup,
+  scopedDeliveryRows, approvalsLabel,
 } from '/tables.js';
 import { rulesMarkup, rulesStats, rulesMarkdown } from '/rules.js';
 import { sprintStrip } from '/sprints.js';
@@ -123,6 +124,9 @@ const state = {
   sprints: null,
   // prd/50: the trend view (`/api/trend`) and the metric/bucket being shown.
   trend: null,
+  // prd/63 F1: a failed trend fetch is an error state in the body, never a
+  // spinner. `trendError` is the message; cleared by a successful fetch.
+  trendError: null,
   trendMetric: 'flow_efficiency',
   trendBucket: 'week',
   // prd/57: the benchmark contrast is on by default and has a per-view toggle.
@@ -781,8 +785,18 @@ async function showPage(page) {
     await ensureData(page);
   } catch (err) {
     setStatus(`view failed: ${err.message}`, 'stale');
+    // prd/63 F1: a failed fetch is a stated result in the body too. The status
+    // pill is one line at the top; the chart area used to keep saying
+    // "Loading the trend…" forever. Only Trend has this failure mode (every
+    // other view's payload is cached or renders an empty state).
+    if (page === 'trend') {
+      state.trend = null;
+      state.trendError = err && err.message ? err.message : 'the request failed';
+      if (state.page === 'trend') renderPage();
+    }
     return;
   }
+  if (page === 'trend') state.trendError = null;
   renderPage();
 }
 
@@ -1283,9 +1297,14 @@ function renderDeliveryPage() {
   }
   $('delivery-assumption').textContent = data
     ? `${data.assumption} · snapshot ${fmtStamp(Date.parse(data.snapshot))} ` +
-      `(${snapshotAge()}; every age on this page is priced to it) · ` +
-      `${data.counts.open} open items, ${data.counts.waiting_over_week} of them waiting over a week. ` +
-      `${data.impact_note}.`
+      `(every age on this page is priced to it) · ` +
+      (state.scope.kind === 'all'
+        ? `${data.counts.open} open items, ${data.counts.waiting_over_week} of them waiting over a week`
+        : `${scopedDeliveryRows(data, deliveryScope()).length} open items in this scope ` +
+          `(${data.counts.open} team-wide), ${scopedDeliveryRows(data, deliveryScope())
+            .filter((row) => !row.blocked && row.waiting_hours >=
+              Number((data.counts && data.counts.waiting_week_hours) || 40)).length} of them waiting over a week`) +
+      `. ${data.impact_note}.`
     : '';
   // B9: the detail panel must not describe a row the table no longer contains.
   // A scope change (or a refresh) re-renders the table, so re-resolve the
@@ -1315,10 +1334,19 @@ function renderDeliveryPage() {
       : (waitBench && !waitBench.available && waitBench.note
         ? `median × unavailable — ${waitBench.note}`
         : '');
+    // prd/63 F7/F16: stale and unobserved are tiles of *this view*, not the
+    // team's. Scope both, and drop "unobserved" when it describes every row
+    // (the table footnote already states what the flag means).
+    const scopedRows = scopedDeliveryRows(data, deliveryScope());
+    const stale = scopedRows.filter((row) => row.stale).length;
+    const unobserved = scopedRows.filter((row) => row.unobserved).length;
+    const unobservedNote = unobserved && unobserved < scopedRows.length
+      ? ` · ${unobserved} unobserved`
+      : '';
     setHonesty(
       `${counts.all} open item${counts.all === 1 ? '' : 's'} in view · ` +
       `${counts.blocked} blocked · ${counts.oldest} waiting over a week (${weekLabel(data)}) · ` +
-      `${data.counts.stale || 0} stale · ${data.counts.unobserved || 0} unobserved · ` +
+      `${stale} stale${unobservedNote} · ` +
       `impact = dependents × current wait (≈) · ` +
       (sprintKeys.size ? `sprint S${state.sprint} lens: ${sprintKeys.size} stories · ` : '') +
       (filtered ? `filtered to ${scopeSuffix}` : 'whole team') +
@@ -1732,14 +1760,18 @@ function renderTrendPage() {
   const data = state.trend;
   $('trend-body').innerHTML = trendMarkup(data, {
     bucket: data ? data.bucket : state.trendBucket,
+    // prd/63 F1: the body states a failed fetch; it never keeps the spinner.
+    error: state.trendError,
   });
-  $('trend-stats').innerHTML = data ? trendStats(data) : '';
-  $('trend-assumption').textContent = data
-    ? `${data.definition} · ${data.assumption} · snapshot ${fmtStamp(Date.parse(data.as_of))} · ` +
-      `${data.bucket} buckets: the first/last is clipped to the analysis window; ` +
-      'the bucket containing the snapshot is in progress.'
-    : '';
-  if (data) {
+  $('trend-stats').innerHTML = data && !state.trendError ? trendStats(data) : '';
+  $('trend-assumption').textContent = state.trendError
+    ? `the /api/trend request failed — nothing on this page is stale data from a previous metric`
+    : (data
+      ? `${data.definition} · ${data.assumption} · snapshot ${fmtStamp(Date.parse(data.as_of))} · ` +
+        `${data.bucket} buckets: the first/last is clipped to the analysis window; ` +
+        'the bucket containing the snapshot is in progress.'
+      : '');
+  if (data && !state.trendError) {
     const summary = data.summary || {};
     setHonesty(
       `${summary.measured_buckets || 0} of ${summary.buckets || 0} ${data.bucket} buckets measured · ` +
@@ -1755,13 +1787,19 @@ async function setTrendView({ metric = null, bucket = null } = {}) {
   if (metric) state.trendMetric = metric;
   if (bucket) state.trendBucket = bucket;
   state.trend = null;
+  state.trendError = null;
   renderPage();
   try {
     await ensureData('trend');
   } catch (err) {
     setStatus(`trend failed: ${err.message}`, 'stale');
+    // prd/63 F1: the chart area says the request failed (with a retry), not
+    // "Loading the trend…" forever.
+    state.trendError = err && err.message ? err.message : 'the request failed';
+    if (state.page === 'trend') renderPage();
     return;
   }
+  state.trendError = null;
   if (state.page === 'trend') renderPage();
   saveUI();
 }
@@ -1832,7 +1870,7 @@ function renderRulesPage() {
       `targets: first review < ${fmtHours(data.targets.first_review_hours)}, ` +
       `cycle < ${fmtHours(data.targets.cycle_hours)}, ` +
       `${data.targets.max_review_rounds} rounds max · ` +
-      `size cap ${data.targets.size_commit_cap} commits / ${data.targets.size_line_cap} lines · ` +
+      `size cap ${data.targets.size_commit_cap} commit${data.targets.size_commit_cap === 1 ? '' : 's'} / ${data.targets.size_line_cap} lines · ` +
       `one review round ≈ ${fmtHours(data.targets.hours_per_round)} ` +
       `(${data.targets.hours_per_round_basis}) · ranked by impact × confidence; ` +
       // prd/42 P2: severity is a tie-break, not the rank.
@@ -2124,7 +2162,7 @@ function openPrDrawer(pr, row = null) {
       ['reviewers', row.reviewers_total
         ? `${row.reviewers_approved || 0}/${row.reviewers_total} approved · ${row.reviewers_pending || 0} pending`
         : 'no roster in the store'],
-      ['approvals', (row.approved || []).join(', ') || 'none'],
+      ['approvals', approvalsLabel(row)],
       ['waiting on', waitingLabel(row) || '—'],
       // prd/56 §1: the drawer says how long *this* wait has run, not only where
       // the PR is now. The current wait starts when the last event handed the
@@ -2232,7 +2270,7 @@ function openTicketPrDrawer(pr) {
     ['reviewers', pr.reviewers_total
       ? `${pr.reviewers_approved || 0}/${pr.reviewers_total} approved · ${pr.reviewers_pending || 0} pending`
       : 'no roster in the store'],
-    ['approvals', (pr.approved || []).join(', ') || 'none'],
+    ['approvals', approvalsLabel(pr)],
     ['waiting on', (pr.waiting_on || []).join(' + ') || 'nobody'],
     ['waiting since', pr.waiting_since
       ? `${fmtStamp(Date.parse(pr.waiting_since))} (${fmtHours(pr.waiting_hours)})`
@@ -2307,7 +2345,7 @@ function openDeliveryPrDrawer(row) {
       ['reviewers', row.reviewers_total
         ? `${row.reviewers_approved || 0}/${row.reviewers_total} approved · ${row.reviewers_pending || 0} pending`
         : 'no roster in the store'],
-      ['approvals', (row.approved || []).join(', ') || 'none'],
+      ['approvals', approvalsLabel(row)],
       ['waiting on', waitingLabel(row)],
       ['open threads', String(row.open_threads ?? 0)],
       ['last event', row.last_event || row.waiting_since
@@ -3561,6 +3599,7 @@ document.addEventListener('click', async (event) => {
       rows,
       data ? `${data.assumption}; snapshot ${data.snapshot}` : '',
       appBase(),
+      { tab: state.tab, counts: data ? scopedTabCounts(data, sprintStoryKeys()) : null },
     ));
     return;
   }
@@ -3646,6 +3685,13 @@ document.addEventListener('click', async (event) => {
   const trendBucket = event.target.closest('[data-trend-bucket]');
   if (trendBucket) {
     await setTrendView({ bucket: trendBucket.dataset.trendBucket });
+    return;
+  }
+  // prd/63 F1: after a failed fetch the error state offers a retry.
+  if (event.target.closest('[data-trend-retry]')) {
+    // drop the cached failure (none is cached) and ask again
+    state.cache.clear();
+    await setTrendView();
     return;
   }
   if (event.target.closest('#trend-copy')) {

@@ -181,7 +181,8 @@ test('the segment colours extend the PR gantt vocabulary in lifecycle order', ()
   // the story-only phases are distinct from each other, and the PR phases are
   // reused by name (waiting / active / review / closed)
   const colors = Object.values(SEGMENT_PHASE).map((phase) => phase.color);
-  assert.equal(new Set(colors).size, 10);
+  // prd/63 V-C6: "waiting for a reviewer" is an eleventh segment hue
+  assert.equal(new Set(colors).size, 11);
   assert.equal(SEGMENT_PHASE.in_progress_pr_open.phase, 'active');
   assert.equal(SEGMENT_PHASE.review_rounds.phase, 'review');
   // prd/29: the verification split gets its own two hues, distinct from every

@@ -14,6 +14,7 @@ must equal a Pearson/median computed independently from the same inputs.
 
 from __future__ import annotations
 
+import json
 import unittest
 from datetime import timedelta
 
@@ -137,6 +138,31 @@ class WorklogTrendTests(StoreCase):
             suggestion["evidence"]["median_logged_hours"],
             metric["median_logged_hours"],
         )
+
+    def test_the_by_points_keys_survive_the_wire_as_plain_sizes(self):
+        """prd/63 V-A4: the chart's keys are "1"/"13", never "1.0".
+
+        The points column round-trips through DuckDB as a float, so the API
+        used to serialise ``{"1.0": 4.0}``. The card looks a size up as a
+        number, and a JSON object's keys are strings: the test reads the
+        metric back through ``json`` (never the Python dict) because that is
+        the shape the browser sees. A fixture with an explicit float size
+        pins the original defect.
+        """
+        fx = self.fixture()
+        # a story explicitly pointed at 1.0 must not produce the key "1.0"
+        fx.story("ENG-8", T0 + timedelta(days=1), points=1.0)
+        fx.worklog("ENG-8", T0 + timedelta(days=1, hours=2), 9.0)
+        metric = self.metric(fx, "worklog_cross_check")
+        wire = json.loads(json.dumps(metric))
+        self.assertEqual(sorted(wire["logged_by_points"]), ["1", "3", "5"])
+        self.assertFalse(
+            any(key.endswith(".0") for key in wire["logged_by_points"]), wire
+        )
+        # every bucket carries a real median, not a zero stub
+        self.assertTrue(all(value and value > 0 for value in wire["logged_by_points"].values()))
+        self.assertIn('"1"', json.dumps(wire["logged_by_points"]))
+        self.assertNotIn('"1.0"', json.dumps(wire["logged_by_points"]))
 
 
 if __name__ == "__main__":

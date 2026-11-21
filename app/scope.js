@@ -44,7 +44,7 @@ export const VIEW_NAMES = {
  * Every view that answers a PR question narrows; the Rule and Policy lab
  * recompute server-side, so they are named here too. */
 const REPO_PAGES = [
-  'overview', 'delivery', 'timeline', 'blocking', 'queue', 'rules', 'policy',
+  'overview', 'delivery', 'timeline', 'blocking', 'queue', 'trend', 'rules', 'policy',
 ];
 
 /** The short repo label a person recognises: "ENG/delivery-api" → "delivery-api". */

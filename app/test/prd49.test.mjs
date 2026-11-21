@@ -37,9 +37,9 @@ test('repo is a real scope kind and its URL round-trips', () => {
   assert.equal(parseRoute('?view=delivery', '').scope, null);
 });
 
-test('a repo scope narrows Queue, Blocking, Delivery, Rules and the Lab', () => {
+test('a repo scope narrows Queue, Blocking, Delivery, Rules, Trend and the Lab', () => {
   const pages = filteredPages({ kind: 'repo', value: REPO });
-  for (const page of ['delivery', 'queue', 'blocking', 'overview', 'rules', 'policy', 'timeline']) {
+  for (const page of ['delivery', 'queue', 'blocking', 'overview', 'rules', 'policy', 'timeline', 'trend']) {
     assert.ok(pages.has(page), `repo scope must filter ${page}`);
   }
   // Sources is provenance, not a PR view
@@ -53,8 +53,11 @@ test('a repo scope narrows Queue, Blocking, Delivery, Rules and the Lab', () => 
   const banner = scopeBanner({ kind: 'repo', value: REPO }, 'queue');
   assert.match(banner, /Scope repo delivery-api \(the delivery-api repo's open PRs and waits\)/);
   assert.match(banner, /this view \(queue view\) is filtered to it/);
-  assert.match(banner, /filtered: overview, delivery list, timeline, blocking map, queue view, rules and policy lab/);
+  assert.match(banner, /filtered: overview, delivery list, timeline, blocking map, queue view, trend, rules and policy lab/);
   assert.match(banner, /not filtered: sources/);
+  // prd/63 F1: Trend reads /api/trend?repo=, so it must not claim to be unfiltered.
+  const trend = scopeBanner({ kind: 'repo', value: REPO }, 'trend');
+  assert.match(trend, /this view \(trend\) is filtered to it/);
 });
 
 test('a repo scope matches the row repository, both forms', () => {

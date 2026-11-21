@@ -164,6 +164,14 @@ SEGMENT_ADVICE = {
         "review and CI can start while the work continues. A story in progress "
         "with no PR is invisible to the reviewers who could unblock it."
     ),
+    # prd/63 V-C6: the wait before anyone was asked is its own lever — it is
+    # process, not a person being slow, and it is cheapest to remove.
+    "pr_open_reviewer_added": (
+        "Name the reviewers when the PR opens: a PR with an empty roster waits "
+        "for someone to notice it, and that wait is invisible in a first-review "
+        "median. Make 'reviewers requested' part of the open checklist (or the "
+        "PR template), and triage the unassigned PRs each morning."
+    ),
     "pr_open_first_review": (
         "Adopt a first-response target: every PR gets a first review inside a "
         "day, and the review queue is triaged each morning. The wait for the "
@@ -1338,8 +1346,8 @@ def rework_loops(court: ballcourt.BallCourt, window) -> dict:
             for count, values in sorted(cycle_by_rounds.items())
         },
         "rounds_cycle_basis": (
-            "Pearson r between a PR's review rounds (concepts.md §6) and its "
-            "created → merged cycle, over MERGED PRs with a measured cycle; "
+            "Pearson r between a PR's review rounds and its created → merged "
+            "cycle, over merged PRs with a measured cycle; "
             "the slope is the marginal hours per extra round"
         ),
         "excluded_pure_rebase": excluded_pure_rebase,
@@ -1745,7 +1753,8 @@ def pr_size_distribution(court: ballcourt.BallCourt, window,
         "basis": (
             "Pearson r over MERGED PRs with a measured created → merged cycle "
             "(open PRs are censored and declined PRs are not delivered work); "
-            "rounds = the review rounds (concepts.md §6). A weak r means size is "
+            "rounds = the review rounds a push or a withdrawn approval starts. "
+            "A weak r means size is "
             "not the lever, even when the size rule fires."
         ),
     }
@@ -2544,7 +2553,9 @@ def templates(
         evidence = (
             f" Each extra round adds ≈{_human_hours(hours_per_round)} of cycle "
             f"in this store (r = {correlation:.2f} over {correlation_n} merged "
-            f"PRs), so the cap is a measured lever, not a style preference."
+            "PRs). That is a correlation, not a proven cause — rounds and cycle "
+            "co-vary by construction, so treat the cap as the lever the data "
+            "supports rather than a measured one."
             if correlation is not None and correlation_n >= 3 else ""
         )
         out.append(_suggestion(
@@ -2569,6 +2580,10 @@ def templates(
                 # prd/43 §1: the correlation the cap is ranked on
                 "rounds_cycle_correlation": correlation,
                 "rounds_cycle_n": correlation_n,
+                # prd/63 V-A10: "measured lever" claimed a cause. The rounds ↔
+                # cycle relationship is a correlation (co-varying by
+                # construction); the card says so in words and in a chip.
+                "relationship": "correlation",
             },
             f"Cap review rounds at {REVIEW_ROUND_CAP_TARGET}: if a PR needs one more "
             "round, the owner and reviewer agree the remaining blockers in one "
@@ -2831,10 +2846,12 @@ def templates(
             impact = (large_latency - small_latency) * ps["large_prs"]
             if impact > 0:
                 pending = ps["diff_size"]["pending"]
+                # prd/63 regression: "PRs over 1 commits" at cap 1.
                 cap = (
-                    f"{ps['commits_cap']} commits"
+                    f"{ps['commits_cap']} commit{'s' if ps['commits_cap'] != 1 else ''}"
                     if pending
-                    else f"{ps['lines_cap']} changed lines or {ps['commits_cap']} commits"
+                    else f"{ps['lines_cap']} changed lines or "
+                    f"{ps['commits_cap']} commit{'s' if ps['commits_cap'] != 1 else ''}"
                 )
                 title = (
                     f"PRs over {cap} get first reviews in "
@@ -2849,7 +2866,7 @@ def templates(
                 )
                 suggestion = (
                     f"Adopt a PR size cap: split work so a PR stays under "
-                    f"{ps['commits_cap']} commits"
+                    f"{ps['commits_cap']} commit{'s' if ps['commits_cap'] != 1 else ''}"
                     + ("" if pending else f" and {ps['lines_cap']} changed lines")
                     + ". Large PRs wait longer for a first review; a smaller diff is "
                     "easier to pick up and finish."
@@ -3720,13 +3737,13 @@ def insights(
             "impact_hours estimates the wait the rule would remove, in "
             f"{court.hours_mode} hours, using the measured review-round cost in "
             "this window; ranking is impact × confidence (sample size). Person "
-            "rules carry pseudonyms only. The Jira-layer rules (prd/21) price "
-            "ticket waits with the same calendar and report "
-            "available: false when the store has no ticket layer. The stacked-PR "
-            "rule (prd/22) derives the stack DAG from ref digests -- never branch "
-            "names -- and reports available: false when the store predates them. "
-            "prd/37: at_stake.hours is additive -- each cost pool is counted once, "
-            "allocated from its most specific rule, so the per-rule estimates are "
-            "not meant to be summed; at_stake.pools shows the allocation."
+            "rules carry pseudonyms only. The ticket rules price ticket waits "
+            "with the same calendar and report available: false when the store "
+            "has no ticket layer. The stacked-PR rule derives the stack from ref "
+            "digests -- never branch names -- and reports available: false when "
+            "the store predates them. At-stake hours are additive: each cost pool "
+            "is counted once, allocated from its most specific rule, so the "
+            "per-rule estimates are not meant to be summed; the pool list shows "
+            "the allocation."
         ),
     }

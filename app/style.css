@@ -364,7 +364,9 @@ body[data-density="L"] {
 .topbar {
   display: flex;
   align-items: center;
+  flex-wrap: nowrap;
   gap: 16px;
+  min-width: 0;
   height: var(--topbar-h);
   padding: 0 14px;
   background: var(--bg-sidebar);
@@ -385,7 +387,18 @@ body[data-density="L"] {
   font-size: 10px; text-transform: uppercase; letter-spacing: .06em;
   color: var(--text-tertiary);
 }
-#range { color: var(--text-secondary); font-size: 11px; }
+/* prd/63 regression: a long ticket-scoped range ("5 Oct 20:01 → 18 Nov
+ * 15:29") squeezed the tenant pill onto two lines. One line, truncated before
+ * it ever wraps; the full value stays in the title. */
+#range {
+  color: var(--text-secondary); font-size: 11px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0; max-width: 230px;
+}
+.topbar .tenant-pill, .tenant-pill .tenant-name, .tenant-pill .tenant-meta {
+  white-space: nowrap;
+}
+.ctx-row .ctx, .topbar .tenant, .topbar .ticket-jump { min-width: 0; }
 
 select, button {
   font: inherit;
@@ -1131,6 +1144,18 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
    and the TICKET / PR cell must not collapse to "…". The table keeps a usable
    minimum width and the wrap owns the horizontal scroll. */
 .table-wrap { min-width: 0; overflow-x: auto; }
+/* prd/63 regression: `th { position: sticky; top: var(--meta-bottom) }` inside
+ * a wrapper that only scrolls horizontally painted the Delivery header 96 px
+ * into the first rows (right-click there hit the <th>, not the row). On a
+ * desktop the delivery list is a real scroll area, so its header sticks at the
+ * wrapper's top edge and the rows scroll under it. */
+@media (min-width: 641px) {
+  #delivery-table {
+    overflow: auto;
+    max-height: calc(100vh - var(--meta-bottom, 96px) - 28px);
+  }
+  #delivery-table .table th { top: 0; }
+}
 .delivery { min-width: 1120px; }
 .delivery .c-state { width: 210px; white-space: normal; }
 .delivery .c-id { width: 250px; }
@@ -1527,6 +1552,10 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .policy-table th { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--text-tertiary); font-weight: 600; }
 .policy-table td.c-metric { color: var(--text-secondary); }
 .policy-table td.c-base, .policy-table td.c-scen, .policy-table td.c-dur { font-family: var(--font-mono); }
+/* prd/63 F23: "≈2 h 45 min" is 102 px of text in a 90 px cell. The policy
+ * table has the width; the duration column owns it. */
+.table.compact.policy-table .c-dur { width: 120px; white-space: nowrap; }
+.table.compact.policy-table .c-who { width: 104px; }
 .policy-table td.c-scen { color: var(--text-primary); }
 .policy-table .c-delta { text-align: right; font-family: var(--font-mono); white-space: nowrap; }
 .policy-table .c-delta.good { color: var(--healthy); }
@@ -1623,10 +1652,14 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .ticket-prs .c-id { width: 190px; }
 .ticket-prs .c-state { width: 150px; }
 .ticket-prs .c-since { width: 150px; }
-.ticket-prs .c-dur { width: 80px; }
+/* prd/63 F23: the cycle carries its cohort contrast ("3 d 3 h (median 24.8 h
+ * · 0.9x)") and the push classes are words ("pure_rebase x2 · bugfix x1").
+ * Both were fixed-width nowrap cells and clipped; they wrap instead. */
+.ticket-prs .c-dur { width: 132px; white-space: normal; }
 .ticket-prs .c-rounds { width: 70px; }
-.ticket-prs .c-push { width: 150px; }
+.ticket-prs .c-push { width: 160px; white-space: normal; }
 .ticket-prs .c-bar { width: 180px; }
+.ticket-prs td { height: auto; vertical-align: top; padding-top: 2px; padding-bottom: 2px; }
 .sprint-strip { display: flex; flex-direction: column; gap: 4px; }
 .sprint-chip {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px;
@@ -1799,6 +1832,14 @@ a.child.ticket-link { color: var(--link); }
   .legend button { font-size: 11.5px; }
   .chip { padding: 0 12px; }
   .link { display: inline-flex; align-items: center; }
+  /* prd/63 F25: the 27 carry-over ticket links were 55 x 19 px. Each row link
+   * is a real tap target on a phone (the table is behind a disclosure, so the
+   * extra row height costs nothing until it is opened). */
+  .sprint-carry-table td a, .sprint-carry-table td .ticket-link,
+  .sprint-out-keys a, .sprint-at-risk a {
+    display: inline-flex; align-items: center;
+    min-height: 44px; padding: 0 6px;
+  }
 
   /* -- off-canvas sidebar --------------------------------------------- */
   body.nav-open { overflow: hidden; }
@@ -2275,7 +2316,22 @@ a.child.ticket-link { color: var(--link); }
   display: block; width: 100%; max-width: 920px; height: auto;
   margin: 0 0 8px;
 }
+/* prd/63 F1: a failed trend fetch is a stated result in the chart area. */
+.trend-error {
+  margin: 8px 12px 12px; padding: 10px 12px;
+  border-left: 3px solid var(--critical);
+  background: var(--bg-surface-raised);
+  border-radius: var(--radius-control);
+}
+.trend-error p { margin: 0 0 6px; font-size: var(--body-font); }
+.trend-error .chip { margin-top: 4px; }
+
 .trend-table { max-width: 720px; }
+/* prd/63 F8/V-A5: the value cell states the censored marker ("2 d 1 h
+ * right-censored (5 open)") and the N cell can carry "low n". Neither is
+ * allowed to clip — the marker is the point of the column. */
+.trend-table .c-dur { width: 190px; white-space: normal; }
+.trend-table td { height: auto; white-space: normal; }
 .trend-table tr.in-progress td { color: var(--text-secondary); }
 .trend-table tr.in-progress td:first-child::after {
   content: " · in progress"; color: var(--text-tertiary); font-size: 10px;
@@ -2354,6 +2410,9 @@ tr.response-row:hover td, tr.response-row:focus-visible td { background: var(--b
 
 /* F27: per-source runs on Sources. */
 .source-runs { margin: 10px 0 6px; }
+/* prd/63 F23: a full UTC timestamp is wider than the fixed column and was
+ * ellipsised; the row states the whole instant instead. */
+.source-runs td { white-space: normal; height: auto; }
 .ticket-links {
   display: flex; flex-wrap: wrap; align-items: center; gap: 6px;
   margin: 4px 0 8px;
