@@ -603,7 +603,9 @@ class JiraProbeCliTests(unittest.TestCase):
         self.assertEqual(report["boards"], {"PROJ": 11})
         self.assertEqual(report["sprints"]["PROJ"],
                          [{"id": 7, "state": "active", "name": "Sprint 7"}])
-        self.assertEqual(report["issues"]["PROJ"], {"total": 1, "types": {"Story": 1}})
+        self.assertEqual(report["issues"]["PROJ"], {
+            "total": 1, "sample": 1, "types": {"Story": 1}, "partial": False,
+        })
         self.assertEqual(report["fields"]["epic_link"], "cf-epic")
 
     def test_cloud_probe_uses_the_cloud_client(self):

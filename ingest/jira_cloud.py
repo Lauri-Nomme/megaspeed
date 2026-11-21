@@ -82,6 +82,30 @@ class CloudJiraClient(JiraClient):
         return out
 
     # -- search (cursor paged) -------------------------------------------
+    def count(self, jql: str) -> int | None:
+        """Approximate issue count (the cursor search returns no total)."""
+        try:
+            payload = self.transport.post(
+                f"{self.api}/search/approximate-count", {"jql": jql}
+            )
+            self.requests += 1
+            self.requests_by_kind["search-count"] += 1
+            count = (payload or {}).get("count")
+            if count is not None:
+                return int(count)
+        except Exception:
+            pass
+        # Older Cloud sites still answer the legacy search with a total.
+        try:
+            payload = self._get(
+                f"{self.api}/search",
+                {"jql": jql, "maxResults": 0, "fields": "key"},
+                kind="search-count",
+            )
+            total = (payload or {}).get("total")
+            return int(total) if total is not None else None
+        except Exception:
+            return None
     def _cursor_pages(
         self,
         path: str,

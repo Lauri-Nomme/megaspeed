@@ -136,10 +136,24 @@ class HttpTransport:
         return headers
 
     def get(self, path: str, params: dict | None = None) -> dict:
+        return self._request("GET", path, params=params)
+
+    def post(self, path: str, body: dict | None = None) -> dict:
+        """One JSON POST (Cloud's approximate-count is the only caller today)."""
+        return self._request("POST", path, body=body)
+
+    def _request(self, method: str, path: str, params: dict | None = None,
+                 body: dict | None = None) -> dict:
         url = self.base_url + path + (("?" + urlencode(params)) if params else "")
+        payload = json.dumps(body).encode() if body is not None else None
+        headers = self._headers()
+        if payload is not None:
+            headers["Content-Type"] = "application/json"
         last: Exception | None = None
         for attempt in range(self.max_retries):
-            request = urllib.request.Request(url, headers=self._headers(), method="GET")
+            request = urllib.request.Request(
+                url, data=payload, headers=headers, method=method
+            )
             context = None
             if url.startswith("https") and not self.verify_tls:
                 context = ssl._create_unverified_context()  # noqa: SLF001 - explicit opt-in
@@ -157,7 +171,7 @@ class HttpTransport:
                 # OSError, not a URLError): retry it instead of killing the run.
                 last = exc
                 time.sleep(1.5 ** attempt)
-        raise BitbucketError(f"GET {path} failed after {self.max_retries} attempts: {last}")
+        raise BitbucketError(f"{method} {path} failed after {self.max_retries} attempts: {last}")
 
     def check(self) -> dict:
         """Cheap connectivity probe — deliberately never called by fixture mode."""

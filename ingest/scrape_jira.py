@@ -1332,6 +1332,22 @@ def scrape(
     reporter = progress if progress is not None else ProgressReporter(
         interval=DEFAULT_PROGRESS_INTERVAL
     )
+    # Say what is about to happen *before* the first request: on a large project
+    # the initial team/epic resolution and field discovery can take minutes, and
+    # an operator staring at a blank console cannot tell that from a hang.
+    _scope_bits = []
+    if cfg.ticket_keys:
+        _scope_bits.append(f"{len(cfg.ticket_keys)} key(s)")
+    if cfg.jira_epics:
+        _scope_bits.append(f"epics {','.join(cfg.jira_epics)}")
+    if cfg.jira_teams:
+        _scope_bits.append(f"teams {', '.join(cfg.jira_teams)}")
+    if not _scope_bits:
+        _scope_bits.append(
+            "projects " + ",".join(projects or cfg.jira_projects or cfg.ticket_projects)
+        )
+    if reporter.enabled:
+        reporter.emit(f"[scrape] {source} · {' · '.join(_scope_bits)} · writing {out}")
 
     previous = None if full else state.watermark(source)
     # Crash safety is incremental (see ``checkpoint``): the in-flight rows are

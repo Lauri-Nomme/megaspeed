@@ -174,15 +174,36 @@ def _issue_type_name(row: dict) -> str:
     return str(value or "?")
 
 
-def _jira_probe(cfg: Config, transport, as_json: bool, client=None) -> int:
-    """Read-only Jira diagnostics: version, board, sprints, issue counts."""
+#: The probe's issue-type sample. Counting every issue in a large project is a
+#: silent multi-minute walk; a bounded sample + an exact/approximate count is
+#: what a diagnostic needs.
+PROBE_SAMPLE = 200
+
+
+def _jira_probe(cfg: Config, transport, as_json: bool, client=None,
+                projects: tuple[str, ...] | None = None) -> int:
+    """Read-only Jira diagnostics: version, board, sprints, issue counts.
+
+    Every step prints as it completes (``flush=True``): the old version only
+    printed at the end, and on a large Cloud project the "count the issues"
+    walk could run for minutes with no sign of life. Issue types come from a
+    bounded sample; the count is exact on DC and approximate on Cloud.
+    """
+    import itertools
+
     from .jira import FIELD_EPIC_LINK, FIELD_SPRINT, FIELD_STORY_POINTS, JiraClient
     from .scrape_jira import ISSUE_TYPES, TEAM_FIELD_NAME, jql_for
 
+    stream = sys.stderr if as_json else sys.stdout
+
+    def say(line: str) -> None:
+        print(line, file=stream, flush=True)
+
     client = client or JiraClient(transport, page_limit=cfg.jira_page_limit, min_interval=0.05)
     version = (client.check() or {}).get("version")
+    say(f"probe          jira {version or '?'} · connected · read-only")
     fields = client.field_ids()
-    projects = tuple(cfg.jira_projects or cfg.ticket_projects)
+    projects = tuple(projects or cfg.jira_projects or cfg.ticket_projects)
     report: dict = {
         "version": version,
         "projects": list(projects),
@@ -199,7 +220,11 @@ def _jira_probe(cfg: Config, transport, as_json: bool, client=None) -> int:
         "sprints": {},
         "issues": {},
     }
+    say(f"projects       {', '.join(projects)}  (issue types: {', '.join(ISSUE_TYPES)})")
+    for name, field_id in report["fields"].items():
+        say(f"field          {name:14} {field_id or '— (not discovered)'}")
     for project in projects:
+        say(f"project        {project}: reading board and sprints…")
         board = cfg.jira_board or client.scrum_board(project)
         report["boards"][project] = board
         if board:
@@ -208,25 +233,43 @@ def _jira_probe(cfg: Config, transport, as_json: bool, client=None) -> int:
                 {"id": int(s["id"]), "state": s.get("state"), "name": s.get("name")}
                 for s in sprints
             ]
-        rows = list(client.search(jql_for(project), fields="key,updated,issuetype"))
-        types = Counter(_issue_type_name(row) for row in rows)
-        report["issues"][project] = {"total": len(rows), "types": dict(sorted(types.items()))}
+            say(f"board          {project}: {board} · {len(sprints)} sprint(s)")
+        else:
+            say(f"board          {project}: — (no scrum board)")
+        jql = jql_for(project)
+        # A custom/older client shape may not implement ``count``; sample one
+        # extra row to know whether the sample covered the whole project, so a
+        # small project still reports an exact number.
+        rows = list(itertools.islice(
+            client.search(jql, fields="key,issuetype"), PROBE_SAMPLE + 1
+        ))
+        complete = len(rows) <= PROBE_SAMPLE
+        rows = rows[:PROBE_SAMPLE]
+        types: Counter = Counter(_issue_type_name(row) for row in rows)
+        sample = len(rows)
+        total = client.count(jql) if hasattr(client, "count") else None
+        if total is None and complete:
+            total = sample
+        partial = (not complete) or (total is not None and sample < total)
+        report["issues"][project] = {
+            "total": total,
+            "sample": sample,
+            "types": dict(sorted(types.items())),
+            "partial": partial,
+        }
+        shown = ", ".join(f"{k}={v}" for k, v in sorted(types.items())) or "—"
+        label = f"{total:,}" if total is not None else f"≥{sample:,}"
+        basis = f"first {sample}" if partial else "all"
+        say(f"issues         {project}: {label} ({basis}: {shown})")
     report["requests"] = client.requests
     report["requests_by_kind"] = dict(sorted(client.requests_by_kind.items()))
     if as_json:
         print(json.dumps(report, indent=2, default=str))
         return 0
-    print(f"probe          jira {report['version']} · {report['requests']} requests · read-only")
-    print(f"projects       {', '.join(report['projects'])}  (issue types: {', '.join(ISSUE_TYPES)})")
-    for name, field_id in report["fields"].items():
-        print(f"field          {name:14} {field_id or '— (not discovered)'}")
     for project, board in report["boards"].items():
-        print(f"board          {project}: {board}")
         for sprint in report["sprints"].get(project, []):
-            print(f"  sprint {sprint['id']:>4}  {sprint['state']:<7} {sprint['name']}")
-        issues = report["issues"].get(project, {})
-        types = ", ".join(f"{k}={v}" for k, v in (issues.get("types") or {}).items())
-        print(f"issues         {project}: {issues.get('total', 0)} ({types})")
+            say(f"  sprint {sprint['id']:>4}  {sprint['state']:<7} {sprint['name']}")
+    say(f"requests       {report['requests']}  ({report['requests_by_kind']})")
     return 0
 
 
@@ -493,6 +536,13 @@ def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows consoles (and redirected pipes) default to a legacy code page; the
+    # scrape report and progress lines contain '·', '—', '≥', '…'.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     ap = build_parser()
     args = ap.parse_args(argv)
 
@@ -628,7 +678,9 @@ def main(argv: list[str] | None = None) -> int:
                     print("--jira --probe needs MEGASPEED_JIRA_BASE_URL", file=sys.stderr)
                     return 2
                 transport, _source, _limit, client = _jira_transport(cfg, args)
-                return _jira_probe(cfg, transport, args.json, client=client)
+                return _jira_probe(
+                    cfg, transport, args.json, client=client, projects=projects
+                )
             transport, source, limit, client = _jira_transport(cfg, args)
             report = scrape_jira(
                 cfg,

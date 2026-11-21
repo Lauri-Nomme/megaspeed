@@ -269,6 +269,25 @@ class JiraClient:
             page_limit=self.list_page_limit,
         )
 
+    def count(self, jql: str) -> int | None:
+        """Exact number of issues a JQL matches, or ``None`` when unavailable.
+
+        Used by the probe so a diagnostic does not page through a 100k-issue
+        project just to print a number. DC reports ``total`` for
+        ``maxResults=0``; Cloud's cursor search has no total, so its override
+        asks the approximate-count endpoint first.
+        """
+        try:
+            payload = self._get(
+                f"{API2}/search",
+                {"jql": jql, "maxResults": 0, "fields": "key"},
+                kind="search-count",
+            )
+            total = (payload or {}).get("total")
+            return int(total) if total is not None else None
+        except Exception:
+            return None
+
     def field_suggestions(self, field_name: str, value: str) -> list[dict]:
         """JQL autocomplete suggestions for one field value (prd/66).
 

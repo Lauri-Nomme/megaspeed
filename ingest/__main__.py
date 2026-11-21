@@ -127,6 +127,12 @@ def _legacy_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows consoles/pipes: the reports below use '·', '—', '≥', '…'.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     argv = list(sys.argv[1:] if argv is None else argv)
     # Two halves, two CLIs: `python3 -m ingest scrape|import ...`. The scrape
     # side is also its own artifact (scrape/build.sh -> megaspeed-scrape).
@@ -332,7 +338,10 @@ def _run_jira(cfg: Config, args) -> int:
         except SystemExit as exc:
             print(str(exc.code) if exc.code not in (0, None) else "bad configuration", file=sys.stderr)
             return 2
-        return _jira_probe(cfg, transport, args.json, client=client)
+        return _jira_probe(
+            cfg, transport, args.json, client=client,
+            projects=tuple(args.project) if args.project else None,
+        )
 
     projects = None
     if args.project:
