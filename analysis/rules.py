@@ -3173,6 +3173,12 @@ def templates(
     # 13. point_churn — the estimate moved after the work started.
     pc = m["point_churn"]
     rc = m["refinement_cost"]
+    # prd/64 F-03: a store with no measured `created → ready` span now reports
+    # ``hours: None`` instead of a fabricated 1 h. A rule may still fire (the
+    # churn/conformance facts are independent), but it cannot price its cost on
+    # a missing number — 0 h is the honest weight for "the refinement cost is
+    # not measurable", and the evidence chip stays ``—``.
+    ref_hours = rc["hours"] or 0.0
     if (
         pc["churned"] > 0
         and (pc["share"] >= POINT_CHURN_SHARE_TARGET or pc["churned"] >= 3)
@@ -3196,7 +3202,7 @@ def templates(
             "means the sprint was planned on a number that was not final, so "
             "the burn-down and the capacity both lie. If the story is bigger "
             "than the estimate, split it rather than re-pointing it mid-flight.",
-            severity, churned * rc["hours"], pc["stories_pointed"] or churned,
+            severity, churned * ref_hours, pc["stories_pointed"] or churned,
         ))
 
     # 14. worklog_cross_check — how much to trust the logged hours.
@@ -3346,7 +3352,7 @@ def templates(
             "cannot be forecast, and a re-point after the start invalidates "
             "the sprint plan it was built on. If the story is not ready, leave "
             "it in the backlog — starting it is what makes the plan wrong.",
-            severity, violations * rc["hours"], jc["stories_started"] or 1,
+            severity, violations * ref_hours, jc["stories_started"] or 1,
         ))
 
     # 16. sprint on-time delivery (prd/37 §1) — did the sprint deliver what it
