@@ -222,7 +222,7 @@ test('F17: event attributes are labelled facts, never a raw k=v dump', () => {
   assert.deepEqual(facts.map((fact) => fact.label), [
     'by', 'logged late by', 'time spent', 'from', 'to',
   ]);
-  assert.equal(facts[1].text, '2 d 4 h');
+  assert.equal(facts[1].text, '20 h 8 min');
   const html = eventsList({
     events: [{
       ts: '2026-11-04T15:46:00Z', activity: 'worklogged', actor: 'DaKo',
