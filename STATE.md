@@ -2,7 +2,29 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1137** (`tests/`) + **99** (`scrape/tests`) + **383** (node `app/test`) green.
+Tests: **1224** (`tests/`) + **99** (`scrape/tests`) + **453** (node `app/test`) green.
+
+## v0.12.0 — the decision layer (prd/58–64)
+
+- **Constraint verdict (prd/58)** — an Overview-top card names ONE constraint by one canonical clock:
+  *Approval gate*, removable **619 h** (live 237 h + tail 382 h), with the exploit→subordinate→elevate
+  ladder. Exploit is open (chase #53/#55/#60), elevate stays **blocked** while items are owed; the
+  sentinel lab says "no clear effect" rather than inventing a win. Rules keeps lower-ranked levers
+  behind "Rules for the next constraint".
+- **Aging WIP (prd/59)** — in-flight age against the team's own completed-work p50/p85/p95, the chase
+  list (ranked by hours past p85), and the fixed stale/sentinel constants replaced by self-calibrated
+  thresholds (`MEGASPEED_AGING_THRESHOLDS=fixed` restores the old ones).
+- **Intervention-aware trend (prd/61)** — team annotations in one allowlisted store table (the sole
+  first-party free-text carve-out; imported content is still rejected), before/after distributions with
+  bootstrap CI + Mann-Whitney and the four honest outcomes ("can't tell at this n"), and Theil-Sen
+  stability flags (`filling` today). prd/60's forecast will refuse on `overload`.
+- **Rolled first-pass yield (prd/62)** — %C&A per step and rolled (7.6 % at 90 d, 8.6 % at 120 d),
+  a DORA-style stability panel (reopen 5.5 %, failed verification 4.1 %, review bounce 23.3 %), and a
+  measured guardrail beside every speed lever; "held constant" is printed with its baseline.
+- **QA hardening (prd/64)** — all 22 findings of the v0.11.1 free-exploring pass: phone clipping/touch
+  targets, the `person:CaOs` holder leak, no fabricated refinement cost on a Jira-less store, Overview
+  no longer mutates with a Queue toggle, affected-first rule drills, ticket detail age-vs-measured and
+  post-close PRs, sprint on-time floor by committed stories, and the baked version.
 
 ## Scrape (airgapped) — full value, reliable
 
