@@ -189,6 +189,16 @@ class VersionFileFallbackTests(unittest.TestCase):
             self.assertEqual(info["sha"], "")
             self.assertEqual(info["source"], "default")
 
+    def test_the_baked_version_and_the_hardcoded_version_agree(self):
+        """prd/64 F-20: the two last-resort versions drifted (VERSION v0.9.0,
+        ``__version__`` 0.9.0) across four releases, so a ``git archive`` build
+        reported a version that had not shipped for months. They are one number
+        written twice; a release bump updates both or this fails."""
+        baked = (Path(version_module.REPO_ROOT) / version_module.VERSION_FILE
+                 ).read_text(encoding="utf-8").strip()
+        self.assertEqual(baked, f"v{version_module.__version__}")
+        self.assertRegex(baked, r"^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
+
     def test_a_blank_version_file_is_ignored(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp).resolve()
