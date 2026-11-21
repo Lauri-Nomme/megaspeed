@@ -97,6 +97,9 @@ test('V-A8: the response table distinguishes "waiting only on the sentinel"', ()
   });
   assert.match(html, /8 <span class="muted"[^>]*>\(3 only\)/);
   assert.match(html, /\+5/);
+  // prd/64 F-16: the oldest age is labelled as the oldest of the total 8, so it
+  // cannot be read as the age of the "+5 other holder" subset.
+  assert.match(html, /\(oldest of 8: 21 d 4 h\)/);
   assert.match(html, /data-response-role="sentinel"/);
   // a clickable row, as the hint promised
   assert.match(html, /class="response-row /);

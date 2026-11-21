@@ -508,7 +508,9 @@ export function responseTable(data, { benchmark = true, scope = null } = {}) {
         row.p90_hours == null ? '—' : esc(fmtHours(row.p90_hours))}</td>
       <td class="c-dur num" data-label="never" title="${esc(neverTitle)}">${neverText}${
         row.never_oldest_hours != null
-          ? ` <span class="muted">(${esc(fmtHours(row.never_oldest_hours))})</span>` : ''}</td>
+          // prd/64 F-16: the age belongs to the *total* 8, not to the "+5" it
+          // sat beside; "(oldest of 8: 21 d 4 h)" cannot be read as "+5 aged 21 d 4 h".
+          ? ` <span class="muted">(oldest of ${row.never}: ${esc(fmtHours(row.never_oldest_hours))})</span>` : ''}</td>
       <td class="c-dur num" data-label="peer → sentinel">${lag}</td>
     </tr>`;
   }).join('');
