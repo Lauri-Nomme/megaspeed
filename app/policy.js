@@ -245,6 +245,25 @@ function guardrailNumber(value) {
 }
 
 /**
+ * The modelled guardrail a lever leads with (prd/62, prd/65 N-10).
+ *
+ * Rules leads with the metric the lever makes *worse* — the packaging cost of
+ * a cap (`advice.GUARDRAIL_PRIMARY` maps `size3` to `prs_per_100_commits`) —
+ * and the lab must quote the same one. The payload flags that entry with
+ * `worse === true`, so: the first worsening entry, else the rounds mean, else
+ * the first modelled fact. One rule for both surfaces; the lab used to
+ * hardcode `rounds`, so `cap PRs at 3 commits` printed a flat `rounds 1.5 →
+ * 1.5` while Rules quoted `PRs per 100 commits 20.2 → 42.2`.
+ */
+function guardrailPrimary(guardrails) {
+  const modelled = (guardrails && guardrails.modelled) || [];
+  return modelled.find((entry) => entry.worse === true)
+    || modelled.find((entry) => entry.id === 'rounds_mean')
+    || modelled[0]
+    || null;
+}
+
+/**
  * prd/62: the guardrail under a scenario's cycle delta.
  *
  * The sentence is built from `compare.guardrails` — the same block the Rules
@@ -256,8 +275,7 @@ function guardrailNumber(value) {
 export function labGuardrail(compare) {
   const guardrails = compare && compare.guardrails;
   if (!guardrails) return '';
-  const modelled = (guardrails.modelled || []);
-  const primary = modelled.find((entry) => entry.id === 'rounds_mean') || modelled[0];
+  const primary = guardrailPrimary(guardrails);
   const held = (guardrails.held_constant || [])
     .find((entry) => entry.id === 'reopen');
   const bits = [];
@@ -272,11 +290,25 @@ export function labGuardrail(compare) {
   return `guardrail: ${bits.join(' · ')}`;
 }
 
-/** The guardrail line as markup, under the headline cycle row. */
+/**
+ * The guardrail line as markup, under the headline cycle row.
+ *
+ * When the primary fact worsens, only that `baseline → scenario` pair carries
+ * the warning tint — the same `.guardrail-warn` class (and so the same colour)
+ * Rules uses — never the held-constant half (prd/62, prd/65 N-10).
+ */
 export function guardrailCell(compare) {
   const line = labGuardrail(compare);
   if (!line) return '';
-  return `<span class="policy-guardrail" data-policy-guardrail>${esc(line)}</span>`;
+  const primary = guardrailPrimary(compare && compare.guardrails);
+  const pair = primary && primary.worse === true
+    && primary.baseline != null && primary.scenario != null
+    ? `${guardrailNumber(primary.baseline)} → ${guardrailNumber(primary.scenario)}`
+    : '';
+  const body = pair
+    ? esc(line).replace(esc(pair), `<b class="guardrail-warn">${esc(pair)}</b>`)
+    : esc(line);
+  return `<span class="policy-guardrail" data-policy-guardrail>${body}</span>`;
 }
 
 /**
