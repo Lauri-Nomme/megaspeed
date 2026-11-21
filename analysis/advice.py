@@ -191,6 +191,22 @@ def _verdict(compare: dict | None) -> dict:
     if not compare:
         return {
             "available": False,
+            "unavailable_reason": None,
+            "cycle_percent": None,
+            "cycle_better": None,
+            "delivered_percent": None,
+            "delivered_better": None,
+            "within_noise": False,
+            "verdict": None,
+            "verdict_tone": None,
+        }
+    if compare.get("available") is False:
+        # prd/64 F-03: the lab refused the scenario because a calibration input
+        # is missing. That is not "no result yet"; it is "not measurable", and
+        # it must not enter the best-scenario ranking.
+        return {
+            "available": False,
+            "unavailable_reason": compare.get("reason"),
             "cycle_percent": None,
             "cycle_better": None,
             "delivered_percent": None,
@@ -203,6 +219,7 @@ def _verdict(compare: dict | None) -> dict:
     delivered = compare.get("throughput_work_per_day") or {}
     return {
         "available": cycle.get("percent") is not None,
+        "unavailable_reason": None,
         "cycle_percent": cycle.get("percent"),
         "cycle_direction": cycle.get("direction"),
         "cycle_better": cycle.get("better"),
@@ -226,6 +243,9 @@ def _note(entry: dict, caveat: str | None = None) -> str:
     """
     tail = f" ({caveat})" if caveat else ""
     if not entry.get("available"):
+        reason = entry.get("unavailable_reason")
+        if reason:
+            return f"the policy lab cannot model this policy: {reason}{tail}"
         return "the policy lab has no result for this policy in this window"
     percent = entry.get("cycle_percent")
     if entry.get("within_noise"):

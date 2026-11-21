@@ -467,6 +467,69 @@ def _positive_float(value, field: str) -> float | None:
     return number
 
 
+#: Each scenario knob that needs a *measured* calibration input, and the reason
+#: when the store has none. A scenario whose input is ``None`` is unavailable,
+#: never modelled at a default (prd/64 F-03): a made-up refinement cost is what
+#: made a PR-only store headline "refine before start — −25 % cycle".
+SCENARIO_INPUTS = {
+    "refine_before_start": (
+        "refinement",
+        "hours",
+        "no measured refinement segments",
+        "refine before start spends the measured created → ready refinement",
+    ),
+}
+
+
+def scenario_inputs(calibration: dict, scenario: Scenario) -> dict:
+    """Do this scenario's calibration inputs exist in the store?
+
+    Returns ``{"available": bool, "reason": str | None, "missing": [...]}``.
+    A missing input makes the scenario unavailable with a stated reason — it is
+    never priced at a default, because that default would be presented as a
+    modelled result.
+    """
+    calibration = calibration or {}
+    missing = []
+    for knob, (block, field, reason, note) in SCENARIO_INPUTS.items():
+        if not getattr(scenario, knob, False):
+            continue
+        value = (calibration.get(block) or {}).get(field)
+        if value is None:
+            missing.append({
+                "knob": knob,
+                "input": f"{block}.{field}",
+                "reason": reason,
+                "note": note,
+            })
+    if not missing:
+        return {"available": True, "reason": None, "missing": []}
+    return {
+        "available": False,
+        "reason": missing[0]["reason"],
+        "missing": missing,
+    }
+
+
+def scenario_unavailable(scenario: Scenario, inputs: dict) -> dict:
+    """The stated no-result for a scenario whose calibration input is missing."""
+    missing = inputs.get("missing") or []
+    reasons = "; ".join(
+        f"{entry['note']}: {entry['reason']}" for entry in missing
+    ) or (inputs.get("reason") or "a calibration input is missing")
+    return {
+        "ok": False,
+        "available": False,
+        "reason": inputs.get("reason") or "a calibration input is missing",
+        "note": (
+            f"{reasons}. The scenario is not modelled — a default cost would "
+            "make an unmeasurable policy look like a measured win"
+        ),
+        "scenario": scenario.as_dict(),
+        "missing_inputs": missing,
+    }
+
+
 # --------------------------------------------------------------------------- #
 # calibration: the store -> the model
 # --------------------------------------------------------------------------- #
@@ -1240,7 +1303,10 @@ class _Lab:
         self.unmeasured_hours = (calibration.get("unmeasured") or {}).get("mean_hours") or 0.0
         # prd/42 M3: refinement is the measured created → ready segment. It is
         # a delay before the first review, not a capacity-consuming service.
-        self.refinement_hours = (calibration.get("refinement") or {}).get("hours") or 0.0
+        # prd/64 F-03: None means the store has no measured segment; `run`
+        # refuses the scenario before the lab is built, and the lifecycle below
+        # treats None as an error rather than an implicit zero.
+        self.refinement_hours = (calibration.get("refinement") or {}).get("hours")
         self.backlog = 0
         self.max_backlog = 0
         self.prs: list[_PR] = []
@@ -1408,7 +1474,11 @@ class _Lab:
         yield admission
         self.backlog -= 1
         pr.started_at = env.now
-        if scenario.refine_before_start and self.refinement_hours > 0:
+        if scenario.refine_before_start:
+            if self.refinement_hours is None:
+                raise SimulationError(
+                    "refine before start needs a measured created → ready segment"
+                )
             # the measured created → ready refinement, before the first review
             yield env.timeout(self.refinement_hours)
         if self.unmeasured_hours > 0:
@@ -1719,6 +1789,11 @@ def run(calibration: dict, scenario: Scenario | None = None, seed: int = DEFAULT
             ),
         }
     scenario = scenario or Scenario()
+    inputs = scenario_inputs(calibration, scenario)
+    if not inputs["available"]:
+        # prd/64 F-03: a knob whose calibration input is None is not modelled
+        # at a default. The result says why, and callers must not show a delta.
+        return scenario_unavailable(scenario, inputs)
     replications = max(1, min(MAX_REPLICATIONS, int(replications)))
     bh_per_day = calibration["window"].get("hours_per_day") or DEFAULT_BH_PER_DAY
     days = horizon_business_days or calibration["window"]["business_days"]
@@ -2237,6 +2312,11 @@ def simulate(calibration: dict, scenario: Scenario | None = None,
                    horizon_business_days=horizon_business_days,
                    replications=replications)
     gate = validate(calibration, baseline, tolerance=tolerance, seed=seed)
+    requested = scenario is not None and not scenario.is_baseline
+    inputs = (
+        scenario_inputs(calibration, scenario)
+        if requested else {"available": True, "reason": None, "missing": []}
+    )
     payload = {
         "ok": bool(baseline.get("ok")),
         "available": bool(baseline.get("available")),
@@ -2250,6 +2330,15 @@ def simulate(calibration: dict, scenario: Scenario | None = None,
         "compare": None,
         "seed": seed,
     }
+    if requested:
+        # prd/64 F-03: expose the scenario's own availability, so Rules and the
+        # lab can say "not measurable" instead of ranking a fabricated result.
+        payload["scenario_available"] = bool(inputs["available"])
+        if not inputs["available"]:
+            unavailable = scenario_unavailable(scenario, inputs)
+            payload["scenario_unavailable"] = unavailable
+            payload["scenario_unavailable_reason"] = unavailable["reason"]
+            payload["missing_inputs"] = unavailable["missing_inputs"]
     if not payload["ok"]:
         payload["note"] = baseline.get("note")
         return payload
@@ -2264,6 +2353,14 @@ def simulate(calibration: dict, scenario: Scenario | None = None,
             f"predicted {gate['predicted_median_hours']} h vs historical "
             f"{gate['historical_median_hours']} h "
             f"({gate['percent_off']} % off, tolerance ±{int(tolerance * 100)} %)"
+        )
+        return payload
+    if not inputs["available"]:
+        # The gate passed, but this scenario's own input is not in the store.
+        # Nothing is modelled: no default hours, no delta, no best-scenario bid.
+        payload["note"] = (
+            "the scenario was not run: "
+            f"{inputs['reason']}"
         )
         return payload
     result = run(calibration, scenario, seed=seed,

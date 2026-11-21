@@ -137,18 +137,36 @@ export function scenarioQuery(scenario, { seed } = {}) {
   return params.toString();
 }
 
-export function policyConfigMarkup(scenario) {
+/** Is the refinement knob measurable on this calibration?
+ *
+ * prd/64 F-03: a store with no `created → ready` segment (a PR-only store has
+ * no Jira layer) reports `refinement.hours: null`. The knob is then disabled
+ * and says so, rather than pricing the policy at an invented 1 h default.
+ */
+export function refinementUnavailable(calibration) {
+  if (!calibration) return false;      // no model shown here; leave the control alone
+  return ((calibration.refinement || {}).hours == null);
+}
+
+export function policyConfigMarkup(scenario, calibration) {
   const current = scenario || defaultScenario();
+  const noRefinement = refinementUnavailable(calibration);
   const rows = KNOBS.map((knob) => {
     const value = current[knob.key];
     // prd/37 §5 (a11y): every control has a real <label for>, not just a span
     // beside it, and its note is wired through aria-describedby.
     const id = `policy-knob-${knob.key}`;
     const noteId = `${id}-note`;
+    const unavailable = knob.key === 'refine_before_start' && noRefinement;
+    const note = unavailable
+      ? 'not measurable (no Jira layer) — this store has no created → ready ' +
+        'segment, so refine before start is unavailable'
+      : knob.note;
     let control = '';
     if (knob.kind === 'toggle') {
       control = `<input type="checkbox" id="${id}" data-knob="${knob.key}"` +
-        ` aria-describedby="${noteId}"${value ? ' checked' : ''}>`;
+        ` aria-describedby="${noteId}"${value && !unavailable ? ' checked' : ''}` +
+        `${unavailable ? ' disabled aria-disabled="true"' : ''}>`;
     } else {
       const options = knob.options.map(([optionValue, label]) => {
         const chosen = String(value ?? '') === optionValue ? ' selected' : '';
@@ -156,15 +174,18 @@ export function policyConfigMarkup(scenario) {
       }).join('');
       control = `<select id="${id}" data-knob="${knob.key}" aria-describedby="${noteId}">${options}</select>`;
     }
-    return `<div class="policy-knob">
+    return `<div class="policy-knob${unavailable ? ' policy-knob-unavailable' : ''}">
       <label class="policy-knob-k" for="${id}">${esc(knob.label)}</label>
       ${control}
-      <span class="policy-knob-note" id="${noteId}">${esc(knob.note)}</span>
+      <span class="policy-knob-note" id="${noteId}">${esc(note)}</span>
     </div>`;
   }).join('');
-  const presets = PRESETS.map((preset) =>
-    `<button type="button" class="chip" data-preset="${esc(preset.id)}">${esc(preset.label)}</button>`,
-  ).join('');
+  const presets = PRESETS.map((preset) => {
+    const unavailable = preset.id === 'refine' && noRefinement;
+    return `<button type="button" class="chip" data-preset="${esc(preset.id)}"` +
+      `${unavailable ? ' disabled aria-disabled="true" title="not measurable (no Jira layer)"' : ''}>` +
+      `${esc(preset.label)}</button>`;
+  }).join('');
   return `<div class="policy-knobs">${rows}</div>
     <div class="policy-actions">
       <button type="button" class="policy-run" id="policy-run">Run scenario</button>
@@ -425,7 +446,7 @@ export function policyMarkup(data, scenario) {
   const gate = validationMarkup(data);
   const config = `<div class="policy-panel policy-config">
       <h2 class="policy-h">Scenario</h2>
-      ${policyConfigMarkup(scenario)}
+      ${policyConfigMarkup(scenario, data && data.calibration)}
     </div>`;
   if (!data) {
     return `<div class="policy-wrap">${config}
@@ -442,6 +463,14 @@ export function policyMarkup(data, scenario) {
         against today’s process.</p>`;
   const blocked = data.blocked
     ? `<p class="policy-warning">${esc(data.blocked)}</p>` : '';
+  // prd/64 F-03: the requested scenario itself may not be measurable, even
+  // when the baseline validated. Say so; never show a delta from a default.
+  const unavailable = data.scenario_available === false
+    ? `<p class="policy-warning" id="policy-scenario-unavailable">
+        <b>not measurable</b> (no Jira layer) — ${esc(
+          data.scenario_unavailable_reason || 'a calibration input is missing')}.
+        This scenario is not modelled, so no delta is shown.</p>`
+    : '';
   const modelled = trusted
     ? `<h2 class="policy-h">A / B · predicted cycle time</h2>
       ${ab}
@@ -451,7 +480,7 @@ export function policyMarkup(data, scenario) {
         and scenario alike — are withheld. The calibrated facts below are measured
         from the store and still hold.</p>`;
   const body = `<div class="policy-panel policy-result">
-      ${blocked}${modelled}
+      ${unavailable}${blocked}${modelled}
       <h2 class="policy-h">Calibrated from</h2>
       ${calibrationMarkup(data.calibration)}
     </div>`;
@@ -490,5 +519,9 @@ export function policyMarkdown(data) {
     `_Every predicted number is an estimate (≈); measured numbers are not. ${compare && compare.within_noise ? 'The delta is within the model\'s run-to-run spread.' : ''}_`,
   ];
   if (data.blocked) lines.splice(2, 0, `> ${data.blocked}`, '');
+  if (data.scenario_available === false) {
+    lines.splice(2, 0,
+      `> not measurable: ${data.scenario_unavailable_reason || 'a calibration input is missing'} — the scenario was not modelled.`, '');
+  }
   return lines.join('\n');
 }
