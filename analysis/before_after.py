@@ -25,8 +25,9 @@ bare p-value.
 
 The censoring rule is the product's usual one (prd/55): an open item's running
 age is **not** a completed duration, so it is excluded from both sides and
-counted (``censored_before``/``censored_after``). The basis string travels with
-the answer so it cannot be mistaken for the bucket series.
+counted (``censored_before``/``censored_after``, with ``censored`` as their
+sum). The basis string travels with the answer so it cannot be mistaken for
+the bucket series; the panel prints the disclosure once, below the table.
 """
 
 from __future__ import annotations
@@ -389,6 +390,7 @@ def compare(items_before, items_after, *, higher_is_better: bool = False,
         "buckets_after": int(buckets_after),
         "censored_before": int(censored_before),
         "censored_after": int(censored_after),
+        "censored": int(censored_before) + int(censored_after),
         "min_items": MIN_ITEMS,
         "noise_band": NOISE_BAND,
         "trials": int(trials) if ci is not None else 0,
@@ -598,12 +600,9 @@ def compare_metric(court, data, window, *, metric: str, split,
         "excluded_in_progress": excluded_in_progress,
         "note_interval": NOTE_INTERVAL,
     })
-    if payload["censored_before"] or payload["censored_after"]:
-        payload["note"] += (
-            f" {payload['censored_before'] + payload['censored_after']} open "
-            "item(s) are excluded and counted: a running age is not a completed "
-            "duration."
-        )
+    # Censoring is disclosed once, below the table, from the structured counts
+    # (``censored_before``/``censored_after``/``censored``). ``note`` stays the
+    # verdict sentence so the panel does not print the disclosure twice.
     return payload
 
 

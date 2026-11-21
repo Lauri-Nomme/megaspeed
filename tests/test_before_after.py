@@ -255,7 +255,41 @@ class CompareStoreTests(StoreCase):
             con.close()
         self.assertEqual(payload["after"]["n"], 9)
         self.assertEqual(payload["censored_after"], 2)
-        self.assertIn("excluded and counted", payload["note"])
+        self.assertEqual(payload["censored"], 2)
+        # N-09: the panel prints the disclosure once, from the structured
+        # counts; the verdict note must not repeat it.
+        self.assertNotIn("excluded and counted", payload["note"])
+
+    def test_censored_items_on_both_sides_are_structured_not_repeated_in_note(self):
+        fx = comparison_fixture(open_after=2)
+        opened = START + timedelta(days=7 * 2, hours=8)
+        fx.pr(98, "AaAa", opened, state="open", closed=None)
+        fx.pr_event(98, "comment_added", "RrRr", hours=0)
+        con, court, data, window = self.load(fx)
+        try:
+            payload = before_after.compare_metric(
+                court, data, window, metric="cycle_median", split=SPLIT,
+                bucket="week", trials=300,
+            )
+        finally:
+            con.close()
+        self.assertEqual(payload["censored_before"], 1)
+        self.assertEqual(payload["censored_after"], 2)
+        self.assertEqual(payload["censored"], 3)
+        self.assertNotIn("excluded and counted", payload["note"])
+
+    def test_no_censoring_leaves_the_note_a_plain_verdict(self):
+        con, court, data, window = self.load(comparison_fixture())
+        try:
+            payload = before_after.compare_metric(
+                court, data, window, metric="cycle_median", split=SPLIT,
+                bucket="week", trials=300,
+            )
+        finally:
+            con.close()
+        self.assertEqual(payload["censored"], 0)
+        self.assertNotIn("excluded and counted", payload["note"])
+        self.assertIn("better", payload["note"].lower())
 
     def test_the_in_progress_bucket_never_appears_on_either_side(self):
         fx = comparison_fixture()

@@ -51,10 +51,22 @@ export function outcomePill(outcome) {
   return `<span class="outcome-pill ${esc(spec.tone)}" data-outcome="${esc(outcome)}">${esc(spec.label)}</span>`;
 }
 
+/** The censoring disclosure, built once from the structured counts. */
+export function censoringSentence(compare) {
+  const before = Number(compare?.censored_before || 0);
+  const after = Number(compare?.censored_after || 0);
+  if (!before && !after) return '';
+  return `${before} open item(s) before and ${after} after are excluded and `
+    + 'counted: a running age is not a completed duration.';
+}
+
+/** Older payloads carry the disclosure in `note`; strip it so it prints once. */
+const CENSORING_SUFFIX = /\s*\d+\s+open item\(s\) are excluded and counted: a running age is not a completed duration\.?\s*$/;
+
 /** The verdict sentence from the server, else a local fallback in the same voice. */
 export function verdictSentence(compare) {
   if (!compare) return '';
-  if (compare.note) return compare.note;
+  if (compare.note) return compare.note.replace(CENSORING_SUFFIX, '').trim();
   const outcome = compare.outcome;
   if (outcome === 'cant_tell') {
     return `Can't tell at this n: ${compare.before?.n ?? 0} before, ${compare.after?.n ?? 0} after.`;
@@ -127,6 +139,7 @@ export function beforeAfterPanel(compare, { annotations = [], metric = null } = 
     .map((entry) => `<option value="${esc(entry.id)}" ${entry.id === (metric || compare.metric) ? 'selected' : ''}>${esc(entry.label)}</option>`)
     .join('');
   const censored = Number(compare.censored_before || 0) + Number(compare.censored_after || 0);
+  const censoring = censoringSentence(compare);
   return `<section class="before-after" data-before-after="${esc(compare.outcome)}" data-reason="${esc(compare.reason)}">
     <div class="section-head">
       <h3>Did it work?</h3>
@@ -148,7 +161,7 @@ export function beforeAfterPanel(compare, { annotations = [], metric = null } = 
     </table>
     ${ciBar(compare)}
     <p class="before-after-basis">${esc(compare.basis || '')} · ${esc(`${compare.buckets_before} buckets before, ${compare.buckets_after} after`)}.</p>
-    ${censored ? `<p class="panel-note censored" data-censored="${censored}">${esc(compare.censored_before)} open item(s) before and ${esc(compare.censored_after)} after are excluded and counted: a running age is not a completed duration.</p>` : ''}
+    ${censoring ? `<p class="panel-note censored" data-censored="${censored}">${esc(censoring)}</p>` : ''}
     <p class="panel-note interval-note">${esc(INTERVAL_NOTE)}</p>
     ${compare.annotated_note || compare.annotation?.note ? `<p class="annotation-note">“${esc(compare.annotation?.note || '')}”</p>` : ''}
   </section>`;
@@ -158,6 +171,7 @@ export function beforeAfterPanel(compare, { annotations = [], metric = null } = 
 export function beforeAfterMarkdown(compare) {
   if (!compare) return '';
   const unit = compare.unit || 'hours';
+  const censoring = censoringSentence(compare);
   const lines = [
     `## Did it work? ${compare.label || compare.metric}${compare.annotation ? ` — ${compare.annotation.label}` : ''}`,
     '',
@@ -172,6 +186,7 @@ export function beforeAfterMarkdown(compare) {
       : 'No interval: the sample cannot support one.',
     `Basis: ${compare.basis || ''}.`,
     compare.p_value != null ? `Mann–Whitney U p=${compare.p_value}.` : '',
+    censoring ? `_${censoring}_` : '',
     `_${INTERVAL_NOTE}_`,
   ];
   return lines.filter((line) => line !== '').join('\n');
