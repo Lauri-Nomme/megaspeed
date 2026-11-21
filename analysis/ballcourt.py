@@ -2255,7 +2255,13 @@ def delivery_list(
             role_label = REVIEW
         else:
             role_label = ball
-        owner = (tail.owner if tail else None) or (current.owner if current else None)
+        # prd/64 F-07: the name comes from the interval that holds the ball
+        # *now* — never from an ended one. With several holders ``latest.owner``
+        # is None and the row keeps the role label; ``waiting_on`` and
+        # ``waiting_roles`` name the real holders. Falling back to
+        # ``current.owner`` leaked CaOs into #66's ``waiting_for`` (it waits on
+        # BoFe + FrMo), so ``person:CaOs`` listed a PR CaOs does not hold.
+        owner = latest.owner if latest is not None else None
         waiting_for = owner or role_label
         waiting_roles = {
             person: (

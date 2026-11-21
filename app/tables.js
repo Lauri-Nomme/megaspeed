@@ -241,11 +241,15 @@ export function matchesScope(row, scope) {
   }
   // concepts.md §2 + prd/34 §3: on the delivery list (and the queue view) a
   // person scope means "waiting on X" — the holders, never "authored by X".
-  const waiting = new Set(
-    [...(row.waiting_on || []), row.waiting_for, row.ball_label]
-      .filter(Boolean)
-      .map((person) => String(person).toLowerCase()),
-  );
+  // prd/64 F-07: `waiting_on` is the truth whenever the payload carries it;
+  // `waiting_for` is only the fallback for an older payload, and `ball_label`
+  // is never a person — with several holders it is a queue label, and naming
+  // one holder of a queue would put a PR in someone's scope who does not hold
+  // it (#66 waits on BoFe + FrMo, not on the CaOs whose review just ended).
+  const holders = (row.waiting_on || []).length
+    ? row.waiting_on
+    : (row.waiting_for ? [row.waiting_for] : []);
+  const waiting = new Set(holders.map((person) => String(person).toLowerCase()));
   const roles = new Set(
     Object.values(row.waiting_roles || {}).map((role) => String(role).toLowerCase()),
   );
@@ -253,6 +257,7 @@ export function matchesScope(row, scope) {
   if (scope.kind === 'role') {
     // prd/40: `ball` is the label; a ready PR is the author's merge click but
     // is nobody's review wait, so the two role scopes stay disjoint.
+    // Role scopes match `waiting_roles` — a role is not a pseudonym.
     if (value === 'sentinel') return roles.has('sentinel');
     if (value === 'review') {
       // a sentinel is a distinct mandatory approver, not a peer review queue;
@@ -483,16 +488,21 @@ export function doneOpenMarkup(delivery, { base = '', scope = null, id = 'done-o
   const done = delivery && delivery.done_open;
   let rows = (done && done.rows) || [];
   if (scope && scope.kind !== 'all') {
-    const value = String(scope.value || '').toLowerCase();
-    if (scope.kind === 'repo') {
-      // prd/49: the server computed this list from the repo-scoped court; the
-      // row's own repo keeps the client filter honest.
-      rows = rows.filter((row) => String(row.repo || '').toLowerCase() === value);
-    } else {
-      rows = rows.filter((row) => (scope.kind === 'ticket'
-        ? String(row.key || '').toLowerCase() === value
-        : (row.waiting_on || []).some((person) => String(person).toLowerCase() === value)));
-    }
+    // prd/64 F-08: one scope rule with the rest of Overview/Delivery. The
+    // Done-open row carries the holder list but not the role map; the court
+    // row for the same PR does, so join on ``object_id`` before asking
+    // ``matchesScope`` — otherwise ``role:sentinel`` compared "sentinel"
+    // against a pseudonym and said "none — 3 team-wide".
+    const court = new Map(
+      ((delivery && delivery.rows) || []).map((row) => [row.object_id, row]),
+    );
+    rows = rows.filter((row) => {
+      const full = court.get(row.object_id);
+      // the Done-open row's ticket key is the key that put it here, so a
+      // `ticket:` scope matches even when the court row is not available.
+      const probe = { ...row, ...(full || {}), key: row.key, ticket: row.key };
+      return matchesScope(probe, scope);
+    });
   }
   if (!done || !done.available) return '';
   const scoped = Boolean(scope && scope.kind !== 'all');
