@@ -93,6 +93,99 @@ def _percent(value: float | None, *, signed: bool = True) -> str:
     return f"{sign}{abs(number):.0f} %"
 
 
+def _rate_text(value: float | None) -> str:
+    """A share as a rate: 5.7 %, 4.6 %, 24 %, 10 % (prd/62's tile copy).
+
+    Two significant digits: below 10 % keep one decimal (5.7), above it the
+    whole percent is the honest precision (24.1 → 24). The same rule as the
+    panel's own formatter, so the guardrail and the tile cannot show 5.7 % and
+    6 % for one number.
+    """
+    if value is None:
+        return "–"
+    pct = float(value) * 100.0
+    return f"{round(pct)} %" if abs(pct) >= 10 else f"{pct:.1f} %"
+
+
+def _number_text(value: float | None) -> str:
+    if value is None:
+        return "–"
+    return f"{round(float(value), 2):g}"
+
+
+#: Which modelled guardrail a policy's one sentence leads with. A policy with no
+#: modelled fact of its own still shows the held-constant sentence, never
+#: silence (prd/62).
+GUARDRAIL_PRIMARY = {
+    "refine": "rounds_mean",
+    "roundcap2": "rounds_mean",
+    "sentinel2": "rounds_mean",
+    "size3": "prs_per_100_commits",
+    "sla4": "escalated_share",
+}
+
+
+def _guardrail(policy: dict, compare: dict | None) -> dict | None:
+    """prd/62: the guardrail sentence beside this lever, from one source.
+
+    The modelled number is the *same run* the Policy page shows; the held
+    baselines are the measured stability panel the server passed into the
+    comparison. When the model cannot represent a guardrail the sentence starts
+    with ``held constant:`` and prints the measured baseline — never silence and
+    never an invented cost.
+    """
+    guardrails = (compare or {}).get("guardrails") or {}
+    modelled = {entry["id"]: entry for entry in guardrails.get("modelled") or ()}
+    held = {entry["id"]: entry for entry in guardrails.get("held_constant") or ()}
+    primary = modelled.get(GUARDRAIL_PRIMARY.get(policy["id"], "rounds_mean"))
+    if primary is None and modelled:
+        primary = next(iter(modelled.values()))
+    held_bits = []
+    for key, label in (
+        ("reopen", "reopen"),
+        ("failed_verification", "failed verification"),
+    ):
+        entry = held.get(key)
+        if entry and entry.get("baseline") is not None:
+            held_bits.append(f"{label} {_rate_text(entry['baseline'])}")
+    if (
+        primary
+        and primary.get("baseline") is not None
+        and primary.get("scenario") is not None
+    ):
+        modelled_text = (
+            f"{primary['label']} {_number_text(primary['baseline'])} → "
+            f"{_number_text(primary['scenario'])} (model)"
+        )
+        parts = [{
+            "text": modelled_text,
+            "tone": "warning" if primary.get("worse") else "neutral",
+        }]
+        text = modelled_text
+        if held_bits:
+            sentence = " and ".join(held_bits) + " are held constant"
+            text += "; " + sentence
+            parts.append({"text": sentence, "tone": "neutral"})
+        text += " — the model does not rework the code, only the review loop"
+        return {
+            "modelled": True,
+            "label": primary["label"],
+            "text": text,
+            "worsens": bool(primary.get("worse")),
+            "parts": parts,
+        }
+    if held_bits:
+        sentence = "held constant: " + " and ".join(held_bits)
+        return {
+            "modelled": False,
+            "label": "reopen",
+            "text": sentence + " — the model does not rework the code",
+            "worsens": False,
+            "parts": [{"text": sentence, "tone": "neutral"}],
+        }
+    return None
+
+
 def _verdict(compare: dict | None) -> dict:
     """One policy's lab result, flattened to the facts a rule note needs."""
     if not compare:
@@ -174,6 +267,11 @@ def _entry(policy: dict, compare: dict | None) -> dict:
         and not entry["within_noise"]
     )
     entry["note"] = _note(entry, policy.get("caveat"))
+    # prd/62: the guardrail is the other half of a lab verdict — copied from the
+    # comparison (one source) and rendered next to the speed result, modelled or
+    # explicitly held constant.
+    entry["guardrails"] = (compare or {}).get("guardrails")
+    entry["guardrail"] = _guardrail(policy, compare)
     return entry
 
 
@@ -301,4 +399,6 @@ def attach(suggestions: list[dict], cross_check: dict | None) -> None:
             # comes from, so the #1 and the banner cannot disagree.
             "best": entry["id"] == best_id,
             "note": entry["note"],
+            # prd/62: the guardrail line, from the lab's own comparison.
+            "guardrail": entry.get("guardrail"),
         }

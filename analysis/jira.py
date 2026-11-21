@@ -316,6 +316,10 @@ class Story:
     points: int | None
     epic_key: str | None
     summary_class: str | None
+    #: prd/62: the Jira *issue type* (story/bug/task …), when the store carries
+    #: it. Never ``summary_class`` — that classifies the summary text and is a
+    #: different fact (using it for the bug share would be a category error).
+    issue_type: str | None = None
     events: list[dict] = field(default_factory=list)
     prs: list = field(default_factory=list)
     #: The store's as-of time, set by ``load`` from the ball-court. It bounds an
@@ -481,6 +485,9 @@ def load(con, court: ballcourt.BallCourt | None = None) -> JiraData:
                 points=attributes.get("points"),
                 epic_key=attributes.get("epic_key"),
                 summary_class=attributes.get("summary_class"),
+                issue_type=(
+                    attributes.get("issue_type") or attributes.get("issuetype")
+                ),
             ))
     if not stories:
         return JiraData(
@@ -1842,6 +1849,445 @@ def rework(court: ballcourt.BallCourt, data: JiraData | None) -> dict:
             "derive rework from",
             bool(data.stories),
         ),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 2. first-pass yield and stability (prd/62)
+# --------------------------------------------------------------------------- #
+#: Below this many deliveries a rate is not shown, counts only — the same floor
+#: ``benchmark.BENCHMARK_MIN_N`` uses for a cohort benchmark.
+MIN_DELIVERIES = 10
+
+#: prd/62 §"Step signals": the four pipeline steps a completed story passes,
+#: in lifecycle order. ``id`` is the closed vocabulary the UI and the API share.
+YIELD_STEPS: tuple[tuple[str, str, str], ...] = (
+    ("refine", "Refined", "created → ready"),
+    ("develop", "Developed", "ready → first review"),
+    ("review", "Reviewed", "first review → approval"),
+    ("verify", "Verified", "merge → verification → done"),
+)
+#: The exact transitions whose *absence* makes a step clean. The table is the
+#: one place the definition lives; the UI prints these as the step's signals.
+YIELD_SIGNALS: dict[str, tuple[str, ...]] = {
+    "refine": ("ready → backlog", "pointed after started"),
+    "develop": ("in_review → in_progress",),
+    # a story with two PRs must pass review twice; clean only if every merged
+    # PR had zero rounds (concepts.md §6 Review round / prd/40).
+    "review": ("zero review rounds across every merged PR",),
+    "verify": ("in_verification → in_progress", "done → ready"),
+}
+ZERO_LOOPBACK_NOTE = (
+    "no loop-back event in this store — check the workflow emits ready, "
+    "in_review and in_verification transitions"
+)
+
+
+def _is_completed(story: Story) -> bool:
+    """A delivery: the story has a measured ``created → done`` cycle."""
+    cycle = _cycle(story)
+    begin = cycle.boundaries.get("created")
+    done = cycle.boundaries.get("done")
+    return begin is not None and done is not None and done > begin
+
+
+def _status_pairs(story: Story) -> set[tuple[str, str]]:
+    return {
+        (
+            normalize_stage(_attrs(event).get("from_status")),
+            normalize_stage(_attrs(event).get("to_status")),
+        )
+        for event in _status_events(story)
+    }
+
+
+def _merged_prs(story: Story) -> list:
+    return [state for state in story.prs if state.pr.get("state") == "merged"]
+
+
+def _yield_round_count(state) -> int:
+    pushes, unapprovals = ballcourt.review_round_events(state)
+    return len(pushes) + len(unapprovals)
+
+
+def _story_step_clean(story: Story) -> dict[str, bool]:
+    """Was this story clean at each step? (the exact transitions, one place)
+
+    ``review`` is clean only if the story has a merged PR **and** every merged
+    PR had zero review rounds: a story with two PRs must pass review twice.
+    """
+    pairs = _status_pairs(story)
+    started = _first_status(story, "in_progress")
+    pointed_after_start = any(
+        started is not None and event["_ts"] > started
+        for event in story.of("pointed")
+    )
+    merged = _merged_prs(story)
+    return {
+        "refine": (
+            ("ready", "backlog") not in pairs and not pointed_after_start
+        ),
+        "develop": ("in_review", "in_progress") not in pairs,
+        "review": bool(merged) and all(
+            _yield_round_count(state) == 0 for state in merged
+        ),
+        "verify": (
+            ("in_verification", "in_progress") not in pairs
+            and ("done", "ready") not in pairs
+        ),
+    }
+
+
+def _step_available(step: str, cohort: list[Story]) -> bool:
+    """Does the store carry the transitions that could falsify this step?
+
+    A step whose falsifying transitions do not exist in the store reports
+    ``unfalsifiable`` and ``rate: null`` rather than a perfect score (prd/62).
+    """
+    if not cohort:
+        return False
+    if step == "refine":
+        # a refinement is observable when the store emits a ready stage or a
+        # point-change event: without either, neither signal can be falsified
+        return any(
+            any(to == "ready" for _, to in _status_pairs(story))
+            or bool(story.of("pointed"))
+            for story in cohort
+        )
+    if step == "develop":
+        # no story ever reached in_review: the workflow has no review stage in
+        # the store, so "review → in progress" cannot be observed
+        return any(
+            ("in_review", "in_progress") in _status_pairs(story)
+            or any(to == "in_review" for _, to in _status_pairs(story))
+            for story in cohort
+        )
+    if step == "review":
+        return any(_merged_prs(story) for story in cohort)
+    if step == "verify":
+        # a done transition is always observable on a completed cohort; the QA
+        # half is only falsifiable when the workflow has the stage
+        return any(
+            ("done", "ready") in _status_pairs(story)
+            or any(to == "done" for _, to in _status_pairs(story))
+            for story in cohort
+        )
+    return False
+
+
+def first_pass_yield(
+    court: ballcourt.BallCourt,
+    data: JiraData | None,
+    window: tuple[datetime, datetime] | None = None,
+    implied: dict | None = None,
+) -> dict:
+    """%C&A per step and VSM's **rolled %C&A** over completed stories (prd/62).
+
+    The cohort is the deliveries created inside the window (a completed story,
+    ``created → done``). Each step's %C&A is the share of that cohort which left
+    the step without a loop-back *into* it — the transitions in
+    :data:`YIELD_SIGNALS`. The rolled figure is the product of the four step
+    rates, and the **joint clean count** (stories clean at every step) is
+    reported next to it because a story can loop at more than one step, so the
+    product and the joint count can differ slightly.
+
+    ``review`` has its own denominator: only stories with a merged PR can pass
+    review; a Jira-only story is excluded and the payload says how many. Below
+    :data:`MIN_DELIVERIES` the counts are reported without a percentage, and a
+    step whose falsifying transitions are not in the store is ``unfalsifiable``
+    (``rate: null``) rather than a perfect score.
+
+    ``implied`` is the per-step yield the policy lab's fitted model implies (the
+    server supplies it). It is a *threshold for a warning dot*, never a
+    measurement: a step below it is marked, never recoloured.
+    """
+    data = data or EMPTY
+    start, end = window or (None, None)
+    cohort = [
+        story for story in data.stories
+        if _is_completed(story)
+        and (start is None or (story.start is not None and start <= story.start <= end))
+    ]
+    n = len(cohort)
+    no_pr = sum(1 for story in cohort if not _merged_prs(story))
+    clean = {story.key: _story_step_clean(story) for story in cohort}
+    steps: list[dict] = []
+    rates: dict[str, float | None] = {}
+    for step, label, step_window in YIELD_STEPS:
+        available = _step_available(step, cohort)
+        if step == "review":
+            members = [story for story in cohort if _merged_prs(story)]
+            step_n = len(members)
+        else:
+            members = cohort
+            step_n = n
+        bounced = [
+            story.key for story in members if not clean[story.key][step]
+        ]
+        clean_n = step_n - len(bounced)
+        hidden = step_n < MIN_DELIVERIES
+        rate = (
+            round(clean_n / step_n, 3)
+            if available and not hidden and step_n
+            else None
+        )
+        rates[step] = rate
+        entry = {
+            "id": step,
+            "label": label,
+            "window": step_window,
+            "clean_n": clean_n if available else None,
+            "n": step_n,
+            "rate": rate,
+            "available": available,
+            "unfalsifiable": not available,
+            "rate_hidden": hidden and available,
+            "signals": list(YIELD_SIGNALS[step]),
+            "items": bounced,
+        }
+        if not available:
+            entry["note"] = (
+                f"no {step} signal in this store: the transitions that would "
+                f"make it unclean ({', '.join(YIELD_SIGNALS[step])}) do not occur"
+            )
+        elif hidden:
+            entry["note"] = (
+                f"{step_n} deliveries — too few for a rate "
+                f"(minimum {MIN_DELIVERIES})"
+            )
+        elif available and not bounced and step_n:
+            entry["note"] = ZERO_LOOPBACK_NOTE
+        steps.append(entry)
+    rolled = (
+        round(_product(rates[step] for step, _, _ in YIELD_STEPS), 3)
+        if n >= MIN_DELIVERIES and all(rates[step] is not None for step, _, _ in YIELD_STEPS)
+        else None
+    )
+    clean_joint = sum(1 for story in cohort if all(clean[story.key].values()))
+    payload = {
+        "available": bool(cohort),
+        "cohort": "completed stories",
+        "n": n,
+        "min_deliveries": MIN_DELIVERIES,
+        "steps": steps,
+        "rolled": rolled,
+        "clean_joint": clean_joint,
+        "joint_rate": round(clean_joint / n, 3) if n else None,
+        "no_pr": no_pr,
+        "basis": (
+            "%C&A = the share of items that left this step complete and "
+            "accurate — no loop-back into it. Rolled %C&A is the product of the "
+            "four steps; the joint count is the measured clean first pass and "
+            "can differ slightly because a story can loop at more than one step."
+        ),
+        "note": _note(
+            data,
+            "no STORY objects in this store: there is no pipeline to measure "
+            "first-pass yield over",
+            bool(cohort),
+        ),
+    }
+    if rolled is not None:
+        payload["note"] = (
+            f"only {clean_joint} of {n} stories went through without a loop-back"
+        )
+    payload["implied"] = implied or {
+        "steps": {},
+        "basis": (
+            "the policy lab did not run for this request, so no step is marked "
+            "below an implied yield"
+        ),
+    }
+    return payload
+
+
+def _product(values) -> float:
+    """The product of the available rates (an empty product is 1)."""
+    out = 1.0
+    for value in values:
+        if value is None:
+            return 0.0
+        out *= value
+    return out
+
+
+#: The stability signals a story's status history can produce (prd/51's rework
+#: flips, read as a rate over deliveries) plus the rework proxy.
+STABILITY_FLIPS: tuple[tuple[str, str, str, str], ...] = (
+    ("reopen", "reopened after done", "done", "ready"),
+    ("failed_verification", "failed verification", "in_verification", "in_progress"),
+    ("review_bounce", "review bounced", "in_review", "in_progress"),
+)
+
+
+def _flip_count(story: Story, from_stage: str, to_stage: str) -> int:
+    return sum(
+        1 for event in _status_events(story)
+        if normalize_stage(_attrs(event).get("from_status")) == from_stage
+        and normalize_stage(_attrs(event).get("to_status")) == to_stage
+    )
+
+
+def stability(
+    court: ballcourt.BallCourt,
+    data: JiraData | None,
+    window: tuple[datetime, datetime] | None = None,
+) -> dict:
+    """DORA's instability factor from tracker data, labelled (prd/62).
+
+    Three **direct** loop-back rates over the same deliveries the yield panel
+    uses (a flip count ÷ deliveries), plus a labelled **proxy** for rework and
+    an explicit "unavailable" for the bug share. None of these is DORA's
+    change-failure or rework rate: the store has no deploy or incident source,
+    and ``bug_share`` needs the Jira issue type, which the store does not carry
+    — ``summary_class`` classifies the summary text, never the issue type, so
+    it is never substituted.
+
+    ``zero_approval_merges`` is the measured baseline the policy lab's guardrail
+    quotes (the model's mandatory gate makes it 0 by construction).
+    """
+    data = data or EMPTY
+    start, end = window or (None, None)
+    cohort = [
+        story for story in data.stories
+        if _is_completed(story)
+        and (start is None or (story.start is not None and start <= story.start <= end))
+    ]
+    n = len(cohort)
+    hidden = n < MIN_DELIVERIES
+    out: dict = {"available": bool(cohort), "n": n, "min_deliveries": MIN_DELIVERIES}
+    counts: dict[str, int] = {}
+    for field, label, from_stage, to_stage in STABILITY_FLIPS:
+        count = sum(_flip_count(story, from_stage, to_stage) for story in cohort)
+        counts[field] = count
+        entry = {
+            "label": label,
+            "count": count,
+            "rate": round(count / n, 3) if n and not hidden else None,
+            "signals": [f"{from_stage} → {to_stage}"],
+        }
+        # each signal's stories, as a drill-down (prd/62's step drill-down)
+        entry["items"] = sorted(
+            story.key for story in cohort
+            if _flip_count(story, from_stage, to_stage)
+        )
+        if hidden:
+            entry["note"] = (
+                f"{n} deliveries — too few for a rate (minimum {MIN_DELIVERIES})"
+            )
+        out[field] = entry
+    typed = [story for story in cohort if story.issue_type]
+    if not typed:
+        out["bug_share"] = {
+            "available": False,
+            "count": None,
+            "rate": None,
+            "reason": "the store's issue objects carry no issue type",
+        }
+    elif len(typed) < n:
+        out["bug_share"] = {
+            "available": False,
+            "count": None,
+            "rate": None,
+            "reason": (
+                f"only {len(typed)} of {n} stories carry an issue type in this "
+                "store"
+            ),
+        }
+    else:
+        bugs = sum(
+            1 for story in cohort
+            if str(story.issue_type or "").strip().lower() in ("bug", "defect")
+        )
+        out["bug_share"] = {
+            "available": True,
+            "label": "bug share",
+            "count": bugs,
+            "n": n,
+            "rate": round(bugs / n, 3) if n and not hidden else None,
+            "basis": "bug-type stories ÷ deliveries",
+            "proxy": True,
+            "note": (
+                "a labelled proxy for a rework rate: a bug-type story is not "
+                "proof that the bug came from a failed change"
+            ),
+        }
+    proxy = counts["reopen"] + counts["failed_verification"]
+    out["rework_proxy"] = {
+        "label": "rework proxy",
+        "count": proxy,
+        "rate": round(proxy / n, 3) if n and not hidden else None,
+        "basis": "reopened or failed verification / deliveries",
+        "proxy": True,
+        "note": (
+            "not DORA's rework rate: this store has no deploy or incident data"
+        ),
+    }
+    merged_in_window = [
+        state for state in court.prs
+        if (start is None or start <= state.pr["created_ts"] <= end)
+        and state.pr["state"] == "merged"
+    ]
+    no_approval = [
+        state for state in merged_in_window
+        if not any(event["activity"] == "pr_approved" for event in state.events)
+    ]
+    out["zero_approval_merges"] = {
+        "label": "merged with no approval",
+        "count": len(no_approval),
+        "n": len(merged_in_window),
+        "rate": (
+            round(len(no_approval) / len(merged_in_window), 3)
+            if merged_in_window else None
+        ),
+        "items": sorted(state.pr["object_id"] for state in no_approval),
+    }
+    out["basis"] = (
+        "each direct rate is a loop-back count ÷ deliveries in the window; the "
+        "bug share and the rework proxy are labelled proxies, never DORA's "
+        "change-failure or rework rate (no deploy/incident source)"
+    )
+    out["note"] = _note(
+        data,
+        "no STORY objects in this store: there is no status history to derive "
+        "loop-back rates from",
+        bool(cohort),
+    )
+    return out
+
+
+def story_yield(court: ballcourt.BallCourt, story: Story | None) -> dict:
+    """One story's four-step pass, for the ticket drawer (prd/62).
+
+    A story with no merged PR has no review pass to measure: that step is
+    ``available: false`` and the ticket says so, rather than reading "bounced"
+    for a step the store cannot falsify.
+    """
+    if story is None:
+        return {"steps": [], "rolled_clean": False, "available": False}
+    clean = _story_step_clean(story)
+    merged = _merged_prs(story)
+    steps = []
+    for step, label, _ in YIELD_STEPS:
+        available = step != "review" or bool(merged)
+        entry = {
+            "id": step,
+            "label": label,
+            "clean": bool(clean[step]),
+            "available": available,
+            "signals": list(YIELD_SIGNALS[step]),
+        }
+        if not available:
+            entry["note"] = (
+                "no merged PR in this store, so there is no review pass to measure"
+            )
+        steps.append(entry)
+    return {
+        "steps": steps,
+        "rolled_clean": all(clean.values()) and all(
+            step["available"] for step in steps
+        ),
+        "available": all(step["available"] for step in steps),
     }
 
 

@@ -11,6 +11,7 @@ import { prSizePanel } from './prsize.js';
 import { linkifyTickets, markdownLinkTickets, ticketHref } from './tickets.js';
 import { reworkMarkdown, reworkPanel } from './rework.js';
 import { worklogMarkdown, worklogPanel, fmtRate } from './worklog.js';
+import { firstPassPanels, yieldMarkdown } from './yield.js';
 
 const SEVERITY_LABEL = {
   critical: 'critical',
@@ -449,6 +450,41 @@ export function labBestLine(data) {
   return lab.note || '';
 }
 
+/* prd/62: the guardrail beside a lever's speed result.
+ *
+ * The sentence comes from the API's `policy_lab.guardrail` — built from the
+ * *same run* the Policy page shows — so the rule and the lab cannot drift. When
+ * the model cannot represent a guardrail the sentence starts with "held
+ * constant:" and prints the measured baseline; no lever is left silent. */
+export function guardrailLine(suggestion) {
+  const guard = suggestion && suggestion.policy_lab
+    && suggestion.policy_lab.guardrail;
+  if (!guard || !guard.text) return '';
+  const parts = (guard.parts && guard.parts.length)
+    ? guard.parts
+    : [{ text: guard.text, tone: 'neutral' }];
+  const body = parts.map((part) => {
+    const text = esc(part.text);
+    if (part.tone === 'warning') {
+      // only the number is tinted, never the whole sentence (prd/62)
+      const number = text.replace(
+        /(\d[\d.,]*\s*→\s*\d[\d.,]*)/,
+        '<b class="guardrail-warn">$1</b>',
+      );
+      return `<span class="guardrail-fact">${number}</span>`;
+    }
+    return `<span class="guardrail-fact">${text}</span>`;
+  }).join('<span class="guardrail-sep" aria-hidden="true"> · </span>');
+  const tail = guard.modelled
+    ? ' — the model does not rework the code, only the review loop'
+    : ' — the model does not rework the code';
+  return `<div class="rule-guardrail" data-guardrail="${
+    guard.modelled ? 'modelled' : 'held_constant'}">
+    <span class="guardrail-overline">GUARDRAIL</span>
+    <p>${body}<span class="guardrail-tail">${esc(tail)}</span></p>
+  </div>`;
+}
+
 export function ruleRow(suggestion, { base = '', metrics = {} } = {}) {
   const severity = SEVERITY_LABEL[suggestion.severity] || 'info';
   const facts = evidenceItems(suggestion.evidence);
@@ -488,6 +524,7 @@ export function ruleRow(suggestion, { base = '', metrics = {} } = {}) {
         ${assumed ? `<p class="rule-assumed">at stake is an assumption (${esc(
           (suggestion.evidence || {}).impact_basis || 'an assumption')}) — not a measured saving.</p>` : ''}
         ${labNote(suggestion)}
+        ${guardrailLine(suggestion)}
         <dl class="rule-evidence">
           ${facts.map((fact) => `<div class="fact"><dt>${esc(fact.label)}</dt>
             <dd class="mono">${linkifyTickets(fact.value, base)}</dd></div>`).join('')}
@@ -582,6 +619,7 @@ export function rulesMarkup(data, { base = '', prSize = null, caps = null } = {}
         ? `Person rules name a pseudonym and a per-person threshold; ${teamRules.length} team rule${teamRules.length === 1 ? ' is' : 's are'} on the team tab.`
         : 'That is a result, not a missing screen: first review under 24 h, cycle time under 9 d (72 business hours), two review rounds or fewer, no lost approvals. Widen the timeframe or switch to people to check the per-person rules.'}</p>
     </div>
+    ${firstPassPanels(data && data.metrics, { base })}
     ${worklogPanel((data && data.metrics && data.metrics.worklog_cross_check) || null)}
     ${prSizePanel(prSize, { caps })}
     ${reworkPanel((data && data.rework) || null, { base })}`;
@@ -610,6 +648,7 @@ export function rulesMarkup(data, { base = '', prSize = null, caps = null } = {}
   return `${note ? `<p class="rules-note">${esc(note)}${teamLink}</p>` : ''}
     ${teamHint}
     ${lab ? `<p class="rules-lab" data-lab-best>${esc(lab)}</p>` : ''}
+    ${firstPassPanels(data && data.metrics, { base })}
     <div class="rules-list">${rows.join('')}</div>
     ${reworkPanel((data && data.rework) || null, { base })}`;
 }
@@ -662,6 +701,10 @@ export function rulesMarkdown(data, base = '') {
   }
   const lab = labBestLine(data);
   if (lab) lines.push(`_${lab}._`, '');
+  // prd/62: the cost side travels with the export too — the step table, the
+  // stability rates and the labelled proxy.
+  const firstPass = yieldMarkdown(data.metrics || {}, base);
+  if (firstPass.length) lines.push(...firstPass, '');
   for (const suggestion of listed) {
     const facts = evidenceItems(suggestion.evidence)
       .map((fact) => `${fact.label} ${markdownLinkTickets(fact.value, base)}`).join(' · ');
@@ -679,6 +722,8 @@ export function rulesMarkdown(data, base = '') {
         ? ['- relationship: correlation — the two numbers move together; that is not proof that one causes the other'] : []),
       ...(suggestion.policy_lab && suggestion.policy_lab.note
         ? [`- policy lab${suggestion.policy_lab.best ? ' (best scenario)' : ''}: ${suggestion.policy_lab.note}`] : []),
+      ...(suggestion.policy_lab && suggestion.policy_lab.guardrail
+        ? [`- guardrail: ${suggestion.policy_lab.guardrail.text}`] : []),
       `- evidence: ${facts}`,
     );
     // prd/26 P5: the exported rule carries its items too, not only the count.

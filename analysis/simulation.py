@@ -1530,6 +1530,10 @@ class _Lab:
             "leads": [pr.merged_at - pr.arrived_at for pr in merged],
             "active": [pr.author_hours + pr.rebase_hours for pr in merged],
             "touches": [pr.touches for pr in merged],
+            # prd/62: a merged PR's review rounds. The last reviewer action is
+            # the approval, so rounds = max(0, reviewer actions - 1); the same
+            # fact the round-cap guardrail reports.
+            "rounds": [max(0, pr.peer_actions - 1) for pr in merged],
             "resources": resources,
             "prs": len(self.prs),
             "merged": len(merged),
@@ -1554,6 +1558,7 @@ def _summary(calibration: dict, scenario: Scenario, pooled: dict,
     leads = pooled["leads"]
     active = pooled["active"]
     touches = pooled["touches"]
+    rounds = pooled.get("rounds") or []
     elapsed = sum(cycles)
     working = sum(active) + sum(touches) * TOUCH_HOURS
     # Utilisation divides by the *modelled horizon*, not by the drained span
@@ -1629,6 +1634,30 @@ def _summary(calibration: dict, scenario: Scenario, pooled: dict,
             "merged": pooled["merged"],
             "declined": pooled["declined"],
             "censored": pooled["prs"] - pooled["merged"] - pooled["declined"],
+            # prd/62: the guardrail facts every speed lever must state. Rounds is
+            # a run value over merged PRs (reviewer actions - 1); its exact bound
+            # under a round cap is what the copy may claim.
+            "rounds": {
+                "n": len(rounds),
+                "mean": _round(_mean([float(value) for value in rounds])),
+                "p50": _quantile(rounds, 0.5),
+                "p85": _quantile(rounds, 0.85),
+            },
+            # packaging: PRs per 100 delivered commits. A size cap splits a PR
+            # into more PRs carrying the same work, so this rises while
+            # delivered work does not (the +289 % artefact, made visible).
+            "prs_per_work_unit": _round(
+                pooled["merged"] / max(1, pooled.get("work", 0)), 4
+            ),
+            "prs_per_100_commits": _round(
+                100.0 * pooled["merged"] / max(1, pooled.get("work", 0)), 1
+            ),
+            "escalated_share": _round(
+                pooled["escalated"] / pooled["prs"] if pooled["prs"] else None, 4
+            ),
+            "declined_per_100": _round(
+                100.0 * pooled["declined"] / pooled["prs"] if pooled["prs"] else None, 1
+            ),
             "backlog_max": pooled["backlog_max"],
             "backlog_end": pooled["backlog_end"],
             "replications": replications,
@@ -1696,6 +1725,7 @@ def run(calibration: dict, scenario: Scenario | None = None, seed: int = DEFAULT
     horizon_hours = max(1.0, float(days) * bh_per_day)
     pooled = {
         "drain": 0.0, "cycles": [], "leads": [], "active": [], "touches": [],
+        "rounds": [],
         "resources": {}, "prs": 0, "merged": 0, "declined": 0, "work": 0,
         "backlog_max": 0, "backlog_end": 0, "escalated": 0,
         "stack_wait_timeouts": 0,
@@ -1710,7 +1740,7 @@ def run(calibration: dict, scenario: Scenario | None = None, seed: int = DEFAULT
         pooled["drain"] += part["drain"]
         if part["cycles"]:
             per_replication.append(statistics.median(part["cycles"]))
-        for key in ("cycles", "leads", "active", "touches"):
+        for key in ("cycles", "leads", "active", "touches", "rounds"):
             pooled[key].extend(part[key])
         for name, entry in part["resources"].items():
             target = pooled["resources"].setdefault(name, dict(entry, busy=0.0, wait=0.0,
@@ -2006,7 +2036,129 @@ def _annotate(compare: dict) -> None:
         compare["verdict_tone"] = "muted"
 
 
-def compare(baseline: dict, scenario: dict) -> dict:
+def _guardrail_entry(entry_id: str, label: str, baseline, scenario,
+                     better: str = "lower", note: str | None = None) -> dict:
+    """One modelled guardrail: the same run's baseline vs scenario."""
+    delta = (
+        round(float(scenario) - float(baseline), 4)
+        if baseline is not None and scenario is not None else None
+    )
+    out = {
+        "id": entry_id,
+        "label": label,
+        "baseline": baseline,
+        "scenario": scenario,
+        "delta": delta,
+        "better": better,
+        # a Monte-Carlo wobble is not a worsening: require a change larger than
+        # 5 % of the baseline (and at least 0.1 of its own unit)
+        "worse": bool(
+            delta is not None and better == "lower" and delta > 0
+            and delta >= max(0.1, abs(float(baseline or 0.0)) * 0.05)
+        ),
+    }
+    if note:
+        out["note"] = note
+    return out
+
+
+def _guardrails(baseline: dict, scenario: dict,
+                held_constant: dict | None = None) -> dict:
+    """prd/62: a guardrail beside every speed lever, marked modelled or held.
+
+    The modelled half is built from **this run's** own facts (rounds, the PRs
+    per 100 commits the size cap inflates, escalation and decline shares), so a
+    guardrail can never disagree with the A/B it sits under. The held half is
+    the measured stability panel passed in by the server: the model re-loops the
+    review, it does not rework the code, so reopen and failed verification are
+    printed at their measured baseline and say they are held — never silence.
+    """
+    left = baseline.get("predicted") or {}
+    right = scenario.get("predicted") or {}
+    left_rounds = left.get("rounds") or {}
+    right_rounds = right.get("rounds") or {}
+    held = held_constant or {}
+    modelled = [
+        _guardrail_entry(
+            "rounds_mean", "rounds",
+            left_rounds.get("mean"), right_rounds.get("mean"),
+            note=(
+                "bounded: a 2-action cap makes rounds ≤ 1 by construction"
+                if (scenario.get("scenario") or {}).get("review_round_cap") == 2
+                else "run value: reviewer actions − 1 per merged PR"
+            ),
+        ),
+        _guardrail_entry(
+            "rounds_p85", "rounds p85",
+            left_rounds.get("p85"), right_rounds.get("p85"),
+        ),
+        _guardrail_entry(
+            "prs_per_100_commits", "PRs per 100 commits",
+            left.get("prs_per_100_commits"), right.get("prs_per_100_commits"),
+            note=(
+                "every extra PR needs the sentinel's approval again; delivered "
+                "work is unchanged, so this is packaging, not throughput"
+            ),
+        ),
+        _guardrail_entry(
+            "escalated_share", "reviews escalated",
+            left.get("escalated_share"), right.get("escalated_share"),
+        ),
+        _guardrail_entry(
+            "declined_per_100", "declined per 100 PRs",
+            left.get("declined_per_100"), right.get("declined_per_100"),
+        ),
+    ]
+    not_modelled: list[dict] = [
+        {
+            "id": "bug_share",
+            "reason": (
+                (held.get("bug_share") or {}).get("reason")
+                or "the store's issue objects carry no issue type"
+            ),
+        },
+    ]
+    held_out: list[dict] = []
+    if held.get("available"):
+        for key, label, note in (
+            ("reopen", "reopened", "the model re-loops review, it does not rework code"),
+            ("failed_verification", "failed verification",
+             "the model re-loops review, it does not rework code"),
+            ("zero_approval_merges", "merged with no approval",
+             "the gate is mandatory in the model"),
+        ):
+            entry = held.get(key) or {}
+            value = entry.get("rate") if key != "zero_approval_merges" else entry.get("count")
+            held_out.append({
+                "id": key,
+                "label": label,
+                "baseline": value,
+                "count": entry.get("count"),
+                "n": entry.get("n", held.get("n")),
+                "note": f"held constant: {note}",
+            })
+    else:
+        not_modelled.append({
+            "id": "reopen",
+            "reason": (
+                held.get("note")
+                or "the store has no ticket layer, so no reopen baseline is measured"
+            ),
+        })
+    return {
+        "modelled": modelled,
+        "held_constant": held_out,
+        "not_modelled": not_modelled,
+        "note": (
+            "modelled = this run's own fact; held constant = the measured "
+            "baseline the model does not simulate. The model does not rework the "
+            "code; it re-loops the review."
+        ),
+    }
+
+
+def compare(baseline: dict, scenario: dict,
+            held_constant: dict | None = None) -> dict:
     """A/B: the two predicted distributions and their deltas, side by side."""
     left = baseline["predicted"]
     right = scenario["predicted"]
@@ -2055,6 +2207,9 @@ def compare(baseline: dict, scenario: dict) -> dict:
             "baseline": left["backlog_max"],
             "scenario": right["backlog_max"],
         },
+        # prd/62: every speed lever carries its guardrail — modelled from this
+        # same run, or the measured baseline it is held at.
+        "guardrails": _guardrails(baseline, scenario, held_constant),
         "within_noise": _within_noise(baseline, scenario),
         "note": (
             "a delta is only a prediction if the baseline validated; the two runs "
@@ -2068,7 +2223,8 @@ def compare(baseline: dict, scenario: dict) -> dict:
 def simulate(calibration: dict, scenario: Scenario | None = None,
              seed: int = DEFAULT_SEED, tolerance: float = DEFAULT_TOLERANCE,
              horizon_business_days: float | None = None,
-             replications: int = DEFAULT_REPLICATIONS) -> dict:
+             replications: int = DEFAULT_REPLICATIONS,
+             held_constant: dict | None = None) -> dict:
     """Baseline + validation gate + (if the gate passes) the scenario A/B.
 
     The gate is enforced here, once, so no caller can accidentally show a
@@ -2114,6 +2270,6 @@ def simulate(calibration: dict, scenario: Scenario | None = None,
                  horizon_business_days=horizon_business_days,
                  replications=replications)
     payload["scenario"] = result
-    payload["compare"] = compare(baseline, result)
+    payload["compare"] = compare(baseline, result, held_constant=held_constant)
     payload["note"] = "baseline validated; the scenario is a prediction, not a measurement"
     return payload

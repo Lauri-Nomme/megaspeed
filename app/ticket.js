@@ -87,6 +87,32 @@ function shortStamp(iso) {
 /** The segment bar: one block per segment, absent blocks are hatched. */
 const MATERIAL_GAP_HOURS = 8;
 
+/**
+ * prd/62: this story's four-step pass, in the ticket drawer.
+ *
+ * `%C&A` is a *measured* fact about the story (which transitions happened), so
+ * the line says "clean" or "bounced" per step and never a rate — one story is
+ * not a cohort. The rolled answer is a sentence.
+ */
+export function yieldPassLine(payload) {
+  const pass = payload && payload.yield;
+  if (!pass || !(pass.steps || []).length) return '';
+  const steps = pass.steps.map((step) => `<span class="pass-step ${
+    step.available === false ? 'unmeasured' : step.clean ? 'clean' : 'bounced'}"
+    data-pass-step="${esc(step.id)}"
+    title="${esc(`${step.label}: ${(step.signals || []).join(', ')}${step.note ? ` — ${step.note}` : ''}`)}">
+    <span class="pass-dot" aria-hidden="true"></span>${esc(step.label)} ${
+    step.available === false ? 'not measured' : step.clean ? 'clean' : 'bounced'}</span>`).join('');
+  const rolled = pass.available === false
+    ? '— not measurable for this story'
+    : pass.rolled_clean
+      ? '— clean at every step'
+      : '— a loop-back somewhere';
+  return `<p class="ticket-pass" id="ticket-pass" data-rolled-clean="${pass.rolled_clean ? 'true' : 'false'}">
+    <span class="overline">first pass</span> ${steps}
+    <span class="muted">${rolled}</span></p>`;
+}
+
 /** What a segment's hours were *not*: a no-PR gap or a reopen loop (V-A7). */
 export function segmentCaveat(row) {
   if (!row) return '';
@@ -598,6 +624,7 @@ export function ticketMarkup(payload, { base = '', benchmark = true } = {}) {
       <p class="clock-note" id="ticket-clock">${esc(clockNote(payload))}</p>
     </div>
     <p class="impact ticket-answer" id="ticket-answer" data-kind="${esc(payload.answer_kind || '')}">${esc(payload.answer || '')}</p>
+    ${yieldPassLine(payload)}
     <nav class="ticket-links" aria-label="this ticket elsewhere">
       <span class="overline">this ticket elsewhere</span>
       <button type="button" class="chip" data-ticket-open="timeline">Timeline</button>
@@ -658,6 +685,11 @@ export function ticketMarkdown(payload, base = '') {
       ? ['', `**reopened** ×${payload.reopen_count || 1} — created→first done ` +
         `${segmentHours(segments.cycle_first_done_hours)}, created→final done ` +
         `${segmentHours(segments.cycle_hours)}`]
+      : []),
+    ...(payload.yield && (payload.yield.steps || []).length
+      ? ['', `**first pass:** ${payload.yield.steps.map((step) =>
+        `${step.label.toLowerCase()} ${step.clean ? 'clean' : 'bounced'}`).join(' · ')}` +
+        ` — ${payload.yield.rolled_clean ? 'clean at every step' : 'a loop-back somewhere'}`]
       : []),
     ...((payload.open_prs || []).length
       ? ['', `**still open:** ${(payload.open_prs || []).map((pr) =>

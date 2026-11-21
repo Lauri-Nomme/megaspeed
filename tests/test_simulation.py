@@ -970,5 +970,123 @@ class SimulateApiTests(unittest.TestCase):
         self.assertEqual(reply.status, 404)
 
 
+# --------------------------------------------------------------------------- #
+# prd/62: the guardrail facts every speed lever must state
+# --------------------------------------------------------------------------- #
+class GuardrailTests(StoreCase):
+    STABILITY = {
+        "available": True,
+        "n": 87,
+        "reopen": {"count": 5, "rate": 0.057},
+        "failed_verification": {"count": 4, "rate": 0.046},
+        "review_bounce": {"count": 21, "rate": 0.241},
+        "zero_approval_merges": {"count": 0, "n": 106},
+        "bug_share": {"available": False, "reason": "no issue type"},
+    }
+
+    def with_peer_actions(self, actions: int) -> dict:
+        calibration = copy.deepcopy(self.calibrate(Fixture(n_prs=100, days=20)))
+        histogram = {str(actions): 1}
+        calibration["rework"]["peer_actions"].update({
+            "histogram": histogram,
+            "merged_histogram": histogram,
+            "declined_histogram": histogram,
+        })
+        return calibration
+
+    def test_rounds_are_pooled_from_the_prs_reviewer_actions(self):
+        # rounds = max(0, peer_actions − 1): the last reviewer action is the
+        # approval, so a 3-action PR had 2 rounds.
+        calibration = self.with_peer_actions(3)
+        baseline = simulation.run(
+            calibration, simulation.Scenario(), seed=5, replications=2
+        )
+        rounds = baseline["predicted"]["rounds"]
+        self.assertEqual(rounds["n"], baseline["predicted"]["merged"])
+        self.assertEqual(rounds["mean"], 2.0)
+        self.assertEqual(rounds["p50"], 2.0)
+        # a 1-action cap removes the re-review by construction
+        capped = simulation.run(
+            calibration, simulation.Scenario(review_round_cap=1),
+            seed=5, replications=2,
+        )
+        self.assertEqual(capped["predicted"]["rounds"]["mean"], 0.0)
+
+    def test_prs_per_100_commits_rises_while_delivered_work_does_not(self):
+        calibration = copy.deepcopy(self.calibrate(Fixture(n_prs=100, days=20)))
+        calibration["pr_size"]["commits"]["histogram"] = {"8": 1}
+        calibration["pr_size"]["commits"]["median"] = 8.0
+        baseline = simulation.run(
+            calibration, simulation.Scenario(), seed=5, replications=6
+        )
+        capped = simulation.run(
+            calibration, simulation.Scenario(size_cap_commits=3),
+            seed=5, replications=6,
+        )
+        self.assertGreater(
+            capped["predicted"]["prs_per_100_commits"],
+            baseline["predicted"]["prs_per_100_commits"],
+        )
+        work_delta = abs(
+            capped["predicted"]["throughput_work_per_day"]
+            - baseline["predicted"]["throughput_work_per_day"]
+        ) / max(1e-9, baseline["predicted"]["throughput_work_per_day"])
+        self.assertLess(work_delta, 0.10)
+        compare = simulation.compare(
+            baseline, capped, held_constant=self.STABILITY
+        )
+        packaging = next(
+            entry for entry in compare["guardrails"]["modelled"]
+            if entry["id"] == "prs_per_100_commits"
+        )
+        self.assertGreater(packaging["scenario"], packaging["baseline"])
+        self.assertTrue(packaging["worse"])
+        self.assertIn("packaging", packaging["note"])
+
+    def test_every_preset_carries_the_modelled_keys_and_the_held_baselines(self):
+        from analysis import advice
+        calibration = self.calibrate(Fixture(n_prs=100, days=20))
+        for policy in advice.POLICIES:
+            result = simulation.simulate(
+                calibration,
+                simulation.Scenario.from_dict(policy["scenario"]),
+                seed=5, replications=2, held_constant=self.STABILITY,
+            )
+            self.assertTrue(result["validation"]["ok"], policy["id"])
+            guardrails = result["compare"]["guardrails"]
+            ids = {entry["id"] for entry in guardrails["modelled"]}
+            self.assertTrue({
+                "rounds_mean", "rounds_p85", "prs_per_100_commits",
+                "escalated_share", "declined_per_100",
+            } <= ids, policy["id"])
+            held = {
+                entry["id"]: entry for entry in guardrails["held_constant"]
+            }
+            # the held baselines are the measured panel's, from one source
+            self.assertEqual(held["reopen"]["baseline"], 0.057)
+            self.assertEqual(held["failed_verification"]["baseline"], 0.046)
+            self.assertEqual(held["zero_approval_merges"]["baseline"], 0)
+            self.assertIn("held constant", held["reopen"]["note"])
+            self.assertEqual(
+                guardrails["not_modelled"][0]["id"], "bug_share"
+            )
+
+    def test_a_store_without_the_ticket_layer_states_what_is_not_modelled(self):
+        calibration = self.calibrate(Fixture(n_prs=60, days=20))
+        baseline = simulation.run(
+            calibration, simulation.Scenario(), seed=5, replications=1
+        )
+        capped = simulation.run(
+            calibration, simulation.Scenario(review_round_cap=2),
+            seed=5, replications=1,
+        )
+        guardrails = simulation.compare(baseline, capped)["guardrails"]
+        self.assertEqual(guardrails["held_constant"], [])
+        reasons = {entry["id"]: entry.get("reason")
+                   for entry in guardrails["not_modelled"]}
+        self.assertIn("reopen", reasons)
+        self.assertIn("no ticket layer", reasons["reopen"])
+
+
 if __name__ == "__main__":
     unittest.main()

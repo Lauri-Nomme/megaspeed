@@ -16,6 +16,7 @@
  */
 
 import { esc, fmtHours } from './format.js';
+import { fmtShare } from './yield.js';
 
 /** A predicted value: always `≈`, never a bare number (prd/10 §3.4). */
 export function predHours(hours) {
@@ -209,11 +210,52 @@ function signed(percent) {
   return `${value > 0 ? '+' : value < 0 ? '−' : ''}${Math.abs(value).toFixed(1)} %`;
 }
 
-function deltaCell(entry) {
-  if (!entry || entry.percent == null) return '<td class="c-delta muted" data-label="Δ">–</td>';
+function deltaCell(entry, extra = '') {
+  if (!entry || entry.percent == null) return `<td class="c-delta muted" data-label="Δ">–${extra}</td>`;
   const cls = entry.better === true ? 'good' : entry.better === false ? 'bad' : 'muted';
   const arrow = entry.direction === 'down' ? '▾' : entry.direction === 'up' ? '▴' : '·';
-  return `<td class="c-delta ${cls}" data-label="Δ">${arrow} ${signed(entry.percent)}</td>`;
+  return `<td class="c-delta ${cls}" data-label="Δ">${arrow} ${signed(entry.percent)}${extra}</td>`;
+}
+
+function guardrailNumber(value) {
+  if (value == null || !isFinite(Number(value))) return '–';
+  const number = Number(value);
+  return String(Math.round(number * 100) / 100);
+}
+
+/**
+ * prd/62: the guardrail under a scenario's cycle delta.
+ *
+ * The sentence is built from `compare.guardrails` — the same block the Rules
+ * note renders — so the two surfaces cannot disagree. A modelled fact is the
+ * run's own value; the held baselines are the measured stability panel. When
+ * nothing modelled is available the line starts with "held constant:", never
+ * silence.
+ */
+export function labGuardrail(compare) {
+  const guardrails = compare && compare.guardrails;
+  if (!guardrails) return '';
+  const modelled = (guardrails.modelled || []);
+  const primary = modelled.find((entry) => entry.id === 'rounds_mean') || modelled[0];
+  const held = (guardrails.held_constant || [])
+    .find((entry) => entry.id === 'reopen');
+  const bits = [];
+  if (primary && primary.baseline != null && primary.scenario != null) {
+    bits.push(`${primary.label || 'rounds'} ${guardrailNumber(primary.baseline)} → ${
+      guardrailNumber(primary.scenario)}`);
+  }
+  if (held && held.baseline != null) {
+    bits.push(`reopen ${bits.length ? 'held at' : 'held constant at'} ${fmtShare(held.baseline)}`);
+  }
+  if (!bits.length) return '';
+  return `guardrail: ${bits.join(' · ')}`;
+}
+
+/** The guardrail line as markup, under the headline cycle row. */
+export function guardrailCell(compare) {
+  const line = labGuardrail(compare);
+  if (!line) return '';
+  return `<span class="policy-guardrail" data-policy-guardrail>${esc(line)}</span>`;
 }
 
 /**
@@ -225,12 +267,12 @@ export function verdictCell(entry) {
   return `<td class="c-verdict ${entry.verdict_tone || 'muted'}" data-label="verdict">${esc(entry.verdict)}</td>`;
 }
 
-function row(label, baseline, scenario, delta, note = '') {
+function row(label, baseline, scenario, delta, note = '', extra = '') {
   return `<tr>
     <td class="c-metric" data-label="">${esc(label)}${note ? `<span class="policy-row-note">${esc(note)}</span>` : ''}</td>
     <td class="c-base" data-label="baseline">${baseline}</td>
     <td class="c-scen" data-label="scenario">${scenario}</td>
-    ${deltaCell(delta)}
+    ${deltaCell(delta, extra)}
     ${verdictCell(delta)}
   </tr>`;
 }
@@ -253,7 +295,8 @@ export function abMarkup(data) {
   const rows = [
     row('cycle time · median', predHours(left.cycle_hours.median),
       right ? predHours(right.cycle_hours.median) : '—',
-      compare && compare.cycle_median_hours, 'open → merge'),
+      compare && compare.cycle_median_hours, 'open → merge',
+      compare ? guardrailCell(compare) : ''),
     row('cycle time · p90', predHours(left.cycle_hours.p90),
       right ? predHours(right.cycle_hours.p90) : '—',
       compare && compare.cycle_p90_hours),
@@ -442,6 +485,7 @@ export function policyMarkdown(data) {
     `| lead time | ${predHours(base.lead_hours.median)} | ${scenario ? predHours(scenario.lead_hours.median) : '—'} | ${compare ? signed(compare.lead_hours.percent) : '—'} | ${(compare && compare.lead_hours.verdict) || '—'} |`,
     `| bottleneck | ${(data.baseline.bottleneck && data.baseline.bottleneck.person) || '–'} | ${scenario && data.scenario.bottleneck ? data.scenario.bottleneck.person : '—'} | | |`,
     '',
+    labGuardrail(compare) ? `_${labGuardrail(compare)}_` : '',
     compare && compare.verdict ? `**verdict:** ${compare.verdict}` : '',
     `_Every predicted number is an estimate (≈); measured numbers are not. ${compare && compare.within_noise ? 'The delta is within the model\'s run-to-run spread.' : ''}_`,
   ];

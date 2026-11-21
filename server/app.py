@@ -1231,11 +1231,18 @@ def _advice_payload(con, tenant: str, path: Path, court, jira, window, repo: str
         calibration = policy_lab.calibrate(
             court, window, conn=con, refinement=refinement,
         )
+        # prd/62: the measured stability baselines the model does not simulate.
+        # Passing them here means the Rules note and the Policy lab row quote one
+        # source, and a guardrail cannot be held at a number the panel does not
+        # show.
+        stability = jira_analysis.stability(court, jira, window)
         comparisons: dict[str, dict | None] = {}
         if calibration.get("ok", True):
             for policy in advice_crosscheck.POLICIES:
                 scenario = policy_lab.Scenario.from_dict(policy["scenario"])
-                result = policy_lab.simulate(calibration, scenario)
+                result = policy_lab.simulate(
+                    calibration, scenario, held_constant=stability,
+                )
                 comparisons[policy["id"]] = result.get("compare")
         report = (
             advice_crosscheck.report(comparisons)
@@ -1245,6 +1252,19 @@ def _advice_payload(con, tenant: str, path: Path, court, jira, window, repo: str
                 or "the policy lab could not calibrate a model from this store"
             )
         )
+        # prd/62: the lab-implied per-step yield, for the panel's warning dot.
+        # The model fits a rework probability (share of PRs with more than one
+        # push), so its implied clean-review share is its complement; it does
+        # not model the other three steps and the payload says so.
+        probability = ((calibration or {}).get("rework") or {}).get("probability")
+        if report.get("available") and probability is not None:
+            report["implied_yield"] = {
+                "steps": {"review": round(1.0 - float(probability), 3)},
+                "basis": (
+                    "the lab's fitted rework probability (share of PRs with "
+                    "more than one push); it does not model the other steps"
+                ),
+            }
     except Exception as exc:  # noqa: BLE001 - the cross-check must not break Rules
         # A store the model cannot calibrate (or a SimPy edge case) is a stated
         # no-result, not a 503: the measured rules still answer, and the page
@@ -1317,12 +1337,16 @@ def insights(request: Request):
             threads = bundle.threads(con)
             bots = bundle.bots(con)
             sizes = bundle.sizes(con)
+            cross_check = _advice_payload(
+                con, tenant, path, court, jira, window, repo,
+            )
             payload = insights_rules.insights(
                 court, threads, window, level=level, bots=bots, sizes=sizes,
                 jira=jira, caps=caps,
-                policy_lab=_advice_payload(
-                    con, tenant, path, court, jira, window, repo,
-                ),
+                policy_lab=cross_check,
+                # prd/62: the lab-implied step yield (warning dot only); the
+                # measured %C&A never comes from the model.
+                implied=(cross_check or {}).get("implied_yield"),
             )
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
@@ -1650,9 +1674,15 @@ def simulate(request: Request):
             calibration = policy_lab.calibrate(
                 court, window, conn=con, refinement=refinement,
             )
+            # prd/62: the measured stability panel travels with the comparison so
+            # the guardrail's held-constant baselines are the panel's numbers —
+            # measured on the Rules page's own window, so the two surfaces agree.
+            stability = jira_analysis.stability(
+                court, jira, insights_rules.window_for(court, _days(days), jira)
+            )
             payload = policy_lab.simulate(
                 calibration, scenario, seed=seed, tolerance=tolerance,
-                replications=replications,
+                replications=replications, held_constant=stability,
             )
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)

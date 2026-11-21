@@ -516,6 +516,58 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
   review bounces could not be totalled. *Fix target: the QA run had to reconstruct them from raw
   events; on del-combined the counts are 5/4/21 plus DEL-161.*
 
+### First-pass yield — %C&A and rolled %C&A (prd/62)
+- **Definition**: **step %C&A** ("complete and accurate") is the share of the
+  cohort that left a pipeline step without a loop-back *into* it. Four steps:
+  `refine` (created → ready), `develop` (ready → first review), `review` (first
+  review → approval) and `verify` (merge → verification → done). The cohort is
+  the **completed stories** in the window (a delivery). **Rolled %C&A** is the
+  product of the four step yields, with the **joint clean count** reported next
+  to it — the measured number of stories clean at every step; the two can differ
+  slightly because a story can loop at more than one step.
+- **Derivation**: `analysis/jira.first_pass_yield`, one place for the exact
+  transitions. `refine` is clean with no `ready → backlog` return and no
+  `pointed` after `started`; `develop` with no `in_review → in_progress`;
+  `review` with **zero review rounds across every merged PR** (a story with two
+  PRs must pass review twice, §6 Review round); `verify` with no
+  `in_verification → in_progress` and no `done → ready` reopen. A step whose
+  falsifying transitions do not exist in the store is **unfalsifiable**
+  (`rate: null`), never a perfect score; below `MIN_DELIVERIES` (10) no
+  percentage is shown, counts only.
+- **Purpose**: the cost side of every speed lever. "Cap review at 2 rounds" is
+  not "ship unreviewed" when only 13 % of stories pass review cleanly — it is
+  "stop asking for the fourth round".
+
+### Stability rate (prd/62)
+- **Definition**: a loop-back count ÷ deliveries in the window: **reopen**
+  (`done → ready`), **failed verification** (`in_verification → in_progress`)
+  and **review bounce** (`in_review → in_progress`) are direct rates. **Bug
+  share** (bug-type stories ÷ deliveries) and the **rework proxy** (reopened or
+  failed verification ÷ deliveries) are **labelled proxies** — this is *not*
+  DORA's change-failure or rework rate, because the store has no deploy or
+  incident source. The bug share needs the Jira issue type; when the store does
+  not carry it the tile is a dash with the reason, and `summary_class` is never
+  substituted (it classifies summary text, not the issue type).
+- **Derivation**: `analysis/jira.stability`, the same status history §6 Story
+  rework reads, over deliveries rather than the whole store.
+- **Purpose**: name the instability the Rules page's speed levers trade
+  against, without claiming a metric the data cannot support.
+
+### Guardrail (prd/62)
+- **Definition**: a quality or rework measure shown **next to a lever's
+  predicted speed effect**, marked `modelled` (a fact of the simulation run) or
+  `held_constant` (the model cannot represent it; its measured baseline is
+  printed with the reason). A lever with no lab result has no guardrail line and
+  says "no lab verdict", rather than inventing a cost.
+- **Derivation**: `analysis/simulation._guardrails` builds the modelled half
+  from the A/B's own run (rounds, PRs per 100 commits, escalation and decline
+  shares); the server passes the measured stability panel in for the held half.
+  `analysis/advice` turns it into the one sentence the rule and the Policy lab
+  both show, from one source.
+- **Purpose**: every speed lever carries its cost. A round cap that lowers
+  rounds by construction says reopen and failed verification are **held
+  constant**, because the model re-loops the review and does not rework code.
+
 ### Constraint ranking (delivery/queue)
 - **Definition**: open items ranked by who they wait on and the wait-hours that costs.
 - **Derivation**: per §2 constraint; **bots excluded, sentinel named**; a "mean wait N d" must use the

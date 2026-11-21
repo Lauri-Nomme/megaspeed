@@ -2149,13 +2149,18 @@ def sentinel_tail(court: ballcourt.BallCourt, window) -> dict:
 def metrics(court: ballcourt.BallCourt, threads: list[dict], window,
             sizes: dict[str, dict] | None = None,
             jira: jira_analysis.JiraData | None = None,
-            caps: dict | None = None) -> dict:
+            caps: dict | None = None,
+            implied: dict | None = None) -> dict:
     """Every prd/17 metric, in one deterministic pass.
 
     The Jira half (prd/21) is merged in under its own keys; with no Jira data in
     the store every one of those metrics is ``available: false`` with the same
     note, so "the ticket layer is missing" is a stated result rather than a
     silent zero. ``caps`` is the tenant's PR-size calibration (prd/39).
+
+    ``implied`` is prd/62's per-step yield the policy lab's fitted model implies
+    (supplied by the server); it only marks a step for a warning dot, never
+    replaces a measured rate.
     """
     done_tickets = jira_analysis.done_keys(jira) if jira is not None else set()
     return {
@@ -2176,6 +2181,12 @@ def metrics(court: ballcourt.BallCourt, threads: list[dict], window,
         "vacation_blocking": vacation_blocking(court, window),
         "stacked_cascade": stack_analysis.metrics(court, window),
         "review_cost": review_cost(court, window),
+        # prd/62: the cost side of every lever — per-step %C&A and its product
+        # (the delivered cohort) plus the labelled stability rates next to it.
+        "yield": jira_analysis.first_pass_yield(
+            court, jira, window, implied=implied
+        ),
+        "stability": jira_analysis.stability(court, jira, window),
         # prd/21: the ticket layer. Keys are distinct from the PR-level ones so
         # a reader can never confuse "merged with no approval" (conformance)
         # with "started before refinement" (jira_conformance).
@@ -3612,6 +3623,7 @@ def insights(
     jira: jira_analysis.JiraData | None = None,
     caps: dict | None = None,
     policy_lab: dict | None = None,
+    implied: dict | None = None,
 ) -> dict:
     """The API payload: metrics + ranked, evidence-backed suggestions.
 
@@ -3623,10 +3635,15 @@ def insights(
     own preset results, which :func:`analysis.advice.attach` stamps onto the
     matching rules. The server computes it (and caches it); a caller that does
     not pass it gets a stated no-result block, never an invented note.
+
+    ``implied`` is prd/62's lab-implied per-step yield (the model's own fitted
+    rework), used only to place a warning dot on a step below it.
     """
     start, end = window
     chosen_caps = size_caps(caps)
-    computed = metrics(court, threads, window, sizes, jira, caps=chosen_caps)
+    computed = metrics(
+        court, threads, window, sizes, jira, caps=chosen_caps, implied=implied
+    )
     round_hours = computed["review_cost"]["hours_per_round"]
     suggestions = rank(templates(computed, level, round_hours, bots, window=window))
     # prd/43 §1: the lab's verdict travels with the rule it bears on.

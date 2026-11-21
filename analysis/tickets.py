@@ -1489,6 +1489,9 @@ def ticket(
         "open_prs": open_prs,
         "reopened": segments["reopened"],
         "reopen_count": segments["reopen_count"],
+        # prd/62: this story's four-step pass — refined / developed / reviewed /
+        # verified, with the signals whose absence made each step clean.
+        "yield": jira.story_yield(court, story),
         "segments": segments,
         "prs": prs,
         "pr_count": len(prs),
