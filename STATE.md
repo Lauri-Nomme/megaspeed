@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1262** (`tests/`) + **99** (`scrape/tests`) + **498** (node `app/test`) green.
+Tests: **1279** (`tests/`) + **99** (`scrape/tests`) + **498** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -51,6 +51,11 @@ Tests: **1262** (`tests/`) + **99** (`scrape/tests`) + **498** (node `app/test`)
   boundaries and the QA segment are measured on live data (e.g. DEL-167 `verification→done` = 8.0 h).
 - **Scope**: `MEGASPEED_TICKET_KEYS` > `MEGASPEED_JIRA_EPICS` (resolves epics → children, one extra search)
   > `MEGASPEED_JIRA_PROJECTS`. Scope rides the manifest → `--verify` enforces it with only the epic env set.
+- **Team scoping (prd/66)**: `MEGASPEED_JIRA_TEAMS` is an **AND** criterion alongside projects / epics /
+  keys (teams *within* those), resolved once through the team field. "Team" is not a standard Jira field:
+  it is the Atlassian Teams custom field (`com.atlassian.teams:rm-teams-custom-field-team`), discovered
+  by name or pinned with `MEGASPEED_JIRA_TEAM_FIELD`. `python3 -m ingest.jira_fields --issue KEY`
+  (or `--list`) prints the field id, one ticket's values and the exact settings to use.
 - **Cloud Jira** (`--jira-cloud`): `proxy/cloud_jira_proxy.py` emulates Cloud v3 over the DC lab
   (Bearer PAT, cursor pagination, name-discovered custom fields, Tempo stub); verified byte-equivalent.
 - **Tempo worklogs (prd/30)**: DC + Cloud read Tempo timesheets (`/rest/tempo-timesheets/4/worklogs/{key}`)

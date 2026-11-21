@@ -49,8 +49,21 @@ _KEY_TOKEN = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,9}-\d{1,6}$")
 # to the union, through the same ``key in (...)`` path an explicit key set uses.
 #   MEGASPEED_JIRA_EPICS=DEL-1,DEL-2
 # Precedence (most specific wins): MEGASPEED_TICKET_KEYS > MEGASPEED_JIRA_EPICS >
-# MEGASPEED_JIRA_PROJECTS.
+# MEGASPEED_JIRA_PROJECTS. Teams are a separate AND criterion (prd/66), not a
+# tier in this precedence.
 DEFAULT_JIRA_EPICS: tuple[str, ...] = ()
+
+# An explicit *team set* (prd/66): the same shape as an epic set, but resolved
+# through the team field instead of "Epic Link". "Team" is not a standard Jira
+# field; it is the Atlassian Teams custom field (schema
+# ``com.atlassian.teams:rm-teams-custom-field-team``), usually named "Team" and
+# installed by Advanced Roadmaps / Teams. The field id is discovered by name or
+# pinned with ``MEGASPEED_JIRA_TEAM_FIELD``.
+#   MEGASPEED_JIRA_TEAMS="Platform,Payments"
+#   MEGASPEED_JIRA_TEAM_FIELD=customfield_10111
+# Teams are AND-ed with the key/epic/project criterion: ``TEAMS`` + ``EPICS``
+# means "these epics, within these teams" (prd/66), never "teams instead of".
+MAX_TEAM_LENGTH = 200
 
 # prd/29: the workflow status map. A real install's statuses (OPEN, READY FOR
 # REFINEMENT, REFINED, IN PROGRESS, IN REVIEW, IN VERIFICATION, CLOSED) project
@@ -142,9 +155,20 @@ class Config:
     jira_projects: tuple[str, ...] = ()
     #: An explicit epic set (prd/27). Resolved at scrape start to the epics plus
     #: their children (``"Epic Link" in (...)``) and scraped through the explicit
-    #: key-set path. Ignored when ``ticket_keys`` is set: the more specific scope
-    #: wins (ticket keys > epics > projects).
+    #: key-set path. An **AND** criterion when teams are also configured (prd/66).
     jira_epics: tuple[str, ...] = DEFAULT_JIRA_EPICS
+    #: prd/66: a **team** set, resolved to the issues that carry one of these
+    #: values in the team field. Same shape as an epic set: one extra search at
+    #: scrape start, then an ordinary explicit-key-set walk, so the manifest and
+    #: ``--verify`` scope the store the same way. "Team" is *not* a standard Jira
+    #: field (it is the Atlassian Teams custom field, normally "Team"); the id is
+    #: discovered by name or pinned with ``team_field``.
+    jira_teams: tuple[str, ...] = ()
+    #: The team field: a name (``Team``), a field id (``customfield_10111``) or a
+    #: JQL reference (``cf[10111]``). Empty => discover the field named "Team";
+    #: a missing field is an operator error that names the inspector
+    #: (``python3 -m ingest.jira_fields --list``).
+    jira_team_field: str = ""
     #: prd/29: normalised workflow status name -> stage. Empty => the Jira
     #: category projection (new/indeterminate/done), i.e. the pre-prd/29
     #: numbers with ``backlog`` in place of ``todo``.
@@ -252,6 +276,31 @@ def parse_epic_keys(value: str | list | tuple) -> tuple[str, ...]:
     applies: a typo is an operator error, never a silently smaller scope.
     """
     return _parse_key_set(value, "MEGASPEED_JIRA_EPICS=DEL-1,DEL-2")
+
+
+def parse_teams(value: str | list | tuple) -> tuple[str, ...]:
+    """Parse a team set (``Platform,Payments`` or a list; prd/66).
+
+    Team *names* are display strings, not key-shaped tokens: case, spaces and
+    punctuation are preserved (JQL matches the field value), so the only
+    normalisation is trimming and de-duplication. An empty entry is skipped; a
+    value longer than :data:`MAX_TEAM_LENGTH` is an operator error (a pasted
+    description is not a team).
+    """
+    items = value if isinstance(value, (list, tuple)) else str(value).split(",")
+    teams: list[str] = []
+    for item in items:
+        name = str(item).strip()
+        if not name:
+            continue
+        if len(name) > MAX_TEAM_LENGTH:
+            raise SystemExit(
+                f"bad MEGASPEED_JIRA_TEAMS entry {name[:30]!r}…: a team name is at most "
+                f"{MAX_TEAM_LENGTH} characters (comma-separated)"
+            )
+        if name not in teams:
+            teams.append(name)
+    return tuple(teams)
 
 
 def parse_status_map(
@@ -423,6 +472,12 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     jira_epics = parse_epic_keys(
         os.environ.get("MEGASPEED_JIRA_EPICS", jira.get("epics", []))
     )
+    # prd/66: a team set is resolved at scrape start through the team field; the
+    # field is a *name* by default because "Team" is a custom field and its id
+    # differs per installation (the inspector prints the id).
+    jira_teams = parse_teams(
+        os.environ.get("MEGASPEED_JIRA_TEAMS", jira.get("teams", []))
+    )
     # prd/29: the workflow status -> stage map. The TOML table is the record;
     # the env var merges over it per status name, so a one-off run can widen the
     # mapping without editing the committed config.
@@ -439,7 +494,7 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         key_shape=os.environ.get("MEGASPEED_KEY_SHAPE", filt.get("key_shape", DEFAULT_KEY_SHAPE)),
         ticket_projects=parse_projects(
             os.environ.get("MEGASPEED_TICKET_PROJECTS", filt.get("ticket_projects", list(DEFAULT_TICKET_PROJECTS))),
-            required=not (ticket_keys or jira_epics),
+            required=not (ticket_keys or jira_epics or jira_teams),
         ),
         ticket_keys=ticket_keys,
         bot_slugs=_parse_slugs(
@@ -483,6 +538,11 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         ),
         # prd/27: the epic set is resolved to epics + children at scrape start.
         jira_epics=jira_epics,
+        # prd/66: the team set is resolved through the team field at scrape start.
+        jira_teams=jira_teams,
+        jira_team_field=str(
+            os.environ.get("MEGASPEED_JIRA_TEAM_FIELD", jira.get("team_field", "")) or ""
+        ).strip(),
         jira_status_map=jira_status_map,
         jira_auth_user=os.environ.get("MEGASPEED_JIRA_USER", ""),
         jira_auth_password=os.environ.get("MEGASPEED_JIRA_PASSWORD", ""),

@@ -117,6 +117,18 @@ board = 0
 epic_link_field = ""
 sprint_field = ""
 story_points_field = ""
+# Team scoping (prd/66): read only the issues carrying one of these team values.
+# "Team" is NOT a standard Jira field -- it is the Atlassian Teams custom field
+# (schema com.atlassian.teams:rm-teams-custom-field-team), so its id differs per
+# site. Leave the field empty to discover the field named "Team"; run
+#   .venv/bin/python -m ingest.jira_fields --issue DEL-100
+# to see the id and the values this site actually uses.
+#   export MEGASPEED_JIRA_TEAMS="Platform,Payments"
+#   export MEGASPEED_JIRA_TEAM_FIELD=customfield_10111   # only if the name is ambiguous
+# Teams are a separate AND criterion: with epics/projects, the import is the
+# intersection ("these epics, within these teams"), never "teams instead of".
+teams = []
+team_field = ""
 
 # Jira Cloud (prd/24): the same ticket layer over Cloud's v3 API + a Bearer PAT.
 # Credentials come from the environment only:

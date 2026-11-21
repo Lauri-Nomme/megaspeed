@@ -41,7 +41,7 @@ from collections import Counter
 from pathlib import Path
 
 from . import __version__, classify, gitclass
-from .config import REPO_ROOT, Config, filter_scope, load_config
+from .config import REPO_ROOT, Config, filter_scope, load_config, parse_teams
 from .hans import HansTransport
 from .progress import DEFAULT_INTERVAL as DEFAULT_PROGRESS_INTERVAL
 from .progress import ProgressReporter
@@ -171,7 +171,7 @@ def _issue_type_name(row: dict) -> str:
 def _jira_probe(cfg: Config, transport, as_json: bool, client=None) -> int:
     """Read-only Jira diagnostics: version, board, sprints, issue counts."""
     from .jira import FIELD_EPIC_LINK, FIELD_SPRINT, FIELD_STORY_POINTS, JiraClient
-    from .scrape_jira import ISSUE_TYPES, jql_for
+    from .scrape_jira import ISSUE_TYPES, TEAM_FIELD_NAME, jql_for
 
     client = client or JiraClient(transport, page_limit=cfg.jira_page_limit, min_interval=0.05)
     version = (client.check() or {}).get("version")
@@ -185,6 +185,9 @@ def _jira_probe(cfg: Config, transport, as_json: bool, client=None) -> int:
             "epic_link": cfg.jira_epic_link_field or fields.get(FIELD_EPIC_LINK),
             "sprint": cfg.jira_sprint_field or fields.get(FIELD_SPRINT),
             "story_points": cfg.jira_story_points_field or fields.get(FIELD_STORY_POINTS),
+            # prd/66: "Team" is a custom field, so showing the discovered id here
+            # is the quickest way to see whether this site has one.
+            "team": cfg.jira_team_field or fields.get(TEAM_FIELD_NAME),
         },
         "boards": {},
         "sprints": {},
@@ -229,12 +232,18 @@ def _print_jira_scrape(r: dict) -> None:
     print(f"identity map   {r['identity_map']}")
     print(f"projects       {', '.join(r['projects'])}")
     epics = tuple(r.get("jira_epics") or ())
+    teams = tuple(r.get("jira_teams") or ())
     keys = tuple(r.get("ticket_keys") or ())
     scope = (
         # prd/27: the epic set resolved to epics + children; listing 100 keys
         # would bury the line, so name the epics and count the union.
         f"epics {','.join(epics)} -> {len(keys)} key(s)"
-        if epics
+        if epics and not teams
+        # prd/66: teams are an AND criterion; say so when both are in play.
+        else f"epics {','.join(epics)} AND teams {', '.join(teams)} -> {len(keys)} key(s)"
+        if epics and teams
+        else f"teams {', '.join(teams)} -> {len(keys)} key(s)"
+        if teams
         else filter_scope(tuple(r['ticket_projects']), keys)
     )
     print(f"ticket filter  {r['ticket_regex']}   ({scope})")
@@ -413,6 +422,12 @@ def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
                          " worklog (prd/30); implies --jira, and applies to --jira-cloud too")
     ap.add_argument("--project", action="append", default=None, metavar="KEY",
                     help="--jira: override the configured Jira projects (repeatable)")
+    ap.add_argument("--team", action="append", default=None, metavar="NAME",
+                    help="--jira: scrape only the issues carrying one of these team values in"
+                         " the team field (repeatable; prd/66). AND-ed with keys/epics/projects")
+    ap.add_argument("--team-field", default=None, metavar="NAME|ID",
+                    help="--jira: the team field's name or id (default: discover the field"
+                         " named 'Team'; see `python3 -m ingest.jira_fields --list`)")
     ap.add_argument("--limit", type=int, default=None, metavar="N",
                     help="--jira: read at most N issues (dev/demo)")
     ap.add_argument("--out", default=None, metavar="PATH.tgz",
@@ -517,6 +532,15 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             repos.append((project, repo))
         cfg.repos = repos
+    # prd/66: --team / --team-field override the environment for one run.
+    if args.team:
+        try:
+            cfg.jira_teams = parse_teams(args.team)
+        except SystemExit as exc:
+            print(str(exc.code) if exc.code not in (0, None) else "bad --team", file=sys.stderr)
+            return 2
+    if args.team_field:
+        cfg.jira_team_field = str(args.team_field).strip()
     if args.no_prefilter:
         cfg.prefilter = False
     if args.no_push_class:

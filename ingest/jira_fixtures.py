@@ -40,7 +40,9 @@ FIELDS = [
     {"id": "customfield_10100", "name": "Epic Link", "custom": True},
     {"id": "customfield_10104", "name": "Sprint", "custom": True},
     {"id": "customfield_10106", "name": "Story Points", "custom": True},
-    {"id": "customfield_10111", "name": "Team", "custom": True},
+    {"id": "customfield_10111", "name": "Team", "custom": True,
+     "schema": {"type": "any",
+                "custom": "com.atlassian.teams:rm-teams-custom-field-team"}},
 ]
 
 STATUS_TODO = {"id": "10000", "name": "To Do", "statusCategory": {"key": "new", "name": "To Do"}}

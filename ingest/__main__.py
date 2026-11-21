@@ -94,6 +94,11 @@ def _legacy_parser() -> argparse.ArgumentParser:
                          " + MEGASPEED_JIRA_CLOUD_TOKEN")
     ap.add_argument("--project", action="append", default=None, metavar="KEY",
                     help="--jira: override the configured Jira projects (repeatable)")
+    ap.add_argument("--team", action="append", default=None, metavar="NAME",
+                    help="--jira: scrape only the issues carrying one of these team values"
+                         " (repeatable; prd/66). See `python3 -m ingest.jira_fields`")
+    ap.add_argument("--team-field", default=None, metavar="NAME|ID",
+                    help="--jira: the team field's name or id (default: discover 'Team')")
     ap.add_argument("--limit", type=int, default=None, metavar="N",
                     help="--jira: read at most N issues")
     ap.add_argument("--n", type=int, default=None,
@@ -151,6 +156,18 @@ def main(argv: list[str] | None = None) -> int:
     cfg: Config = load_config(args.config)
     if args.db:
         cfg.db_path = Path(args.db).expanduser().resolve()
+    # prd/66: one-run team scope override (the env/config value still wins when
+    # no flag is given).
+    if getattr(args, "team", None):
+        from .config import parse_teams
+
+        try:
+            cfg.jira_teams = parse_teams(args.team)
+        except SystemExit as exc:
+            print(str(exc.code) if exc.code not in (0, None) else "bad --team", file=sys.stderr)
+            return 2
+    if getattr(args, "team_field", None):
+        cfg.jira_team_field = str(args.team_field).strip()
     if args.repo:
         repos = []
         for item in args.repo:

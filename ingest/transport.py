@@ -183,9 +183,13 @@ _JIRA_SPRINT_ISSUES = re.compile(r"^/rest/agile/1\.0/sprint/(?P<id>\d+)/issue$")
 _JIRA_BOARD_SPRINTS = re.compile(r"^/rest/agile/1\.0/board/(?P<id>\d+)/sprint$")
 _JQL_KEY_IN = re.compile(r"key\s+in\s*\(([^)]*)\)", re.I)
 _JQL_PROJECT = re.compile(r"project\s*(?:=\s*|in\s*\()\s*\"?([A-Za-z0-9_]+)\"?", re.I)
+#: prd/66: ``project in ("A","B")`` -- the team search AND-ed with a project list.
+_JQL_PROJECT_LIST = re.compile(r"project\s+in\s*\(([^)]*)\)", re.I)
 _JQL_UPDATED = re.compile(r"updated\s*>=\s*\"?([^\"]+)\"?", re.I)
 #: prd/27: the one search that resolves an epic set to its children.
 _JQL_EPIC_LINK = re.compile(r"\"?\s*Epic Link\s*\"?\s+in\s*\(([^)]*)\)", re.I)
+#: prd/66: a custom-field ``in`` clause, by display name or ``cf[<id>]``.
+_JQL_CUSTOM_IN = re.compile(r"(?:\"([^\"]+)\"|cf\[(\d+)\])\s+in\s*\(([^)]*)\)", re.I)
 
 
 def _jql_time(value: str) -> datetime:
@@ -198,8 +202,9 @@ def _jql_time(value: str) -> datetime:
     return datetime.fromisoformat(text).astimezone(timezone.utc)
 
 
-def _jql_filter(issues: list[dict], jql: str, epic_field: str = "customfield_10100") -> list[dict]:
-    """The tiny subset of JQL this fixture honours (keys, project, updated, epic)."""
+def _jql_filter(issues: list[dict], jql: str, epic_field: str = "customfield_10100",
+                fields: list[dict] | None = None) -> list[dict]:
+    """The tiny subset of JQL this fixture honours (keys, project, updated, epic, custom)."""
     selected = list(issues)
     match = _JQL_KEY_IN.search(jql or "")
     if match:
@@ -208,14 +213,27 @@ def _jql_filter(issues: list[dict], jql: str, epic_field: str = "customfield_101
         }
         selected = [i for i in selected if str(i.get("key", "")).upper() in wanted]
     else:
-        match = _JQL_PROJECT.search(jql or "")
+        match = _JQL_PROJECT_LIST.search(jql or "")
         if match:
-            project = match.group(1).strip().upper()
+            wanted = {
+                _jql_unquote(token.strip()).upper()
+                for token in _split_jql_values(match.group(1))
+                if token.strip()
+            }
             selected = [
                 i
                 for i in selected
-                if str(i.get("key", "")).upper().startswith(project + "-")
+                if str(i.get("key", "")).partition("-")[0].upper() in wanted
             ]
+        else:
+            match = _JQL_PROJECT.search(jql or "")
+            if match:
+                project = match.group(1).strip().upper()
+                selected = [
+                    i
+                    for i in selected
+                    if str(i.get("key", "")).upper().startswith(project + "-")
+                ]
     # prd/27: ``"Epic Link" in (PROJ-1)`` -- the epic set resolved to its children.
     match = _JQL_EPIC_LINK.search(jql or "")
     if match:
@@ -235,7 +253,84 @@ def _jql_filter(issues: list[dict], jql: str, epic_field: str = "customfield_101
             for i in selected
             if _jql_time(str((i.get("fields") or {}).get("updated") or "1970-01-01")) >= cutoff
         ]
+    # prd/66: a custom-field clause (``cf[10111] in ("Platform")`` or
+    # ``"Team" in ("Platform")``), matched by the field's *value* (a string, or
+    # an object/list whose ``name`` carries it). This is what lets a team-scoped
+    # fixture run resolve its key set exactly like a real installation.
+    by_name = {
+        str(entry.get("name") or "").strip().lower(): str(entry.get("id") or "")
+        for entry in (fields or ())
+        if entry.get("name") and entry.get("id")
+    }
+    for clause in _JQL_CUSTOM_IN.finditer(jql or ""):
+        name, cf_id, values = clause.group(1), clause.group(2), clause.group(3)
+        if cf_id:
+            field_id = f"customfield_{cf_id}"
+        else:
+            field_id = by_name.get(str(name or "").strip().lower(), "")
+        if not field_id or field_id == epic_field:
+            continue    # key/project/issuetype, or the epic clause handled above
+        wanted = {
+            _jql_unquote(token.strip()).lower()
+            for token in _split_jql_values(values)
+            if token.strip()
+        }
+        selected = [
+            i for i in selected
+            if _field_names((i.get("fields") or {}).get(field_id)) & wanted
+        ]
     return selected
+
+
+def _jql_unquote(value: str) -> str:
+    """A JQL literal without its quotes/escapes, for case-folded comparison."""
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] == '"':
+        text = text[1:-1]
+    return text.replace('\\"', '"').replace("\\\\", "\\")
+
+
+def _split_jql_values(value: str) -> list[str]:
+    """Split ``"A","B, C"`` into its literals (a comma inside quotes is data)."""
+    out: list[str] = []
+    current: list[str] = []
+    quoted = False
+    escaped = False
+    for char in value:
+        if escaped:
+            current.append(char)
+            escaped = False
+        elif char == "\\":
+            current.append(char)
+            escaped = True
+        elif char == '"':
+            current.append(char)
+            quoted = not quoted
+        elif char == "," and not quoted:
+            out.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    if current:
+        out.append("".join(current))
+    return out
+
+
+def _field_names(value) -> set[str]:
+    """Case-folded names a field value can be compared by (object/list/string)."""
+    if isinstance(value, list):
+        names: set[str] = set()
+        for item in value:
+            names |= _field_names(item)
+        return names
+    if isinstance(value, dict):
+        for key in ("name", "value"):
+            if value.get(key):
+                return {str(value[key]).strip().lower()}
+        return set()
+    if value in (None, ""):
+        return set()
+    return {str(value).strip().lower()}
 
 
 class FixtureJiraTransport:
@@ -275,7 +370,8 @@ class FixtureJiraTransport:
             return list(self.bundle.get("statuses", []))
         if path == "/rest/api/2/search":
             rows = _jql_filter(
-                list(self._issues.values()), str(params.get("jql") or ""), self._epic_field
+                list(self._issues.values()), str(params.get("jql") or ""), self._epic_field,
+                self.bundle.get("fields", []),
             )
             rows.sort(key=lambda i: (str((i.get("fields") or {}).get("updated") or ""), i["key"]))
             fields = [f.strip() for f in str(params.get("fields") or "key").split(",")]

@@ -12,13 +12,22 @@ python3 -m ingest scrape --jira-cloud --live --project DEL --out export/del-jira
 python3 -m ingest scrape --jira --fixture --out /tmp/jira-fixture.tgz
 ```
 
-The scope is chosen by the most specific setting available (prd/18, prd/27):
-an explicit ticket set (``MEGASPEED_TICKET_KEYS``) beats an epic set
-(``MEGASPEED_JIRA_EPICS``), which beats the project list
-(``MEGASPEED_JIRA_PROJECTS``). An epic set is resolved once, at the start of the
-run, with one extra search (``"Epic Link" in (DEL-1, DEL-2)``); from then on the
-walk is an ordinary explicit-key-set walk, and the resolved keys ride in the
-bundle manifest so import and ``--verify`` scope the store the same way.
+The scope is built from three criteria (prd/18, prd/27, prd/66), in an AND
+relationship where they are independent dimensions:
+
+* an explicit ticket set (``MEGASPEED_TICKET_KEYS``) beats an epic set
+  (``MEGASPEED_JIRA_EPICS``), which picks the *key* criterion when both are set;
+* the project list (``MEGASPEED_JIRA_PROJECTS``) is the criterion when no key or
+  epic set is selected;
+* a **team set** (``MEGASPEED_JIRA_TEAMS``) is a separate criterion and is
+  AND-ed with whichever of the above is active: teams within these epics, teams
+  within these projects, teams within these keys.
+
+An epic or team set is resolved once, at the start of the run, with one extra
+search (``"Epic Link" in (DEL-1, DEL-2)`` / ``cf[10111] in ("Platform")``); from
+then on the walk is an ordinary explicit-key-set walk, and the resolved keys
+ride in the bundle manifest so import and ``--verify`` scope the store the same
+way.
 
 The Cloud variant (prd/24) is the *same* walk and the same reducer with a
 different client (:class:`ingest.jira_cloud.CloudJiraClient`): v3 paths, Bearer
@@ -331,6 +340,11 @@ class JiraCollected:
     ticket_keys: tuple[str, ...] = ()
     #: The epic keys the operator asked for (prd/27); empty unless epic-scoped.
     epic_keys: tuple[str, ...] = ()
+    #: The team values the operator asked for (prd/66); empty unless team-scoped.
+    #: ``ticket_keys`` above is the resolved set; this is request provenance.
+    team_keys: tuple[str, ...] = ()
+    #: The team field the set was resolved through (id or name), for provenance.
+    team_field: str = ""
     identity: IdentityTable | None = None
     watermark: datetime | None = None
     boards: dict[str, int] = field(default_factory=dict)
@@ -411,6 +425,152 @@ def _projects_of(keys: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(key.partition("-")[0] for key in keys if "-" in key))
 
 
+#: The Atlassian Teams custom field. "Team" is **not** a standard Jira field: it
+#: is installed by Atlassian Teams / Advanced Roadmaps (schema
+#: ``com.atlassian.teams:rm-teams-custom-field-team``) and its id differs per
+#: site, so the name is only the default lookup key.
+TEAM_FIELD_NAME = "Team"
+
+
+def base_scope(cfg) -> tuple[str, tuple[str, ...]]:
+    """The non-team scope criteria: explicit keys, epics, or the project walk.
+
+    Teams are **not** a tier in this precedence: they are an independent
+    criterion and are AND-ed with whatever this returns (prd/66). So
+    ``MEGASPEED_JIRA_TEAMS`` with ``MEGASPEED_JIRA_EPICS`` means "these epics,
+    within these teams", and with ``MEGASPEED_JIRA_PROJECTS`` it means "these
+    projects, within these teams" -- never "teams instead of".
+    """
+    if cfg.ticket_keys:
+        return "keys", tuple(cfg.ticket_keys)
+    if cfg.jira_epics:
+        return "epics", tuple(cfg.jira_epics)
+    return "projects", ()
+
+
+def _jql_string(value: str) -> str:
+    """A JQL string literal (Jira escapes ``"`` and ``\\`` with a backslash)."""
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def team_field_ref(field: str, fields: dict[str, str]) -> tuple[str, str]:
+    """The team field's (id, JQL reference), discovered or pinned (prd/66).
+
+    ``field`` may be a name (``Team``), an id (``customfield_10111``) or a JQL
+    reference (``cf[10111]``). Empty means discover the field named "Team". A
+    field that cannot be found is an operator error, not a silent fallback to
+    "the whole project": the message names the inspector that prints the site's
+    fields and one ticket's values.
+
+    The id is preferred in JQL (``cf[10111]``) because a site may carry two
+    fields with the same display name; a pinned *name* keeps the name form so it
+    still works when the id is unknown.
+    """
+    pinned = (field or "").strip()
+    if not pinned:
+        pinned = TEAM_FIELD_NAME
+    lowered = {str(name).strip().lower(): str(value) for name, value in fields.items()}
+    if pinned.lower() in lowered:
+        field_id = lowered[pinned.lower()]
+        return field_id, _field_ref(field_id)
+    if pinned.lower().startswith("cf["):
+        inner = pinned[3:-1].strip()
+        return f"customfield_{inner}", pinned
+    if pinned.lower().startswith("customfield_"):
+        return pinned, _field_ref(pinned)
+    if pinned.isdigit():
+        return f"customfield_{pinned}", f"cf[{pinned}]"
+    # A pinned *name* that discovery did not report: keep the name form, so a
+    # site whose /field endpoint hides the field can still be queried.
+    return pinned, _jql_string(pinned)
+
+
+def _field_ref(field_id: str) -> str:
+    """``customfield_10111`` -> ``cf[10111]``; anything else keeps its form."""
+    prefix = "customfield_"
+    if field_id.startswith(prefix) and field_id[len(prefix):].isdigit():
+        return f"cf[{field_id[len(prefix):]}]"
+    return _jql_string(field_id)
+
+
+def jql_for_teams(ref: str, teams: tuple[str, ...],
+                  *, projects: tuple[str, ...] = ()) -> str:
+    """The one extra search that resolves a team set to its issues (prd/66).
+
+    Restricted to the issue types this pipeline imports, so a Bug that carries
+    the team does not widen the key set with a key the walk will skip. When an
+    explicit project list is also configured, it is AND-ed here (one request),
+    which is the same criterion the project walk would apply -- teams are a
+    filter, not a replacement.
+    """
+    clauses = ["issuetype in (" + ", ".join(ISSUE_TYPES) + ")"]
+    if projects:
+        clauses.append("project in (" + ",".join(_jql_string(p) for p in projects) + ")")
+    values = ",".join(_jql_string(team) for team in teams)
+    clauses.append(f"{ref} in ({values})")
+    return " AND ".join(clauses)
+
+
+def resolve_team_keys(
+    client: JiraClient,
+    teams: tuple[str, ...],
+    ref: str,
+    *,
+    projects: tuple[str, ...] = (),
+    progress: ProgressReporter | None = None,
+) -> tuple[str, ...]:
+    """A team set -> the exact issue keys that carry one of those values.
+
+    One search, like the epic resolver; the result is de-duplicated and kept in
+    the search's own order. ``projects`` (when configured) is AND-ed in the JQL,
+    so a team that spans projects only reads the configured ones. An empty
+    result is an operator error: a typo in the field name, a renamed team, or a
+    team with no work in those projects must not become a green, empty scrape.
+    """
+    keys: list[str] = []
+    where = f" in {', '.join(projects)}" if projects else ""
+    for row in client.search(jql_for_teams(ref, teams, projects=projects), fields="key"):
+        key = str(row.get("key") or "")
+        if key and key not in keys:
+            keys.append(key)
+    if not keys:
+        raise SystemExit(
+            f"no issue matches team(s) {', '.join(teams)} via {ref}{where}: check the"
+            " field name and the exact values with `python3 -m ingest.jira_fields --list`"
+            " (fields) and `--issue KEY` (one ticket's values), then set"
+            " MEGASPEED_JIRA_TEAM_FIELD / MEGASPEED_JIRA_TEAMS"
+        )
+    if progress is not None:
+        progress.emit(f"[scrape] teams {', '.join(teams)}{where} -> {len(keys)} key(s)")
+    return tuple(keys)
+
+
+def intersect_team_keys(
+    base: tuple[str, ...],
+    team_keys: tuple[str, ...],
+    *,
+    teams: tuple[str, ...],
+    criterion: str,
+) -> tuple[str, ...]:
+    """The AND of a base key set and the team set, in the base's order (prd/66).
+
+    An empty intersection is an operator error: none of the selected keys
+    carries the selected team(s), which is a scope mistake, not a legitimate
+    empty result (an empty ingest is not a green run).
+    """
+    allowed = set(team_keys)
+    keys = tuple(key for key in base if key in allowed)
+    if not keys:
+        raise SystemExit(
+            f"no issue carries team(s) {', '.join(teams)} in the selected"
+            f" {criterion} set: {len(base)} key(s) were considered and none"
+            " matched. Teams are an AND filter, so check both criteria"
+            " (`python3 -m ingest.jira_fields --issue KEY` shows a ticket's team)."
+        )
+    return keys
+
+
+
 def collect(
     cfg: Config,
     transport,
@@ -471,23 +631,51 @@ def collect(
         # in ``ingest.live``) still reads Tempo when it is configured.
         tempo=cfg.jira_tempo,
     )
-    # -- scope: ticket keys > epics > projects (prd/18, prd/27) -----------
-    # The most specific scope wins. An epic set is resolved here, once, to the
-    # epics plus their children, and from then on the run is an ordinary
-    # explicit-key-set run: same ``key in (...)`` query, same manifest, so
-    # import and ``--verify`` cannot tell the two paths apart.
-    epic_keys = () if cfg.ticket_keys else tuple(cfg.jira_epics)
-    scope_keys = tuple(cfg.ticket_keys)
+    # -- scope: keys/epics/projects, then teams AND-ed in (prd/18, 27, 66) --
+    # A key or epic set is resolved here, once, to an explicit key set. Teams
+    # are an independent criterion: when configured they are AND-ed with that
+    # set (or with the project criterion), never used instead of it.
+    kind, selected = base_scope(cfg)
+    epic_keys = selected if kind == "epics" else ()
+    team_values = tuple(cfg.jira_teams)
+    team_field = ""
+    scope_keys = selected if kind == "keys" else ()
+    fields = client.field_ids()
     if epic_keys:
         scope_keys = resolve_epic_keys(client, epic_keys, progress=progress)
+    if team_values:
+        team_field_id, team_ref = team_field_ref(cfg.jira_team_field, fields)
+        team_field = team_field_id
+        # Project is the criterion only when no key/epic set is selected; a CLI
+        # --project override is the project criterion too.
+        project_criterion = (
+            tuple(projects or cfg.jira_projects) if kind == "projects" else ()
+        )
+        team_keys = resolve_team_keys(
+            client, team_values, team_ref,
+            projects=project_criterion, progress=progress,
+        )
+        if scope_keys:
+            before = len(scope_keys)
+            scope_keys = intersect_team_keys(
+                scope_keys, team_keys, teams=team_values,
+                criterion="ticket-key" if kind == "keys" else "epic",
+            )
+            if progress is not None:
+                progress.emit(
+                    f"[scrape] teams AND {kind}: {before} -> {len(scope_keys)} key(s)"
+                )
+        else:
+            scope_keys = team_keys
     key_filter = KeyFilter.build(
         cfg.ticket_regex, cfg.key_shape, cfg.ticket_projects, scope_keys
     )
-    # The epics name the projects to read sprints from, so an epic-scoped run
+    # The epics/teams name the projects to read sprints from, so a scoped run
     # does not need (or inherit) an unrelated project list.
     project_list = tuple(
         projects
         or (_projects_of(epic_keys) if epic_keys else ())
+        or (_projects_of(scope_keys) if team_values else ())
         or cfg.jira_projects
         or cfg.ticket_projects
     )
@@ -500,6 +688,8 @@ def collect(
         ticket_projects=cfg.ticket_projects,
         ticket_keys=scope_keys,
         epic_keys=epic_keys,
+        team_keys=team_values,
+        team_field=team_field,
         identity=ident,
         resumed=bool(carry_events or carry_objects),
         carried_events=list(carry_events or []),
@@ -509,7 +699,6 @@ def collect(
     stats = out.stats
 
     # -- metadata: field ids + status categories (2 requests) -------------
-    fields = client.field_ids()
     epic_link = cfg.jira_epic_link_field or fields.get(FIELD_EPIC_LINK, "")
     sprint_field = cfg.jira_sprint_field or fields.get(FIELD_SPRINT, "")
     points_field = cfg.jira_story_points_field or fields.get(FIELD_STORY_POINTS, "")
@@ -520,6 +709,7 @@ def collect(
             ("epic_link", epic_link),
             ("sprint", sprint_field),
             ("story_points", points_field),
+            ("team", team_field),
         )
         if field_id
     }
@@ -875,6 +1065,10 @@ def build_manifest(collected: JiraCollected, *, previous: datetime | None,
         # the *resolved* set (epics + children), which is what import and
         # ``--verify`` enforce; this is provenance for the request.
         "jira_epics": list(collected.epic_keys),
+        # prd/66: the team values and the field they were resolved through. The
+        # resolved issues ride in ``ticket_keys``, like an epic set's children.
+        "jira_teams": list(collected.team_keys),
+        "jira_team_field": collected.team_field,
         "ticket_regex": collected.ticket_regex,
         "projects": list(collected.projects),
         "repos": [],
@@ -1208,6 +1402,8 @@ def scrape(
         # resolved to epics + children (prd/27). Import/--verify use this.
         "ticket_keys": list(collected.ticket_keys),
         "jira_epics": list(collected.epic_keys),
+        "jira_teams": list(collected.team_keys),
+        "jira_team_field": collected.team_field,
         "jira_status_map": dict(sorted(collected.status_map.items())),
     }
 
@@ -1216,9 +1412,15 @@ __all__ = [
     "ISSUE_STATE_FILE",
     "JiraCollected",
     "JiraIssueState",
+    "TEAM_FIELD_NAME",
+    "base_scope",
     "collect",
+    "intersect_team_keys",
     "jql_for",
     "jql_for_epics",
+    "jql_for_teams",
     "resolve_epic_keys",
+    "resolve_team_keys",
     "scrape",
+    "team_field_ref",
 ]
