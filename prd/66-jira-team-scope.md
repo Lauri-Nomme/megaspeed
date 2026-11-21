@@ -13,8 +13,12 @@ Roadmaps custom field:
 
 - name: usually `Team` (a site may rename it);
 - schema: `com.atlassian.teams:rm-teams-custom-field-team` (type `any`);
-- id: per installation — `customfield_10111` on the local DC 9.17.5 lab;
-- value: an object (`{id, name}`), so JQL filters it by the team's **name**.
+- id: per installation — `customfield_10111` on the local DC 9.17.5 lab,
+  `customfield_17000` on a real Cloud site;
+- value: an object (`{id, name}`). On **Cloud** the field type is
+  `customfieldtypes:atlassian-team` and JQL compares the team **id**, in the
+  documented form `"Team[Team]" in (<id>)`; a name is not a reliable JQL value.
+  On **DC** the field is queried as an ordinary custom field by name.
 
 Because the id is not portable, the scraper **discovers** it by name (the same rule as Epic Link /
 Sprint / Story Points), and `MEGASPEED_JIRA_TEAM_FIELD` pins it when a site has two fields with that
@@ -33,15 +37,18 @@ python3 -m ingest.jira_fields --issue DEL-100 --json # scripting
 ```
 
 It reports every field whose name/schema mentions *team* (so the field is identified even when the
-sample ticket's value is null), the value on the ticket, and the exact next settings:
+sample ticket's value is null), ranks the **populated** field first, prints the team's name and id — and
+the exact next settings, including the JQL it will use:
 
 ```
 TEAM CANDIDATE(S)
-  customfield_10111      Team      com.atlassian.teams:rm-teams-custom-field-team
-    value: — (null)  (on screen)
+  customfield_17000      Team      com.atlassian.jira.plugin.system.customfieldtypes:atlassian-team   <- likely
+    team:  [ACME] Platform Team Alpha (team-example)
+    id:    00000000-0000-4000-8000-000000000001
 NEXT
-  MEGASPEED_JIRA_TEAM_FIELD=customfield_10111
-  MEGASPEED_JIRA_TEAMS="<team name>[,<team name>]"
+  MEGASPEED_JIRA_TEAM_FIELD=customfield_17000
+  MEGASPEED_JIRA_TEAMS="00000000-0000-4000-8000-000000000001"
+  jql: issuetype in (...) AND "Team[Team]" in (00000000-0000-4000-8000-000000000001)
 ```
 
 Credentials come from the same environment as the scraper; the output can contain ticket text, so it
@@ -118,5 +125,7 @@ enablement, or an IP allowlist/SSO policy.
   store scope; a misspelt team fails; a pinned id is used and recorded;
 - an empty intersection is an operator error naming the other criterion;
 - manifest provenance: `jira_teams` + `jira_team_field` beside the resolved `ticket_keys`;
-- inspector: identifies the field with a null value, renders an object value, lists the catalogue, and
-  says so when the site has no team field.
+- inspector: identifies the field with a null value, ranks a populated Teams field above an empty
+  "Test Team", renders the team name + id, prints the JQL, lists the catalogue, and says so when the site
+  has no team field;
+- Cloud Teams: the `"Team[Team]"` reference, bare ids, name→id autocomplete (and an id needs no request).

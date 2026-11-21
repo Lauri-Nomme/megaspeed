@@ -90,6 +90,7 @@ later project's older issues.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -343,6 +344,9 @@ class JiraCollected:
     #: The team values the operator asked for (prd/66); empty unless team-scoped.
     #: ``ticket_keys`` above is the resolved set; this is request provenance.
     team_keys: tuple[str, ...] = ()
+    #: The team ids the Cloud Teams field actually compared (resolved from names
+    #: where needed); empty on DC, where the field compares names.
+    team_ids: tuple[str, ...] = ()
     #: The team field the set was resolved through (id or name), for provenance.
     team_field: str = ""
     identity: IdentityTable | None = None
@@ -493,22 +497,124 @@ def _field_ref(field_id: str) -> str:
     return _jql_string(field_id)
 
 
+#: The two spellings of the Atlassian Teams custom field. On Cloud, JQL compares
+#: the field by **team id**, and the field reference is ``"<name>[Team]"`` (not
+#: ``cf[...]``); a select field called "Team" is an ordinary custom field.
+CLOUD_TEAM_SCHEMAS = frozenset({
+    "com.atlassian.teams:rm-teams-custom-field-team",
+    "com.atlassian.jira.plugin.system.customfieldtypes:atlassian-team",
+})
+#: A Team id: a UUID, sometimes with a shared-team suffix (``...-1259``).
+_TEAM_ID = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?:-\d+)?$"
+)
+
+
+def team_field_info(field: str, fields: dict[str, str],
+                    entries: list[dict] | tuple[dict, ...] = (), *,
+                    cloud: bool = False) -> dict:
+    """Everything needed to query the team field: id, name, schema, JQL ref.
+
+    The *Cloud* Teams field is not queried as ``cf[17800]``: Jira's documented
+    form is ``"Team[Team]"`` and it compares **team ids**. The schema decides,
+    so a plain select field that happens to be called "Team" keeps the ordinary
+    ``cf[...]`` path.
+    """
+    field_id, dc_ref = team_field_ref(field, fields)
+    name = next((str(n) for n, i in fields.items() if i == field_id), "")
+    name = name or (field or "").strip() or TEAM_FIELD_NAME
+    schema = ""
+    for entry in entries:
+        if str(entry.get("id") or "") == field_id:
+            schema = str((entry.get("schema") or {}).get("custom") or "")
+            break
+    cloud_team = bool(cloud and schema in CLOUD_TEAM_SCHEMAS)
+    ref = _jql_string(f"{name}[Team]") if cloud_team else dc_ref
+    return {
+        "id": field_id,
+        "name": name,
+        "schema": schema,
+        "cloud_team": cloud_team,
+        "ref": ref,
+    }
+
+
+def _team_literal(value: str) -> str:
+    """A JQL team value: an id is bare (as Jira writes it), a name is quoted."""
+    text = str(value).strip()
+    return text if re.fullmatch(r"[A-Za-z0-9_-]+", text) else _jql_string(text)
+
+
 def jql_for_teams(ref: str, teams: tuple[str, ...],
-                  *, projects: tuple[str, ...] = ()) -> str:
+                  *, projects: tuple[str, ...] = (),
+                  cloud_team: bool = False) -> str:
     """The one extra search that resolves a team set to its issues (prd/66).
 
     Restricted to the issue types this pipeline imports, so a Bug that carries
     the team does not widen the key set with a key the walk will skip. When an
     explicit project list is also configured, it is AND-ed here (one request),
     which is the same criterion the project walk would apply -- teams are a
-    filter, not a replacement.
+    filter, not a replacement. ``cloud_team`` writes the documented
+    ``"Team[Team]" IN (<ids>)`` form instead of ``cf[...]``.
     """
     clauses = ["issuetype in (" + ", ".join(ISSUE_TYPES) + ")"]
     if projects:
         clauses.append("project in (" + ",".join(_jql_string(p) for p in projects) + ")")
-    values = ",".join(_jql_string(team) for team in teams)
+    values = ",".join(
+        _team_literal(team) if cloud_team else _jql_string(team)
+        for team in teams
+    )
     clauses.append(f"{ref} in ({values})")
     return " AND ".join(clauses)
+
+
+def _looks_like_team_id(value: str) -> bool:
+    return bool(_TEAM_ID.fullmatch(str(value).strip()))
+
+
+def _team_id_from_suggestions(client: JiraClient, field_name: str, name: str) -> str:
+    """Resolve a team display name to its id through JQL autocomplete (Cloud).
+
+    Jira's own JQL editor does exactly this: a typed team name is replaced by
+    the team id. The endpoint returns ``{value, displayName}`` rows; ``value``
+    is the id (sometimes quoted).
+    """
+    try:
+        results = client.field_suggestions(field_name, name)
+    except Exception:  # a site without the endpoint: let JQL try the name
+        return ""
+    exact = [
+        row for row in results
+        if str(row.get("displayName") or "").strip().casefold()
+        == str(name).strip().casefold()
+    ]
+    pick = exact or (results if len(results) == 1 else [])
+    if not pick:
+        return ""
+    return str(pick[0].get("value") or "").strip().strip('"')
+
+
+def resolve_team_ids(client: JiraClient, field_name: str,
+                     teams: tuple[str, ...], *,
+                     progress: ProgressReporter | None = None) -> tuple[str, ...]:
+    """Team names/ids -> the team ids the Cloud Teams field compares (prd/66).
+
+    A value that already looks like a team id is kept; a display name goes
+    through JQL autocomplete. Unresolved names are passed through once, so a
+    site that does accept names still works; the search error names the
+    inspector when it does not.
+    """
+    ids: list[str] = []
+    for team in teams:
+        value = team if _looks_like_team_id(team) else (
+            _team_id_from_suggestions(client, field_name, team) or team
+        )
+        if value not in ids:
+            ids.append(value)
+    if progress is not None and ids != list(teams):
+        progress.emit(f"[scrape] teams {', '.join(teams)} -> ids {', '.join(ids)}")
+    return tuple(ids)
 
 
 def resolve_team_keys(
@@ -517,6 +623,7 @@ def resolve_team_keys(
     ref: str,
     *,
     projects: tuple[str, ...] = (),
+    cloud_team: bool = False,
     progress: ProgressReporter | None = None,
 ) -> tuple[str, ...]:
     """A team set -> the exact issue keys that carry one of those values.
@@ -527,12 +634,21 @@ def resolve_team_keys(
     result is an operator error: a typo in the field name, a renamed team, or a
     team with no work in those projects must not become a green, empty scrape.
     """
+    jql = jql_for_teams(ref, teams, projects=projects, cloud_team=cloud_team)
     keys: list[str] = []
+    try:
+        rows = client.search(jql, fields="key")
+        for row in rows:
+            key = str(row.get("key") or "")
+            if key and key not in keys:
+                keys.append(key)
+    except Exception as exc:
+        raise SystemExit(
+            f"team query failed: {jql}\n  {exc}\n"
+            "The Cloud Teams field compares a team **id**, not a name;"
+            " `python3 -m ingest.jira_fields --issue KEY` prints the id."
+        ) from exc
     where = f" in {', '.join(projects)}" if projects else ""
-    for row in client.search(jql_for_teams(ref, teams, projects=projects), fields="key"):
-        key = str(row.get("key") or "")
-        if key and key not in keys:
-            keys.append(key)
     if not keys:
         raise SystemExit(
             f"no issue matches team(s) {', '.join(teams)} via {ref}{where}: check the"
@@ -639,21 +755,39 @@ def collect(
     epic_keys = selected if kind == "epics" else ()
     team_values = tuple(cfg.jira_teams)
     team_field = ""
+    team_ids: tuple[str, ...] = ()
     scope_keys = selected if kind == "keys" else ()
-    fields = client.field_ids()
+    entries = list(client.fields() or [])
+    fields = {
+        str(entry.get("name") or ""): str(entry.get("id") or "")
+        for entry in entries
+        if entry.get("name") and entry.get("id")
+    }
     if epic_keys:
         scope_keys = resolve_epic_keys(client, epic_keys, progress=progress)
     if team_values:
-        team_field_id, team_ref = team_field_ref(cfg.jira_team_field, fields)
-        team_field = team_field_id
+        info = team_field_info(
+            cfg.jira_team_field, fields, entries,
+            cloud=str(getattr(client, "api", "")).startswith("/rest/api/3"),
+        )
+        team_field = info["id"]
         # Project is the criterion only when no key/epic set is selected; a CLI
         # --project override is the project criterion too.
         project_criterion = (
             tuple(projects or cfg.jira_projects) if kind == "projects" else ()
         )
+        # The Cloud Teams field compares team ids; names go through JQL
+        # autocomplete exactly as the JQL editor does. DC fields keep names.
+        query_values = (
+            resolve_team_ids(client, info["name"], team_values, progress=progress)
+            if info["cloud_team"] else team_values
+        )
+        if info["cloud_team"]:
+            team_ids = query_values
         team_keys = resolve_team_keys(
-            client, team_values, team_ref,
-            projects=project_criterion, progress=progress,
+            client, query_values, info["ref"],
+            projects=project_criterion, cloud_team=info["cloud_team"],
+            progress=progress,
         )
         if scope_keys:
             before = len(scope_keys)
@@ -689,6 +823,7 @@ def collect(
         ticket_keys=scope_keys,
         epic_keys=epic_keys,
         team_keys=team_values,
+        team_ids=team_ids,
         team_field=team_field,
         identity=ident,
         resumed=bool(carry_events or carry_objects),
@@ -1068,6 +1203,7 @@ def build_manifest(collected: JiraCollected, *, previous: datetime | None,
         # prd/66: the team values and the field they were resolved through. The
         # resolved issues ride in ``ticket_keys``, like an epic set's children.
         "jira_teams": list(collected.team_keys),
+        "jira_team_ids": list(collected.team_ids),
         "jira_team_field": collected.team_field,
         "ticket_regex": collected.ticket_regex,
         "projects": list(collected.projects),
@@ -1403,6 +1539,7 @@ def scrape(
         "ticket_keys": list(collected.ticket_keys),
         "jira_epics": list(collected.epic_keys),
         "jira_teams": list(collected.team_keys),
+        "jira_team_ids": list(collected.team_ids),
         "jira_team_field": collected.team_field,
         "jira_status_map": dict(sorted(collected.status_map.items())),
     }

@@ -47,8 +47,10 @@ from ingest.scrape_jira import (
     build_manifest,
     intersect_team_keys,
     jql_for_teams,
+    resolve_team_ids,
     resolve_team_keys,
     scrape,
+    team_field_info,
     team_field_ref,
 )
 from ingest.store import connect, imported_scope
@@ -261,6 +263,74 @@ class TeamFieldTests(unittest.TestCase):
         self.assertEqual(team_field_ref("team", self.FIELDS), (TEAM_FIELD, "cf[10111]"))
 
 
+class CloudTeamFieldTests(unittest.TestCase):
+    """The Cloud Teams field: ``"Team[Team]"`` + team ids, not ``cf[...]`` names."""
+
+    TEAM_ID = "00000000-0000-4000-8000-000000000001"
+    FIELDS = {"Team": "customfield_17000", "Test Team": "customfield_17001"}
+    ENTRIES = [
+        {"id": "customfield_17001", "name": "Test Team",
+         "schema": {"type": "string",
+                    "custom": "com.atlassian.jira.plugin.system.customfieldtypes:select"}},
+        {"id": "customfield_17000", "name": "Team",
+         "schema": {"type": "any",
+                    "custom": "com.atlassian.jira.plugin.system.customfieldtypes:atlassian-team"}},
+    ]
+
+    def test_the_cloud_team_uses_the_documented_reference(self):
+        info = team_field_info("Team", self.FIELDS, self.ENTRIES, cloud=True)
+        self.assertTrue(info["cloud_team"])
+        self.assertEqual(info["ref"], '"Team[Team]"')
+        self.assertEqual(info["id"], "customfield_17000")
+
+    def test_a_select_field_called_team_keeps_the_custom_field_path(self):
+        info = team_field_info("Test Team", self.FIELDS, self.ENTRIES, cloud=True)
+        self.assertFalse(info["cloud_team"])
+        self.assertEqual(info["ref"], "cf[17001]")
+
+    def test_the_same_field_on_dc_keeps_the_custom_field_path(self):
+        info = team_field_info("Team", self.FIELDS, self.ENTRIES, cloud=False)
+        self.assertFalse(info["cloud_team"])
+        self.assertEqual(info["ref"], "cf[17000]")
+
+    def test_the_jql_is_the_documented_form(self):
+        jql = jql_for_teams('"Team[Team]"', (self.TEAM_ID,), cloud_team=True)
+        self.assertIn(f'"Team[Team]" in ({self.TEAM_ID})', jql)
+        self.assertNotIn('"Team[Team]" in ("', jql)   # ids are bare, as Jira writes them
+
+    def test_a_name_is_resolved_to_the_team_id(self):
+        class Client:
+            def field_suggestions(self, field_name, value):
+                assert field_name == "Team"
+                return [{"value": self.team_id, "displayName": NAME}]
+
+        client = Client()
+        client.team_id = self.TEAM_ID
+        ids = resolve_team_ids(client, "Team", (NAME,))
+        self.assertEqual(ids, (self.TEAM_ID,))
+
+    def test_an_id_needs_no_request(self):
+        class Client:
+            def field_suggestions(self, field_name, value):
+                raise AssertionError("an id must not be resolved")
+
+        self.assertEqual(
+            resolve_team_ids(Client(), "Team", (self.TEAM_ID,)), (self.TEAM_ID,)
+        )
+
+    def test_an_unresolved_name_survives_for_the_search_to_try(self):
+        class Client:
+            def field_suggestions(self, field_name, value):
+                return []
+
+        self.assertEqual(
+            resolve_team_ids(Client(), "Team", ("Some Team",)), ("Some Team",)
+        )
+
+
+NAME = "[ACME] Platform Team Alpha (team-example)"
+
+
 class TeamJqlTests(unittest.TestCase):
     def test_the_query_is_restricted_to_imported_issue_types(self):
         from ingest.scrape_jira import ISSUE_TYPES
@@ -368,6 +438,7 @@ class TeamScrapeTests(_ScrapeCase):
         manifest = read_bundle(out).manifest
         self.assertEqual(set(manifest["ticket_keys"]), set(expected))
         self.assertEqual(manifest["jira_teams"], ["Platform"])
+        self.assertEqual(manifest["jira_team_ids"], [])   # DC compares names
         self.assertEqual(manifest["jira_team_field"], TEAM_FIELD)
 
     def test_a_team_and_the_same_explicit_keys_produce_the_same_store(self):
@@ -458,6 +529,7 @@ class ManifestProvenanceTests(unittest.TestCase):
             run_id="run-1",
             ticket_keys=("DEL-1", "DEL-2"),
             team_keys=("Platform",),
+            team_ids=("00000000-0000-4000-8000-000000000001",),
             team_field=TEAM_FIELD,
             ticket_projects=("DEL",),
             ticket_regex=REGEX,
@@ -466,6 +538,10 @@ class ManifestProvenanceTests(unittest.TestCase):
             collected, previous=None, watermark=None, overlap_hours=0, full=True
         )
         self.assertEqual(manifest["jira_teams"], ["Platform"])
+        self.assertEqual(
+            manifest["jira_team_ids"],
+            ["00000000-0000-4000-8000-000000000001"],
+        )
         self.assertEqual(manifest["jira_team_field"], TEAM_FIELD)
         self.assertEqual(manifest["ticket_keys"], ["DEL-1", "DEL-2"])
 
@@ -557,6 +633,10 @@ class AuthProbeTests(unittest.TestCase):
         self.assertFalse(self._cfg().has_jira_cloud_credentials)
 
 
+class CloudFieldClient(_FieldClient):
+    """A fake whose class name marks it Cloud (``inspect`` reads the scope)."""
+
+
 class FieldInspectorTests(unittest.TestCase):
     FIELDS = [
         {"id": "summary", "name": "Summary", "schema": {"type": "string"}},
@@ -619,6 +699,34 @@ class FieldInspectorTests(unittest.TestCase):
         text = render(report)
         self.assertIn("via /rest/api/3/myself as Lauri", text)
         self.assertIn("serverInfo", text)
+
+    def test_the_populated_cloud_team_outranks_an_empty_test_team(self):
+        team_id = "00000000-0000-4000-8000-000000000001"
+        fields = [
+            {"id": "customfield_17001", "name": "Test Team", "custom": True,
+             "schema": {"type": "string",
+                        "custom": "com.atlassian.jira.plugin.system.customfieldtypes:select"}},
+            {"id": "customfield_17000", "name": "Team", "custom": True,
+             "schema": {"type": "any",
+                        "custom": "com.atlassian.jira.plugin.system.customfieldtypes:atlassian-team"}},
+        ]
+        issue = {"key": "PROJ-12345", "fields": {
+            "customfield_17001": None,
+            "customfield_17000": {"id": team_id, "name": NAME},
+        }}
+        report = inspect(CloudFieldClient(fields, issue), "PROJ-12345")
+        best = report["team_candidates"][0]
+        self.assertEqual(best["id"], "customfield_17000")
+        self.assertEqual(best["value_name"], NAME)
+        self.assertEqual(best["value_id"], team_id)
+        hint = report["hint"]
+        self.assertEqual(hint["field"], "customfield_17000")
+        self.assertEqual(hint["team_id"], team_id)
+        self.assertEqual(hint["field_name"], "Team")
+        text = render(report)
+        self.assertIn(f"team:  {NAME}", text)
+        self.assertIn(f"id:    {team_id}", text)
+        self.assertIn('"Team[Team]" in (', text)
 
 
 if __name__ == "__main__":  # pragma: no cover

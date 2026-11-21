@@ -151,6 +151,8 @@ class JiraClient:
     requests: int = 0
     requests_by_kind: Counter = field(default_factory=Counter)
     _last_request: float = 0.0
+    #: The REST namespace this client speaks. Cloud overrides it with ``/rest/api/3``.
+    api: str = API2
     #: Read worklogs through the Tempo Server/DC add-on instead of Jira's native
     #: ``/issue/{key}/worklog`` (prd/30). The reduced events are identical.
     tempo: bool = False
@@ -266,6 +268,20 @@ class JiraClient:
             kind="search",
             page_limit=self.list_page_limit,
         )
+
+    def field_suggestions(self, field_name: str, value: str) -> list[dict]:
+        """JQL autocomplete suggestions for one field value (prd/66).
+
+        The Team field compares by **team id**, not by name; the JQL editor turns
+        a typed name into that id through this endpoint, and so do we. Each
+        result is ``{value, displayName, ...}`` (``value`` is the id).
+        """
+        payload = self._get(
+            f"{self.api}/jql/autocompletedata/suggestions",
+            {"fieldName": field_name, "fieldValue": value},
+            kind="suggestions",
+        )
+        return list((payload or {}).get("results") or [])
 
     def issue(self, key: str, *, changelog: bool = True) -> dict:
         """One issue with its full history (``expand=changelog``)."""

@@ -35,6 +35,12 @@ import json
 import sys
 
 from .config import Config, load_config
+from .scrape_jira import (
+    CLOUD_TEAM_SCHEMAS,
+    _field_ref,
+    _jql_string,
+    jql_for_teams,
+)
 
 #: A value longer than this is truncated in the text output (the JSON keeps it).
 VALUE_LIMIT = 200
@@ -189,10 +195,43 @@ def team_candidates(fields: list[dict]) -> list[dict]:
     return out
 
 
+def _team_value(value) -> tuple[str, str]:
+    """(display name, team id) out of a Teams / select / multicheckbox value.
+
+    The Cloud Teams field returns ``{id, name, avatarUrl, ...}``; a select
+    returns ``{value, id}``; a multicheckbox returns a list of those. Showing the
+    *name* first is what makes the field identifiable -- the raw JSON truncates
+    before ``name`` and looks like an opaque UUID.
+    """
+    if isinstance(value, list):
+        names: list[str] = []
+        ids: list[str] = []
+        for item in value:
+            name, ident = _team_value(item)
+            if name:
+                names.append(name)
+            if ident:
+                ids.append(ident)
+        return ", ".join(names), ", ".join(ids)
+    if isinstance(value, dict):
+        name = value.get("name") or value.get("value") or value.get("title")
+        ident = value.get("id")
+        return (str(name) if name else "", str(ident) if ident else "")
+    if isinstance(value, str):
+        return value, ""
+    return "", ""
+
+
 def _compact(value, limit: int = VALUE_LIMIT) -> str:
     """One field value, short enough for a table row (JSON keeps the full one)."""
     if value is None or value == "":
         return "— (null)"
+    name, ident = _team_value(value)
+    if name or (ident and not isinstance(value, (dict, list))):
+        text = name or ident
+        if ident and ident not in text:
+            text = f"{text}  · id={ident}"
+        return text if len(text) <= limit else text[: limit - 1] + "…"
     try:
         text = json.dumps(value, ensure_ascii=False, sort_keys=True) \
             if isinstance(value, (dict, list)) else str(value)
@@ -257,6 +296,9 @@ def inspect(client, issue_key: str | None = None, *, catalogue: bool = False,
             candidate["value"] = row["value"] if row else None
             candidate["on_screen"] = row is not None
             candidate["null"] = bool(row["null"]) if row else True
+            name, ident = _team_value(candidate["value"])
+            candidate["value_name"] = name
+            candidate["value_id"] = ident
     elif catalogue:
         report["fields"] = [
             {
@@ -268,16 +310,67 @@ def inspect(client, issue_key: str | None = None, *, catalogue: bool = False,
             }
             for entry in sorted(fields, key=lambda e: (str(e.get("name") or "").lower(), str(e.get("id") or "")))
         ]
+        for candidate in report["team_candidates"]:
+            candidate.setdefault("value", None)
+            candidate["value_name"] = ""
+            candidate["value_id"] = ""
+            candidate["on_screen"] = False
+            candidate["null"] = True
+    report["team_candidates"] = sorted(
+        report["team_candidates"], key=_candidate_rank
+    )
     if report["team_candidates"]:
-        field_id = report["team_candidates"][0]["id"]
+        best = report["team_candidates"][0]
+        field_id = best["id"]
+        name, ident = best.get("value_name") or "", best.get("value_id") or ""
+        scope = report.get("scope") or "dc"
+        cloud_team = (
+            scope == "cloud"
+            and (best.get("schema") or {}).get("custom") in CLOUD_TEAM_SCHEMAS
+        )
+        ref = _jql_string(f"{best['name']}[Team]") if cloud_team else _field_ref(field_id)
+        team_value = ident or name
+        jql = jql_for_teams(
+            ref, (team_value or "<team>",),
+            cloud_team=cloud_team and bool(ident),
+        )
         report["hint"] = {
             "field": field_id,
+            "field_name": best["name"],
+            "cloud_team": cloud_team,
             "env": f"MEGASPEED_JIRA_TEAM_FIELD={field_id}",
-            "teams": "MEGASPEED_JIRA_TEAMS=\"<team name>[,<team name>]\"",
+            "team_id": ident,
+            "team_name": name,
+            "teams": (
+                f'MEGASPEED_JIRA_TEAMS="{ident}"'
+                if ident else f'MEGASPEED_JIRA_TEAMS="{name or "<team name>"}"'
+            ),
+            "name_alt": (
+                f"team name: {name} — JQL compares the id; names go through"
+                " JQL autocomplete where the site supports it"
+                if cloud_team and ident and name else ""
+            ),
+            "jql": jql,
             "inspect": f"python3 -m ingest.jira_fields --issue {issue_key or 'KEY'}",
         }
     report["requests"] = client.requests
     return report
+
+
+def _candidate_rank(candidate: dict) -> tuple:
+    """Most likely field first: populated beats present, Teams schema beats names.
+
+    "Test Team" (null) must not outrank the `atlassian-team` field that actually
+    carries ``[ACME] Platform Team Alpha`` just because it sorts first by id.
+    """
+    schema = str((candidate.get("schema") or {}).get("custom") or "")
+    populated = bool(candidate.get("on_screen")) and not candidate.get("null")
+    return (
+        0 if populated else 1,
+        0 if schema in CLOUD_TEAM_SCHEMAS else 1,
+        0 if str(candidate.get("name") or "").strip().lower() == "team" else 1,
+        str(candidate.get("name") or "").lower(),
+    )
 
 
 def render(report: dict) -> str:
@@ -304,11 +397,19 @@ def render(report: dict) -> str:
     if candidates:
         lines.append("")
         lines.append("TEAM CANDIDATE(S)")
-        for entry in candidates:
+        for index, entry in enumerate(candidates):
             schema = entry.get("schema") or {}
             detail = schema.get("custom") or schema.get("type") or ""
-            lines.append(f"  {entry['id']:<22} {entry['name']:<26} {detail}")
-            if "value" in entry:
+            marker = "   <- likely" if index == 0 else ""
+            lines.append(f"  {entry['id']:<22} {entry['name']:<26} {detail}{marker}")
+            value_name = entry.get("value_name") or ""
+            value_id = entry.get("value_id") or ""
+            if value_name or value_id:
+                if value_name:
+                    lines.append(f"    team:  {value_name}")
+                if value_id:
+                    lines.append(f"    id:    {value_id}")
+            elif "value" in entry:
                 where = "on screen" if entry.get("on_screen") else "not on this ticket's screen"
                 lines.append(f"    value: {_compact(entry.get('value'))}  ({where})")
     else:
@@ -331,6 +432,9 @@ def render(report: dict) -> str:
         lines.append("NEXT")
         lines.append(f"  {hint['env']}")
         lines.append(f"  {hint['teams']}")
+        if hint.get("name_alt"):
+            lines.append(f"  # {hint['name_alt']}")
+        lines.append(f"  jql: {hint['jql']}")
         lines.append(
             "  then: MEGASPEED_JIRA_TEAMS=\"…\" python3 -m ingest scrape --jira --live"
             " --team \"…\" --out export/team-jira.tgz"

@@ -127,6 +127,9 @@ story_points_field = ""
 #   export MEGASPEED_JIRA_TEAM_FIELD=customfield_10111   # only if the name is ambiguous
 # Teams are a separate AND criterion: with epics/projects, the import is the
 # intersection ("these epics, within these teams"), never "teams instead of".
+# On Cloud the Teams field compares a team **id** (JQL "Team[Team]"), not a name;
+# the inspector prints the id, e.g.
+#   export MEGASPEED_JIRA_TEAMS="00000000-0000-4000-8000-000000000001"
 teams = []
 team_field = ""
 

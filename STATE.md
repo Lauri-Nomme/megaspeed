@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1285** (`tests/`) + **99** (`scrape/tests`) + **498** (node `app/test`) green.
+Tests: **1314** (`tests/`) + **99** (`scrape/tests`) + **498** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -54,8 +54,10 @@ Tests: **1285** (`tests/`) + **99** (`scrape/tests`) + **498** (node `app/test`)
 - **Team scoping (prd/66)**: `MEGASPEED_JIRA_TEAMS` is an **AND** criterion alongside projects / epics /
   keys (teams *within* those), resolved once through the team field. "Team" is not a standard Jira field:
   it is the Atlassian Teams custom field (`com.atlassian.teams:rm-teams-custom-field-team`), discovered
-  by name or pinned with `MEGASPEED_JIRA_TEAM_FIELD`. `python3 -m ingest.jira_fields --issue KEY`
-  (or `--list`) prints the field id, one ticket's values and the exact settings to use. Cloud auth
+  by name or pinned with `MEGASPEED_JIRA_TEAM_FIELD`. On Cloud the Teams field compares a team **id**
+  (`"Team[Team]" in (<id>)`), so the inspector ranks the populated field first and prints the name, the
+  id and the JQL; names are resolved through JQL autocomplete where supported. `python3 -m
+  ingest.jira_fields --issue KEY` (or `--list`) prints the field id and the exact settings to use. Cloud auth
   accepts either an account e-mail + API token (Basic) or a Bearer PAT; a blocked `/serverInfo` falls
   back to `/myself`, and a total 401/403 prints the method sent and the env vars to fix.
 - **Cloud Jira** (`--jira-cloud`): `proxy/cloud_jira_proxy.py` emulates Cloud v3 over the DC lab
