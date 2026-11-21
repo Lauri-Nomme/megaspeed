@@ -1758,7 +1758,8 @@ a.child.ticket-link { color: var(--link); }
    * scrolls with the page instead of sticking and eating more of the screen. */
   .yah { position: static; height: auto; min-height: 38px; padding: 2px 10px; gap: 6px; }
   .yah-k { display: none; }
-  .yah-step { height: 34px; min-height: 34px; padding: 0 8px; font-size: 12px; }
+  /* prd/64 F-02: 34 px is below the 44 px touch contract (prd/28) */
+  .yah-step { height: 44px; min-height: 44px; padding: 0 8px; font-size: 12px; }
   .yah-here { font-size: 12px; }
   /* the theme toggle stays on the first row, next to density: it is global
      context, and a phone must be able to reach it without opening a menu */
@@ -1768,8 +1769,9 @@ a.child.ticket-link { color: var(--link); }
   /* prd/38: the ticket jump gets its own full-width row on a phone, so the
    * control is reachable without shrinking the dataset/scope row. */
   .ticket-jump { order: 7; flex-basis: 100%; }
-  .ticket-jump input { width: auto; flex: 1; height: 36px; }
-  .ticket-jump button { width: 44px; height: 36px; }
+  /* prd/64 F-02: the input was 36 px tall; a phone row is a 44 px target */
+  .ticket-jump input { width: auto; flex: 1; height: 44px; min-height: 44px; }
+  .ticket-jump button { width: 44px; height: 44px; min-height: 44px; }
   .ctx-row {
     display: flex;
     order: 6;
@@ -2054,6 +2056,16 @@ a.child.ticket-link { color: var(--link); }
   .empty-row { padding: 14px 12px; }
   .drill-wrap { max-height: none; overflow: visible; }
   .drill { min-width: 0; }
+  /* prd/64 F-01: `.delivery` (1120 px) and the response table (900 px) kept
+     their desktop minimum inside the phone stack, so every card was 900–1120 px
+     wide inside a 412 px scroller: label at the left, value at x ≈ 880–1100.
+     A card has one column, so it has no minimum width. */
+  .delivery, .response-panel .response-table { min-width: 0; }
+  /* the response panel repeats its column widths at a higher specificity than
+     the card reset above (and the ≤1180 px block repeats it again), which pins
+     `MEM`/`NEVER` to 84–190 px on a phone; the cell is a card row here */
+  .response-panel .response-table .c-dur, .response-panel .response-table .c-who,
+  .response-table .c-dur, .response-table .c-who { width: auto; }
   .drill td { padding: 2px 0; max-width: none; }
   .drill tr { background: transparent; }
   .drill tr.affected { box-shadow: inset 2px 0 0 var(--warning); }
@@ -2061,6 +2073,9 @@ a.child.ticket-link { color: var(--link); }
 
   /* -- timeline / blocking toolbars ----------------------------------- */
   .zoom button { min-width: 44px; }
+  /* prd/64 F-02: the text twin's disclosure was a 16 px line; the label keeps
+     its 11 px caps, the row becomes a 44 px target */
+  .blocking-text > summary { display: flex; align-items: center; min-height: 44px; }
   /* prd/33 §3: on a phone the lane viewport is what is left under the top bar
      and the toolbars; the lane list scrolls inside it, one finger at a time. */
   .timeline-stage { height: clamp(300px, 58dvh, 640px); }
@@ -2148,11 +2163,20 @@ a.child.ticket-link { color: var(--link); }
   .panel-head { padding: calc(var(--density-pad) + 2px) 12px 6px; flex-wrap: wrap; }
   .policy-panel { padding: 12px; }
   .policy-table th, .policy-table td { padding: 4px 6px; }
-  .policy-knob { grid-template-columns: minmax(0, 1fr) auto; }
+  .policy-knob { grid-template-columns: minmax(0, 1fr) auto; min-height: 44px; align-items: center; }
+  /* prd/64 F-02: the checkbox itself is 13 px wide; its label is the target,
+     so it pads the full 44 px row instead of the 17 px text box */
+  .policy-knob-k { display: flex; align-items: center; min-height: 44px; }
   .policy-actions { flex-wrap: wrap; }
   .facts { gap: 4px 12px; }
   .facts dd { word-break: break-word; }
   .stub { padding: 16px 12px 32px; }
+
+  /* -- prd/64 F-02: remaining phone touch targets ---------------------- */
+  /* The two base rules are declared later in this file (prd/63 papercuts), but
+   * they set no display/height, so these phone-only targets still apply. */
+  .skip-link { display: inline-flex; align-items: center; min-height: 44px; }
+  .sprint-carry-summary > summary { display: flex; align-items: center; min-height: 44px; }
 }
 
 @keyframes sheet-in {
