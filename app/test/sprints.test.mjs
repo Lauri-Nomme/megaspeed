@@ -10,7 +10,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { sprintBands, sprintScopeLine, sprintStrip } from '../sprints.js';
+import { sprintBands, sprintScopeLine, sprintStrip, atRiskMarkup } from '../sprints.js';
 
 function payload(overrides = {}) {
   return {
@@ -167,4 +167,78 @@ test('out-of-scope stories are listed with their two reasons', () => {
   assert.match(html, /10 never planned · 0 removed to the backlog/);
   assert.match(html, /href="#ticket\/DEL-190"/);
   assert.match(html, /href="#ticket\/DEL-191"/);
+});
+
+/* ------------------------------------------------------------------------- */
+/* sprint-at-risk (prd/52)                                                    */
+/* ------------------------------------------------------------------------- */
+function atRisk(overrides = {}) {
+  return {
+    available: true,
+    sprint_id: 3,
+    planned_end: '2026-11-27',
+    band_end: '2026-11-17T02:25:45Z',
+    stories: 30,
+    done_by_end: 25,
+    points: 125,
+    count: 3,
+    points_at_risk: 15,
+    basis: 'the active sprint\'s not-delivered stories, priced to the snapshot',
+    rows: [
+      {
+        key: 'DEL-167', points: 8, reason: 'done-but-unmerged',
+        who: ['CaOs', 'FrMo'], waiting_hours: 168,
+        detail: { prs: [53], done_at: '2026-10-19T12:38:42Z' },
+      },
+      {
+        key: 'DEL-176', points: 5, reason: 'stuck-on',
+        who: ['FrMo'], waiting_hours: 131,
+        detail: { prs: [60] },
+      },
+      {
+        key: 'DEL-161', points: 2, reason: 'approved-unmerged',
+        who: ['ErLi'], waiting_hours: 300,
+        detail: {
+          pr: 34, state: 'declined', approved_by: ['DaKo', 'FrMo'],
+          closed_by: 'BiBi', bot_closed: true,
+        },
+      },
+    ],
+    ...overrides,
+  };
+}
+
+test('at-risk names each open story, why, and who owes it', () => {
+  const html = atRiskMarkup({ at_risk: atRisk() }, { base: '' });
+  assert.match(html, /id="sprint-at-risk"/);
+  assert.match(html, /Sprint 3 at risk/);
+  assert.match(html, /3 stor(?:y|ies) · 15 pts/);
+  assert.match(html, /25 of 30 delivered by the snapshot/);
+  assert.match(html, /plan ends 2026-11-27/);
+  // each row is a ticket link with its own reason and holder set
+  assert.match(html, /data-at-risk-key="DEL-167" data-risk="done-but-unmerged"/);
+  assert.match(html, /data-at-risk-key="DEL-176" data-risk="stuck-on"/);
+  assert.match(html, /data-at-risk-key="DEL-161" data-risk="approved-unmerged"/);
+  assert.match(html, /href="#ticket\/DEL-167"/);
+  assert.match(html, /Done in Jira, PR unmerged/);
+  // the stuck story names the person, not a generic queue
+  assert.match(html, /stuck on FrMo/);
+  assert.match(html, /data-risk-who="FrMo"/);
+  // the orphan names both approvals and the bot that closed it
+  assert.match(html, /approved by DaKo \+ FrMo · closed by the bot BiBi/);
+  assert.match(html, /waiting|168 h/);
+});
+
+test('a delivered sprint has no at-risk section body', () => {
+  assert.equal(atRiskMarkup({}), '');
+  assert.equal(atRiskMarkup({ at_risk: { available: false, rows: [] } }), '');
+  const html = atRiskMarkup({ at_risk: atRisk({ count: 0, points_at_risk: 0, rows: [] }) });
+  assert.match(html, /Every story in the active sprint is done and its code merged/);
+});
+
+test('the at-risk table rides the sprint strip', () => {
+  const html = sprintStrip(payload({ at_risk: atRisk() }), { base: 'http://x/' });
+  assert.match(html, /id="sprint-at-risk"/);
+  assert.match(html, /href="http:\/\/x\/#ticket\/DEL-176"/);
+  assert.match(html, /stuck on FrMo/);
 });

@@ -880,6 +880,37 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .sprint-out > summary:hover { color: var(--text-primary); }
 .sprint-out .muted { color: var(--text-tertiary); }
 
+/* --- story-level rework (prd/51) ---------------------------------------- */
+/* The panel is a set of collapsed groups: the count is the headline, the
+   ticket rows are the evidence. A zero group stays visible ("none"). */
+.rework-panel, .at-risk-panel { border-top: 1px solid var(--border-hairline); }
+.rework-groups { display: flex; flex-direction: column; gap: 3px; }
+.rework-group {
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-control);
+  padding: 3px 8px;
+  font-size: 11px;
+}
+.rework-group > summary {
+  cursor: pointer; display: flex; align-items: baseline; gap: 8px;
+  color: var(--text-secondary); list-style: none;
+}
+.rework-group > summary::-webkit-details-marker { display: none; }
+.rework-group > summary::before { content: '▸'; color: var(--text-tertiary); }
+.rework-group[open] > summary::before { content: '▾'; }
+.rework-group > summary:hover { color: var(--text-primary); }
+.rework-group > summary b { color: var(--text-primary); font-weight: 600; }
+.rework-hint { color: var(--text-tertiary); }
+.rework-hours { margin-left: auto; color: var(--text-secondary); }
+.rework-table { margin-top: 4px; }
+.rework-empty { margin: 4px 0 2px; }
+/* prd/52: the at-risk table inside the sprint strip */
+.at-risk-panel { padding: 6px 0 0; }
+.at-risk-table { margin-top: 4px; }
+.at-risk-table .c-note { color: var(--text-tertiary); }
+.at-risk-table .c-who { color: var(--text-primary); }
+.c-note { color: var(--text-tertiary); }
+
 .selection {
   display: inline-flex;
   align-items: center;

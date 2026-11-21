@@ -459,6 +459,43 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
   lens counts every story in the store). Both are correct for their scope, so the window travels with
   the number — two views must not show different counts for "carried over" without stating it.
 
+### Sprint at risk (prd/52)
+- **Definition**: the stories committed to the **active** sprint that its own done-by-snapshot count
+  does not deliver, each with a risk class, who owes the next action, and the current wait. A closed
+  sprint has a measured verdict, not a forecast: its at-risk list is empty and says so.
+- **Derivation**: the active band's `done_by_end`/`unmerged`/`never_done` scope (exactly the stories the
+  band does not count as delivered) classified in priority order:
+  `done-but-unmerged` (Jira done, a named PR open) → `stuck-on` (a live PR whose ball is with one or
+  more people) → `approved-unmerged` (every reviewer approved and the PR never merged) →
+  `no-live-pr` (no open PR and no orphaned approval). `who` is the delivery list's holder set (the
+  author for the merge click on an orphaned approval), and `waiting_hours` is the PR's last handover →
+  the snapshot (or final approval → close/snapshot for the orphan), priced on the holder's calendar.
+  It reuses prd/37's done-by-end machinery and prd/34/prd/42 M4's "Done in Jira, PR open" predicate.
+- **Purpose**: answer "will the sprint land, and which stories are the risk" without assembling the
+  list by hand across the Overview, delivery list and ticket pages. *Fix target: DEL-167/168/183 were
+  "unmerged", DEL-176 was stuck on FrMo, and DEL-161 was invisible because "stories open without a
+  live PR" was not a list.*
+
+### Story-level rework (prd/51)
+- **Definition**: the stories that came back after the workflow moved them backwards, with the count
+  and cost of each loop. Four signals; a PR-level review round is a different concept (§6 Review round).
+  - **reopened** — `done → ready`; `count` is the flips, `hours` first done → final done (or the
+    snapshot while it is open again).
+  - **failed verification** — `in_verification → in_progress`; `hours` is the loop from the flip to
+    the next return to verification (or done).
+  - **review bounce** — `in_review → in_progress`; `hours` is the loop to the next return to review
+    (or verification/done).
+  - **approved but never merged** — every reviewer on a non-merged PR approved (the DEL-161 orphan);
+    `hours` is final approval → the PR's close, or the snapshot while it is open.
+- **Derivation**: `analysis.jira.rework` reads the same `status_changed` history as the segments and
+  the PR status vectors as the delivery list; the cohort is **every story in the store** (a repo scope
+  narrows it), not the Rules window — the signals belong to a story's whole life. Surfaced as
+  `rework` on `/api/insights` and the Rules "Story rework" panel; each row is a `#ticket/KEY` link.
+- **Purpose**: answer "how much rework is hiding in the stories, and where?" — the old product showed
+  only the PR-level rule and per-ticket reopen flags, so 5 reopens, 4 failed verifications and 21
+  review bounces could not be totalled. *Fix target: the QA run had to reconstruct them from raw
+  events; on del-combined the counts are 5/4/21 plus DEL-161.*
+
 ### Constraint ranking (delivery/queue)
 - **Definition**: open items ranked by who they wait on and the wait-hours that costs.
 - **Derivation**: per §2 constraint; **bots excluded, sentinel named**; a "mean wait N d" must use the

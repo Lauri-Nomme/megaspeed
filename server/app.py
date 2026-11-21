@@ -1267,6 +1267,11 @@ def insights(request: Request):
     preset results (cached per store/calendar/window), the note each mapped rule
     carries, and the lab's best scenario. A store the model cannot validate
     reports ``available: false`` with the reason; the measured rules still show.
+
+    prd/51: ``rework`` is the story-level rework aggregate — reopened, failed
+    verification, review bounces and approved-but-never-merged PRs, each row a
+    ticket key with its count and hours (derived from the status history and the
+    PR status vectors, over the whole store).
     """
     unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["insights"]))
     if unknown is not None:
@@ -1412,6 +1417,12 @@ def sprints(request: Request):
     but not done by its close" (late or still open), not only an explicit
     re-add. A store with no Jira layer answers ``available: false`` with the
     reason, not zeroes.
+
+    prd/52: ``at_risk`` is the **active** sprint's forecast — each story the
+    sprint's own done-by-snapshot count does not deliver, classified as
+    done-but-unmerged / stuck-on / approved-unmerged / no-live-pr, with who owes
+    the wait and for how long. A store with no active sprint reports
+    ``available: false`` with the reason.
     """
     unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["sprints"]))
     if unknown is not None:

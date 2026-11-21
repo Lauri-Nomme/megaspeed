@@ -3676,6 +3676,11 @@ def insights(
             "jira_worklog_ratio": [WORKLOG_RATIO_LOW, WORKLOG_RATIO_HIGH],
         },
         "metrics": computed,
+        # prd/51: the story-level rework aggregate (reopened / failed
+        # verification / review bounces / approved-but-never-merged) rides the
+        # Rules payload; it is derived from the same status history and PR
+        # vectors the metrics read, over every story in the store.
+        "rework": jira_analysis.rework(court, jira),
         "suggestions": suggestions,
         # prd/37 §2: the additive headline (sums each cost pool once) next to
         # the per-rule estimates, so the total is auditable.

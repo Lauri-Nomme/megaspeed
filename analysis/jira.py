@@ -35,7 +35,9 @@ Everything else in this module follows from those rows:
 ``point_churn``         ``pointed`` events after the story started
 ``worklog_cross_check`` ``log_delay_bucket`` distribution + logged vs active hours
 ``jira_conformance``    started before refined, re-pointed after start, carry-over
-``sprints``             the sprint lens (prd/26 P6): bands, scope, carry-over
+``rework``              story-level reopened / verification / bounce / orphan signals
+``sprints``             the sprint lens (prd/26 P6): bands, scope, carry-over,
+                        and the active sprint's at-risk forecast (prd/52)
 ======================  ==========================================================
 
 Honesty rules this module follows, in the same spirit as ``ballcourt``:
@@ -1535,6 +1537,288 @@ def carry_over(
 
 
 # --------------------------------------------------------------------------- #
+# 1b. story-level rework (prd/51)
+# --------------------------------------------------------------------------- #
+#: The backward status flips that are rework, as ``(from_stage, to_stage)``.
+#: ``reopened`` is the PRD's exact definition (done → ready); the other two are
+#: the workflow's own stage bounces, read from the same status history the
+#: segments use.
+REWORK_FLIPS: dict[str, tuple[str, str]] = {
+    "reopened": ("done", "ready"),
+    "failed_verification": ("in_verification", "in_progress"),
+    "review_bounces": ("in_review", "in_progress"),
+}
+#: Where a bounce is over: the story reached the stage it fell out of again
+#: (or finished). A review bounce may recover straight into verification, so
+#: that stage ends the loop too.
+REWORK_RECOVERY: dict[str, frozenset[str]] = {
+    "failed_verification": frozenset({"in_verification", "done"}),
+    "review_bounces": frozenset({"in_review", "in_verification", "done"}),
+}
+
+
+def _status_events(story: Story) -> list[dict]:
+    """The story's ``status_changed`` events, in time order."""
+    return [event for event in story.events if event["activity"] == "status_changed"]
+
+
+def _rework_loops(
+    court: ballcourt.BallCourt,
+    story: Story,
+    from_stage: str,
+    to_stage: str,
+    recovered: frozenset[str],
+) -> list[dict]:
+    """Every backward flip and the loop it opened.
+
+    ``hours`` is the business time between the flip and the next status that
+    returns to the stage the story fell out of (or ``done``, or the snapshot):
+    the fix plus the re-review, never the whole remaining cycle. A story with
+    no further event keeps its loop open to the snapshot, so a forgotten
+    bounce is a quantity rather than a bare count.
+    """
+    events = _status_events(story)
+    end = _cycle(story).boundaries.get("done") or story.snapshot
+    loops: list[dict] = []
+    for index, event in enumerate(events):
+        attributes = _attrs(event)
+        if normalize_stage(attributes.get("from_status")) != from_stage:
+            continue
+        if normalize_stage(attributes.get("to_status")) != to_stage:
+            continue
+        recovered_at = None
+        for later in events[index + 1:]:
+            if normalize_stage(_attrs(later).get("to_status")) in recovered:
+                recovered_at = later["_ts"]
+                break
+        if recovered_at is None:
+            recovered_at = end
+        hours = (
+            round(court.business_hours(story.actor, event["_ts"], recovered_at), 2)
+            if recovered_at is not None and recovered_at > event["_ts"]
+            else 0.0
+        )
+        loops.append({
+            "ts": event["_ts"],
+            "recovered": recovered_at,
+            "hours": hours,
+        })
+    return loops
+
+
+def _rework_group(label: str, note: str, rows: list[dict]) -> dict:
+    """One signal group: its rows, the flip/PR count and the total hours."""
+    rows.sort(key=lambda row: (
+        -float(row.get("hours") or 0.0), row["key"], row.get("number") or 0
+    ))
+    return {
+        "label": label,
+        "note": note,
+        "count": sum(int(row.get("count") or 0) for row in rows),
+        "stories": len({row["key"] for row in rows}),
+        "hours": round(sum(float(row.get("hours") or 0.0) for row in rows), 2),
+        "rows": rows,
+        "affected": bool(rows),
+    }
+
+
+def rework(court: ballcourt.BallCourt, data: JiraData | None) -> dict:
+    """Story-level rework: reopened, failed verification, bounces, orphans.
+
+    The PR-side ``rework_loops`` rule measures rounds *inside* a PR. This is
+    the story-level aggregate the QA run had to assemble from raw events:
+
+    * **reopened** — a ``done → ready`` flip (``count`` is the flips, ``hours``
+      the business time from the first done to the final one, or the snapshot
+      while it is open again);
+    * **failed verification** — ``in_verification → in_progress``; ``hours`` is
+      the loop back to verification (or done);
+    * **review bounces** — ``in_review → in_progress``; the loop back to review
+      (verification ends it too, since the story left review);
+    * **approved but never merged** — every reviewer on a PR approved and the
+      PR never merged (DEL-161: both approved, the bot declined it 34 days
+      later). ``hours`` is final approval → the close (or the snapshot).
+
+    The cohort is **every story in the store**, not the Rules window: the
+    signals are a property of a story's whole life, and a 90-day window would
+    silently drop the oldest reopen (DEL-105) from the 5 the QA measured. The
+    payload says so in ``scope``.
+    """
+    data = data or EMPTY
+    reopened: list[dict] = []
+    verification: list[dict] = []
+    bounces: list[dict] = []
+    unmerged: list[dict] = []
+
+    for story in data.stories:
+        cycle = _cycle(story)
+        flips = [
+            event for event in _status_events(story)
+            if normalize_stage(_attrs(event).get("from_status")) == "done"
+            and normalize_stage(_attrs(event).get("to_status")) == "ready"
+        ]
+        if flips:
+            first_done = cycle.boundaries.get("first_done") or flips[0]["_ts"]
+            final_done = cycle.boundaries.get("done")
+            end = final_done or story.snapshot
+            hours = (
+                round(court.business_hours(story.actor, first_done, end), 2)
+                if first_done is not None and end is not None and end > first_done
+                else 0.0
+            )
+            reopened.append({
+                "kind": "story",
+                "object_id": story.object_id,
+                "key": story.key,
+                "tickets": [story.key],
+                "points": story.points,
+                "count": len(flips),
+                "hours": hours,
+                "first_done": iso(first_done) if first_done else None,
+                "final_done": iso(final_done) if final_done else None,
+                "open": final_done is None,
+                "events": [
+                    {"ts": iso(event["_ts"]), "from": "done", "to": "ready"}
+                    for event in flips
+                ],
+                "affected": True,
+            })
+
+        for group, rows in (
+            ("failed_verification", verification),
+            ("review_bounces", bounces),
+        ):
+            from_stage, to_stage = REWORK_FLIPS[group]
+            loops = _rework_loops(
+                court, story, from_stage, to_stage, REWORK_RECOVERY[group]
+            )
+            if not loops:
+                continue
+            rows.append({
+                "kind": "story",
+                "object_id": story.object_id,
+                "key": story.key,
+                "tickets": [story.key],
+                "points": story.points,
+                "count": len(loops),
+                "hours": round(sum(loop["hours"] for loop in loops), 2),
+                "events": [
+                    {
+                        "ts": iso(loop["ts"]),
+                        "from": from_stage,
+                        "to": to_stage,
+                        "recovered": iso(loop["recovered"]) if loop["recovered"] else None,
+                        "hours": loop["hours"],
+                    }
+                    for loop in loops
+                ],
+                "affected": True,
+            })
+
+        for state in story.prs:
+            pr = state.pr
+            if pr.get("state") == "merged":
+                continue
+            latest = state.intervals[-1] if state.intervals else None
+            if latest is None or not latest.roster:
+                continue
+            approved = set(latest.approved or ())
+            if not approved or approved != set(latest.roster):
+                continue
+            approvals = [
+                event["_ts"] for event in state.events
+                if event["activity"] == "pr_approved"
+            ]
+            if not approvals:
+                continue
+            approved_at = max(approvals)
+            closed_at = pr.get("closed_ts")
+            end = closed_at or court.snapshot
+            hours = (
+                round(court.business_hours(pr["actor"], approved_at, end), 2)
+                if end is not None and end > approved_at else 0.0
+            )
+            closed_by = next(
+                (
+                    event["actor"] for event in reversed(state.events)
+                    if event["activity"] in ("pr_declined", "pr_closed")
+                ),
+                None,
+            )
+            unmerged.append({
+                "kind": "pr",
+                "object_id": pr["object_id"],
+                "key": story.key,
+                "tickets": [story.key],
+                "id": f"{pr['repo'].split('/')[-1]}#{pr['pr_id']}",
+                "number": pr["pr_id"],
+                "repo": pr["repo"],
+                "repo_short": pr["repo"].split("/")[-1],
+                "state": pr.get("state"),
+                "author": pr.get("actor"),
+                "points": story.points,
+                "count": 1,
+                "hours": hours,
+                "approved_by": sorted(approved),
+                "approved_at": iso(approved_at),
+                "closed_at": iso(closed_at) if closed_at else None,
+                "closed_by": closed_by,
+                "bot_closed": bool(closed_by and closed_by in (court.bots or set())),
+                "waiting_on": [pr["actor"]] if pr.get("actor") else [],
+                "affected": True,
+            })
+
+    groups = {
+        "reopened": _rework_group(
+            "reopened after done",
+            "a done → ready flip: the story came back after it was closed",
+            reopened,
+        ),
+        "failed_verification": _rework_group(
+            "failed verification",
+            "in verification → in progress: QA sent the story back",
+            verification,
+        ),
+        "review_bounces": _rework_group(
+            "review bounces",
+            "in review → in progress: review sent the story back",
+            bounces,
+        ),
+        "approved_unmerged": _rework_group(
+            "approved but never merged",
+            "every reviewer approved and the PR never merged",
+            unmerged,
+        ),
+    }
+    total = sum(group["count"] for group in groups.values())
+    hours = round(sum(group["hours"] for group in groups.values()), 2)
+    return {
+        "available": bool(data.stories),
+        "scope": (
+            "every story in the store unless a repo scope narrows it (not the "
+            "Rules window)"
+        ),
+        "stories": len(data.stories),
+        **groups,
+        "count": total,
+        "hours": hours,
+        "basis": (
+            "reopened = done → ready flips, priced first done → final done (or "
+            "the snapshot); a verification/review bounce is priced from the "
+            "backward flip to the next return to that stage (or done); an "
+            "approved-but-unmerged PR is priced final approval → its close (or "
+            "the snapshot)"
+        ),
+        "note": _note(
+            data,
+            "no STORY objects in this store: there is no status history to "
+            "derive rework from",
+            bool(data.stories),
+        ),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # 2a. sprint on-time delivery (prd/37 §1, §6)
 # --------------------------------------------------------------------------- #
 def _added_at_start(story: Story, sid: int, sprint_index: dict) -> bool:
@@ -1852,6 +2136,263 @@ def _membership(story: Story) -> dict:
         "at_start": any(at_start for _, _, at_start in adds),
         "carried_over": len(sprints) > 1,
         "adds": len(adds),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 2c. sprint-at-risk (prd/52)
+# --------------------------------------------------------------------------- #
+#: The risk classes, in presentation order: a Jira-done story with unmerged code
+#: is the strongest lie, a person-held PR is next, an orphaned approval after
+#: that, and "no live PR at all" is the remaining gap.
+RISK_REASONS: tuple[tuple[str, str], ...] = (
+    ("done-but-unmerged", "Done in Jira, PR unmerged"),
+    ("stuck-on", "stuck on a person"),
+    ("approved-unmerged", "approved but never merged"),
+    ("no-live-pr", "no live PR"),
+)
+RISK_ORDER = {reason: index for index, (reason, _) in enumerate(RISK_REASONS)}
+RISK_LABEL = dict(RISK_REASONS)
+
+
+def _latest_interval(state):
+    """The last measured interval — the status vector that holds the ball now."""
+    return state.intervals[-1] if state.intervals else None
+
+
+def _pr_holders(court: ballcourt.BallCourt, state) -> list[str]:
+    """Who owes this PR now: pending reviewers plus the author while in debt.
+
+    The same holder set the delivery list reports (concepts.md §2): the
+    status vector is the truth, bots are excluded, and a PR nobody holds is
+    empty rather than guessed.
+    """
+    latest = _latest_interval(state)
+    if latest is None:
+        return []
+    holders = set(latest.pending_all or ())
+    author = state.pr.get("actor")
+    if latest.author_open and author and author not in (court.bots or set()):
+        holders.add(author)
+    return sorted(holders)
+
+
+def _pr_wait(court: ballcourt.BallCourt, state) -> tuple[float | None, datetime | None]:
+    """The current wait on an open PR: its last handover → the snapshot.
+
+    Priced on the holder's own calendar when one person holds it, exactly as
+    the delivery row does; a closed PR has no current wait.
+    """
+    latest = _latest_interval(state)
+    pr = state.pr
+    if latest is None or pr.get("closed_ts") is not None:
+        return None, None
+    end = court.snapshot
+    start = latest.start
+    if start is None or end is None or end <= start:
+        return None, None
+    return round(court.business_hours(latest.owner, start, end), 2), start
+
+
+def _approved_wait(
+    court: ballcourt.BallCourt, state,
+) -> tuple[float | None, datetime | None]:
+    """Final approval → the PR's close (or the snapshot)."""
+    approvals = [
+        event["_ts"] for event in state.events
+        if event["activity"] == "pr_approved"
+    ]
+    if not approvals:
+        return None, None
+    start = max(approvals)
+    end = state.pr.get("closed_ts") or court.snapshot
+    if end is None or end <= start:
+        return None, start
+    return round(court.business_hours(state.pr.get("actor"), start, end), 2), start
+
+
+def _risk_row(court: ballcourt.BallCourt, story: Story) -> dict:
+    """Classify one not-delivered story of the sprint (prd/52).
+
+    The four classes reuse facts the product already has — the cycle's final
+    ``done`` (Jira says done), the PR status vector (who owes, fully approved),
+    and the same "Done in Jira, PR open" predicate the delivery list uses:
+
+    * ``done-but-unmerged`` — Jira done while a named PR is open;
+    * ``stuck-on`` — a live PR whose ball is with one or more people;
+    * ``approved-unmerged`` — every reviewer approved and the PR never merged
+      (DEL-161: the bot declined it after both approvals);
+    * ``no-live-pr`` — no open PR and no orphaned approval: the work has no
+      code in flight at all.
+    """
+    cycle = _cycle(story)
+    done_at = cycle.boundaries.get("done")
+    live = [
+        state for state in story.prs
+        if state.pr.get("closed_ts") is None
+    ]
+    approved_unmerged = []
+    for state in story.prs:
+        if state.pr.get("state") == "merged":
+            continue
+        latest = _latest_interval(state)
+        if latest is None or not latest.roster:
+            continue
+        approved = set(latest.approved or ())
+        if approved and approved == set(latest.roster):
+            approved_unmerged.append(state)
+
+    progress = []
+    for state in story.prs:
+        latest = _latest_interval(state)
+        wait, since = _pr_wait(court, state)
+        progress.append({
+            "object_id": state.pr["object_id"],
+            "number": state.pr["pr_id"],
+            "repo": state.pr["repo"],
+            "repo_short": state.pr["repo"].split("/")[-1],
+            "state": state.pr.get("state"),
+            "open": state.pr.get("closed_ts") is None,
+            "author": state.pr.get("actor"),
+            "opened": (
+                iso(state.pr.get("created_ts"))
+                if state.pr.get("created_ts") is not None else None
+            ),
+            "who": _pr_holders(court, state) if state.pr.get("closed_ts") is None else [],
+            "waiting_hours": wait,
+            "waiting_since": iso(since) if since else None,
+            "approved": sorted(latest.approved or ()) if latest else [],
+            "roster": sorted(latest.roster or ()) if latest else [],
+            "last_event": iso(state.events[-1]["_ts"]) if state.events else None,
+        })
+
+    reason: str
+    who: list[str]
+    wait: float | None = None
+    since: datetime | None = None
+    detail: dict = {}
+
+    if done_at is not None and live:
+        reason = "done-but-unmerged"
+        open_rows = [row for row in progress if row["open"]]
+        holder_set = sorted({person for row in open_rows for person in row["who"]})
+        waits = [row["waiting_hours"] for row in open_rows if row["waiting_hours"] is not None]
+        wait = max(waits) if waits else None
+        who = holder_set
+        detail = {
+            "prs": [row["number"] for row in open_rows],
+            "done_at": iso(done_at),
+            # prd/42 M4 / QA: a PR opened after Jira closed the ticket cannot
+            # have been part of the delivered story (DEL-183).
+            "opened_after_close": [
+                row["number"] for row in open_rows
+                if row.get("opened") and row["opened"] > iso(done_at)
+            ],
+        }
+    elif approved_unmerged:
+        state = max(
+            approved_unmerged,
+            key=lambda item: (_approved_wait(court, item)[0] or 0.0),
+        )
+        reason = "approved-unmerged"
+        wait, since = _approved_wait(court, state)
+        who = [state.pr["actor"]] if state.pr.get("actor") else []
+        closed_by = next(
+            (
+                event["actor"] for event in reversed(state.events)
+                if event["activity"] in ("pr_declined", "pr_closed")
+            ),
+            None,
+        )
+        latest = _latest_interval(state)
+        detail = {
+            "pr": state.pr["pr_id"],
+            "repo": state.pr["repo"],
+            "state": state.pr.get("state"),
+            "approved_by": sorted(latest.approved or ()) if latest else [],
+            "closed_at": iso(state.pr.get("closed_ts")) if state.pr.get("closed_ts") else None,
+            "closed_by": closed_by,
+            "bot_closed": bool(closed_by and closed_by in (court.bots or set())),
+        }
+    elif live:
+        reason = "stuck-on"
+        open_rows = [row for row in progress if row["open"]]
+        holder_set = sorted({person for row in open_rows for person in row["who"]})
+        waits = [row["waiting_hours"] for row in open_rows if row["waiting_hours"] is not None]
+        wait = max(waits) if waits else None
+        who = holder_set
+        detail = {"prs": [row["number"] for row in open_rows]}
+    else:
+        reason = "no-live-pr"
+        who = [story.actor] if story.actor else []
+        detail = {
+            "prs": [row["number"] for row in progress],
+            "merged_prs": [
+                row["number"] for row in progress if row["state"] == "merged"
+            ],
+        }
+
+    return {
+        "kind": "story",
+        "object_id": story.object_id,
+        "key": story.key,
+        "tickets": [story.key],
+        "points": story.points,
+        "reason": reason,
+        "label": RISK_LABEL[reason],
+        "who": who,
+        "waiting_hours": wait,
+        "waiting_since": iso(since) if since else None,
+        "detail": detail,
+        "prs": progress,
+        "affected": True,
+    }
+
+
+def _at_risk(court: ballcourt.BallCourt, sid: int, band: dict,
+             by_key: dict[str, Story], outcomes: dict) -> dict:
+    """The active sprint's forecast: each not-delivered story, why, who owes."""
+    rows: list[dict] = []
+    points = 0
+    for key in band["stories"]:
+        story = by_key.get(key)
+        if story is None:
+            continue
+        outcome = outcomes[key]
+        verdict = outcome["outcomes"].get(sid)
+        if verdict is None:
+            continue
+        # what the band counts as delivered is exactly what is not at risk
+        if verdict == "by_end" and outcome.get("delivered"):
+            continue
+        risk = _risk_row(court, story)
+        risk["verdict"] = verdict
+        rows.append(risk)
+        points += story.points or 0
+    rows.sort(key=lambda row: (
+        RISK_ORDER[row["reason"]],
+        -(row.get("points") or 0),
+        -(row.get("waiting_hours") or 0.0),
+        row["key"],
+    ))
+    return {
+        "available": True,
+        "sprint_id": sid,
+        "planned_end": band.get("planned_end"),
+        "band_end": band.get("band_end"),
+        "stories": band.get("story_count") or 0,
+        "done_by_end": band.get("done_by_end") or 0,
+        "points": band.get("points") or 0,
+        "count": len(rows),
+        "points_at_risk": points,
+        "share": _share(len(rows), band.get("story_count") or 0),
+        "points_share": _share(points, band.get("points") or 0),
+        "rows": rows,
+        "basis": (
+            "the active sprint's not-delivered stories (Jira done with an open "
+            "PR, a live PR held by people, an approved-but-unmerged PR, or no "
+            "live PR), with the current wait priced to the snapshot"
+        ),
     }
 
 
@@ -2208,6 +2749,37 @@ def sprints(
         )
     else:
         note = None
+    # "active" is the store's own state, not merely a missing completion: a
+    # closed sprint whose completion timestamp was lost still has a band that
+    # must stop at the snapshot, but it is not the current sprint.
+    active_sid = next(
+        (
+            row["sprint_id"] for row in bands
+            if row["state"] == "active" or (row["open"] and not row["state"])
+        ),
+        None,
+    )
+    # prd/52: the forecast belongs to the active sprint only — a closed sprint
+    # has a verdict, not a risk. The rows are the not-delivered stories the
+    # band already counts, classified with the same PR facts as the delivery
+    # list (done-in-Jira, holders, approvals).
+    at_risk = (
+        _at_risk(court, active_sid, sprint_rows[active_sid], by_key, outcomes)
+        if active_sid is not None and active_sid in sprint_rows else
+        {
+            "available": False,
+            "sprint_id": None,
+            "rows": [],
+            "note": (
+                "no active sprint in this store: at-risk is a forecast for the "
+                "sprint in flight, while a closed sprint has a measured verdict"
+            ),
+            "basis": (
+                "the active sprint's not-delivered stories; a closed sprint has "
+                "no at-risk list"
+            ),
+        }
+    )
     return {
         "available": available,
         "sprints": bands,
@@ -2220,16 +2792,8 @@ def sprints(
             "end": iso(window[1]),
             "days": round((window[1] - window[0]).total_seconds() / 86400.0, 1),
         },
-        # "active" is the store's own state, not merely a missing completion:
-        # a closed sprint whose completion timestamp was lost still has a band
-        # that must stop at the snapshot, but it is not the current sprint.
-        "active": next(
-            (
-                row["sprint_id"] for row in bands
-                if row["state"] == "active" or (row["open"] and not row["state"])
-            ),
-            None,
-        ),
+        "active": active_sid,
+        "at_risk": at_risk,
         "scope": {
             "stories": len(in_window),
             "in_sprint": len(planned),

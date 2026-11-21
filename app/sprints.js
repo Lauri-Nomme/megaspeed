@@ -122,6 +122,115 @@ function carryCell(sprint) {
   return `<span class="sprint-carry" title="committed but not done by the close: ${esc(keys.join(', '))}">↻ ${esc(parts.join(' · '))}</span>`;
 }
 
+/* ------------------------------------------------------------------------- */
+/* Sprint-at-risk (prd/52).                                                   */
+/* ------------------------------------------------------------------------- */
+
+const RISK_LABELS = {
+  'done-but-unmerged': 'Done in Jira, PR unmerged',
+  'stuck-on': 'stuck on a person',
+  'approved-unmerged': 'approved, never merged',
+  'no-live-pr': 'no live PR',
+};
+
+function riskWho(row) {
+  return (row.who || []).filter(Boolean);
+}
+
+/** The risk reason in words; a single holder is named ("stuck on FrMo"). */
+export function riskReasonText(row) {
+  if (!row) return '';
+  const who = riskWho(row);
+  if (row.reason === 'stuck-on') {
+    return who.length === 1
+      ? `stuck on ${who[0]}`
+      : `stuck on ${who.length} people`;
+  }
+  return RISK_LABELS[row.reason] || row.label || row.reason || 'at risk';
+}
+
+/** What the row's detail cell says, from the same PR facts the list uses. */
+export function riskDetailText(row) {
+  if (!row) return '';
+  const detail = row.detail || {};
+  if (row.reason === 'done-but-unmerged') {
+    const prs = (detail.prs || []).map((number) => `#${number}`).join(', ');
+    const after = detail.opened_after_close || [];
+    const suffix = after.length ? ' (opened after the ticket closed)' : '';
+    return prs ? `${prs} still open${suffix}` : `the PR is still open${suffix}`;
+  }
+  if (row.reason === 'stuck-on') {
+    const prs = (detail.prs || []).map((number) => `#${number}`).join(', ');
+    return prs ? `${prs} open` : 'a live PR is waiting';
+  }
+  if (row.reason === 'approved-unmerged') {
+    const approved = (detail.approved_by || []).join(' + ') || 'nobody';
+    if (detail.state === 'declined') {
+      return `approved by ${approved} · ${detail.bot_closed
+        ? `closed by the bot ${detail.closed_by || ''}`.trim()
+        : `closed by ${detail.closed_by || 'someone'}`}`;
+    }
+    return `approved by ${approved} · not merged`;
+  }
+  if (row.reason === 'no-live-pr') {
+    const prs = (detail.prs || []).map((number) => `#${number}`).join(', ');
+    if (!prs) return 'no PR names this key';
+    const merged = detail.merged_prs || [];
+    if (merged.length && merged.length === (detail.prs || []).length) {
+      return `${prs} merged · Jira still open`;
+    }
+    return `${prs} closed without merging`;
+  }
+  return '';
+}
+
+/**
+ * The active sprint's forecast: each not-delivered story, why it is at risk and
+ * who owes the next action. It reuses the sprint band's own counts (25 of 30
+ * done by the snapshot) and the delivery list's holder facts, so the list can
+ * never disagree with the strip above it.
+ */
+export function atRiskMarkup(data, { base = '' } = {}) {
+  const risk = data && data.at_risk;
+  if (!risk || !risk.available) return '';
+  const rows = risk.rows || [];
+  const count = risk.count ?? rows.length;
+  const points = risk.points_at_risk ?? 0;
+  const head = `<div class="panel-head"><h2>Sprint ${esc(risk.sprint_id)} at risk</h2>
+      <span class="pill ${count ? 'warning' : 'healthy'}" data-at-risk-count="${count}">${count} stor${count === 1 ? 'y' : 'ies'} · ${points} pts</span>
+      <span class="muted">${risk.done_by_end ?? 0} of ${risk.stories ?? 0} delivered by the snapshot${
+        risk.planned_end ? ` · plan ends ${esc(risk.planned_end)}` : ''}</span></div>`;
+  if (!rows.length) {
+    return `<section class="panel wide at-risk-panel" id="sprint-at-risk">
+      ${head}<p class="panel-note">Every story in the active sprint is done and its code merged.</p>
+    </section>`;
+  }
+  const body = rows.map((row) => {
+    const who = riskWho(row);
+    return `<tr data-at-risk-key="${esc(row.key)}" data-risk="${esc(row.reason)}"
+        data-risk-who="${esc(who.join(' + '))}">
+      <td class="c-id" data-label="ticket">${ticketLink(row.key, { base })}
+        <span class="muted">${row.points || 0} pts</span></td>
+      <td class="c-state" data-label="reason"><span class="pill ${
+        row.reason === 'done-but-unmerged' ? 'blocked' : 'warning'
+      }" title="${esc(RISK_LABELS[row.reason] || '')}">${esc(riskReasonText(row))}</span></td>
+      <td class="c-who" data-label="who owes">${esc(who.join(' + ') || '—')}</td>
+      <td class="c-dur num" data-label="waiting">${esc(fmtHours(row.waiting_hours))}</td>
+      <td class="c-note" data-label="note">${esc(riskDetailText(row))}</td>
+    </tr>`;
+  }).join('');
+  return `<section class="panel wide at-risk-panel" id="sprint-at-risk">
+    ${head}
+    <div class="table-wrap"><table class="table compact at-risk-table"><thead><tr>
+      <th class="c-id">ticket</th><th class="c-state">reason</th>
+      <th class="c-who">who owes</th><th class="c-dur num">waiting</th>
+      <th class="c-note">note</th>
+    </tr></thead><tbody>${body}</tbody></table></div>
+    <p class="panel-note">${esc(risk.basis || '')} · a story is at risk when the
+      sprint's own done-by-snapshot count does not deliver it</p>
+  </section>`;
+}
+
 function outOfScope(data, base) {
   const scope = data.scope || {};
   const keys = scope.unplanned || [];
@@ -240,6 +349,7 @@ export function sprintStrip(data, { base = '', focus = null } = {}) {
     </div>
     ${focus != null ? focusLine(data, focus) : ''}
     <div class="sprint-rows">${rows}</div>
+    ${atRiskMarkup(data, { base })}
     ${carriedOver(data, base)}
     ${outOfScope(data, base)}
   </div>`;

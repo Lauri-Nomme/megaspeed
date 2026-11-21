@@ -9,6 +9,7 @@
 import { fmtHours, esc } from './format.js';
 import { prSizePanel } from './prsize.js';
 import { linkifyTickets, markdownLinkTickets, ticketHref } from './tickets.js';
+import { reworkMarkdown, reworkPanel } from './rework.js';
 import { worklogMarkdown, worklogPanel, fmtRate } from './worklog.js';
 
 const SEVERITY_LABEL = {
@@ -488,7 +489,8 @@ export function rulesMarkup(data, { base = '', prSize = null, caps = null } = {}
         Widen the timeframe or switch to people to check the per-person rules.</p>
     </div>
     ${worklogPanel((data && data.metrics && data.metrics.worklog_cross_check) || null)}
-    ${prSizePanel(prSize, { caps })}`;
+    ${prSizePanel(prSize, { caps })}
+    ${reworkPanel((data && data.rework) || null, { base })}`;
   }
   // prd/39: the calibration panel sits next to the size rule (or after the list
   // when the rule does not fire), so the threshold the rule quotes is adjustable
@@ -513,7 +515,8 @@ export function rulesMarkup(data, { base = '', prSize = null, caps = null } = {}
   }
   return `${note ? `<p class="rules-note">${esc(note)}</p>` : ''}
     ${lab ? `<p class="rules-lab" data-lab-best>${esc(lab)}</p>` : ''}
-    <div class="rules-list">${rows.join('')}</div>`;
+    <div class="rules-list">${rows.join('')}</div>
+    ${reworkPanel((data && data.rework) || null, { base })}`;
 }
 
 export function rulesMarkdown(data, base = '') {
@@ -581,6 +584,9 @@ export function rulesMarkdown(data, base = '') {
     (data.metrics && data.metrics.worklog_cross_check) || null,
   );
   if (worklog.length) lines.push(...worklog, '');
+  // prd/51: the story-level rework panel travels with the export too.
+  const rework = reworkMarkdown(data.rework || null, base);
+  if (rework.length) lines.push(...rework, '');
   lines.push(`_${data.note || ''}_`);
   return lines.join('\n');
 }
