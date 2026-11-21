@@ -69,6 +69,14 @@ MIN_N_BY_METRIC = {
     "cumulative_flow": 0,
 }
 
+#: prd/64 F-17: a sprint bucket holds exactly one sprint, so its bucket count is
+#: always 1 and an ``n ≥ 2`` bucket floor can never be met there. For ``on_time``
+#: the sample of a sprint bucket is the sprint's own committed stories; five is
+#: the floor the rest of the module already uses. Week buckets keep the ``n ≥ 2``
+#: closed-sprint rule (`MIN_N_BY_METRIC["on_time"]`), because a week bucket can
+#: hold several sprints.
+SPRINT_BUCKET_MIN_STORIES = MIN_COHORT_N
+
 #: The metric catalogue. ``definition`` names the function the point quotes, so
 #: "same cohort, no new definitions" is stated in the payload, not just here.
 #: ``min_n`` is the bucket cohort a headline needs (see ``MIN_COHORT_N``); it
@@ -102,12 +110,18 @@ METRICS: dict[str, dict] = {
         ),
     },
     "on_time": {
-        "label": "Sprint on-time delivery",
+        # prd/64 F-17: the tab names the *plotted quantity* (a sprint's share of
+        # committed stories delivered by its close). "Sprints on time (≥80 %)"
+        # on Timeline/Rules counts sprints that reached the target — a different
+        # question, and one the trend never answers.
+        "label": "Sprint story delivery share",
         "unit": "ratio",
         "higher_is_better": True,
         "definition": (
-            "done by the sprint's close ÷ committed stories, for the closed "
-            "sprints whose close falls in the bucket"
+            "stories done by the sprint's close ÷ the sprint's committed "
+            "stories — the share of a sprint's stories delivered on time. This "
+            "is not the 'sprints on time (≥80 %)' count on Timeline/Rules: that "
+            "answers how many sprints reached the target share"
         ),
     },
     "wait_hours": {
@@ -180,6 +194,22 @@ def metric_ids() -> list[dict]:
 
 for _metric_id, _min_n in MIN_N_BY_METRIC.items():
     METRICS[_metric_id]["min_n"] = _min_n
+
+
+def min_n_rule(metric: str, bucket: str) -> tuple[int, str]:
+    """The headline floor for one metric × bucket kind: ``(floor, basis)``.
+
+    ``basis`` names the point field the floor counts. It is ``"n"`` everywhere
+    except ``on_time`` on ``bucket=sprint``, where the bucket *is* one sprint
+    (``n = 1`` by construction) and the sample is the sprint's committed stories
+    — so the floor is ``≥ 5`` stories, not ``≥ 2`` buckets (prd/64 F-17). The
+    bucket count is not a sample size there, and quoting it made the headline
+    permanently read "no bucket meets the n≥2 floor".
+    """
+    if metric == "on_time" and bucket == "sprint":
+        return SPRINT_BUCKET_MIN_STORIES, "stories"
+    min_n_value = METRICS[metric].get("min_n")
+    return int(MIN_COHORT_N if min_n_value is None else min_n_value), "n"
 
 
 # --------------------------------------------------------------------------- #
@@ -560,19 +590,25 @@ def trend(
     # prd/63 F8/V-A5: a bucket also needs the metric's minimum cohort. The old
     # rule quoted any settled bucket, so "50.0 % latest (n=1)" and "2 d 1 h
     # latest (9 Nov · n=3)" headlined noise and compared n=3 with n=3. The
-    # headline is the newest settled bucket with n ≥ min_n; a bucket below it
-    # stays drawn and is named as skipped, never silently promoted.
-    min_n_value = METRICS[metric].get("min_n")
-    min_n = int(MIN_COHORT_N if min_n_value is None else min_n_value)
+    # headline is the newest settled bucket that clears the floor; a bucket
+    # below it stays drawn and is named as skipped, never silently promoted.
+    # prd/64 F-17: the floor's *basis* depends on the bucket kind — a sprint
+    # bucket of `on_time` is one sprint, so it is judged on its committed
+    # stories, not on a bucket count that can only ever be 1.
+    min_n, min_n_basis = min_n_rule(metric, bucket)
+
+    def cohort(point: dict) -> int:
+        return int(point.get(min_n_basis) or 0)
+
     settled = [point for point in measured if not point["in_progress"]]
-    below_min = [point for point in settled if int(point["n"] or 0) < min_n]
-    eligible = [point for point in settled if int(point["n"] or 0) >= min_n]
+    below_min = [point for point in settled if cohort(point) < min_n]
+    eligible = [point for point in settled if cohort(point) >= min_n]
     # A one-week (or one-sprint) store has no settled bucket: fall back to a
     # provisional *in-progress* point only when it clears the same floor, and
     # say so (``latest_provisional``).
     provisional = [
         point for point in measured
-        if point["in_progress"] and int(point["n"] or 0) >= min_n
+        if point["in_progress"] and cohort(point) >= min_n
     ]
     headline = eligible or provisional
     first = headline[0] if headline else None
@@ -617,6 +653,11 @@ def trend(
         "metric": metric,
         **METRICS[metric],
         "bucket": bucket,
+        # prd/64 F-17: the *effective* floor travels with the bucket kind, not
+        # only with the metric, and says what it counts (a sprint bucket's
+        # floor counts its committed stories, not its bucket count).
+        "min_n": min_n,
+        "min_n_basis": min_n_basis,
         "available": bool(points),
         "points": points,
         "annotations": entries,
@@ -637,19 +678,35 @@ def trend(
             # says when it had to fall back to a provisional in-progress point.
             "latest_label": latest["label"] if latest else None,
             "latest_n": latest["n"] if latest else None,
+            # prd/64 F-17: the on_time extras the headline quotes as
+            # "15/30 stories" so a sprint bucket's sample is never shown as n=1.
+            "latest_stories": latest.get("stories") if latest else None,
+            "latest_done_by_end": latest.get("done_by_end") if latest else None,
             "first_label": first["label"] if first else None,
             "first_n": first["n"] if first else None,
             "latest_provisional": bool(latest and latest["in_progress"]),
             "settled_buckets": len(settled),
             # prd/63 F8/V-A5: the minimum-N rule and the censored marker are
             # facts in the payload, so every consumer states the same floor.
+            # prd/64 F-17: ``min_n_basis`` says what the floor counts ("n" or a
+            # sprint bucket's "stories"), so the UI never prints "n≥2" for a
+            # sprint bucket it is not measuring by buckets.
             "min_n": min_n,
+            "min_n_basis": min_n_basis,
             "latest_settled_label": (
                 latest_settled["label"] if latest_settled else None
             ),
             "latest_settled_n": latest_settled["n"] if latest_settled else None,
             "below_min": [
-                {"label": point["label"], "n": point["n"]} for point in below_min
+                {
+                    "label": point["label"],
+                    "n": point["n"],
+                    # the floor's quantity, for a bucket kind whose floor is not
+                    # the bucket count (sprint buckets of `on_time`)
+                    **({"stories": int(point.get("stories") or 0)}
+                       if point.get("stories") is not None else {}),
+                }
+                for point in below_min
             ],
             "low_n_after_headline": skipped_after if latest is not None else [],
             "latest_censored": bool(latest and latest.get("censored")),
