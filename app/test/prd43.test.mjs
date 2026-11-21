@@ -183,7 +183,8 @@ test('the response table says the sentinel clock starts at the last peer', () =>
   assert.match(html, /last peer answer → first response/);
   assert.match(html, /×3\.0/);                    // 6 h vs a 2 h peer median
   assert.match(html, /oldest open request 19 d 0 h/);   // the forgotten tail
-  assert.match(html, /\(19 d 0 h\)/);              // and it is on screen, not only in a title
+  // prd/64 F-16: the age is labelled as the oldest of the total, not of a subset.
+  assert.match(html, /\(oldest of 2: 19 d 0 h\)/);      // and it is on screen, not only in a title
   // prd/46 §2: one canonical number, its definition stated, unowed requests named
   assert.match(html, /sentinel wait<\/b> \(the one canonical number\)/);
   assert.match(html, /median 6 h over 107 requests/);
