@@ -127,6 +127,20 @@ OBJECT_STATE = frozenset({"open", "merged", "declined"})
 # prd/02 "Bot vs human": deterministic, from a known account set (DC user type
 # SERVICE plus configured CI/build slugs).
 ACTOR_KIND = frozenset({"bot", "human"})
+# prd/61: the *type* of a dated team annotation (a policy/process change). The
+# kind is enumerated so the chart marker and its label stay renderable and
+# testable; the optional ``note`` (first-party metadata, never scraped) is where
+# the nuance lives. Not an event: annotations live in their own store table and
+# never reach the classifier or the event log.
+ANNOTATION_KINDS = frozenset({
+    "review_sla",
+    "wip_limit",
+    "size_cap",
+    "sentinel_added",
+    "sentinel_rotation",
+    "refinement_change",
+    "other",
+})
 OBJECT_TYPES = frozenset(
     {"PR", "COMMIT", "TICKET", "PERSON", "PRREV", "THREAD", "EPIC", "STORY", "SPRINT"}
 )

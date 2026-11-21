@@ -849,6 +849,101 @@ class SummaryRunTests(unittest.TestCase):
             self.assertEqual(result["prs_dropped"], 0)
 
 
+# --------------------------------------------------------------------------- #
+# prd/61: annotations + before/after through the real app
+# --------------------------------------------------------------------------- #
+class AnnotationEndpointTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.dir = Path(cls.tmp.name).resolve()
+        make_store(cls.dir, "cmp", n=24, seed=777)
+        cls.patches = [
+            mock.patch.object(app_module, "TENANTS_DIR", cls.dir),
+            mock.patch.object(app_module, "DEFAULT_TENANT", ""),
+            mock.patch.object(app_module, "LOG", False),
+            mock.patch.object(
+                app_module, "CALENDAR_CONFIG", cls.dir / "no-calendar.yaml",
+            ),
+        ]
+        for patch in cls.patches:
+            patch.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        for patch in reversed(cls.patches):
+            patch.stop()
+        cls.tmp.cleanup()
+
+    def setUp(self):
+        app_module._analysis_cache = None
+        app_module._trend_cache.clear()
+        app_module._compare_cache.clear()
+        con = connect(self.dir / "cmp.duckdb")
+        try:
+            con.execute("DELETE FROM annotations")
+        finally:
+            con.close()
+
+    def _post(self, payload) -> Reply:
+        return call(
+            "/api/annotations", method="POST", query="tenant=cmp",
+            body=json.dumps(payload).encode(),
+            headers=[(b"content-type", b"application/json")],
+        )
+
+    def _split(self) -> str:
+        body = get("/api/health", tenant="cmp").json()
+        first = datetime.fromisoformat(body["first_ts"].replace("Z", ""))
+        last = datetime.fromisoformat(body["last_ts"].replace("Z", ""))
+        middle = first + (last - first) / 2
+        return middle.date().isoformat()
+
+    def test_an_unknown_kind_is_a_400_and_lists_the_closed_vocabulary(self):
+        reply = self._post({"date": self._split(), "kind": "deploy_freeze"})
+        self.assertEqual(reply.status, 400, reply.body)
+        self.assertIn("review_sla", reply.json()["valid"])
+
+    def test_compare_validation_names_the_metric_and_the_split(self):
+        bad_metric = get("/api/trend/compare", tenant="cmp",
+                         metric="nope", split=self._split())
+        self.assertEqual(bad_metric.status, 400)
+        self.assertIn("metric must be one of", bad_metric.json()["error"])
+        bad_split = get("/api/trend/compare", tenant="cmp",
+                        metric="cycle_median", split="yesterday")
+        self.assertEqual(bad_split.status, 400)
+        self.assertIn("split", bad_split.json()["error"])
+        missing = get("/api/trend/compare", tenant="cmp", metric="cycle_median")
+        self.assertEqual(missing.status, 400)
+
+    def test_a_repeat_compare_is_cached(self):
+        split = self._split()
+        first = get("/api/trend/compare", tenant="cmp",
+                    metric="cycle_median", split=split)
+        second = get("/api/trend/compare", tenant="cmp",
+                     metric="cycle_median", split=split)
+        self.assertEqual(first.status, 200, first.body)
+        self.assertEqual(first.body, second.body)
+        self.assertTrue(app_module._compare_cache)
+        body = first.json()
+        self.assertIn("outcome", body)
+        self.assertIn(body["outcome"],
+                      ("better", "worse", "no_clear_change", "cant_tell"))
+        self.assertIn("ci", body)
+        self.assertIn("basis", body)
+
+    def test_an_annotation_write_invalidates_the_compare_cache(self):
+        split = self._split()
+        before = get("/api/trend/compare", tenant="cmp",
+                     metric="cycle_median", split=split).json()
+        self.assertIsNone(before["annotation"])
+        created = self._post({"date": split, "kind": "review_sla", "value": 4})
+        self.assertEqual(created.status, 201, created.body)
+        after = get("/api/trend/compare", tenant="cmp",
+                    metric="cycle_median", split=split).json()
+        self.assertEqual(after["annotation"]["label"], "review SLA 4 h")
+
+
 if __name__ == "__main__":
     unittest.main()
 

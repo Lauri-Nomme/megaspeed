@@ -471,6 +471,48 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
 - **Purpose**: "is flow efficiency improving week over week?" and "did delivery get better after the
   review-SLA change?" — a trend must be a sequence of the *same* number, never a second definition.
 
+### Annotation (prd/61)
+- **Definition**: a **closed-vocabulary, dated change the team itself records** — "we adopted the 4 h
+  review SLA on 8 Oct", "WIP limit 6", "sentinel added". It is first-party team metadata, not an event:
+  it lives in the store's own `annotations` table, never the event log, never the raw→label classifier,
+  and it is never scraped. The `kind` is enumerated (`review_sla`, `wip_limit`, `size_cap`,
+  `sentinel_added`, `sentinel_rotation`, `refinement_change`, `other`) so the marker and its label are
+  renderable; the optional `note` is the team's own words (the one documented first-party free-text
+  column) and never leaves that table.
+- **Derivation**: `analysis/annotations.py` against the store (one transactional write, one cache
+  invalidation). Holiday/vacation **spans** are derived from the same business-hours calendar every
+  duration is priced on (`calendar.summary()["holidays"]`, `vacation_list()`), never entered twice. An
+  annotation outside the analysis window is counted, not drawn.
+- **Purpose**: let the trend answer "did the change work?" with a dated marker instead of a guess. A
+  change nobody wrote down is indistinguishable from noise — the empty state says so.
+
+### Before/after comparison (prd/61)
+- **Definition**: the comparison of the **item-level durations** either side of a split (PRs or stories
+  *created* before vs after), with a difference of medians, a percentile-bootstrap 95 % interval, and a
+  two-sided Mann–Whitney U p (tooltip only). The outcome is exactly one of `better`, `worse`,
+  `no clear change` or `can't tell at this n`.
+- **Derivation**: `analysis/before_after.py`. The median is the **lower median** (an observed item, the
+  PRD's convention); the CI is 10k resamples with a seed derived from the cache key, so cached and cold
+  calls agree. Per side: at least 8 finished items and 3 buckets; fewer → `can't tell` (the reason
+  travels with the answer). Open items are excluded from both sides and counted (a running age is not a
+  completed duration); the bucket containing the snapshot is excluded from both sides.
+- **Purpose**: "did the SLA actually buy us anything?" without claiming causality. A wide interval is
+  an answer, not a failed test — and a naked p-value is never the presentation.
+
+### Stability flag (prd/61)
+- **Definition**: the combined reading of a **Theil–Sen** WIP slope and a **Theil–Sen** throughput slope
+  over the settled buckets: `overload` (WIP grows while exits do not), `filling` (WIP grows >2× faster
+  than throughput), `stable` (|WIP slope| ≤ 0.25/wk), `draining` (WIP falls while throughput holds), or
+  `insufficient` (< 4 buckets). Only `overload` carries `refuses_forecast: true` — the one flag prd/60
+  must obey.
+- **Derivation**: `analysis/stability.py`. WIP = open PRs at the bucket end; throughput = PRs merged in
+  the bucket (one population, so Little's Law is meaningful). Little's Law compares implied
+  `mean(WIP) ÷ mean(throughput)` with the censoring-correct **Kaplan–Meier** median; a >2× divergence is
+  `dead_wip` and names the prd/59 items with no live PR. Arrivals (PRs created) vs departures (PRs
+  merged) is the cumulative gap.
+- **Purpose**: warn when a metric improvement is mechanically about to reverse, and tell a lead *why*
+  the queue is the risk.
+
 ### Sprint "done" / scope / carry-over
 - **Definition**: a story is *done in sprint S* if it reached `done` **by S's end** (not "by now")
   **and no PR it names is still open**. A story whose Jira status is Done while one of its PRs is open
@@ -703,6 +745,7 @@ sets; "other" is the explicit "could not decide", never free text.
 | unapprove cause | push, manual |
 | object state | open, merged, declined |
 | actor kind | bot, human |
+| annotation kind | review_sla, wip_limit, size_cap, sentinel_added, sentinel_rotation, refinement_change, other (prd/61; first-party team metadata, never an event) |
 | object types | PR, COMMIT, THREAD, PRREV, PERSON, STORY, TICKET, EPIC, SPRINT |
 
 ---

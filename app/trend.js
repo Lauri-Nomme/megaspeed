@@ -12,6 +12,11 @@
 
 import { esc, fmtHours } from './format.js';
 import { color } from './theme.js';
+import {
+  annotationEmptyMarkup, annotationList, annotationMarkdown, annotationRecordMarkup,
+  annotationSummary, beforeAfterMarkdown, beforeAfterPanel, stabilityMarkdown,
+  stabilityStrip,
+} from './intervention.js';
 
 const WIDTH = 640;
 const HEIGHT = 168;
@@ -74,7 +79,11 @@ export function trendGeometry(payload) {
   const high = max + span * 0.12;
   const stamps = points.map((point) => Date.parse(point.bucket_start || point.start));
   const t0 = Math.min(...stamps);
-  const t1 = Math.max(...stamps) || t0 + 1;
+  // prd/61: the time domain reaches the last bucket's *end* (not only its
+  // start), so an annotation dated inside the in-progress week lands on the
+  // plot instead of being clipped past the right edge.
+  const ends = points.map((point) => Date.parse(point.end || point.start)).filter((value) => isFinite(value));
+  const t1 = Math.max(...stamps, ...ends) || t0 + 1;
   const plotW = WIDTH - PAD.left - PAD.right;
   const plotH = HEIGHT - PAD.top - PAD.bottom;
   const scaleX = (ms) => PAD.left + ((ms - t0) / (t1 - t0 || 1)) * plotW;
@@ -85,7 +94,18 @@ export function trendGeometry(payload) {
     x: Math.round(scaleX(stamps[index]) * 10) / 10,
     y: point.value == null ? null : Math.round(scaleY(point.value) * 10) / 10,
   }));
-  return { points: mapped, bounds: { low, high }, min, max };
+  return {
+    points: mapped,
+    bounds: { low, high },
+    min,
+    max,
+    t0,
+    t1,
+    // prd/61: the annotation layer needs the same time scale as the series (a
+    // marker at 8 Oct must land between the buckets, not on the nearest one).
+    xAt: (ms) => Math.round(scaleX(ms) * 10) / 10,
+    bucketWidth: plotW / Math.max(1, points.length),
+  };
 }
 
 /** A polyline per run of consecutive measured buckets (gaps stay gaps). */
@@ -102,6 +122,26 @@ function trendPaths(geometry) {
   }
   if (run.length) runs.push(run);
   return runs.map((entries) => entries.map((entry) => `${entry.x},${entry.y}`).join(' '));
+}
+
+/** The cumulative-flow bands, as polylines on the chart's own time scale. */
+function cumulativeFlowPaths(geometry) {
+  const first = geometry.points.find((entry) => entry.point.bands);
+  if (!first) return '';
+  const tokens = ['--series-default', '--info-accent', '--warning', '--healthy'];
+  return (first.point.bands || []).map((band, index) => {
+    const points = geometry.points
+      .filter((entry) => Array.isArray(entry.point.bands) && entry.point.bands[index])
+      .map((entry) => {
+        const value = Number(entry.point.bands[index].value || 0);
+        const y = PAD.top + (1 - ((value - geometry.bounds.low) / (geometry.bounds.high - geometry.bounds.low || 1))) * (HEIGHT - PAD.top - PAD.bottom);
+        return `${entry.x},${Math.round(y * 10) / 10}`;
+      });
+    if (points.length < 2) return '';
+    return `<polyline class="trend-band" data-band="${esc(band.id)}" points="${points.join(' ')}"
+      fill="none" stroke="${color(tokens[index % tokens.length])}" stroke-width="1.5"
+      stroke-linejoin="round"><title>${esc(band.label)}</title></polyline>`;
+  }).join('');
 }
 
 /** The inline SVG chart, with the active bucket banded and labelled. */
@@ -139,6 +179,52 @@ export function trendChart(payload) {
   }).join('');
   const paths = trendPaths(geometry).map((points) => `<polyline points="${points}"
     fill="none" stroke="${line}" stroke-width="2" stroke-linejoin="round"/>`).join('');
+  // prd/61: the cumulative-flow view draws the four bands (created / started /
+  // in review / merged) from the same buckets, instead of a single value line.
+  const flowPaths = payload && payload.metric === 'cumulative_flow'
+    ? cumulativeFlowPaths(geometry)
+    : '';
+  // prd/61: holiday/vacation spans behind the plot (`--warning` 8 %-alpha), and
+  // a dated policy change as a 1 px `--info-accent` hairline with a dot on the
+  // axis. An annotation outside the window is counted, never drawn.
+  const warning = color('--warning');
+  const accent = color('--info-accent');
+  const spans = ((payload && payload.spans) || [])
+    .filter((span) => span.in_window !== false)
+    .map((span) => {
+      const start = Date.parse(`${span.start}T00:00:00Z`);
+      const end = Date.parse(`${span.end}T00:00:00Z`) + 86400000; // the end day is inclusive
+      const x1 = Math.max(PAD.left, Math.min(WIDTH - PAD.right, geometry.xAt(start)));
+      const x2 = Math.max(PAD.left, Math.min(WIDTH - PAD.right, geometry.xAt(end)));
+      const width = Math.max(1, x2 - x1);
+      const label = width >= geometry.bucketWidth * 2
+        ? `<text x="${(x1 + width / 2).toFixed(1)}" y="${PAD.top + 9}" text-anchor="middle"
+            fill="${color('--text-secondary')}" font-size="10">${esc(span.label)}</text>`
+        : '';
+      return `<g class="trend-span ${esc(span.kind)}" data-span-kind="${esc(span.kind)}"
+          data-span-start="${esc(span.start)}" data-span-end="${esc(span.end)}">
+        <rect x="${x1.toFixed(1)}" y="${PAD.top}" width="${width.toFixed(1)}"
+          height="${plotH}" fill="${warning}" opacity="0.08"/>
+        ${label}
+      </g>`;
+    }).join('');
+  const markers = ((payload && payload.annotations) || [])
+    .filter((entry) => entry.in_window !== false)
+    .map((entry) => {
+      const x = geometry.xAt(Date.parse(`${entry.date}T00:00:00Z`));
+      if (!isFinite(x) || x < PAD.left - 1 || x > WIDTH - PAD.right + 1) return '';
+      // 44 px invisible hit area: a phone marker is tappable, never hover-only.
+      return `<g class="trend-annotation" data-annotation-id="${esc(entry.id)}"
+          data-kind="${esc(entry.kind)}" data-date="${esc(entry.date)}"
+          tabindex="0" role="button" aria-label="${esc(`${entry.label} · ${entry.date}${entry.note ? ` · ${entry.note}` : ''}`)}">
+        <line x1="${x.toFixed(1)}" y1="${PAD.top}" x2="${x.toFixed(1)}" y2="${HEIGHT - PAD.bottom}"
+          stroke="${accent}" stroke-width="1"/>
+        <circle cx="${x.toFixed(1)}" cy="${HEIGHT - PAD.bottom}" r="2.5" fill="${accent}"/>
+        <rect class="annotation-hit" x="${(x - 22).toFixed(1)}" y="${PAD.top}"
+          width="44" height="${plotH + 14}" fill="transparent"/>
+        <title>${esc(`${entry.label} · ${entry.date}${entry.note ? ` · “${entry.note}”` : ''}`)}</title>
+      </g>`;
+    }).join('');
   const dots = geometry.points.filter((entry) => entry.y != null).map((entry) => {
     // prd/63 F8/V-A5: a bucket whose cohort is partly still open is
     // right-censored — its median is over the survivors. The dot is hollow and
@@ -167,8 +253,18 @@ export function trendChart(payload) {
       data-trend-metric="${esc(payload.metric)}"
       aria-label="${esc(`${label} per ${payload.bucket}: ${geometry.points.length} buckets, ${active.length ? `${active.length} in progress` : 'all complete'}`)}">
     <title>${esc(`${label} per ${payload.bucket}`)}</title>
-    ${bands}${gridlines}${paths}${dots}${axis}
+    ${spans}${bands}${gridlines}${paths}${flowPaths}${dots}${markers}${axis}
   </svg>`;
+}
+
+/** The cumulative-flow legend (one line per band, from the payload's own ids). */
+export function cumulativeFlowLegend(payload) {
+  const point = ((payload && payload.points) || []).find((entry) => entry.bands);
+  if (!point) return '';
+  const tokens = ['--series-default', '--info-accent', '--warning', '--healthy'];
+  return `<p class="cfd-legend">${(point.bands || []).map((band, index) =>
+    `<span class="cfd-key" data-band="${esc(band.id)}"><i style="background:${color(tokens[index % tokens.length])}"></i>${esc(band.label)}</span>`).join('')}
+    <span class="muted">cumulative PRs by stage, binned on each bucket's end</span></p>`;
 }
 
 /** Does a bucket's N clear the payload's minimum-cohort floor? */
@@ -251,8 +347,8 @@ export function trendErrorMarkup(message) {
   </div>`;
 }
 
-/** Tabs + chart + table. `bucket` switches week/sprint. */
-export function trendMarkup(payload, { bucket = 'week', enabled = true, error = null } = {}) {
+/** Tabs + chart + annotations + before/after + stability + table. */
+export function trendMarkup(payload, { bucket = 'week', enabled = true, error = null, compare = null } = {}) {
   if (error) return trendErrorMarkup(error);
   if (!payload) return '<p class="empty-row">Loading the trend…</p>';
   const tabs = `<div class="trend-toolbar">
@@ -268,19 +364,32 @@ export function trendMarkup(payload, { bucket = 'week', enabled = true, error = 
     return `${tabs}<p class="empty-row">${esc(payload.note || 'No trend for this metric in this store.')}</p>`;
   }
   const censored = (payload.points || []).filter((point) => point.censored).length;
+  const annotations = payload.annotations || [];
+  const catalogue = payload.kinds || [];
+  const record = catalogue.length ? annotationRecordMarkup(catalogue) : '';
   return `${tabs}
     <div class="trend-body" ${enabled ? '' : 'data-benchmark-off="true"'}>
       ${trendChart(payload)}
+      ${payload.metric === 'cumulative_flow' ? cumulativeFlowLegend(payload) : ''}
+      ${annotationSummary(payload)}
+      ${annotations.length ? annotationList(payload) : (catalogue.length ? annotationEmptyMarkup(catalogue) : '')}
+      ${annotations.length ? beforeAfterPanel(compare, {
+        annotations,
+        metric: compare ? compare.metric : null,
+      }) : ''}
+      ${stabilityStrip(payload.stability)}
       ${trendTable(payload)}
     </div>
+    ${annotations.length ? '' : ''}
+    ${record && annotations.length ? record : ''}
     ${censored ? `<p class="panel-note" data-trend-censored="${censored}">a hollow point is
       right-censored: the bucket's cohort still has open PRs, so only the merged ones
       can enter its value.</p>` : ''}
     ${payload.note ? `<p class="panel-note">${esc(payload.note)}</p>` : ''}`;
 }
 
-/** Copy-as-Markdown: the same points, one line per bucket. */
-export function trendMarkdown(payload) {
+/** Copy-as-Markdown: the points, the annotations, the verdict and the stability. */
+export function trendMarkdown(payload, { compare = null } = {}) {
   if (!payload) return '';
   const lines = [
     `# ${payload.label || 'Trend'} per ${payload.bucket}`,
@@ -294,5 +403,10 @@ export function trendMarkdown(payload) {
         point.censored ? ` (right-censored${point.censored ? `: ${point.censored} still open` : ''})` : ''} | ` +
       `${trendValue(point.value, payload.unit)} | ${point.n == null ? '–' : point.n} |`),
   ];
-  return lines.join('\n');
+  const extra = [
+    annotationMarkdown(payload),
+    compare ? beforeAfterMarkdown(compare) : '',
+    stabilityMarkdown(payload.stability),
+  ].filter(Boolean);
+  return [lines.join('\n'), ...extra].join('\n\n');
 }

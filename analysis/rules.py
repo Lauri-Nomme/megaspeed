@@ -728,6 +728,7 @@ def cycle_time(court: ballcourt.BallCourt, window) -> dict:
     return {
         "n": len(samples),
         "median_hours": _median(samples),
+        "p85_hours": _percentile(samples, 0.85),
         "p90_hours": _p90(samples),
         "target_hours": TARGET_CYCLE_HOURS,
         "over_target": sum(1 for h in samples if h > TARGET_CYCLE_HOURS),

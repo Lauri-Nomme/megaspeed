@@ -9,6 +9,10 @@ pseudonyms, PR ids, commit hashes, timestamps and closed attribute labels.
     queues     — per-person WIP / throughput series (Little's law)
     delivery   — the triage list ("what needs attention?")
     rules      — metrics + ranked, evidence-backed "change this" suggestions
+    trend      — the same metrics, one bucket at a time (prd/50)
+    annotations — dated, closed-vocabulary team changes in the store (prd/61)
+    before_after — item-level comparison either side of a change (prd/61)
+    stability  — Theil–Sen WIP/throughput slopes + Little's Law (prd/61)
 
 Duration assumption: **business hours** when a calendar is attached (the server
 loads ``config/calendar.default.yaml`` plus ``data/<tenant>/calendar.yaml``),

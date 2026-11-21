@@ -2766,6 +2766,28 @@ tr.response-row:hover td, tr.response-row:focus-visible td { background: var(--b
 }
 
 @media (max-width: 640px) {
+  /* phone (prd/61): a 140 px chart, tappable markers, the table as a
+   * before | after grid, verdict above it, chips stacked. No horizontal scroll. */
+  .trend-chart { max-height: 140px; }
+  .annotation-item { gap: 4px 8px; }
+  .annotation-item .chip { min-height: 44px; margin-left: 0; }
+  .annotation-form .control, .annotation-form .control.grow { flex: 1 1 100%; }
+  .annotation-form input, .annotation-form select { height: 40px; font-size: 13px; }
+  .before-after .section-head { align-items: stretch; }
+  .before-after select { height: 40px; font-size: 13px; }
+  .before-after-table { max-width: none; }
+  .before-after-table thead { display: none; }
+  .before-after-table tbody { display: grid; grid-template-columns: max-content 1fr 1fr 1fr; }
+  .before-after-table tr { display: contents; }
+  .before-after-table th[scope="row"] { grid-column: 1; font-size: 11px; }
+  .before-after-table td { grid-row: auto; }
+  .before-after-table tr.diff td[colspan] { grid-column: 2 / -1; }
+  .ci-block { max-width: none; }
+  .stability-strip { flex-direction: column; align-items: flex-start; gap: 5px; }
+  .stability-strip .chip.stability { min-height: 28px; height: auto; padding: 4px 8px; white-space: normal; }
+}
+
+@media (max-width: 640px) {
   /* the waterfall becomes four stacked rows; the tiles go 2 × 2 (prd/62) */
   .yield-waterfall { flex-direction: column; gap: 8px; }
   .yield-step, .yield-rolled { width: 100%; flex: 0 0 auto; }
@@ -2792,3 +2814,125 @@ tr.response-row:hover td, tr.response-row:focus-visible td { background: var(--b
   .aging td.c-age .calendar { display: block; margin: 0; }
   .aging td.c-age .working { display: block; color: var(--text-tertiary); font-size: 10px; }
 }
+
+/* --- prd/61: intervention-aware trend --------------------------------- */
+/* Markers are interactivity/info; spans are context. Only the verdict pill
+ * uses state colour, and `can't tell` is a neutral outline, never a failure. */
+.trend-span { pointer-events: none; }
+.trend-annotation { cursor: pointer; }
+.trend-annotation:focus { outline: none; }
+.trend-annotation:focus .annotation-hit { fill: var(--info-wash); }
+.trend-annotation .annotation-hit { pointer-events: all; }
+.cfd-legend {
+  display: flex; flex-wrap: wrap; gap: 4px 12px; align-items: center;
+  margin: 0 0 6px; font-size: 10.5px; color: var(--text-secondary);
+}
+.cfd-key { display: inline-flex; align-items: center; gap: 4px; font-family: var(--font-mono); }
+.cfd-key i { width: 10px; height: 2px; display: inline-block; }
+.annotation-summary {
+  display: flex; flex-wrap: wrap; gap: 4px; align-items: baseline;
+  margin: 0 0 6px; font-size: 11.5px; color: var(--text-secondary);
+}
+.annotation-list {
+  list-style: none; margin: 0 0 10px; padding: 0;
+  border-top: 1px solid var(--border-hairline);
+}
+.annotation-item {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px;
+  padding: 6px 0; border-bottom: 1px solid var(--border-hairline);
+  font-size: 12px;
+}
+.annotation-label { font-weight: 600; }
+.annotation-date { font-size: 11px; color: var(--text-tertiary); }
+.annotation-note { color: var(--text-secondary); font-size: 11.5px; font-style: italic; }
+.annotation-item .chip { margin-left: auto; }
+.chip.danger { color: var(--critical); border-color: var(--critical-line); }
+.annotation-record { margin: 4px 0 10px; }
+.annotation-record > summary { list-style: none; cursor: pointer; }
+.annotation-record > summary::-webkit-details-marker { display: none; }
+.annotation-form {
+  display: flex; flex-wrap: wrap; align-items: end; gap: 8px 12px;
+  padding: 8px 0 4px;
+}
+.annotation-form .control {
+  display: flex; flex-direction: column; gap: 3px;
+  font-size: 11px; color: var(--text-secondary);
+}
+.annotation-form .control.grow { flex: 1 1 220px; }
+.annotation-form input, .annotation-form select {
+  height: 26px; padding: 0 6px; min-width: 90px;
+  background: var(--bg-control); color: var(--text-primary);
+  border: 1px solid var(--border-control); border-radius: var(--radius-control);
+  font-size: 12px;
+}
+.annotation-empty {
+  margin: 0 0 10px; padding: 8px 0;
+  border-top: 1px solid var(--border-hairline);
+  font-size: 12px; color: var(--text-secondary);
+}
+.annotation-empty p { margin: 0 0 4px; }
+
+.before-after {
+  margin: 10px 0 12px; padding: 8px 0 6px;
+  border-top: 1px solid var(--border-hairline);
+  border-bottom: 1px solid var(--border-hairline);
+}
+.before-after .section-head {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px;
+  margin-bottom: 6px;
+}
+.before-after .section-head h3 { margin: 0; font-size: 12px; font-weight: 600; }
+.before-after .control {
+  display: inline-flex; align-items: center; gap: 5px;
+  font-size: 11px; color: var(--text-secondary);
+}
+.before-after select {
+  height: 24px; padding: 0 6px;
+  background: var(--bg-control); color: var(--text-primary);
+  border: 1px solid var(--border-control); border-radius: var(--radius-control);
+  font-size: 12px;
+}
+.verdict { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; margin: 4px 0 8px; }
+.verdict-sentence { margin: 0; font-size: 12px; color: var(--text-primary); }
+.outcome-pill {
+  display: inline-flex; align-items: center; height: 18px; padding: 0 8px;
+  border-radius: var(--radius-pill); font-size: 10.5px; font-weight: 600;
+  white-space: nowrap; border: 1px solid var(--border-control);
+  background: transparent; color: var(--text-secondary);
+}
+.outcome-pill.positive { color: var(--healthy); border-color: var(--healthy); background: var(--healthy-tint, transparent); }
+.outcome-pill.critical { color: var(--critical); border-color: var(--critical-line); background: var(--critical-tint); }
+.before-after-table { max-width: 460px; }
+.before-after-table th[scope="row"] { text-align: left; font-weight: 500; color: var(--text-secondary); }
+.before-after-table tr.diff td { color: var(--text-primary); }
+.ci-block { margin: 8px 0 4px; max-width: 460px; }
+.ci-bar {
+  position: relative; height: 12px; width: 100%;
+  background: var(--bg-control); border-radius: 2px;
+}
+.ci-zero { position: absolute; top: -2px; width: 1px; height: 16px; background: var(--text-tertiary); }
+.ci-range { position: absolute; top: 5px; height: 2px; background: var(--info-accent); border-radius: 1px; }
+.ci-diff { position: absolute; top: 3px; width: 2px; height: 6px; background: var(--text-primary); }
+.ci-text { font-size: 11px; color: var(--text-secondary); font-family: var(--font-mono); }
+.ci-none { font-size: 11.5px; color: var(--text-tertiary); font-style: italic; }
+.before-after-basis { margin: 4px 0 0; font-size: 11px; color: var(--text-tertiary); }
+.before-after .panel-note { margin: 6px 0 0; }
+.before-after .interval-note { color: var(--text-tertiary); }
+
+.stability-strip {
+  display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center;
+  margin: 8px 0 10px; padding: 8px 0;
+  border-top: 1px solid var(--border-hairline);
+  border-bottom: 1px solid var(--border-hairline);
+}
+.stability-strip .chip.stability {
+  font-family: var(--font-mono); font-size: 10.5px; height: 20px;
+  background: transparent; border-color: var(--border-control);
+  color: var(--text-secondary);
+}
+.stability-strip .chip.stability.arrivals.behind { color: var(--warning); border-color: var(--warning-line); }
+.stability-strip .chip.stability.little.dead_wip { color: var(--warning); border-color: var(--warning-line); }
+.stability-strip.overload .chip.stability.wip { color: var(--critical); border-color: var(--critical-line); }
+.stability-sentence { flex-basis: 100%; margin: 0; font-size: 11.5px; color: var(--text-secondary); }
+.stability-sentence.little-note { color: var(--text-tertiary); }
+.stability-strip.insufficient .stability-sentence { color: var(--text-tertiary); }
