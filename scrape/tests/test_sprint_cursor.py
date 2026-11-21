@@ -58,6 +58,9 @@ class SprintMembershipCursorTests(unittest.TestCase):
             repos=[],
             ticket_projects=("PROJ",),
             jira_projects=("PROJ",),
+            # This suite exercises the opt-in board walk; the default reads the
+            # ticket's own Sprint field and makes no /sprint/{id}/issue calls.
+            jira_sprint_membership="api",
         )
         self.out = self.root / "export" / "jira.tgz"
         self.state_dir = self.root / "export" / "jira.state"

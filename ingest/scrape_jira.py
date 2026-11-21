@@ -43,7 +43,7 @@ What is read, and why (prd/04):
 | ``/rest/api/2/issue/{key}?expand=changelog`` | the issue snapshot + every status / assignee / sprint / points change |
 | ``/rest/api/2/issue/{key}/worklog`` | native worklogs (only when the inline page is truncated) |
 | ``/rest/agile/1.0/board/{id}/sprint`` | Sprint objects (start / end / complete / state) |
-| ``/rest/agile/1.0/sprint/{id}/issue`` | membership-at-start vs added-later |
+| ``/rest/agile/1.0/sprint/{id}/issue`` | membership-at-start vs added-later (only with ``sprint_membership=api``; the default reads the ticket's own Sprint field) |
 | ``/rest/api/2/field`` + ``/status`` | custom-field discovery, status -> category |
 
 Local state, kept next to the output and never inside the tgz (prd/11 §3,§5):
@@ -208,15 +208,16 @@ class JiraIssueState:
 # reduction
 # --------------------------------------------------------------------------- #
 class JiraSprintState:
-    """Per-sprint membership cursor (``jira_sprints.json``, prd/44 NFR-2).
+    """Per-sprint membership cursor for the ``sprint_membership=api`` fallback.
 
-    The Jira side used to walk **every** sprint's membership on **every** run:
-    one ``/sprint/{id}/issue`` request per sprint, forever, even though a closed
-    sprint's membership cannot change once its ``completeDate`` is final. This
-    cache stores, per sprint id: the metadata that decides freshness
-    (``state`` / ``start_date`` / ``complete_date``) and the issue keys the walk
-    read. A later run re-reads membership only for an open sprint or one whose
-    ``completeDate`` moved; everything else is replayed from here.
+    The **default** mode reads membership from each ticket's own Sprint field and
+    never calls ``/sprint/{id}/issue`` (prd/04/66). This cache belongs to the
+    opt-in board walk: it used to walk every sprint on every run, one request
+    per sprint, even though a closed sprint's membership cannot change once its
+    ``completeDate`` is final. The cache stores, per sprint id, the metadata
+    that decides freshness (``state`` / ``start_date`` / ``complete_date``) and
+    the issue keys the walk read. A later run re-reads membership only for an
+    open sprint or one whose ``completeDate`` moved; everything else replays.
     """
 
     def __init__(self, path: str | Path):
@@ -349,6 +350,10 @@ class JiraCollected:
     team_ids: tuple[str, ...] = ()
     #: The team field the set was resolved through (id or name), for provenance.
     team_field: str = ""
+    #: prd/04/66: ``ticket`` (membership from each ticket's Sprint field) or
+    #: ``api`` (the per-sprint board walk). Recorded so a store's sprint
+    #: membership is reproducible.
+    sprint_membership: str = "ticket"
     identity: IdentityTable | None = None
     watermark: datetime | None = None
     boards: dict[str, int] = field(default_factory=dict)
@@ -635,6 +640,11 @@ def resolve_team_keys(
     team with no work in those projects must not become a green, empty scrape.
     """
     jql = jql_for_teams(ref, teams, projects=projects, cloud_team=cloud_team)
+    where = f" in {', '.join(projects)}" if projects else ""
+    if progress is not None:
+        progress.emit(
+            f"[scrape] resolving team keys: {ref} in ({len(teams)} value(s)){where}…"
+        )
     keys: list[str] = []
     try:
         rows = client.search(jql, fields="key")
@@ -642,13 +652,14 @@ def resolve_team_keys(
             key = str(row.get("key") or "")
             if key and key not in keys:
                 keys.append(key)
+                if progress is not None and len(keys) % 500 == 0:
+                    progress.emit(f"[scrape] team keys: {len(keys):,} so far…")
     except Exception as exc:
         raise SystemExit(
             f"team query failed: {jql}\n  {exc}\n"
             "The Cloud Teams field compares a team **id**, not a name;"
             " `python3 -m ingest.jira_fields --issue KEY` prints the id."
         ) from exc
-    where = f" in {', '.join(projects)}" if projects else ""
     if not keys:
         raise SystemExit(
             f"no issue matches team(s) {', '.join(teams)} via {ref}{where}: check the"
@@ -825,6 +836,7 @@ def collect(
         team_keys=team_values,
         team_ids=team_ids,
         team_field=team_field,
+        sprint_membership=cfg.jira_sprint_membership,
         identity=ident,
         resumed=bool(carry_events or carry_objects),
         carried_events=list(carry_events or []),
@@ -856,7 +868,8 @@ def collect(
     # completeDate is final, so this cursor is what keeps an incremental run
     # from paying one membership request per sprint, forever.
     sprints: list[tuple[str, dict]] = []
-    memberships: dict[str, set[int]] = {}
+    membership_api = cfg.jira_sprint_membership == "api"
+    memberships: dict[str, set[int]] | None = {} if membership_api else None
     sprints_previous = None if full else (state.watermark(source) if state else None)
     sprints_cached = {} if sprint_state is None else sprint_state.entries(source)
     sprints_bootstrap = bool(full or not sprints_cached)
@@ -868,13 +881,20 @@ def collect(
         board_sprints = list(client.sprints(board))
         for sprint in board_sprints:
             sprints.append((project, sprint))
+        if not membership_api:
+            continue
         walk = {
             int(sprint["id"]) for sprint in _sprint_membership_candidates(
                 board_sprints, sprints_cached,
                 watermark=sprints_previous, bootstrap=sprints_bootstrap,
             )
         }
-        for sprint in board_sprints:
+        if progress is not None:
+            progress.emit(
+                f"[scrape] {project}: board {board} · {len(board_sprints)} sprint(s)"
+                f" · walking {len(walk)} membership list(s)…"
+            )
+        for index, sprint in enumerate(board_sprints, 1):
             sid = int(sprint["id"])
             cached_entry = sprints_cached.get(str(sid)) or {}
             if sprint_state is not None and sid not in walk:
@@ -885,7 +905,25 @@ def collect(
                     sprint_state.record(source, sprint, keys)
             for key in keys:
                 memberships.setdefault(key, set()).add(sid)
+            if progress is not None and (
+                index % 25 == 0 or index == len(board_sprints)
+            ):
+                progress.emit(
+                    f"[scrape] sprint membership {index}/{len(board_sprints)}"
+                    f" · {len(memberships)} issue(s)"
+                )
     out.sprint_count = len(sprints)
+    if progress is not None:
+        if membership_api:
+            progress.emit(
+                f"[scrape] sprint membership done: {len(sprints)} sprint(s)"
+                f" · {len(memberships)} issue(s)"
+            )
+        else:
+            progress.emit(
+                "[scrape] sprint membership: derived from each ticket's Sprint"
+                " field (no per-sprint walk)"
+            )
 
     reducer = JiraReducer(
         cfg,
@@ -940,6 +978,20 @@ def collect(
     def _checkpoint(project: str | None) -> None:
         _refresh()
         checkpoint(out, project)
+
+    if progress is not None:
+        scope_label = (
+            f"{len(scope_keys):,} key(s)" if key_scoped
+            else f"project(s) {', '.join(project_list)}"
+        )
+        member_label = (
+            f"{len(memberships):,} sprint member(s)"
+            if memberships is not None
+            else "membership from each ticket's Sprint field"
+        )
+        progress.emit(
+            f"[scrape] issues: walking {scope_label} · {member_label}…"
+        )
 
     for index, project in enumerate(project_list):
         if stop or (key_scoped and index > 0):
@@ -1020,6 +1072,14 @@ def collect(
                     requests=client.requests,
                     events=len(stats.events),
                 )
+                # The interval tick may be silent on a slow request; a count every
+                # 200 kept issues is the heartbeat a two-hour walk needs.
+                if stats.issues_kept % 200 == 0:
+                    progress.emit(
+                        f"[scrape] {stats.issues_kept:,} issue(s) kept"
+                        f" · {client.requests:,} req"
+                        f" · {len(stats.events):,} events"
+                    )
             if checkpoint is not None and checkpoint_every > 0:
                 pending += 1
                 if pending >= checkpoint_every:
@@ -1226,6 +1286,7 @@ def build_manifest(collected: JiraCollected, *, previous: datetime | None,
             # prd/29: status name -> stage. Empty means the Jira category
             # projection was used (3 coarse stages).
             "status_map": dict(sorted(collected.status_map.items())),
+            "sprint_membership": collected.sprint_membership,
             "worklogs": collected.stats.worklogs,
             "log_delays": dict(sorted(collected.stats.log_delays.items())),
         },
@@ -1557,6 +1618,7 @@ def scrape(
         "jira_teams": list(collected.team_keys),
         "jira_team_ids": list(collected.team_ids),
         "jira_team_field": collected.team_field,
+        "jira_sprint_membership": collected.sprint_membership,
         "jira_status_map": dict(sorted(collected.status_map.items())),
     }
 

@@ -157,6 +157,11 @@ class Config:
     #: their children (``"Epic Link" in (...)``) and scraped through the explicit
     #: key-set path. An **AND** criterion when teams are also configured (prd/66).
     jira_epics: tuple[str, ...] = DEFAULT_JIRA_EPICS
+    #: prd/66 / prd/04: where sprint membership comes from. ``ticket`` (default)
+    #: reads each ticket's own Sprint field -- the value Jira already returns --
+    #: and needs no per-sprint ``/sprint/{id}/issue`` walk. ``api`` restores the
+    #: old board walk, for a site whose Sprint field is incomplete.
+    jira_sprint_membership: str = "ticket"
     #: prd/66: a **team** set, resolved to the issues that carry one of these
     #: values in the team field. Same shape as an epic set: one extra search at
     #: scrape start, then an ordinary explicit-key-set walk, so the manifest and
@@ -485,6 +490,19 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
     jira_teams = parse_teams(
         os.environ.get("MEGASPEED_JIRA_TEAMS", jira.get("teams", []))
     )
+    # prd/04/66: sprint membership from the ticket's own Sprint field (default),
+    # or the old per-sprint board walk for sites with an incomplete field.
+    membership = str(
+        os.environ.get(
+            "MEGASPEED_JIRA_SPRINT_MEMBERSHIP",
+            jira.get("sprint_membership", "ticket"),
+        ) or "ticket"
+    ).strip().lower()
+    if membership not in ("ticket", "api"):
+        raise SystemExit(
+            f"bad MEGASPEED_JIRA_SPRINT_MEMBERSHIP {membership!r}: expected"
+            " 'ticket' (read each ticket's Sprint field) or 'api' (walk each sprint)"
+        )
     # prd/29: the workflow status -> stage map. The TOML table is the record;
     # the env var merges over it per status name, so a one-off run can widen the
     # mapping without editing the committed config.
@@ -547,6 +565,7 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         jira_epics=jira_epics,
         # prd/66: the team set is resolved through the team field at scrape start.
         jira_teams=jira_teams,
+        jira_sprint_membership=membership,
         jira_team_field=str(
             os.environ.get("MEGASPEED_JIRA_TEAM_FIELD", jira.get("team_field", "")) or ""
         ).strip(),

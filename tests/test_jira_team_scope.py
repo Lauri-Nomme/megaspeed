@@ -161,6 +161,18 @@ class TeamConfigTests(unittest.TestCase):
         cfg = self.load(MEGASPEED_JIRA_TEAMS="Platform", MEGASPEED_TICKET_PROJECTS="")
         self.assertEqual(cfg.ticket_projects, ())
 
+    def test_the_sprint_membership_defaults_to_the_ticket_field(self):
+        self.assertEqual(self.load().jira_sprint_membership, "ticket")
+
+    def test_the_api_walk_is_opt_in(self):
+        cfg = self.load(MEGASPEED_JIRA_SPRINT_MEMBERSHIP="api")
+        self.assertEqual(cfg.jira_sprint_membership, "api")
+
+    def test_a_bad_sprint_membership_mode_is_an_operator_error(self):
+        with self.assertRaises(SystemExit) as caught:
+            self.load(MEGASPEED_JIRA_SPRINT_MEMBERSHIP="both")
+        self.assertIn("MEGASPEED_JIRA_SPRINT_MEMBERSHIP", str(caught.exception.code))
+
     def test_cloud_email_plus_api_token_is_a_credential(self):
         # The standard Cloud method; a Bearer PAT is not the only option.
         cfg = self.load(
@@ -410,7 +422,8 @@ class _ScrapeCase(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def scrape(self, name: str = "jira", fixture: dict | None = None, **overrides):
+    def scrape(self, name: str = "jira", fixture: dict | None = None, *,
+               progress_stream=None, **overrides):
         cfg = _config(self.root, **overrides)
         out = self.root / f"{name}.tgz"
         report = scrape(
@@ -419,7 +432,9 @@ class _ScrapeCase(unittest.TestCase):
             JIRA_SOURCE,
             out=out,
             state_dir=self.root / f"{name}.state",
-            progress=ProgressReporter(stream=io.StringIO(), interval=0),
+            progress=ProgressReporter(
+                stream=progress_stream or io.StringIO(), interval=0
+            ),
         )
         return cfg, report, out
 
@@ -478,6 +493,19 @@ class TeamScrapeTests(_ScrapeCase):
         self.assertEqual(report["jira_team_field"], TEAM_FIELD)
         self.assertEqual(set(report["ticket_keys"]), set(_keys_in(fixture, "Payments")))
 
+    def test_the_long_phases_report_progress(self):
+        # A 2,391-key team used to sit silent through the key resolution, the
+        # sprint-membership walk and the issue walk.
+        stream = io.StringIO()
+        self.scrape(
+            "progress", fixture=_team_fixture(), jira_teams=("Platform",),
+            progress_stream=stream,
+        )
+        text = stream.getvalue()
+        self.assertIn("resolving team keys", text)
+        self.assertIn("sprint membership: derived from each ticket's Sprint field", text)
+        self.assertIn("issues: walking", text)
+
     def test_teams_and_explicit_keys_import_only_the_intersection(self):
         # prd/66: teams are an AND criterion, not a replacement for the keys.
         fixture = _team_fixture()
@@ -516,6 +544,46 @@ class TeamScrapeTests(_ScrapeCase):
                 jira_teams=("Platform",),
             )
         self.assertIn("in OPS", str(caught.exception.code))
+
+
+class SprintMembershipTests(_ScrapeCase):
+    """prd/04/66: the ticket's Sprint field is the membership; no board walk."""
+
+    @staticmethod
+    def _sprint_events(path) -> list[tuple]:
+        bundle = read_bundle(path)
+        return sorted(
+            (
+                event["event_key"],
+                event["activity"],
+                event["attributes"].get("sprint_id"),
+                bool(event["attributes"].get("at_start")),
+                str(event["ts"]),
+            )
+            for event in bundle.events
+            if event["activity"] in ("sprint_added", "sprint_removed")
+        )
+
+    def test_the_default_uses_the_ticket_field_and_skips_the_sprint_walk(self):
+        _cfg, report, out = self.scrape("ticket", fixture=_team_fixture())
+        self.assertEqual(report["jira_sprint_membership"], "ticket")
+        self.assertNotIn("sprint-issues", report["requests_by_kind"])
+        self.assertGreater(report["sprint_at_start"], 0)
+
+    def test_the_api_mode_produces_the_same_membership_events(self):
+        _c1, ticket_report, ticket_out = self.scrape(
+            "ticket", fixture=_team_fixture()
+        )
+        _c2, api_report, api_out = self.scrape(
+            "api", fixture=_team_fixture(), jira_sprint_membership="api"
+        )
+        self.assertIn("sprint-issues", api_report["requests_by_kind"])
+        self.assertEqual(
+            self._sprint_events(ticket_out), self._sprint_events(api_out)
+        )
+        self.assertEqual(
+            ticket_report["sprint_at_start"], api_report["sprint_at_start"]
+        )
 
 
 # --------------------------------------------------------------------------- #

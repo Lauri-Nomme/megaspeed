@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1325** (`tests/`) + **99** (`scrape/tests`) + **498** (node `app/test`) green.
+Tests: **1331** (`tests/`) + **99** (`scrape/tests`) + **498** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 

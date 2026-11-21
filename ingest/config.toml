@@ -132,6 +132,12 @@ story_points_field = ""
 #   export MEGASPEED_JIRA_TEAMS="00000000-0000-4000-8000-000000000001"
 teams = []
 team_field = ""
+# Sprint membership (prd/04/66). Default "ticket" reads each ticket's own Sprint
+# field, which Jira already returns with the issue -- no per-sprint
+# /sprint/{id}/issue walk. Set "api" only if the Sprint field is incomplete on
+# your site and you need the board walk as a fallback.
+#   export MEGASPEED_JIRA_SPRINT_MEMBERSHIP=ticket|api
+sprint_membership = "ticket"
 
 # Jira Cloud (prd/24): the same ticket layer over Cloud's v3 API.
 # Auth is one of two methods (environment only):

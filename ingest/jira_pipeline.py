@@ -435,14 +435,16 @@ class JiraReducer:
         issue: dict,
         *,
         project: str,
-        memberships: dict[str, set[int]],
+        memberships: dict[str, set[int]] | None = None,
         stats: JiraStats,
     ) -> None:
         itype = _issue_type(issue)
         if itype == "epic":
             self._reduce_epic(issue, stats)
         elif itype in STORY_TYPES:
-            self._reduce_story(issue, project=project, memberships=memberships, stats=stats)
+            self._reduce_story(
+                issue, project=project, memberships=memberships, stats=stats
+            )
         else:
             stats.issues_skipped_type += 1
 
@@ -483,7 +485,7 @@ class JiraReducer:
         issue: dict,
         *,
         project: str,
-        memberships: dict[str, set[int]],
+        memberships: dict[str, set[int]] | None,
         stats: JiraStats,
     ) -> None:
         key = str(issue["key"])
@@ -527,7 +529,15 @@ class JiraReducer:
         )
 
         self._walk_changelog(issue, story_id, stats, allow_sprint=True, project=project)
-        self._at_start_membership(key, story_id, project=project, memberships=memberships, stats=stats)
+        # prd/04/66: the ticket's own Sprint field is the membership Jira already
+        # returned; the per-sprint board walk is only a fallback (``api`` mode).
+        current_sprints = (
+            memberships.get(key) if memberships is not None
+            else _current_sprints(fields, self.sprint_field)
+        )
+        self._at_start_membership(
+            key, story_id, sprints=current_sprints, project=project, stats=stats
+        )
         self._worklogs(issue, story_id, stats)
 
     # -- changelog -------------------------------------------------------
@@ -661,15 +671,16 @@ class JiraReducer:
         if at_start:
             stats.sprint_at_start += 1
 
-    def _at_start_membership(self, key, object_id, *, project, memberships, stats) -> None:
+    def _at_start_membership(self, key, object_id, *, sprints, project, stats) -> None:
         """Membership Jira never recorded as a change = in the sprint from its start.
 
         prd/04 asks for "membership-at-start vs added-later": an issue that is in
         a sprint and has no ``Sprint`` changelog item was in it when the sprint
         started, which is exactly the carry-over signal. It is emitted with the
-        synthetic ``system`` actor at the sprint's start date.
+        synthetic ``system`` actor at the sprint's start date. ``sprints`` is the
+        ticket's own Sprint field in the default mode (no board walk).
         """
-        for sid in sorted(memberships.get(key) or ()):
+        for sid in sorted(sprints or ()):
             if (key, sid) in self._sprint_events:
                 continue
             start = self.sprint_starts.get(sid)
@@ -714,6 +725,22 @@ class JiraReducer:
 
 def _issue_type(issue: dict) -> str:
     return str(((issue.get("fields") or {}).get("issuetype") or {}).get("name") or "").strip().lower()
+
+
+def _current_sprints(fields: dict, sprint_field: str) -> set[int]:
+    """The sprint ids in a ticket's own Sprint field (all shapes Jira returns).
+
+    This is the membership the ticket already carries; the per-sprint
+    ``/sprint/{id}/issue`` walk is not needed to know it (prd/04/66).
+    """
+    raw = (fields or {}).get(sprint_field) if sprint_field else None
+    items = raw if isinstance(raw, (list, tuple)) else [raw]
+    out: set[int] = set()
+    for item in items:
+        sid = sprint_id(item)
+        if sid is not None:
+            out.add(int(sid))
+    return out
 
 
 def _user(fields: dict, *names: str) -> dict:
