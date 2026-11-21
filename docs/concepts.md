@@ -432,6 +432,31 @@ answer states its honesty ("6 of 8 segments measured … right-censored").
   median", and "most of it went to review" becomes "this item is the outlier". A per-view toggle
   hides the contrast when it is not wanted.
 
+### Aging band, self-calibrated threshold, hours at risk (prd/59)
+- **Definition**: an *in-flight* item's age read against the **same cohort's finished work**, never against
+  an invented service level. The band is one of a closed five: `normal` (< p50) · `watch` (p50–p85) ·
+  `aging` (p85–p95) · `very old` (≥ p95) · `insufficient history` (cohort below `MIN_N = 20`). Half-open
+  intervals, so **exactly p85 is `aging`**. "Stale" stays the prd/34 rule with its own threshold; the bands
+  never reuse the word.
+- **Derivation**: one clock per row, role-level once (concepts.md §1, §6): a **story** ages on the story
+  clock (`created → snapshot`, or `entered_stage → snapshot`) against completed stories' cycles or their
+  same-stage dwell; a **PR** ages on the review clock (`phase = review` **and** `ball = review`, plus the
+  unobserved tail while the ball is still with review) against merged PRs, or on its cycle
+  (`created → snapshot`) against merged PRs' cycles. Percentiles are nearest-rank on the sorted cohort,
+  index `round(q × (n − 1))`. The payload always carries the cohort's `n`, the `min_n` and a `basis`; a
+  cohort below `MIN_N` is `available: false` with the reason, never a percentile drawn from noise.
+- **Self-calibrated threshold**: the p85 of that same cohort — `stale-prs` takes the p85 of merged PRs'
+  review time, `sentinel-tail` the p85 of completed stories' review segment — quoted with its source
+  (`p85 of 106 merged PRs (22.7 h)`) in the rule evidence. A cohort below `MIN_N` falls back to the fixed
+  constant *and says so*; `MEGASPEED_AGING_THRESHOLDS=fixed` restores 5 business days / 24 h by choice.
+- **Hours at risk**: `age − p85` (≥ 0) — the removable wait a chase action carries. The ranked chase list
+  is live items in the `aging`/`very old` bands, sorted by hours at risk (tie: downstream dependents, then
+  age); `dead` items (no open PR, no human event for ≥ 10 business days) are listed separately as
+  "no live PR — close or re-plan", because no nudge can unblock them.
+- **Purpose**: answer "what is old *for this team*, and what should I chase today" — the forward-looking
+  half of flow. An age is censored (the item has not finished); it is compared with finished work and never
+  added to a cycle-time median.
+
 ### Trend (time series, prd/50)
 - **Definition**: one headline metric evaluated **per bucket** — a calendar week (Monday 00:00 UTC, the
   same alignment the event histogram uses) or a sprint's measured band (start → end, or start → snapshot

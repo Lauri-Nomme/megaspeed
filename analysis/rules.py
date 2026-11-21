@@ -79,6 +79,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 
 from analysis import advice
+from analysis import aging as aging_analysis
 from analysis import ballcourt
 from analysis import jira as jira_analysis
 from analysis import stack as stack_analysis
@@ -1983,18 +1984,29 @@ def vacation_blocking(court: ballcourt.BallCourt, window) -> dict:
 
 
 def stale_prs(court: ballcourt.BallCourt, window,
-              done_tickets: set[str] | None = None) -> dict:
+              done_tickets: set[str] | None = None,
+              threshold: dict | None = None) -> dict:
     """The stale/zombie-PR signal, priced (prd/34 §5, prd/37 §6).
 
     Reuses ``ballcourt.delivery_list`` so the rule and the delivery list quote
-    the *same* fact: a PR is stale when it has been open longer than
-    ``STALE_BUSINESS_DAYS`` business days (8 h each, concepts.md §1), or when
-    its ticket is already Done in Jira while the PR is open. The second reason
-    is finished work that was never delivered, so its whole current wait is
-    recoverable; the first prices only the age past the limit.
+    the *same* fact: a PR is stale when it has been open longer than the
+    threshold — the p85 of merged PRs' review time (prd/59's self-calibrated
+    threshold) when the cohort has enough history, the old 5 business days
+    otherwise — or when its ticket is already Done in Jira while the PR is open.
+    The threshold's ``source`` travels with the number, so a reader can see
+    whether it is calibrated or fixed. The second reason is finished work that
+    was never delivered, so its whole current wait is recoverable; the first
+    prices only the age past the limit.
     """
-    limit_days = ballcourt.STALE_BUSINESS_DAYS
-    limit_hours = limit_days * ballcourt.BUSINESS_HOURS_PER_DAY
+    threshold = threshold or {}
+    limit_hours = float(
+        threshold.get("threshold_hours")
+        or ballcourt.STALE_BUSINESS_DAYS * ballcourt.BUSINESS_HOURS_PER_DAY
+    )
+    limit_days = round(limit_hours / ballcourt.BUSINESS_HOURS_PER_DAY, 2)
+    threshold_source = threshold.get("source") or (
+        f"fixed ({ballcourt.STALE_BUSINESS_DAYS:g} business days)"
+    )
     delivery = ballcourt.delivery_list(
         court, window, stale_business_days=limit_days, done_tickets=done_tickets,
     )
@@ -2040,6 +2052,9 @@ def stale_prs(court: ballcourt.BallCourt, window,
         "ticket_done_open": ticket_done_open,
         "limit_days": limit_days,
         "limit_hours": limit_hours,
+        # prd/59: the number is not a constant any more — say where it came from.
+        "threshold_source": threshold_source,
+        "min_n": threshold.get("min_n"),
         "oldest_age_hours": oldest,
         # prd/55 §6: when every stale item was opened before the window, the
         # rule's cohort is outside it and a 1-week view must not present it.
@@ -2059,20 +2074,29 @@ def stale_prs(court: ballcourt.BallCourt, window,
 SENTINEL_TAIL_HOURS = 24.0
 
 
-def sentinel_tail(court: ballcourt.BallCourt, window) -> dict:
+def sentinel_tail(court: ballcourt.BallCourt, window,
+                  threshold: dict | None = None) -> dict:
     """Open items waiting **only** on the sentinel, past a stated threshold.
 
     ``sentinel_queue`` prices every wait the mandatory approver caused;
     this metric isolates the tail where the sentinel is the *sole* holder —
     no peer reviewer pending, no author debt — so the fix is unambiguous
     (another sentinel, or a rotation) and no reviewer is charged for it.
+
+    prd/59: the threshold is the p85 of completed stories' review segment (the
+    story-side review wait) when that cohort has enough history, the old 24 h
+    otherwise; ``threshold_source`` says which.
     """
+    threshold = threshold or {}
+    limit = float(threshold.get("threshold_hours") or SENTINEL_TAIL_HOURS)
+    threshold_source = threshold.get("source") or f"fixed ({SENTINEL_TAIL_HOURS:g} h)"
     sentinels = set(court.sentinels)
     if not sentinels:
         return {
             "available": False,
             "sentinels": [],
-            "threshold_hours": SENTINEL_TAIL_HOURS,
+            "threshold_hours": limit,
+            "threshold_source": threshold_source,
             "n": 0,
             "tail_items": 0,
             "hours": 0.0,
@@ -2115,8 +2139,8 @@ def sentinel_tail(court: ballcourt.BallCourt, window) -> dict:
             person=person,
             hours=round(hours, 2),
             waiting_since=iso(since),
-            threshold_hours=SENTINEL_TAIL_HOURS,
-            affected=hours > SENTINEL_TAIL_HOURS,
+            threshold_hours=limit,
+            affected=hours > limit,
         ))
     rows = _drill_order(rows)
     tail_rows = [row for row in rows if row["affected"]]
@@ -2124,12 +2148,14 @@ def sentinel_tail(court: ballcourt.BallCourt, window) -> dict:
     return {
         "available": True,
         "sentinels": sorted(sentinels),
-        "threshold_hours": SENTINEL_TAIL_HOURS,
+        "threshold_hours": limit,
+        "threshold_source": threshold_source,
+        "min_n": threshold.get("min_n"),
         "n": len(rows),
         "tail_items": len(tail_rows),
         "hours": round(sum(row["hours"] for row in tail_rows), 2),
         "excess_hours": round(
-            sum(row["hours"] - SENTINEL_TAIL_HOURS for row in tail_rows), 2
+            sum(row["hours"] - limit for row in tail_rows), 2
         ),
         "median_hours": _median(waits),
         "p90_hours": _p90(waits),
@@ -2141,7 +2167,8 @@ def sentinel_tail(court: ballcourt.BallCourt, window) -> dict:
         "note": (
             "an item is in the sentinel tail when the sentinel is its only "
             "human holder (no peer reviewer pending, no author debt) and that "
-            f"wait exceeds {SENTINEL_TAIL_HOURS:g} business hours"
+            f"wait exceeds {limit:g} business hours; threshold source: "
+            f"{threshold_source}"
         ),
     }
 
@@ -2150,7 +2177,8 @@ def metrics(court: ballcourt.BallCourt, threads: list[dict], window,
             sizes: dict[str, dict] | None = None,
             jira: jira_analysis.JiraData | None = None,
             caps: dict | None = None,
-            implied: dict | None = None) -> dict:
+            implied: dict | None = None,
+            aging: dict | None = None) -> dict:
     """Every prd/17 metric, in one deterministic pass.
 
     The Jira half (prd/21) is merged in under its own keys; with no Jira data in
@@ -2163,6 +2191,9 @@ def metrics(court: ballcourt.BallCourt, threads: list[dict], window,
     replaces a measured rate.
     """
     done_tickets = jira_analysis.done_keys(jira) if jira is not None else set()
+    # prd/59: the two stale constants are now supplied by the aging helper, so
+    # the rule, the delivery list and the aging tab quote one threshold.
+    aging_thresholds = aging or aging_analysis.rule_thresholds(court, jira, window)
     return {
         "time_to_first_review": time_to_first_review(court, window),
         "cycle_time": cycle_time(court, window),
@@ -2175,8 +2206,16 @@ def metrics(court: ballcourt.BallCourt, threads: list[dict], window,
         "conformance": conformance(court, window),
         "sentinel_queue": sentinel_queue(court, window),
         # prd/37 §6: the two rules the data wanted on top of the signals
-        "sentinel_tail": sentinel_tail(court, window),
-        "stale_prs": stale_prs(court, window, done_tickets),
+        "sentinel_tail": sentinel_tail(
+            court, window, threshold=aging_thresholds.get("sentinel_tail"),
+        ),
+        "stale_prs": stale_prs(
+            court, window, done_tickets,
+            threshold=aging_thresholds.get("stale_prs"),
+        ),
+        # prd/59: the threshold block itself (source strings, n, mode), so the
+        # page can print where every calibrated number came from.
+        "aging": aging_thresholds,
         "pr_size": pr_size(court, window, sizes, caps=caps),
         "vacation_blocking": vacation_blocking(court, window),
         "stacked_cascade": stack_analysis.metrics(court, window),
@@ -2734,7 +2773,7 @@ def templates(
         if sp["over_age"]:
             reasons.append(
                 f"{sp['over_age']} open past "
-                f"{_human_hours(sp['limit_days'] * 8)}"
+                f"{_human_hours(sp['limit_days'] * ballcourt.BUSINESS_HOURS_PER_DAY)}"
             )
         if sp["ticket_done_open"]:
             reasons.append(f"{sp['ticket_done_open']} with the ticket already Done")
@@ -2756,6 +2795,10 @@ def templates(
                 "over_age": sp["over_age"],
                 "ticket_done_open": sp["ticket_done_open"],
                 "limit_days": sp["limit_days"],
+                "limit_hours": sp["limit_hours"],
+                # prd/59: the threshold's provenance is part of the evidence —
+                # "a stale PR" means nothing without the value and its cohort.
+                "threshold_source": sp.get("threshold_source"),
                 "oldest_age_hours": oldest,
                 "recoverable_hours": sp["hours"],
                 # prd/63 V-B: stale PRs are a live state; `1w` does not window
@@ -2802,13 +2845,15 @@ def templates(
         st.get("cohort_end"), window
     ):
         longest = st["longest_hours"] or 0.0
-        severity = "critical" if longest >= 3 * SENTINEL_TAIL_HOURS else "warning"
+        severity = (
+            "critical" if longest >= 3 * st["threshold_hours"] else "warning"
+        )
         names = ", ".join(st["sentinels"])
         out.append(_suggestion(
             "sentinel-tail", "sentinel_tail",
             f"{_count(st['tail_items'], 'item')} waiting only on "
             f"{names} for up to {_human_hours(longest)} (threshold "
-            f"{_human_hours(SENTINEL_TAIL_HOURS)})",
+            f"{_human_hours(st['threshold_hours'])})",
             {
                 "sentinels": len(st["sentinels"]),
                 "tail_items": st["tail_items"],
@@ -2818,6 +2863,7 @@ def templates(
                 "median_hours": st["median_hours"],
                 "longest_hours": longest,
                 "threshold_hours": st["threshold_hours"],
+                "threshold_source": st.get("threshold_source"),
                 "person": names,
                 # prd/46 §2: this is a *current* wait, not the response clock.
                 "clock": "current wait on the sentinel, not their response time",
@@ -3624,6 +3670,7 @@ def insights(
     caps: dict | None = None,
     policy_lab: dict | None = None,
     implied: dict | None = None,
+    aging: dict | None = None,
 ) -> dict:
     """The API payload: metrics + ranked, evidence-backed suggestions.
 
@@ -3642,7 +3689,8 @@ def insights(
     start, end = window
     chosen_caps = size_caps(caps)
     computed = metrics(
-        court, threads, window, sizes, jira, caps=chosen_caps, implied=implied
+        court, threads, window, sizes, jira, caps=chosen_caps,
+        implied=implied, aging=aging,
     )
     round_hours = computed["review_cost"]["hours_per_round"]
     suggestions = rank(templates(computed, level, round_hours, bots, window=window))

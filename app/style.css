@@ -1239,6 +1239,12 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
 .stat-n { font-size: var(--stat-n); font-weight: 700; font-family: var(--font-mono); }
 .stat-n.attention { color: var(--critical); }
 .stat-k { font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .06em; }
+/* prd/59: the "waiting over a week" label is the doorway to the Aging tab. */
+button.stat-k {
+  background: none; border: 0; padding: 0; margin: 0; text-align: left;
+  font-family: inherit; cursor: pointer;
+}
+button.stat-k:hover, button.stat-k:focus-visible { color: var(--link); }
 .stat-note { font-size: var(--body-font); color: var(--text-tertiary); }
 
 .overview-grid {
@@ -2540,6 +2546,94 @@ tr.response-row:hover td, tr.response-row:focus-visible td { background: var(--b
 .pass-step.bounced .pass-dot { background: var(--warning); }
 .pass-step.unmeasured .pass-dot { background: transparent; border: 1px solid var(--text-tertiary); }
 
+/* --- prd/59: aging WIP ------------------------------------------------ */
+/* One question (what needs attention?), answered by age against the team's
+ * own finished work. Structure is neutral; colour is state only: the aging
+ * band is a warning tint, very old a critical tint, normal/watch neutral. */
+.aging-view { min-width: 0; }
+.aging-controls {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px;
+  padding: 8px 14px; border-bottom: 1px solid var(--border-hairline);
+}
+.aging-control {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--text-secondary);
+}
+.aging-control select {
+  height: 24px; padding: 0 6px;
+  background: var(--bg-control); color: var(--text-primary);
+  border: 1px solid var(--border-control); border-radius: var(--radius-control);
+  font-size: 12px;
+}
+.aging-counts { font-size: 11px; color: var(--text-secondary); font-family: var(--font-mono); }
+.aging-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  gap: 10px; padding: 10px 14px 0;
+}
+.aging-head h3 { margin: 0; font-size: 12px; font-weight: 600; }
+.aging-source {
+  font-size: 10.5px; color: var(--text-tertiary);
+  font-family: var(--font-mono); white-space: normal; text-align: right;
+}
+.aging-strip { position: relative; margin: 6px 14px 0; }
+.aging-tick-labels { position: relative; height: 18px; font-size: 10.5px; color: var(--text-secondary); }
+.aging-tick-labels span {
+  position: absolute; transform: translateX(-50%); white-space: nowrap;
+  font-family: var(--font-mono);
+}
+.aging-plot { width: 100%; height: 88px; display: block; }
+.aging-base { stroke: var(--border-control); stroke-width: .4; }
+.aging-tick { stroke: var(--border-control); stroke-dasharray: 2 3; stroke-width: .4; }
+.aging-dot { fill: var(--text-secondary); }
+.aging-dot.band-aging { fill: var(--warning); }
+.aging-dot.band-very_old { fill: var(--critical); }
+.aging-dot.band-insufficient { fill: var(--text-tertiary); }
+.aging-axis { margin: 0; font-size: 10.5px; color: var(--text-tertiary); }
+.aging-ticks {
+  display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 6px 14px 0;
+  font-size: 10.5px; color: var(--text-secondary); font-family: var(--font-mono);
+}
+.aging-meta, .aging-censor {
+  margin: 6px 14px 0; font-size: 11.5px; color: var(--text-tertiary);
+}
+.aging-insufficient {
+  margin: 8px 14px; padding: 10px 12px;
+  border: 1px solid var(--border-control); border-radius: var(--radius-control);
+  background: var(--bg-surface-raised); font-size: 12px;
+}
+.aging-insufficient p { margin: 0 0 4px; }
+.aging-insufficient p:last-child { margin-bottom: 0; }
+.aging .c-band { width: 104px; }
+.aging .c-kind { width: 58px; }
+.aging .c-id { width: 230px; }
+.aging .c-stage { width: 100px; }
+.aging .c-age { width: 170px; }
+.aging .c-mult { width: 64px; }
+.aging .c-holder { width: 200px; white-space: normal; }
+.aging .c-live { width: 120px; white-space: normal; }
+.aging td.c-age .calendar { color: var(--text-tertiary); font-size: 10px; margin-left: 5px; }
+/* prd/59 phone: the second line of a row says the age in working days. */
+.aging td.c-age .working { display: none; }
+.aging-row { cursor: pointer; }
+.aging-row:hover td { background: var(--bg-hover); color: var(--text-primary); }
+.band-bar {
+  position: relative; display: inline-block; width: 92px; height: 4px;
+  background: var(--bg-control); border-radius: 2px; vertical-align: middle;
+}
+.band-bar.blank { opacity: .35; }
+.band-bar .tick {
+  position: absolute; top: -2px; width: 1px; height: 8px;
+  background: var(--text-tertiary);
+}
+.band-bar .mark {
+  position: absolute; top: -3px; width: 2px; height: 10px;
+  background: var(--text-secondary); border-radius: 1px;
+}
+.band-bar.band-aging .mark { background: var(--warning); }
+.band-bar.band-very_old .mark { background: var(--critical); }
+.aging-replan .c-id { width: 220px; }
+.aging-replan .c-age { width: 120px; }
+.aging-replan .c-who { width: auto; }
 @media (max-width: 640px) {
   /* the waterfall becomes four stacked rows; the tiles go 2 × 2 (prd/62) */
   .yield-waterfall { flex-direction: column; gap: 8px; }
@@ -2554,4 +2648,16 @@ tr.response-row:hover td, tr.response-row:focus-visible td { background: var(--b
   .yield-step .yield-bar { grid-column: 1 / -1; }
   .stability-tiles { grid-template-columns: 1fr 1fr; }
   .policy-guardrail { font-size: 11.5px; }
+  .aging-controls { padding: 8px 10px; gap: 8px 10px; }
+  .aging-control { font-size: 12px; }
+  .aging-control select { height: 34px; min-height: 34px; font-size: 13px; }
+  .aging-controls .chip { min-height: 44px; }
+  .aging-plot { display: none; }
+  .aging-tick-labels { display: none; }
+  .aging-strip { margin: 6px 10px 0; }
+  .aging-head, .aging-meta, .aging-censor, .aging-ticks { margin-left: 10px; margin-right: 10px; }
+  .aging .c-band, .aging .c-kind, .aging .c-stage, .aging .c-mult { display: none; }
+  .aging .c-id, .aging .c-age, .aging .c-holder, .aging .c-live { width: auto; }
+  .aging td.c-age .calendar { display: block; margin: 0; }
+  .aging td.c-age .working { display: block; color: var(--text-tertiary); font-size: 10px; }
 }

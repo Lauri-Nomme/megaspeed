@@ -112,6 +112,18 @@ export function fmtCalendarDuration(ms) {
   return `${days} calendar day${days === 1 ? '' : 's'}${rest ? ` ${rest} h` : ''}`;
 }
 
+/**
+ * A whole number of elapsed **calendar** days ("92 calendar days").
+ *
+ * The one way a view renders a day count it holds in days (the aging row's
+ * `calendar_days`): the letter `d` is a business day (concepts.md §1), and a
+ * duration is never divided by 24 outside this file (prd/45 conformance).
+ */
+export function fmtCalendarDays(days) {
+  const value = Math.max(0, Math.round(Number(days) || 0));
+  return `${value} calendar day${value === 1 ? '' : 's'}`;
+}
+
 /** Elapsed wall-clock hours (the timeline's unit) as a calendar duration. */
 export function fmtCalendarHours(hours) {
   return fmtCalendarDuration((Number(hours) || 0) * HOUR);

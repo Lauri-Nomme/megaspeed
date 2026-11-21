@@ -656,6 +656,138 @@ class ServerPerformanceTests(unittest.TestCase):
         )
 
 
+class AgingEndpointTests(unittest.TestCase):
+    """prd/59: ``/api/aging`` — payload, scoping, cache and the stated fallback."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.dir = Path(cls.tmp.name).resolve()
+        cls.alpha = make_store(cls.dir, "alpha", n=12, seed=101)
+        cls.beta = make_store(cls.dir, "beta", n=5, seed=202)
+        cls.patches = [
+            mock.patch.object(app_module, "TENANTS_DIR", cls.dir),
+            mock.patch.object(app_module, "DEFAULT_TENANT", ""),
+            mock.patch.object(app_module, "bridge", BrowserBridge()),
+            mock.patch.object(app_module, "LOG", False),
+            mock.patch.dict(os.environ, {
+                app_module.HARNESS_TOKEN_ENV: TOKEN,
+                app_module.HARNESS_TOKEN_FILE_ENV: str(cls.dir / ".harness-token"),
+            }),
+        ]
+        for patch in cls.patches:
+            patch.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        for patch in reversed(cls.patches):
+            patch.stop()
+        cls.tmp.cleanup()
+
+    def aging(self, **query):
+        return get("/api/aging", **query)
+
+    def test_the_payload_names_its_clock_cohort_and_chase_feed(self):
+        reply = self.aging(tenant="alpha", kind="pr")
+        self.assertEqual(reply.status, 200, reply.text)
+        payload = reply.json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(reply.headers["x-tenant"], "alpha")
+        self.assertEqual(payload["tenant"], "alpha")
+        for key in ("as_of", "hours_mode", "window", "thresholds", "rows",
+                    "counts", "review_p75", "feed", "note", "bands", "min_n"):
+            self.assertIn(key, payload)
+        self.assertEqual(payload["kind"], "pr")
+        self.assertEqual(payload["active_threshold"], "review_time")
+        self.assertEqual(payload["bands"],
+                         ["normal", "watch", "aging", "very_old", "insufficient"])
+        # the selector is complete whatever cohort is on screen (prd/59)
+        self.assertIn("cycle", payload["story_stages"])
+        self.assertEqual(payload["min_n"], 20)
+        self.assertIn("threshold_source", payload["feed"])
+        self.assertIn("stale_prs", payload["rule_thresholds"])
+        self.assertIn("sentinel_tail", payload["rule_thresholds"])
+        for row in payload["rows"]:
+            self.assertIn(row["band"], payload["bands"])
+            self.assertTrue(row["href"].startswith("#ticket/"))
+
+    def test_a_small_cohort_says_insufficient_instead_of_a_percentile(self):
+        payload = self.aging(tenant="alpha", kind="pr").json()
+        threshold = next(t for t in payload["thresholds"] if t["id"] == "review_time")
+        if threshold["n"] < 20:
+            self.assertFalse(threshold["available"])
+            self.assertIsNone(threshold["p85"])
+            self.assertIn("insufficient history", threshold["note"])
+            # the rules fall back to the old constant, with the reason visible
+            self.assertIn("insufficient history",
+                          payload["rule_thresholds"]["stale_prs"]["source"])
+
+    def test_each_tenant_is_answered_from_its_own_store(self):
+        alpha = self.aging(tenant="alpha", kind="pr").json()
+        beta = self.aging(tenant="beta", kind="pr").json()
+        self.assertEqual(alpha["tenant"], "alpha")
+        self.assertEqual(beta["tenant"], "beta")
+        # the two fixtures differ in size, so the cohorts cannot be the same
+        self.assertNotEqual(alpha["counts"]["open"], beta["counts"]["open"])
+
+    def test_the_story_clock_is_the_default_and_the_stage_selector_is_answered(self):
+        payload = self.aging(tenant="alpha").json()
+        self.assertEqual(payload["kind"], "story")
+        self.assertEqual(payload["active_threshold"], "story_cycle")
+        self.assertIn("cycle", payload["stages"])
+        stage = payload["stages"][-1]
+        staged = self.aging(tenant="alpha", kind="story", stage=stage)
+        self.assertEqual(staged.status, 200, staged.text)
+        self.assertEqual(staged.json()["stage"], stage)
+
+    def test_an_unknown_stage_or_kind_is_a_400_listing_the_valid_ones(self):
+        for query in ({"stage": "nope"}, {"kind": "nope"}, {"only": "nope"}):
+            with self.subTest(query=query):
+                reply = self.aging(tenant="alpha", **query)
+                self.assertEqual(reply.status, 400, reply.text)
+                body = reply.json()
+                self.assertFalse(body["ok"])
+                self.assertIn("valid", body)
+
+    def test_an_unknown_parameter_is_rejected_not_ignored(self):
+        reply = self.aging(tenant="alpha", sort="age")
+        self.assertEqual(reply.status, 400, reply.text)
+        self.assertIn("sort", reply.json()["error"])
+
+    def test_only_live_and_limit_narrow_the_rows_not_the_counts(self):
+        full = self.aging(tenant="alpha", kind="pr", only="all").json()
+        live = self.aging(tenant="alpha", kind="pr", only="live").json()
+        self.assertLessEqual(len(live["rows"]), len(full["rows"]))
+        self.assertTrue(all(row["live"] in ("live", "unmerged") for row in live["rows"]))
+        # the fixture store is fully closed, so this pins the contract, not a
+        # row count: the table is capped, the counts describe the whole cohort
+        limited = self.aging(tenant="alpha", kind="story", limit=1).json()
+        self.assertLessEqual(len(limited["rows"]), 1)
+        unlimited = self.aging(tenant="alpha", kind="story").json()
+        self.assertEqual(limited["counts"]["open"], unlimited["counts"]["open"])
+
+    def test_a_repeated_request_is_served_from_cache(self):
+        real = app_module.aging_view.payload
+        with mock.patch.object(
+            app_module.aging_view, "payload", side_effect=real,
+        ) as payload:
+            first = self.aging(tenant="alpha", kind="pr", days=30)
+            second = self.aging(tenant="alpha", kind="pr", days=30)
+            self.assertEqual(first.status, 200, first.text)
+            self.assertEqual(second.body, first.body)
+            self.assertEqual(payload.call_count, 1)     # one build, not two
+            # a different clock is a different answer (and a different key)
+            third = self.aging(tenant="alpha", kind="pr", stage="cycle", days=30)
+            self.assertEqual(third.status, 200, third.text)
+            self.assertEqual(payload.call_count, 2)
+
+    def test_the_fixed_threshold_source_restores_the_constants(self):
+        payload = self.aging(tenant="alpha", kind="pr", thresholds="fixed").json()
+        self.assertEqual(payload["thresholds_mode"], "fixed")
+        self.assertIn("fixed", payload["rule_thresholds"]["stale_prs"]["source"])
+        self.assertEqual(payload["rule_thresholds"]["stale_prs"]["threshold_hours"], 40.0)
+
+
 class SummaryRunTests(unittest.TestCase):
     """prd/38 #18: PR counts come from the run that saw PRs, not the latest run.
 
