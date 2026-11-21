@@ -29,9 +29,9 @@ story-level improvement, and why the next quarter is at risk.
 
 1. **Annotation layer on the existing chart.** A 1 px `--info-accent` hairline at each annotation date with a 4 px
    dot on the axis; vacation/holiday spans as `--warning` 8 %-alpha bands behind the plot, labelled at 10 px when
-   ≥2 buckets wide. Hover/tap opens a popover with the closed-vocabulary label and the date (`review SLA 4 h ·
-   8 Oct`). Under the chart: `2 policy changes · 1 holiday in this window`. Annotations outside the window are
-   counted, not drawn.
+   ≥2 buckets wide. Hover/tap opens a popover with the closed-vocabulary label, the date, and the team's optional
+   note (`review SLA 4 h · 8 Oct` · "adopted after the retro"). Under the chart: `2 policy changes · 1 holiday in
+   this window`. Annotations outside the window are counted, not drawn.
 2. **"Did the change work?" panel** below the chart. One annotation selected at a time (default: the latest policy
    change; a select of the closed labels). Layout: a two-column before/after table (`n`, `p50`, `p85`, the metric's
    own unit), the CI as a 12 px line with a 2 px range bar centred on zero, and the **verdict as a pill + one
@@ -51,10 +51,13 @@ state tints, and `can't tell` is not a failure colour.
 stability sentence; the panel's "compare this metric" links to the prd/62 guardrail trend for the same split.
 
 **Adding an annotation.** A small "Record a change" affordance on the Trend page opens a menu of the **closed
-vocabulary** (`review SLA`, `WIP limit`, `PR size cap`, `sentinel added`, `sentinel rotation`, `refinement change`,
-`other`) plus one numeric value where it applies (hours / commits / limit) and a date. **No free text** — the label
-is rendered from the vocabulary (`review_sla` + 4 → "review SLA 4 h"). This keeps the no-content contract intact and
-makes the note testable. Delete is a two-step inline confirm.
+vocabulary** for the change *type* (`review SLA`, `WIP limit`, `PR size cap`, `sentinel added`, `sentinel rotation`,
+`refinement change`, `other`) plus one numeric value where it applies (hours / commits / limit), a date, and an
+optional **free-text note** in the team's own words (e.g. "adopted after the retro; rollback is a 2-click revert").
+The note is **first-party metadata** — the team typed it into megaspeed, it is not scraped Bitbucket/Jira content, it
+lives outside the store (a tenant file), and it never enters the event log or the classifier — so it does not touch
+the pseudonymisation contract (prd/02 §"Scope"). The `kind` stays enumerated so the chart/label is renderable and
+testable; the optional `note` is where the nuance lives. Delete is a two-step inline confirm.
 
 **Honesty language (exact).** `A before/after is not an experiment: it compares two samples of items either side of
 the change, with everything else that also changed. The interval is the answer.` ·
@@ -74,13 +77,15 @@ width. No horizontal scroll, no hover-only affordance (tap-and-hold for the popo
 log stays ingest-only and `--verify` is untouched. Entry:
 
 ```yaml
-- {id: a1, date: 2026-10-08, kind: review_sla, value: 4}
-- {id: a2, date: 2026-09-01, kind: wip_limit, value: 6}
+- {id: a1, date: 2026-10-08, kind: review_sla, value: 4, note: "adopted after the retro; rollback = revert the policy"}
+- {id: a2, date: 2026-09-01, kind: wip_limit, value: 6, note: null}
 ```
 
 `kind ∈ {review_sla, wip_limit, size_cap, sentinel_added, sentinel_rotation, refinement_change, other}`;
-`value` numeric or null; `scope` optional (a repo). Rendering is a closed template per kind, so no prose ever
-reaches the file. Written atomically (temp + rename), validated on write, re-read when its mtime changes.
+`value` numeric or null; `note` optional free text (first-party, tenant-side — **not** scraped content, never
+in the store); `scope` optional (a repo). The `kind`/`value` renders a closed label
+(`review_sla` + 4 → "review SLA 4 h"); the `note` is the team's own words, stored verbatim in the tenant file.
+Written atomically (temp + rename), validated on write, re-read when its mtime changes.
 
 `analysis/annotations.py`: `load(tenant_dir)`, `save(...)`, `catalogue()`, `render(entry)`, `validate(entry)`.
 **Calendar spans** are derived, never entered twice: `calendar.summary()["holidays"]["dated"]` (resolved dates,
@@ -144,7 +149,7 @@ TRIALS = 10_000
 ```json
 { "…": "…",
   "annotations": [{"id": "a1", "date": "2026-10-08", "kind": "review_sla", "value": 4,
-                   "label": "review SLA 4 h", "in_window": true}],
+                   "label": "review SLA 4 h", "note": "adopted after the retro", "in_window": true}],
   "spans": [{"kind": "holiday", "start": "2026-08-20", "end": "2026-08-20", "label": "taasiseseisvumispäev"}],
   "stability": {"flag": "filling",
                 "wip": {"slope_per_week": 1.0, "from": 6, "to": 17},
@@ -166,9 +171,10 @@ TRIALS = 10_000
   "censored_before": 9, "censored_after": 4, "note": "…" }
 ```
 
-`GET|POST /api/annotations`, `DELETE /api/annotations/{id}` — validated, closed vocabulary, atomic write; 400 on free
-text (a field not in the vocabulary is rejected, not stored). 409/`unavailable` when the server has no tenant dir
-(read-only mirror installs still *read* annotations).
+`GET|POST /api/annotations`, `DELETE /api/annotations/{id}` — validated, atomic write; 400 only on an **unknown
+`kind`** (the type is enumerated so the chart/label is renderable); the optional `note` is free text and is stored
+verbatim in the tenant file (not the store) — it is first-party metadata, not scraped content. 409/`unavailable`
+when the server has no tenant dir (read-only mirror installs still *read* annotations).
 
 ### Cache and invalidation
 
@@ -197,7 +203,7 @@ at exactly 20 %; determinism (same seed → identical CI); censored items exclud
 `tests/test_stability.py` — Theil–Sen slope on a known series (+1.0/wk on the del-combined WIP); `filling` on
 del-combined (WIP +1.0 vs throughput +0.3) and `overload` on a flat-throughput fixture; `stable` on a flat series;
 `dead_wip` when WIP ≫ KM median; `insufficient` with 3 buckets; only `overload` refuses a forecast.
-`tests/test_annotations.py` — round-trip POST/GET/DELETE; every kind renders; free text/unknown kind → 400; atomic
+`tests/test_annotations.py` — round-trip POST/GET/DELETE; every kind renders; an unknown kind → 400; a free-text `note` is accepted and stored verbatim (tenant file only, never the store); atomic
 write (no partial file on a failed save); mtime invalidates the trend cache. `tests/test_trend.py` — `cycle_p85`
 equals `rules.cycle_time`'s p85; spans include the 20 Aug holiday; in-progress bucket excluded from the compare.
 `tests/test_server.py` — endpoint validation/cache. `app/test/prd61.test.mjs` — marker positions, span bands,
@@ -211,7 +217,7 @@ verdict pill wording, four outcomes, phone markup (no hover-only), Markdown expo
 - The stability strip flags `filling` on del-combined (WIP 6 → 17, +1.0/wk vs throughput 8.2/wk, +0.3/wk; arrivals
   10.1/wk vs departures 8.2/wk, +25 items) and prints the Little's-Law sentence (`implied 1.4 wk vs measured
   0.6 wk`, `dead_wip`); the 20 Aug holiday span renders from the calendar with no manual entry.
-- Annotation CRUD round-trips, free text is a 400, and a second annotation in the same bucket forces `cant_tell`.
+- Annotation CRUD round-trips, an unknown kind is a 400, a free-text note is accepted (tenant file only), and a second annotation in the same bucket forces `cant_tell`.
 - Every before/after on screen shows both `n`s, the CI and one of the four outcomes — never a bare p-value; the
   in-progress bucket never appears on either side.
 - Tests green (Python + node), including prd/45 conformance.
@@ -224,7 +230,7 @@ throughput series and the WIP flag), **62** (guardrails get the same before/afte
 `docs/concepts.md` §6 with *annotation* (a closed-vocabulary dated policy change), *before/after comparison* (item
 distributions either side of a split, with CI and outcome) and *stability flag* (Theil–Sen WIP/throughput slopes).
 
-Does **not**: claim causality or replace an experiment; add free-text notes (the privacy contract forbids content,
-and free text would also break the closed vocabulary); add AI attribution; benchmark against other teams; send
-alerts; forecast (prd/60); annotate automatically (if the product guessed a policy change, "did it work" would
-become "did the product's guess work").
+Does **not**: claim causality or replace an experiment; put a note (or any free text) into the
+**store/classifier/LLM view** (the note is tenant-side metadata only, never imported); add AI attribution;
+benchmark against other teams; send alerts; forecast (prd/60); annotate automatically (if the product guessed a
+policy change, "did it work" would become "did the product's guess work").

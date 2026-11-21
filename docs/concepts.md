@@ -673,8 +673,10 @@ These are comparisons, not new units. Each names its cohort and its basis wherev
 ## 10. Data model & pseudonymisation (prd/02 — non-negotiable)
 
 - The store and every API response contain only **ticket keys, abbreviated actor pseudonyms, timestamps
-  and enumerated closed-vocabulary labels**. No raw description, comment, diff, commit message, or
-  workflow status name ever crosses into the store or the API.
+  and enumerated closed-vocabulary labels**. No raw **imported-from-Bitbucket/Jira** description, comment,
+  diff, commit message, or workflow status name ever crosses into the store or the API. The rule is about
+  *scraped* content — a tenant-side, first-party file (calendar overrides, dated annotations) is the
+  team's own metadata, lives **outside** the store, and never enters the event log or the classifier.
 - All classifications are a projection onto a closed set (`taxonomy.py`); "other" is the explicit
   "could not decide" escape hatch, never free text.
 

@@ -17,6 +17,15 @@ The scraped data and the primary datastore (or any view of it) may contain:
 | Counts, severities, phases (from a fixed taxonomy) | Slack **message text** |
 | | Any free-text paraphrase or "summary" of the above |
 
+**Scope — what the rule does *not* cover.** This governs **raw content imported from Bitbucket/Jira**
+(the scraped raw zone, the store's content columns, and any LLM view of them). It does **not** forbid
+*first-party* metadata the team enters directly into megaspeed — calendar overrides, scope/timeframe
+preferences, and dated **annotations** ("we adopted the 4 h review SLA after the retro") are the team's
+own words, not scraped content. They live **outside** the store (tenant files such as
+`calendar.yaml` / `annotations.yaml`), never enter the event log, and never feed the raw→label
+classifier or the analysis LLM's view of the store. The "no free-text columns" rule is a property of the
+*store*, not a blanket ban on the team writing a note in a tenant-side file.
+
 Two subtleties worth writing down before they bite us:
 
 1. **"Ticket keys are OK" is a deliberate, accepted residual risk.** A project
