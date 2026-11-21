@@ -416,6 +416,10 @@ export function ruleRow(suggestion, { base = '', metrics = {} } = {}) {
         </div>
         <h2 class="rule-title">${esc(suggestion.title)}</h2>
         <p class="rule-action">${esc(suggestion.suggestion)}</p>
+        ${suggestion.policy_lab && suggestion.policy_lab.contradiction
+          ? `<p class="rule-caveat" data-lab-contradiction="true">The lab does not support this as a lever (${
+            esc(suggestion.policy_lab.note || 'no clear effect')}); treat it as a hypothesis to test, not a proven fix.</p>`
+          : ''}
         ${assumed ? `<p class="rule-assumed">at stake is an assumption (${esc(
           (suggestion.evidence || {}).impact_basis || 'an assumption')}) — not a measured saving.</p>` : ''}
         ${labNote(suggestion)}

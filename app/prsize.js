@@ -215,6 +215,7 @@ export function prSizePanel(payload, { caps = null } = {}) {
       PRs are flagged large<span class="muted" data-pr-size-split> ·
       ${counts.overCommits} over commits · ${counts.overLines} over changed lines</span>.</p>
     ${correlationLine(payload)}
+    <p class="prsize-why" data-pr-size-why aria-live="polite"></p>
     ${seriesMarkup('commits', 'commits per PR', commits, chosen, commitMax)}
     ${seriesMarkup('lines', 'changed lines per PR', lines, chosen, lineMax, { available: !pending })}
     <p class="panel-note">A PR is large iff <code>commits &gt; cap</code> or

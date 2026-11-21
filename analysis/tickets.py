@@ -734,6 +734,41 @@ def _attach_benchmarks(segments: dict, prs: list[dict], cohorts: dict) -> None:
     for pr in prs:
         # A censored PR has no completed cycle; the contrast is suppressed with
         # its reason rather than comparing a running age to merged PRs.
+        # prd/63 B10: a declined/abandoned PR is not delivered work either. Its
+        # span can hit the window cap (DEL-100 #2: 504 h = 63 business days) and
+        # benchmarking that against the merged-PR median invented a 20× "slow".
+        declined = str(pr.get("state") or "").lower() != "merged" and not pr.get("censored")
+        if declined:
+            block = benchmark.contrast(
+                None, cohorts["pr_cycles"], basis=ballcourt.PR_CYCLE_BASIS,
+            )
+            block.update({
+                "declined": True,
+                "available": False,
+                "median": None,
+                "multiple": None,
+                "note": (
+                    "declined PR — closed without merging, so it is not "
+                    "benchmarked against merged PRs"
+                ),
+            })
+            pr["cycle_benchmark"] = block
+            # The phases of an abandoned PR are real spans, but the merged-PR
+            # phase cohort is not their comparison. Suppress the contrast too.
+            pr["phase_benchmarks"] = {
+                phase: {
+                    "available": False,
+                    "median": None,
+                    "multiple": None,
+                    "n": len(cohorts["phases"].get(phase, ())),
+                    "min_n": benchmark.BENCHMARK_MIN_N,
+                    "basis": ballcourt.PHASE_BENCHMARK_BASIS,
+                    "declined": True,
+                    "note": "declined PR — not benchmarked against merged PRs",
+                }
+                for phase in (pr.get("phase_hours") or {})
+            }
+            continue
         pr["cycle_benchmark"] = benchmark.contrast(
             None if pr.get("censored") else pr.get("cycle_hours"),
             cohorts["pr_cycles"], basis=ballcourt.PR_CYCLE_BASIS,

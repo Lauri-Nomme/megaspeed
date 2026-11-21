@@ -124,6 +124,8 @@
         <span class="dot">·</span>
         <span class="timebasis" id="timebasis" title="prd/19: business hours when the tenant has a calendar, wall-clock otherwise">wall-clock hours</span>
         <span class="range-meta mono" id="range-meta" hidden></span>
+        <span class="build mono" id="app-version" hidden
+              title="build identity (prd/32): git tag + short SHA"></span>
       </div>
 
       <!-- Timeline -->
@@ -203,6 +205,7 @@
             <p class="empty-detail">Select a row to see its impact, facts and pivot chips.</p>
           </aside>
         </div>
+        <div id="delivery-extra"></div>
         <p class="assumption" id="delivery-assumption"></p>
       </section>
 
@@ -304,10 +307,6 @@
       <div class="menu" id="menu" role="menu" hidden></div>
     </main>
   </div>
-  <footer class="app-footer" id="app-footer" aria-label="build">
-    <span class="build mono" id="app-version" hidden
-          title="build identity (prd/32): git tag + short SHA"></span>
-  </footer>
   <div class="scrim" id="scrim" hidden></div>
 </div>
 <script type="module" src="/main.js"></script>

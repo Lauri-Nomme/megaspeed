@@ -94,9 +94,9 @@ test('prd/25: the ticket page is a route, and keys are links everywhere', () => 
 test('prd/46 §6: the delivery table and response numbers are not clipped', () => {
   const css = read('style.css');
   assert.match(css, /\.table-wrap \{[^}]*overflow-x: auto/);
-  assert.match(css, /\.delivery \{ min-width: 1040px; \}/);
-  assert.match(css, /\.delivery \.c-id \{ width: 270px; \}/);
-  assert.match(css, /\.response-panel \.response-table \.c-dur \{ width: 120px; \}/);
+  assert.match(css, /\.delivery \{ min-width: 1120px; \}/);
+  assert.match(css, /\.delivery \.c-id \{ width: 250px; \}/);
+  assert.match(css, /\.response-panel \.response-table \.c-dur \{ width: 190px; white-space: normal; \}/);
   assert.match(css, /#queue-response \{ overflow-x: auto; \}/);
 });
 

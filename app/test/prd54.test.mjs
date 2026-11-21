@@ -15,7 +15,7 @@ import {
 } from '../tables.js';
 import { overviewMarkup } from '../tables.js';
 
-function row(number, ticket, repo, hours, roles, { stale = false, ...extra } = {}) {
+function row(number, ticket, repo, hours, roles, { stale = false, approved = 0, ...extra } = {}) {
   return {
     object_id: `PR:${repo}#${number}`,
     id: `${repo}#${number}`,
@@ -38,6 +38,8 @@ function row(number, ticket, repo, hours, roles, { stale = false, ...extra } = {
     stale_reasons: stale ? ['open 24 business days (limit 5)'] : [],
     waiting_on: Object.keys(roles),
     waiting_roles: roles,
+    reviewers_approved: approved,
+    reviewers_total: Object.keys(roles).filter((p) => roles[p] !== 'author').length,
     dependents: 0,
     impact_hours: 0,
     ...extra,
@@ -46,10 +48,10 @@ function row(number, ticket, repo, hours, roles, { stale = false, ...extra } = {
 
 // The QA store's eight open PRs, in the shape the delivery API returns them.
 const ROWS = [
-  row(53, 'DEL-167', 'delivery-api', 168, { CaOs: 'review', FrMo: 'sentinel' }, { stale: true }),
-  row(55, 'DEL-168', 'delivery-api', 152, { FrMo: 'sentinel' }, { stale: true }),
-  row(60, 'DEL-176', 'delivery-api', 131, { FrMo: 'sentinel' }, { stale: true }),
-  row(52, 'DEL-197', 'delivery-web', 16, { FrMo: 'sentinel' }),
+  row(53, 'DEL-167', 'delivery-api', 168, { CaOs: 'review', FrMo: 'sentinel' }, { stale: true, approved: 0 }),
+  row(55, 'DEL-168', 'delivery-api', 152, { FrMo: 'sentinel' }, { stale: true, approved: 1 }),
+  row(60, 'DEL-176', 'delivery-api', 131, { FrMo: 'sentinel' }, { stale: true, approved: 1 }),
+  row(52, 'DEL-197', 'delivery-web', 16, { FrMo: 'sentinel' }, { approved: 1 }),
   // a normal two-day review with a peer still pending: the sentinel's gate has
   // not opened (concepts.md §2), so it is not an orphaned approval
   row(51, 'DEL-190', 'delivery-api', 16, { CaOs: 'review', FrMo: 'sentinel' }),
@@ -75,14 +77,16 @@ const DELIVERY = {
   },
 };
 
-test('the orphans are the sentinel-only waits plus the stale shared waits', () => {
+test('the orphans are the approvals whose only remaining holder is the sentinel', () => {
   const orphans = orphanedApprovals(DELIVERY);
-  // worst wait first: #53, #55, #60, then the fresh #52
-  assert.deepEqual(orphans.map((entry) => entry.number), [53, 55, 60, 52]);
-  // excluded: #51 (peer still pending, not stale) and #66 (waits on the author)
+  // worst wait first: #55, #60, then the fresh #52
+  assert.deepEqual(orphans.map((entry) => entry.number), [55, 60, 52]);
   assert.deepEqual(orphans.map((entry) => entry.ticket).sort(),
-    ['DEL-167', 'DEL-168', 'DEL-176', 'DEL-197']);
-  assert.equal(waitsOnSentinel(ROWS[4]), true);   // #51 does wait on the sentinel…
+    ['DEL-168', 'DEL-176', 'DEL-197']);
+  // excluded: #53 (no approval at all — CaOs owes the first review),
+  // #51 (peer still pending) and #66 (waits on the author)
+  assert.equal(waitsOnSentinel(ROWS[0]), true);   // #53 names the sentinel…
+  assert.equal(waitsOnSentinel(ROWS[4]), true);   // #51 too…
   assert.equal(waitsOnSentinel(ROWS[5]), false);  // …#66 does not
   assert.deepEqual(sentinelNames(orphans), ['FrMo']);
 });
@@ -93,21 +97,24 @@ test('who owes each names the role, not only the pseudonym', () => {
   assert.equal(whoOwes(null), '—');
 });
 
-test('the card renders the four orphans, who owes, and a chase link each', () => {
+test('the card renders the three orphans, who owes, and a chase action each', () => {
   const html = chaseCard(DELIVERY);
   assert.match(html, /id="chase"/);
   assert.match(html, /What to do now/);
-  assert.match(html, /data-chase-count="4"/);
-  for (const ticket of ['DEL-167', 'DEL-168', 'DEL-176', 'DEL-197']) {
+  assert.match(html, /data-chase-count="3"/);
+  for (const ticket of ['DEL-168', 'DEL-176', 'DEL-197']) {
     assert.match(html, new RegExp(`data-chase-ticket="${ticket}"`));
     assert.match(html, new RegExp(`href="#ticket/${ticket}"`));
-    assert.match(html, new RegExp(`data-ticket="${ticket}"`));
   }
-  // #55 and #60 name the sentinel alone; #53 names both holders
+  // #53 (no approval, CaOs owes) and #66 (author owes) are not here
+  assert.doesNotMatch(html, /data-chase-ticket="DEL-167"/);
+  assert.doesNotMatch(html, /#53[\s\S]*?chase/);
   assert.match(html, /#55[\s\S]*?FrMo \(sentinel\)/);
   assert.match(html, /#60[\s\S]*?FrMo \(sentinel\)/);
-  assert.match(html, /#53[\s\S]*?CaOs \(review\) \+ FrMo \(sentinel\)/);
-  assert.equal((html.match(/class="chip chase-link"/g) || []).length, 4);
+  assert.equal((html.match(/class="chip chase-link"/g) || []).length, 3);
+  // prd/63 C12: the action opens the PR drawer, not only the ticket page
+  assert.match(html, /data-chase-open="PR:delivery-api#55"/);
+  assert.doesNotMatch(html, /class="chip chase-link" href=/);
   assert.match(html, /chase →/);
   // the review SLA is the lab's own preset, one click from here
   assert.match(html, /data-preset="sla4"/);
@@ -142,9 +149,12 @@ test('the card follows the scope like the attention list', () => {
   const webCard = chaseCard(DELIVERY, { scope: { kind: 'repo', value: 'delivery-web' } });
   assert.match(webCard, /data-chase-count="1"/);
   assert.match(webCard, /data-chase-ticket="DEL-197"/);
-  const personCard = chaseCard(DELIVERY, { scope: { kind: 'person', value: 'CaOs' } });
-  assert.match(personCard, /data-chase-count="1"/);
-  assert.match(personCard, /data-chase-ticket="DEL-167"/);
+  const personCard = chaseCard(DELIVERY, { scope: { kind: 'person', value: 'FrMo' } });
+  assert.match(personCard, /data-chase-count="3"/);
+  assert.match(personCard, /data-chase-ticket="DEL-197"/);
+  // CaOs owes #53's first review, which is not an orphaned approval
+  const caOs = chaseCard(DELIVERY, { scope: { kind: 'person', value: 'CaOs' } });
+  assert.doesNotMatch(caOs, /data-chase-ticket="DEL-167"/);
 });
 
 test('the Overview puts the card above the tiles', () => {
@@ -155,5 +165,5 @@ test('the Overview puts the card above the tiles', () => {
   });
   assert.ok(html.indexOf('chase-panel') > -1);
   assert.ok(html.indexOf('chase-panel') < html.indexOf('class="stats"'));
-  assert.match(html, /4 orphaned approvals/);
+  assert.match(html, /3 orphaned approvals/);
 });

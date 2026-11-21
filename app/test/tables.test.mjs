@@ -95,7 +95,8 @@ test('the state line says 0/2 approved and names every pending reviewer', async 
   assert.equal(waitingLabel(row), 'CaOs + FrMo');
   // a single named holder keeps its name
   assert.equal(waitingLabel(openRow({ ball_label: 'FrMo', waiting_on: ['FrMo'] })), 'FrMo');
-  // the author-debt label is not a reviewer list
+  // prd/63 D: the author-debt row names the same holder set as "who owes" —
+  // DEL-183 #66 reads "BoFe + FrMo" on both surfaces, never "author".
   assert.equal(waitingLabel(openRow({ ball: 'author', ball_label: 'author',
-    waiting_on: ['BoFe', 'FrMo'] })), 'author');
+    waiting_on: ['BoFe', 'FrMo'] })), 'BoFe + FrMo');
 });

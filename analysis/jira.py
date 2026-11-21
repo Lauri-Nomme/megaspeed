@@ -1825,16 +1825,21 @@ def _added_at_start(story: Story, sid: int, sprint_index: dict) -> bool:
     """Was this story in sprint ``sid`` when the sprint started? (prd/46 §4)
 
     ``at_start`` is the store's own membership-at-start marker (prd/42 M5); a
-    ``sprint_added`` stamped at or before the sprint's start is the same fact
-    from the timestamp. Anything later was *adopted* mid-sprint, not committed.
+    ``sprint_added`` on the sprint's **start day** is the same fact from the
+    timestamp. Anything later was *adopted* mid-sprint, not committed.
+
+    prd/63 C13: the comparison is by day, not by exact timestamp. A planning
+    session that adds a story at 09:30 to a sprint starting 09:00 was still
+    part of the plan; the old strict compare counted S2 as "2 committed, 28
+    adopted" when five were in the room at the start.
     """
     start = (sprint_index.get(sid) or {}).get("start")
     for event in story.of("sprint_added"):
         if event_sprint_id(event) != sid:
             continue
-        return bool(_attrs(event).get("at_start")) or (
-            start is not None and event["_ts"] <= start
-        )
+        if _attrs(event).get("at_start"):
+            return True
+        return start is not None and event["_ts"].date() <= start.date()
     return False
 
 

@@ -45,15 +45,14 @@ test('the tooltip names where the identity came from', () => {
 
 /* ---- the wiring -------------------------------------------------------- */
 
-test('the build footer carries the version element on every page', () => {
+test('the build identity sits in the meta strip on every page', () => {
   const html = read('index.html');
   assert.match(html, /id="app-version"/);
-  // P-3: the build identity is a fixed bottom-left footer, outside the meta
-  // strip (which stays provenance/honesty/timebasis only).
-  const footer = html.slice(html.indexOf('<footer class="app-footer"'), html.indexOf('<script type="module"'));
-  assert.match(footer, /id="app-version"/);
+  // prd/63 D: it used to be a fixed footer that sat on top of content. In the
+  // meta strip it is in the flow and never overlays a table row.
   const meta = html.slice(html.indexOf('<div class="meta"'), html.indexOf('<!-- Timeline -->'));
-  assert.doesNotMatch(meta, /id="app-version"/);
+  assert.match(meta, /id="app-version"/);
+  assert.doesNotMatch(html, /class="app-footer"/);
 });
 
 test('main.js fetches /api/meta once and renders it', () => {
@@ -70,17 +69,13 @@ test('main.js fetches /api/meta once and renders it', () => {
   assert.match(main, /\['build', versionLabel\(state\.build\)/);
 });
 
-test('the version line is a fixed bottom-left footer on desktop and phone', () => {
+test('the version line is in flow, never fixed over content', () => {
   const css = read('style.css');
-  assert.match(css, /\.build \{ color: var\(--text-tertiary\)/);
-  // P-3: `position: fixed; left; bottom` — the conventional build-stamp slot.
-  assert.match(css, /\.app-footer \{[^}]*position: fixed/s);
-  assert.match(css, /\.app-footer \{[^}]*left: 190px/s);
-  assert.match(css, /\.app-footer \{[^}]*bottom: 6px/s);
-  // the phone overrides the sidebar offset, not visibility
-  assert.match(css, /\.app-footer \{ left: 10px; bottom: 4px; \}/);
+  assert.match(css, /\.meta \.build \{ color: var\(--text-tertiary\)/);
+  // prd/63 D: no fixed build footer may overlay the content again.
+  assert.doesNotMatch(css, /\.app-footer/);
   // no rule may hide the build label itself; only the empty `[hidden]` state
   // (a server older than /api/meta) is display:none.
   assert.doesNotMatch(css, /\.build\s*\{[^}]*display: none/s);
-  assert.match(css, /\.app-footer \.build\[hidden\] \{ display: none; \}/);
+  assert.match(css, /\.meta \.build\[hidden\] \{ display: none; \}/);
 });
