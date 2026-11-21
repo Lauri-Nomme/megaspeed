@@ -139,6 +139,11 @@ const state = {
   trendError: null,
   trendMetric: 'flow_efficiency',
   trendBucket: 'week',
+  // prd/61: the "Did it work?" panel's selected split and metric, plus the
+  // compare payload (item-level before/after) for that split.
+  compare: null,
+  compareSplit: '',
+  compareMetric: 'story_cycle',
   // prd/57: the benchmark contrast is on by default and has a per-view toggle.
   benchmark: true,
   // prd/37 §4: the selected sprint (id) — filters the story lanes, marks the
@@ -861,6 +866,29 @@ async function ensureData(page) {
       )));
     }
     state.trend = cached(key);
+    // prd/61: one compare per (metric, split). The default split is the latest
+    // in-window policy change; a click on a marker moves it. Cached by the same
+    // (tenant, timeframe, bucket, repo, snapshot) key as the trend.
+    const entries = (state.trend && state.trend.annotations) || [];
+    if (!entries.length) {
+      state.compare = null;
+    } else {
+      const policy = entries.filter((entry) => entry.policy !== false && entry.in_window !== false);
+      const split = entries.some((entry) => entry.date === state.compareSplit)
+        ? state.compareSplit
+        : (policy.length ? policy[policy.length - 1].date : entries[entries.length - 1].date);
+      state.compareSplit = split;
+      const ckey = `compare:${tenant}:${state.timeframe}:${state.trendBucket}:${
+        state.compareMetric}:${split}:${repo}:${stamp}`;
+      if (!cached(ckey)) {
+        state.cache.set(ckey, await getJSON(withTenant(
+          `/api/trend/compare?metric=${encodeURIComponent(state.compareMetric)}` +
+          `&split=${encodeURIComponent(split)}` +
+          `&bucket=${encodeURIComponent(state.trendBucket)}&${q}`,
+        )));
+      }
+      state.compare = cached(ckey);
+    }
   }
   if (page === 'rules') {
     // prd/39: the distributions are cap-independent; the size *rule* is not, so
@@ -1889,6 +1917,8 @@ function renderTrendPage() {
     bucket: data ? data.bucket : state.trendBucket,
     // prd/63 F1: the body states a failed fetch; it never keeps the spinner.
     error: state.trendError,
+    // prd/61: the before/after panel beside the annotations.
+    compare: state.compare,
   });
   $('trend-stats').innerHTML = data && !state.trendError ? trendStats(data) : '';
   $('trend-assumption').textContent = state.trendError
@@ -1929,6 +1959,79 @@ async function setTrendView({ metric = null, bucket = null } = {}) {
   state.trendError = null;
   if (state.page === 'trend') renderPage();
   saveUI();
+}
+
+/* prd/61: the before/after panel's split (an annotation date) or metric. */
+async function setTrendCompare({ split = null, metric = null } = {}) {
+  if (split) state.compareSplit = split;
+  if (metric) state.compareMetric = metric;
+  state.compare = null;
+  if (state.page === 'trend') renderPage();
+  try {
+    await ensureData('trend');
+  } catch (err) {
+    setStatus(`before/after failed: ${err.message}`, 'stale');
+    return;
+  }
+  if (state.page === 'trend') renderPage();
+  saveUI();
+}
+
+/* prd/61: one annotation, posted as first-party metadata (never scraped). */
+async function recordAnnotation(form) {
+  const data = new FormData(form);
+  const raw = data.get('value');
+  const payload = {
+    kind: data.get('kind'),
+    date: data.get('date'),
+    value: raw === null || String(raw).trim() === '' ? null : Number(raw),
+    note: String(data.get('note') || '').trim() || null,
+  };
+  if (!payload.date) {
+    flashStatus('a change needs a date', 'stale');
+    return;
+  }
+  // A repo scope rides only when the page is scoped to one repo.
+  if (state.scope && state.scope.kind === 'repo') payload.scope = state.scope.value;
+  try {
+    const { response, body } = await fetchJSON(withTenant('/api/annotations'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!response.ok) throw new HttpError(response.status, body, '/api/annotations');
+    state.compareSplit = payload.date;
+    // The annotation lives in the store, so every cached trend/compare answer
+    // may be stale; clear the client cache and ask again.
+    state.cache.clear();
+    state.trend = null;
+    state.compare = null;
+    await ensureData('trend');
+    renderPage();
+    setStatus(`recorded ${(body.annotation && body.annotation.label) || 'the change'}`, 'ok');
+  } catch (err) {
+    flashStatus(`could not record the change: ${err.message}`, 'stale');
+  }
+}
+
+/* prd/61: delete is the second click of the inline confirm. */
+async function deleteAnnotation(id) {
+  try {
+    const { response, body } = await fetchJSON(
+      withTenant(`/api/annotations/${encodeURIComponent(id)}`),
+      { method: 'DELETE' },
+    );
+    if (!response.ok) throw new HttpError(response.status, body, `/api/annotations/${id}`);
+    state.cache.clear();
+    state.trend = null;
+    state.compare = null;
+    state.compareSplit = '';
+    await ensureData('trend');
+    renderPage();
+    setStatus('annotation deleted', 'ok');
+  } catch (err) {
+    flashStatus(`could not delete the annotation: ${err.message}`, 'stale');
+  }
 }
 
 // ------------------------------------------------------- benchmark contrast
@@ -3642,6 +3745,18 @@ document.addEventListener('input', (event) => {
 });
 
 document.addEventListener('change', async (event) => {
+  // prd/61: the before/after panel's split and metric are two selects on one
+  // block; changing either asks the same endpoint one new question.
+  const compareSplit = event.target.closest('[data-compare-split]');
+  if (compareSplit) {
+    await setTrendCompare({ split: compareSplit.value });
+    return;
+  }
+  const compareMetric = event.target.closest('[data-compare-metric]');
+  if (compareMetric) {
+    await setTrendCompare({ metric: compareMetric.value });
+    return;
+  }
   // prd/59: the aging cohort (story cycle / PR review / PR cycle / a stage) and
   // the threshold source are two selects on one tab.
   const agingView = event.target.closest('[data-aging-view]');
@@ -3677,6 +3792,14 @@ $('ticket-jump').addEventListener('submit', async (event) => {
   }
   input.value = '';
   await openTicket(key);
+});
+
+/* prd/61: "Record a change" posts one first-party annotation. */
+document.addEventListener('submit', async (event) => {
+  const form = event.target.closest('[data-annotation-form]');
+  if (!form) return;
+  event.preventDefault();
+  await recordAnnotation(form);
 });
 
 document.addEventListener('click', async (event) => {
@@ -3849,7 +3972,25 @@ document.addEventListener('click', async (event) => {
     return;
   }
   if (event.target.closest('#trend-copy')) {
-    await copyText(trendMarkdown(state.trend));
+    await copyText(trendMarkdown(state.trend, { compare: state.compare }));
+    return;
+  }
+  // prd/61: delete is a two-step inline confirm (no modal).
+  const remove = event.target.closest('[data-annotation-delete]');
+  if (remove) {
+    if (remove.dataset.confirm === 'true') {
+      await deleteAnnotation(remove.dataset.annotationDelete);
+    } else {
+      remove.dataset.confirm = 'true';
+      remove.textContent = 'delete? click to confirm';
+      remove.classList.add('danger');
+    }
+    return;
+  }
+  // prd/61: a chart marker selects that change in the before/after panel.
+  const marker = event.target.closest('[data-annotation-id]');
+  if (marker && marker.dataset.date) {
+    await setTrendCompare({ split: marker.dataset.date });
     return;
   }
   // prd/57: the per-view benchmark toggle (delivery / ticket / queue).
@@ -4100,6 +4241,9 @@ function saveUI() {
       // prd/50: the trend tab; prd/57: the benchmark contrast preference.
       trendMetric: state.trendMetric,
       trendBucket: state.trendBucket,
+      // prd/61: the before/after panel's metric is a preference; the split
+      // defaults to the latest recorded change.
+      compareMetric: state.compareMetric,
       benchmark: state.benchmark,
       activity: [...timeline.activityState.entries()],
       scope: state.scope,
@@ -4166,6 +4310,9 @@ function restoreUI() {
   if (['flow_efficiency', 'cycle_median', 'on_time', 'wait_hours', 'merged', 'open']
     .includes(stored.trendMetric)) {
     state.trendMetric = stored.trendMetric;
+  }
+  if (stored.compareMetric === 'story_cycle' || stored.compareMetric === 'cycle_median') {
+    state.compareMetric = stored.compareMetric;
   }
   if (stored.trendBucket === 'week' || stored.trendBucket === 'sprint') {
     state.trendBucket = stored.trendBucket;

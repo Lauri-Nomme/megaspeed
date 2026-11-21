@@ -28,7 +28,7 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import urlencode
 
-from analysis import ballcourt, jira, rules, trend
+from analysis import ballcourt, calendar, jira, rules, trend
 from ingest.store import connect, to_naive_utc
 from server import app as app_module
 from tests.test_jira_analysis import Fixture, T0, AS_OF
@@ -339,8 +339,9 @@ class TrendValueTests(StoreCase):
         self.assertNotIn("rules.", payload["definition"])
         self.assertEqual(
             [entry["id"] for entry in payload["metrics"]],
-            ["flow_efficiency", "cycle_median", "on_time", "wait_hours",
-             "merged", "open"],
+            ["flow_efficiency", "cycle_median", "cycle_p85", "on_time",
+             "wait_hours", "merged", "open", "throughput_stories",
+             "arrival_prs", "arrival_stories", "cumulative_flow"],
         )
 
     def test_a_store_without_sprints_explains_the_empty_sprint_bucket(self):
@@ -464,7 +465,7 @@ class TrendApiTests(unittest.TestCase):
         self.assertEqual(body["bucket"], "week")
         self.assertEqual(body["points"][0]["value"], 24.0)
         self.assertEqual(body["points"][0]["bucket_start"], "2026-01-05T00:00:00Z")
-        self.assertEqual(len(body["metrics"]), 6)
+        self.assertEqual(len(body["metrics"]), 11)
         self.assertEqual(reply.headers.get("x-tenant"), "trend")
         self.assertEqual(body["calendar_id"], "none")
         self.assertEqual(body["hours_mode"], "wall-clock")
@@ -575,3 +576,63 @@ class TrendRepoScopeApiTests(unittest.TestCase):
         self.assertIn("unknown repo", error)
         self.assertIn("ENG/api", error)
         self.assertIn("ENG/web", error)
+
+
+# --------------------------------------------------------------------------- #
+# prd/61: intervention-aware trend
+# --------------------------------------------------------------------------- #
+class Prd61TrendTests(StoreCase):
+    def _august_store(self):
+        fx = Fixture(as_of=datetime(2026, 9, 1, 12))
+        opened = datetime(2026, 8, 17, 9)
+        fx.pr(1, "AaAa", opened, tickets=("OPS-1",),
+              closed=opened + timedelta(hours=8))
+        fx.pr_event(1, "pr_merged", "RrRr", 8)
+        fx.write(self.path)
+        cal = calendar.load(
+            config_path=Path(__file__).resolve().parent.parent / "config"
+            / "calendar.default.yaml"
+        )
+        con = connect(self.path, read_only=True)
+        court = ballcourt.load(con, calendar=cal)
+        data = jira.load(con, court)
+        window = rules.window_for(court, None, data)
+        return con, court, data, window
+
+    def test_cycle_p85_equals_the_shared_cycle_time_function(self):
+        con, court, data, window = self.load()
+        try:
+            payload = trend.trend(court, data, window, metric="cycle_p85")
+            block = rules.cycle_time(court, window)
+        finally:
+            con.close()
+        point = next(point for point in payload["points"]
+                     if not point["in_progress"] and point["value"] is not None)
+        # the point quotes the same function on its *own* bucket window
+        bucket_block = rules.cycle_time(court, _bucket(point))
+        self.assertIn("p85_hours", block)
+        self.assertEqual(point["value"], bucket_block["p85_hours"])
+
+    def test_the_payload_carries_annotations_and_calendar_spans(self):
+        con, court, data, window = self._august_store()
+        entries = [{
+            "id": "a1", "date": "2026-08-18", "kind": "review_sla",
+            "value": 4, "label": "review SLA 4 h", "note": "after the retro",
+            "policy": True,
+        }]
+        try:
+            payload = trend.trend(
+                court, data, window, metric="cycle_median",
+                annotations=entries,
+            )
+        finally:
+            con.close()
+        holidays = [span for span in payload["spans"]
+                    if span["kind"] == "holiday"]
+        self.assertIn("2026-08-20", [span["start"] for span in holidays])
+        self.assertEqual(payload["annotations"][0]["in_window"], True)
+        self.assertEqual(payload["annotation_counts"]["policy"], 1)
+        self.assertEqual(payload["kinds"][0]["id"], "review_sla")
+        self.assertIn("stability", payload)
+        self.assertIn(payload["stability"]["flag"],
+                      ("overload", "filling", "stable", "draining", "insufficient"))

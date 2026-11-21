@@ -65,6 +65,8 @@ HEAD_COMMIT_RE = r"^[0-9a-f]{7,40}$"
 EVENT_KEY_RE = taxonomy.EVENT_KEY_RE
 # ``ingest_runs.run_id``: one token, no whitespace (``fixture-2026...-abcdef``).
 RUN_ID_RE = r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$"
+# ``annotations.annotation_id``: a uuid4 hex string (prd/61).
+ANNOTATION_ID_RE = r"^[0-9a-f]{32}$"
 # The sources this store may hold. A source name is a closed label, not free
 # text: it is the provenance column of ``ingest_runs``. ``jira-cloud`` is the
 # Cloud shape of the same Jira source (prd/24): a different API surface, the
@@ -114,7 +116,20 @@ ALLOWED: dict[str, set[str]] = {
         "prs_seen", "prs_kept", "prs_dropped", "events_written", "events_skipped",
         "issues_seen", "issues_kept", "issues_skipped",
     },
+    # prd/61: dated team annotations (policy changes). First-party metadata, not
+    # imported content: the team types it into megaspeed and it never reaches
+    # the event log or the classifier. ``note`` is the one documented first-party
+    # free-text column — see the carve-out in :func:`verify`.
+    "annotations": {
+        "annotation_id", "created_at", "date", "kind", "value", "note", "scope",
+    },
 }
+
+#: The ONE first-party free-text column the store may hold (prd/02 "Scope",
+#: prd/61). It is not scraped Bitbucket/Jira content: the team typed it. Every
+#: other rule (the canary, the column allowlist, the closed ``kind``) still
+#: applies to the table.
+FIRST_PARTY_FREE_TEXT = frozenset({("annotations", "note")})
 
 CANARY = "zzcanary"
 
@@ -134,6 +149,11 @@ def ensure_schema(con) -> None:
     # the store the same way the bundle did (a store built from epics has no
     # MEGASPEED_TICKET_KEYS to read).
     con.execute("ALTER TABLE ingest_runs ADD COLUMN IF NOT EXISTS ticket_keys VARCHAR[]")
+    # prd/61: annotations are a table, not a file. ``CREATE TABLE IF NOT EXISTS``
+    # in the schema above is the migration for an existing store (the new table
+    # starts empty); a store written by an earlier prd/61 build still gets the
+    # ``note`` column additively.
+    con.execute("ALTER TABLE annotations ADD COLUMN IF NOT EXISTS note VARCHAR")
 
 
 # --------------------------------------------------------------------------- #
@@ -627,11 +647,16 @@ def verify(con, key_shape: str = DEFAULT_KEY_SHAPE,
             problems.append(f"{table}: missing expected columns: {sorted(missing)}")
 
     # No whitespace anywhere in a stored string: prose has spaces, identifiers
-    # (keys, pseudonyms, hashes, repo slugs, enum labels) do not.
+    # (keys, pseudonyms, hashes, repo slugs, enum labels) do not. The ONE
+    # exception is ``annotations.note``: first-party team metadata, never
+    # scraped content (prd/02 "Scope", prd/61), so prose is the point. The
+    # canary scan below still covers it — if scraped text ever reached the note
+    # column through a leaked bundle, the canary still fails.
     for table, column, dtype in _string_columns(con):
-        bad = _scan(con, table, column, dtype, r"regexp_matches(v, '\s')", [])
-        if bad:
-            problems.append(f"{table}.{column}: {bad} value(s) contain whitespace")
+        if (table, column) not in FIRST_PARTY_FREE_TEXT:
+            bad = _scan(con, table, column, dtype, r"regexp_matches(v, '\s')", [])
+            if bad:
+                problems.append(f"{table}.{column}: {bad} value(s) contain whitespace")
         leaked = _scan(con, table, column, dtype, "lower(v) LIKE ?", [f"%{CANARY}%"])
         if leaked:
             problems.append(f"{table}.{column}: {leaked} canary value(s) leaked")
@@ -649,6 +674,28 @@ def verify(con, key_shape: str = DEFAULT_KEY_SHAPE,
     for (otype,) in con.execute("SELECT DISTINCT object_type FROM objects").fetchall():
         if otype not in taxonomy.OBJECT_TYPES:
             problems.append(f"object type outside vocabulary: {otype!r}")
+    # prd/61: an annotation's ``kind`` is enumerated like every other label; the
+    # ``note`` is deliberately NOT inspected for content class (first-party).
+    if "annotations" in tables:
+        bad = _scan(
+            con, "annotations", "kind", "VARCHAR",
+            f"v NOT IN ({','.join('?' * len(taxonomy.ANNOTATION_KINDS))})",
+            sorted(taxonomy.ANNOTATION_KINDS),
+        )
+        if bad:
+            problems.append(f"annotations.kind: {bad} value(s) outside the closed vocabulary")
+        bad = _scan(
+            con, "annotations", "annotation_id", "VARCHAR",
+            "NOT regexp_matches(v, ?)", [ANNOTATION_ID_RE],
+        )
+        if bad:
+            problems.append(f"annotations.annotation_id: {bad} value(s) outside the expected shape")
+        bad = _scan(
+            con, "annotations", "scope", "VARCHAR",
+            "v <> '' AND NOT regexp_matches(v, ?)", [REPO_RE],
+        )
+        if bad:
+            problems.append(f"annotations.scope: {bad} value(s) outside the expected shape")
     object_columns = {
         row[0]
         for row in con.execute(

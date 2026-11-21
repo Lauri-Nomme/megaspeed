@@ -51,6 +51,23 @@ CREATE TABLE IF NOT EXISTS objects (
     PRIMARY KEY (object_type, object_id)
 );
 
+-- prd/61: dated changes the TEAM itself records ("we adopted the 4 h review SLA
+-- on 8 Oct"). These are first-party metadata, not imported content: the team
+-- types them into megaspeed, they never touch the event log or the classifier.
+-- ``note`` is the ONE documented first-party free-text column (see prd/02
+-- "Scope"): ingest/store.py allowlists it and exempts it from the whitespace
+-- heuristic, while the canary still proves no *scraped* raw text is stored.
+-- ``kind`` stays a closed vocabulary so the marker's label is renderable.
+CREATE TABLE IF NOT EXISTS annotations (
+    annotation_id VARCHAR PRIMARY KEY,   -- stable id (uuid hex)
+    created_at    TIMESTAMP NOT NULL,    -- when the team recorded it
+    date          DATE NOT NULL,         -- the change date shown on the axis
+    kind          VARCHAR NOT NULL,      -- closed vocabulary (ingest/taxonomy.py)
+    value         DOUBLE,                -- hours / commits / limit, or NULL
+    note          VARCHAR,               -- first-party free text (the one carve-out)
+    scope         VARCHAR                -- optional repo (project/slug)
+);
+
 CREATE TABLE IF NOT EXISTS ingest_runs (
     run_id             VARCHAR PRIMARY KEY,
     source             VARCHAR NOT NULL,      -- fixture | bitbucket-dc | jira-fixture | jira-dc

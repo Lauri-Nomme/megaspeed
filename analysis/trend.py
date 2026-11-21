@@ -25,9 +25,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+from analysis import aging as aging_view
+from analysis import annotations as annotation_view
 from analysis import ballcourt
 from analysis import jira as jira_analysis
 from analysis import rules
+from analysis import stability as stability_view
 from ingest.store import iso
 
 #: One working week = 5 working days = 40 business hours (concepts.md §1). The
@@ -51,11 +54,19 @@ MIN_COHORT_N = 5
 MIN_N_BY_METRIC = {
     "flow_efficiency": MIN_COHORT_N,
     "cycle_median": MIN_COHORT_N,
+    "cycle_p85": MIN_COHORT_N,
     "wait_hours": MIN_COHORT_N,
     "on_time": 2,
     # a count is exact: a week with zero merges is a measurement, not a sample
     "merged": 0,
     "open": 0,
+    # prd/61 additions: the stability strip's series and the cumulative bands.
+    # Counts are exact (a zero week is a measurement); throughput_stories is a
+    # cohort median-like number and keeps the same floor as the others.
+    "throughput_stories": MIN_COHORT_N,
+    "arrival_prs": 0,
+    "arrival_stories": 0,
+    "cumulative_flow": 0,
 }
 
 #: The metric catalogue. ``definition`` names the function the point quotes, so
@@ -79,6 +90,15 @@ METRICS: dict[str, dict] = {
         "definition": (
             "median PR open → merged hours over the PRs opened in the bucket "
             "— the same cycle time as the headline"
+        ),
+    },
+    "cycle_p85": {
+        "label": "Cycle time (p85)",
+        "unit": "hours",
+        "higher_is_better": False,
+        "definition": (
+            "p85 of the same PR created → merged hours cohort — "
+            "rules.cycle_time's p85, the tail the headline median hides"
         ),
     },
     "on_time": {
@@ -112,6 +132,37 @@ METRICS: dict[str, dict] = {
         "definition": (
             "PRs open at the bucket's end (the snapshot for the active bucket) "
             "— the work in progress the queue view samples"
+        ),
+    },
+    # -- prd/61: the stability strip's series and the cumulative bands ------- #
+    "throughput_stories": {
+        "label": "Stories delivered",
+        "unit": "count",
+        "higher_is_better": True,
+        "definition": (
+            "stories whose done boundary falls inside the bucket — the prd/60 "
+            "delivered population (Jira done with no open PR)"
+        ),
+    },
+    "arrival_prs": {
+        "label": "PRs opened",
+        "unit": "count",
+        "higher_is_better": False,
+        "definition": "PRs created inside the bucket (the arrival rate)",
+    },
+    "arrival_stories": {
+        "label": "Stories created",
+        "unit": "count",
+        "higher_is_better": False,
+        "definition": "stories created inside the bucket (the ticket arrival rate)",
+    },
+    "cumulative_flow": {
+        "label": "Cumulative flow",
+        "unit": "count",
+        "higher_is_better": True,
+        "definition": (
+            "cumulative PRs created / started / in review / merged (and stories "
+            "created / started / in review / done), binned on the bucket's end"
         ),
     },
 }
@@ -208,6 +259,29 @@ def _label(moment: datetime, bucket: str) -> str:
     return moment.strftime("%d %b")
 
 
+def bucket_bounds(
+    court: ballcourt.BallCourt,
+    data: jira_analysis.JiraData | None,
+    window: tuple[datetime, datetime],
+    bucket: str = DEFAULT_BUCKET,
+) -> list[dict]:
+    """The dense bucket rows a metric is evaluated on (prd/50, prd/61).
+
+    Shared by the trend, the stability strip and the cumulative-flow series so
+    the three cannot disagree about where a week (or a sprint) ends.
+    """
+    if bucket not in BUCKETS:
+        raise ValueError(f"bucket must be one of {sorted(BUCKETS)}")
+    if bucket == "week":
+        return [
+            {"start": low, "end": high, "exclusive_end": True,
+             "in_progress": high > court.snapshot,
+             "sprint_id": None, "label": _label(low, "week")}
+            for low, high in week_bounds(window)
+        ]
+    return sprint_bounds(court, data or jira_analysis.EMPTY)
+
+
 # --------------------------------------------------------------------------- #
 # one point per bucket, from the existing metric functions
 # --------------------------------------------------------------------------- #
@@ -235,6 +309,10 @@ def _point(
     end_inclusive: datetime,
     *,
     sprints: list[dict] | None = None,
+    outcomes: dict[str, dict] | None = None,
+    stories: list | None = None,
+    flow: dict | None = None,
+    point: datetime | None = None,
 ) -> tuple[float | None, int, dict]:
     """``(value, n, extra)`` for one bucket — the same function as the headline."""
     window = (start, end_inclusive)
@@ -251,9 +329,15 @@ def _point(
             "unavailable": not block["available"],
             "censored": _open_in_bucket(court, start, end_inclusive),
         }
-    if metric == "cycle_median":
+    if metric in ("cycle_median", "cycle_p85"):
         block = rules.cycle_time(court, window)
-        return block["median_hours"], int(block["n"]), {
+        value = (
+            block["median_hours"] if metric == "cycle_median"
+            else block["p85_hours"]
+        )
+        return value, int(block["n"]), {
+            "median_hours": block["median_hours"],
+            "p85_hours": block["p85_hours"],
             "p90_hours": block["p90_hours"],
             "cohort": block["cohort"],
             "censored_open": block["censored"]["open"],
@@ -279,6 +363,30 @@ def _point(
             )
         )
         return count, count, {}
+    if metric == "throughput_stories":
+        count = sum(
+            1 for outcome in (outcomes or {}).values()
+            if outcome.get("done_at") is not None
+            and start <= outcome["done_at"] <= end_inclusive
+            and outcome.get("delivered", True)
+        )
+        return count, count, {}
+    if metric == "arrival_prs":
+        count = sum(
+            1 for state in court.prs
+            if state.pr["created_ts"] is not None
+            and start <= state.pr["created_ts"] <= end_inclusive
+        )
+        return count, count, {}
+    if metric == "arrival_stories":
+        count = sum(
+            1 for story in (stories or ())
+            if story.start is not None and start <= story.start <= end_inclusive
+        )
+        return count, count, {}
+    if metric == "cumulative_flow":
+        block = dict(flow or {})
+        return block.get("created") or 0, int(block.get("created") or 0), block
     if metric == "on_time":
         rows = [
             row for row in sprints or ()
@@ -299,40 +407,122 @@ def _point(
     raise ValueError(f"unknown trend metric {metric!r}")
 
 
+def _flow_at(
+    court: ballcourt.BallCourt,
+    data: jira_analysis.JiraData,
+    point: datetime,
+) -> dict:
+    """The four cumulative bands of both populations at one bucket end.
+
+    PRs: created (opened) · started (an author push/comment) · in review (a
+    reviewer's first action, ``ballcourt.first_review``) · merged. Stories:
+    created · started (a status event into in-progress or later) · in review
+    (in-review/in-verification/done) · done. One population per band, and the
+    PR band is the point's value (the widest series).
+    """
+    pr = {"created": 0, "started": 0, "in_review": 0, "merged": 0}
+    for state in court.prs:
+        created = state.pr["created_ts"]
+        if created is None or created > point:
+            continue
+        pr["created"] += 1
+        if any(
+            event["_ts"] <= point
+            and event["activity"] in ("pr_pushed", "comment_added")
+            for event in state.events
+        ):
+            pr["started"] += 1
+        review = ballcourt.first_review(state)
+        if review is not None and review["_ts"] <= point:
+            pr["in_review"] += 1
+        if (
+            state.pr["closed_ts"] is not None
+            and state.pr["state"] == "merged"
+            and state.pr["closed_ts"] <= point
+        ):
+            pr["merged"] += 1
+    story = {"created": 0, "started": 0, "in_review": 0, "done": 0}
+    for item in data.stories:
+        created = item.start
+        if created is None or created > point:
+            continue
+        story["created"] += 1
+        stages = {
+            stage for stamp, stage in aging_view.stage_events(item) if stamp <= point
+        }
+        if stages & {"in_progress", "in_review", "in_verification", "done"}:
+            story["started"] += 1
+        if stages & {"in_review", "in_verification", "done"}:
+            story["in_review"] += 1
+        done = jira_analysis.story_done_at(item)
+        if done is not None and done <= point:
+            story["done"] += 1
+    return {
+        "created": pr["created"],
+        "bands": [
+            {"id": "created", "label": "created", "value": pr["created"]},
+            {"id": "started", "label": "started", "value": pr["started"]},
+            {"id": "in_review", "label": "in review", "value": pr["in_review"]},
+            {"id": "merged", "label": "merged", "value": pr["merged"]},
+        ],
+        "story_bands": [
+            {"id": "created", "label": "created", "value": story["created"]},
+            {"id": "started", "label": "started", "value": story["started"]},
+            {"id": "in_review", "label": "in review", "value": story["in_review"]},
+            {"id": "done", "label": "done", "value": story["done"]},
+        ],
+        "population": "pr",
+        "point": iso(point),
+    }
+
+
 def trend(
     court: ballcourt.BallCourt,
     data: jira_analysis.JiraData | None,
     window: tuple[datetime, datetime],
     metric: str = DEFAULT_METRIC,
     bucket: str = DEFAULT_BUCKET,
+    *,
+    annotations: list[dict] | None = None,
+    spans: list[dict] | None = None,
 ) -> dict:
     """The time series for one metric, one point per bucket.
 
     Raises ``ValueError`` for an unknown metric/bucket (the endpoint maps it to
     a 400 that lists the valid ones — a filter is never silently ignored).
+
+    prd/61: the same payload also carries the team's dated annotations (marked
+    ``in_window``; one outside the window is counted, never drawn), the calendar
+    spans (holidays/vacations, derived from the business-hours calendar), and
+    the stability strip. The series itself is unchanged: every point still calls
+    the same metric function the headline does.
     """
     data = data or jira_analysis.EMPTY
     if metric not in METRICS:
         raise ValueError(f"metric must be one of {sorted(METRICS)}")
-    if bucket not in BUCKETS:
-        raise ValueError(f"bucket must be one of {sorted(BUCKETS)}")
     start, end = window
-    if bucket == "week":
-        bounds = [
-            {"start": low, "end": high, "exclusive_end": True,
-             "in_progress": high > court.snapshot,
-             "sprint_id": None, "label": _label(low, "week")}
-            for low, high in week_bounds(window)
-        ]
-    else:
-        bounds = sprint_bounds(court, data)
-        if not bounds:
-            bounds = []
+    bounds = bucket_bounds(court, data, window, bucket)
 
     sprints = (
         jira_analysis.sprint_delivery(court, data, window).get("sprints") or []
         if metric == "on_time" else None
     )
+    outcomes = (
+        jira_analysis.sprint_outcomes(court, data)[1]
+        if metric in ("throughput_stories", "cumulative_flow") else None
+    )
+    stories = list(data.stories) if metric == "arrival_stories" else None
+    flow: dict = {}
+    if metric == "cumulative_flow":
+        for row in bounds:
+            low = max(row["start"], start)
+            high = min(row["end"], end)
+            if high <= low and not (not row["exclusive_end"] and high == low):
+                continue
+            end_inclusive = high - MICROSECOND if row["exclusive_end"] else high
+            flow[row["start"]] = _flow_at(
+                court, data, min(end_inclusive, court.snapshot)
+            )
     points: list[dict] = []
     for row in bounds:
         low = max(row["start"], start)
@@ -342,6 +532,8 @@ def trend(
         end_inclusive = high - MICROSECOND if row["exclusive_end"] else high
         value, n, extra = _point(
             metric, court, low, end_inclusive, sprints=sprints,
+            outcomes=outcomes, stories=stories, flow=flow.get(row["start"]),
+            point=min(end_inclusive, court.snapshot),
         )
         points.append({
             "start": iso(low),
@@ -403,12 +595,38 @@ def trend(
         ),
         None,
     )
+    entries, annotation_counts = annotation_view.view_entries(
+        list(annotations or ()), window,
+    )
+    span_rows = (
+        list(spans) if spans is not None
+        else annotation_view.calendar_spans(court, window)
+    )
+    annotation_counts["holiday"] = sum(
+        1 for span in span_rows
+        if span.get("kind") == "holiday" and span.get("in_window", True)
+    )
+    annotation_counts["vacation"] = sum(
+        1 for span in span_rows
+        if span.get("kind") == "vacation" and span.get("in_window", True)
+    )
+    annotation_counts["spans_outside"] = sum(
+        1 for span in span_rows if not span.get("in_window", True)
+    )
     return {
         "metric": metric,
         **METRICS[metric],
         "bucket": bucket,
         "available": bool(points),
         "points": points,
+        "annotations": entries,
+        "spans": span_rows,
+        "annotation_counts": annotation_counts,
+        # the "Record a change" menu's closed vocabulary (one source of truth)
+        "kinds": annotation_view.catalogue(),
+        "stability": stability_view.payload(
+            court, data, window, bucket=bucket, bounds=bounds,
+        ),
         "summary": {
             "first": first["value"] if first else None,
             "latest": latest["value"] if latest else None,

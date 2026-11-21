@@ -208,8 +208,11 @@ test('prd/63 B8: the headline is the latest settled bucket, never the in-progres
   // the count axis has no negative tick
   const geometry = trendGeometry(trend());
   assert.ok(geometry.bounds.low >= 0, `low was ${geometry.bounds.low}`);
-  // the in-progress label is anchored inside the plot at the right edge
-  assert.match(trendChart(trend()), /text-anchor="end"[^>]*>in progress/);
+  // the in-progress label is inside the plot and not clipped (prd/61 extends
+  // the time domain to the last bucket's end, so it is no longer at the edge)
+  const chart = trendChart(trend());
+  assert.match(chart, />in progress</);
+  assert.doesNotMatch(chart, /in progre</);
 });
 
 /* ------------------------------------------------------- B9 stale pills + list */

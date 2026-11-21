@@ -1,8 +1,11 @@
 """megaspeed local dev server.
 
-Read-only over the pseudonymised store: there is no write path, no credential,
-and no import of anything under ``ingest/`` except the schema guard's read
-helpers. If the UI cannot leak raw text, it cannot leak raw text by accident.
+Read-only over the pseudonymised store, with one deliberate exception: the
+team's own **annotations** (prd/61) are first-party metadata the team types in,
+so the server may write — and only write — an ``annotations`` row. There is no
+write path into the event log, no credential, and no import of anything under
+``ingest/`` except the schema guard's read helpers. If the UI cannot leak raw
+text, it cannot leak raw text by accident.
 
 **Tenants** (prd/12): one dataset per ``<tenants-dir>/<tenant>.duckdb``. The
 list is the directory itself (no registry file to drift), and every read
@@ -36,7 +39,15 @@ one failure this whole feature exists to prevent.
                                         (in/out of a sprint) and carry-over
     GET  /api/trend?tenant=&metric=…&bucket=&days=&repo=
                                         one headline metric as a time series,
-                                        bucketed by week or sprint (prd/50)
+                                        bucketed by week or sprint (prd/50),
+                                        with annotations, spans and stability (prd/61)
+    GET  /api/trend/compare?tenant=&metric=&split=&bucket=&days=&repo=
+                                        item-level before/after around one date,
+                                        with a bootstrap CI and an outcome (prd/61)
+    GET  /api/annotations?tenant=&repo=  the team's dated policy changes (prd/61)
+    POST /api/annotations                record one (kind is a closed vocabulary;
+                                        the optional note is first-party metadata)
+    DELETE /api/annotations/{id}         remove one
     GET  /api/simulate?days=&scenario=&repo=&tenant= policy lab: calibrated model,
                                               validation gate + one scenario (prd/23)
     GET  /api/calendar?tenant=          effective business-hours calendar (prd/19)
@@ -150,6 +161,8 @@ sys.path.insert(0, str(REPO_ROOT))
 from analysis import ballcourt as analyse  # noqa: E402  (read-only projections)
 from analysis import advice as advice_crosscheck  # noqa: E402  (prd/43 §1)
 from analysis import aging as aging_view  # noqa: E402  (prd/59 aging WIP)
+from analysis import annotations as annotation_view  # noqa: E402  (prd/61)
+from analysis import before_after as before_after_view  # noqa: E402  (prd/61)
 from analysis import calendar as workcal  # noqa: E402  (prd/19 business hours)
 from analysis import jira as jira_analysis  # noqa: E402  (prd/21 sprints)
 from analysis import rules as insights_rules  # noqa: E402  (prd/17 suggestions)
@@ -423,6 +436,69 @@ def _file_stamp(path: Path):
         return (st.st_mtime_ns, st.st_size)
     except OSError:
         return None
+
+
+# prd/61: the one write path is an annotation. DuckDB's file mtime can be coarse
+# (a small row may land inside the same ns tick), so a successful write also
+# bumps this in-process stamp. The rows live in the store, so there is no
+# separate annotations cache or mtime key: every trend/compare cache key that
+# includes the store stamp invalidates naturally, exactly like an ingest run.
+_store_stamp_bump: dict[str, int] = {}
+_store_stamp_lock = threading.Lock()
+# DuckDB allows one writer; serialize the annotation writes so two clicks
+# cannot race each other into a lock error.
+_annotation_write_lock = threading.Lock()
+
+
+def _store_stamp(path: Path):
+    with _store_stamp_lock:
+        bump = _store_stamp_bump.get(str(path), 0)
+    return (_file_stamp(path), bump)
+
+
+def _bump_store_stamp(path: Path) -> None:
+    with _store_stamp_lock:
+        key = str(path)
+        _store_stamp_bump[key] = _store_stamp_bump.get(key, 0) + 1
+
+
+class StoreReadOnly(RuntimeError):
+    """The tenant store (or its directory) is not writable — a mirror install."""
+
+
+@contextlib.contextmanager
+def store_write_conn(path: Path):
+    """One short-lived **read-write** connection for a first-party write.
+
+    The only writer is the annotations endpoint (prd/61). A mirror install (a
+    read-only file, or a read-only directory for DuckDB's WAL) gets a clean
+    :class:`StoreReadOnly` — it still *reads* annotations. The caller owns the
+    transaction, so a failure leaves no partial row.
+    """
+    target = Path(path)
+    if not target.exists():
+        raise FileNotFoundError(target.name)
+    if not os.access(target, os.W_OK) or not os.access(target.parent, os.W_OK):
+        raise StoreReadOnly("the store is not writable (mirror install)")
+    con = None
+    for attempt in range(STORE_RETRY_ATTEMPTS):
+        try:
+            con = pstore.connect(target)
+            break
+        except Exception as exc:  # noqa: BLE001
+            if not _is_lock_error(exc):
+                raise
+            if attempt + 1 >= STORE_RETRY_ATTEMPTS:
+                raise StoreBusy("store is locked by a writer") from None
+            time.sleep(STORE_RETRY_DELAY * (attempt + 1))
+    try:
+        # A store created before prd/61 has no annotations table; the additive
+        # migration is the schema file itself.
+        pstore.ensure_schema(con)
+        yield con
+    finally:
+        if con is not None:
+            con.close()
 
 
 # Per-tenant health is recomputed only when the file changes; a busy store is
@@ -1035,6 +1111,8 @@ ANALYSIS_PARAMS = {
     "insights": ("level", "days", "size_commits", "size_lines", "repo"),
     "sprints": ("days",),
     "trend": ("metric", "bucket", "days", "repo"),
+    "trend-compare": ("metric", "split", "bucket", "days", "repo"),
+    "annotations": ("repo",),
     "simulate": ("days", "scenario", "seed", "tolerance", "replications", "repo"),
     "pr-size": ("size_commits", "size_lines"),
 }
@@ -1691,7 +1769,7 @@ def trend(request: Request):
             except ValueError as exc:
                 return _bad_request(str(exc), valid=list(_params(ANALYSIS_PARAMS["trend"])))
             key = (
-                tenant, _file_stamp(path), _calendar_key(tenant),
+                tenant, _store_stamp(path), _calendar_key(tenant),
                 days, bucket, metric, repo or "",
             )
             with _trend_lock:
@@ -1703,6 +1781,11 @@ def trend(request: Request):
             window = insights_rules.window_for(court, _days(days), jira)
             payload = trend_view.trend(
                 court, jira, window, metric=metric, bucket=bucket,
+                # prd/61: the team's dated changes and the calendar's own spans.
+                # Annotations live in the store, so the store stamp above already
+                # invalidates this cached answer after a write.
+                annotations=annotation_view.load(con, repo),
+                spans=annotation_view.calendar_spans(court, window),
             )
     except Exception as exc:  # noqa: BLE001
         return _store_error(exc)
@@ -1722,6 +1805,250 @@ def trend(request: Request):
             _trend_cache.clear()
         _trend_cache[key] = payload
     return JSONResponse(payload, headers={"X-Tenant": tenant})
+
+
+# --------------------------------------------------------------------------- #
+# before/after (prd/61): item-level distributions either side of a split
+# --------------------------------------------------------------------------- #
+# A compare is a bootstrap + rank test over item samples; it shares the trend's
+# invalidation key (store stamp + calendar) and the same cache budget. The seed
+# is derived from that key, so a cached and a cold call agree.
+_compare_cache: dict[tuple, dict] = {}
+COMPARE_CACHE_SIZE = 32
+
+
+@app.get("/api/trend/compare")
+def trend_compare(request: Request):
+    """Did the change work? Item-level before/after around one dated split.
+
+    ``metric`` is ``story_cycle`` or ``cycle_median``; ``split`` is the change
+    date (ISO). Items created in the bucket containing the snapshot are excluded
+    from both sides, open items are censored and counted, and the answer is one
+    of ``better`` / ``worse`` / ``no clear change`` / ``can't tell at this n``.
+    Never a bare p-value: both ``n``s and the CI travel with the verdict.
+    """
+    unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["trend-compare"]))
+    if unknown is not None:
+        return unknown
+    try:
+        days = _num_param(request, "days", minimum=0, maximum=3650)
+        metric = (
+            request.query_params.get("metric") or "story_cycle"
+        ).strip()
+        bucket = (
+            request.query_params.get("bucket") or trend_view.DEFAULT_BUCKET
+        ).strip()
+        if metric not in before_after_view.COMPARE_METRICS:
+            raise ValueError(
+                f"metric must be one of {sorted(before_after_view.COMPARE_METRICS)}"
+            )
+        if bucket not in trend_view.BUCKETS:
+            raise ValueError(f"bucket must be one of {sorted(trend_view.BUCKETS)}")
+        split = before_after_view.parse_split(request.query_params.get("split"))
+    except ValueError as exc:
+        return _bad_request(
+            str(exc), valid=list(_params(ANALYSIS_PARAMS["trend-compare"]))
+        )
+    try:
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    try:
+        with store_conn(path) as con:
+            bundle = _analysis_bundle(con, tenant, path)
+            try:
+                repo = _repo_param(request, bundle.court)
+            except ValueError as exc:
+                return _bad_request(
+                    str(exc),
+                    valid=list(_params(ANALYSIS_PARAMS["trend-compare"])),
+                )
+            key = (
+                tenant, _store_stamp(path), _calendar_key(tenant),
+                days, bucket, metric, split.isoformat(), repo or "",
+            )
+            with _trend_lock:
+                hit = _compare_cache.get(key)
+            if hit is not None:
+                return JSONResponse(hit, headers={"X-Tenant": tenant})
+            jira = bundle.jira(con)
+            court, jira = _repo_scope(bundle.court, jira, repo)
+            window = insights_rules.window_for(court, _days(days), jira)
+            payload = before_after_view.compare_metric(
+                court, jira, window,
+                metric=metric, split=split, bucket=bucket,
+                annotations=annotation_view.load(con, repo),
+                tenant=tenant, stamp=_store_stamp(path),
+                calendar_id=court.calendar_id,
+            )
+    except Exception as exc:  # noqa: BLE001
+        return _store_error(exc)
+    payload.update({
+        "ok": True,
+        "tenant": tenant,
+        "repo": repo,
+        "as_of": pstore.iso(court.snapshot),
+        "hours_mode": court.hours_mode,
+        "calendar_id": court.calendar_id,
+        "assumption": court.assumption,
+        "metrics": before_after_view.metric_ids(),
+        **court.calendar_warning(),
+    })
+    with _trend_lock:
+        if len(_compare_cache) >= COMPARE_CACHE_SIZE:
+            _compare_cache.clear()
+        _compare_cache[key] = payload
+    return JSONResponse(payload, headers={"X-Tenant": tenant})
+
+
+# --------------------------------------------------------------------------- #
+# annotations (prd/61): the ONE first-party write path
+# --------------------------------------------------------------------------- #
+def _write_denied(request: Request) -> JSONResponse | None:
+    """A browser write must be same-origin (prd/61's one write path).
+
+    Reads are public on this local tool; a write is not. A cross-site page can
+    make a browser POST/PUT/DELETE to ``127.0.0.1`` even though CORS stops it
+    reading the answer, so the Origin is checked before anything is stored.
+    ``curl`` (no Origin) keeps working, exactly like the rest of the suite.
+    """
+    if _origin_allowed(request.headers.get("origin"), request.headers.get("host")):
+        return None
+    return JSONResponse(
+        status_code=403,
+        content={"ok": False, "error": "cross-origin writes are not allowed"},
+    )
+
+
+def _annotation_write_error(exc: Exception) -> JSONResponse:
+    if isinstance(exc, (StoreReadOnly, PermissionError)):
+        return JSONResponse(
+            status_code=409,
+            content={
+                "ok": False,
+                "unavailable": True,
+                "error": "this store is read-only (a mirror install still reads annotations)",
+            },
+        )
+    if isinstance(exc, StoreBusy):
+        return JSONResponse(
+            status_code=503,
+            content={"ok": False, "error": "the store is being written right now",
+                     "retryable": True},
+            headers={"Retry-After": "1"},
+        )
+    return _store_error(exc)
+
+
+@app.get("/api/annotations")
+def annotations_list(request: Request):
+    """The team's dated changes and the closed vocabulary (prd/61)."""
+    unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["annotations"]))
+    if unknown is not None:
+        return unknown
+    try:
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    repo = (request.query_params.get("repo") or "").strip() or None
+    try:
+        with store_conn(path) as con:
+            entries = annotation_view.load(con, repo)
+    except Exception as exc:  # noqa: BLE001
+        return _store_error(exc)
+    return JSONResponse(
+        {
+            "ok": True,
+            "tenant": tenant,
+            "repo": repo,
+            "annotations": entries,
+            "kinds": annotation_view.catalogue(),
+        },
+        headers={"X-Tenant": tenant},
+    )
+
+
+@app.post("/api/annotations")
+async def annotations_create(request: Request):
+    """Record one annotation. 400 only for the closed-vocabulary ``kind``.
+
+    The optional ``note`` is first-party free text (the team's own words), stored
+    verbatim in the allowlisted ``annotations`` table — never the event log,
+    never the classifier (prd/02 "Scope").
+    """
+    denied = _write_denied(request)
+    if denied is not None:
+        return denied
+    unknown = _unknown_params(request, _params(()))
+    if unknown is not None:
+        return unknown
+    try:
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    body = await _json_body(request)
+    if body is None:
+        return _bad_request("invalid json")
+    try:
+        clean = annotation_view.validate(body)
+    except annotation_view.AnnotationError as exc:
+        return _bad_request(str(exc), valid=[kind["id"] for kind in annotation_view.catalogue()])
+    try:
+        with _annotation_write_lock:
+            with store_write_conn(path) as con:
+                con.execute("BEGIN")
+                try:
+                    entry = annotation_view.save(con, clean)
+                    con.execute("COMMIT")
+                except Exception:
+                    con.execute("ROLLBACK")
+                    raise
+    except Exception as exc:  # noqa: BLE001
+        return _annotation_write_error(exc)
+    _bump_store_stamp(path)
+    return JSONResponse(
+        {"ok": True, "tenant": tenant, "annotation": entry},
+        status_code=201,
+        headers={"X-Tenant": tenant},
+    )
+
+
+@app.delete("/api/annotations/{annotation_id}")
+def annotations_delete(annotation_id: str, request: Request):
+    """Delete one annotation (a two-step inline confirm in the UI, prd/61)."""
+    denied = _write_denied(request)
+    if denied is not None:
+        return denied
+    unknown = _unknown_params(request, _params(()))
+    if unknown is not None:
+        return unknown
+    try:
+        tenant, path = _tenant_of(request)
+    except UnknownTenant as exc:
+        return _tenant_error(exc.args[0])
+    try:
+        with _annotation_write_lock:
+            with store_write_conn(path) as con:
+                con.execute("BEGIN")
+                try:
+                    deleted = annotation_view.delete(con, annotation_id.strip())
+                    con.execute("COMMIT")
+                except Exception:
+                    con.execute("ROLLBACK")
+                    raise
+    except Exception as exc:  # noqa: BLE001
+        return _annotation_write_error(exc)
+    if not deleted:
+        return JSONResponse(
+            status_code=404,
+            content={"ok": False, "error": f"no annotation {annotation_id!r} in this store"},
+            headers={"X-Tenant": tenant},
+        )
+    _bump_store_stamp(path)
+    return JSONResponse(
+        {"ok": True, "tenant": tenant, "deleted": annotation_id},
+        headers={"X-Tenant": tenant},
+    )
 
 
 # --------------------------------------------------------------------------- #

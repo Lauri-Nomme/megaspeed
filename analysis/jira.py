@@ -1370,6 +1370,11 @@ def _done_at(story: Story) -> datetime | None:
     )
 
 
+def story_done_at(story: Story) -> datetime | None:
+    """Public name for when a story first reached done (prd/61 cumulative flow)."""
+    return _done_at(story)
+
+
 def story_unmerged_prs(story: Story) -> list[str]:
     """The story's PRs that are still open — the code never merged (prd/43 §5).
 
