@@ -458,8 +458,19 @@ class LivenessTests(StoreCase):
 # --------------------------------------------------------------------------- #
 # 4. ties, the ladder and the rung map
 # --------------------------------------------------------------------------- #
-def pool(station: str, hours: float) -> dict:
-    return {"station": station, "label": station.title(), "removable_hours": hours}
+def pool(station: str, hours: float, *, live: float | None = None,
+         tail: float | None = None, label: str | None = None) -> dict:
+    """One pool-table row: ``hours`` is the reference pool (live + tail)."""
+    live = hours if live is None else live
+    tail = max(0.0, hours - live) if tail is None else tail
+    return {
+        "station": station,
+        "label": label or station.title(),
+        "removable_hours": hours,
+        "live_hours": live,
+        "tail_hours": tail,
+        "removable_now_hours": live,
+    }
 
 
 class TieTests(unittest.TestCase):
@@ -473,12 +484,117 @@ class TieTests(unittest.TestCase):
         self.assertEqual([row["station"] for row in block["tied_with"]], ["review"])
 
         table["review"]["removable_hours"] = 89.0   # 11 % behind: not tied
+        table["review"]["removable_now_hours"] = 89.0
+        table["review"]["live_hours"] = 89.0
         block = verdict.constraint(table)
         self.assertEqual(block["tied_with"], [])
 
     def test_no_pool_is_no_constraint(self):
         self.assertIsNone(verdict.constraint({}))
         self.assertIsNone(verdict.constraint({"refine": pool("refine", 0.0)}))
+
+
+class LiveFirstTests(unittest.TestCase):
+    """prd/67 W-04: the verdict ranks what is owed now, never the historical tail."""
+
+    def test_zero_live_everywhere_is_no_constraint_and_names_the_history(self):
+        table = {
+            "refine": pool("refine", 2345.0, live=0, tail=2312.0,
+                           label="Refinement"),
+            "start": pool("start", 1830.0, live=0, tail=1817.0,
+                          label="Starting work"),
+            "verify": pool("verify", 91.0, live=0, tail=91.0,
+                           label="Verification"),
+            "plan": pool("plan", 50.0, live=0, tail=50.0, label="Sprint planning"),
+        }
+        # A 0-owed historical tail is not a current constraint.
+        self.assertIsNone(verdict.constraint(table))
+        history = verdict.historical(table)
+        self.assertEqual([row["station"] for row in history],
+                         ["refine", "start", "verify"])   # top 3, by tail
+        tails = [row["tail_hours"] for row in history]
+        self.assertEqual(tails, sorted(tails, reverse=True))
+        note = verdict.no_queue_note(table)
+        self.assertIn("No current queue is visible in this window: 0 h owed now", note)
+        self.assertIn("Refinement (2312 h)", note)
+        self.assertIn("Starting work (1817 h)", note)
+        self.assertIn("history, not a live constraint", note)
+        self.assertNotIn("The constraint is", note)
+
+    def test_zero_live_with_no_history_says_so_without_a_station(self):
+        table = {"review": pool("review", 0.0, live=0, tail=0)}
+        self.assertIsNone(verdict.constraint(table))
+        self.assertEqual(verdict.historical(table), [])
+        note = verdict.no_queue_note(table)
+        self.assertIn("0 h owed now", note)
+        self.assertIn("No completed story left an abnormal tail", note)
+
+    def test_a_live_station_beats_a_larger_historical_tail(self):
+        table = {
+            "refine": pool("refine", 5000.0, live=0, tail=5000.0,
+                           label="Refinement"),
+            "review": pool("review", 120.0, live=120.0, tail=0.0,
+                           label="Approval gate"),
+        }
+        block = verdict.constraint(table)
+        self.assertEqual(block["station"], "review")
+        self.assertEqual(block["removable_now_hours"], 120.0)
+        self.assertEqual(block["removable_hours"], 120.0)
+        self.assertEqual(block["tied_with"], [])
+
+    def test_ties_are_within_ten_percent_of_the_top_live(self):
+        table = {
+            "refine": pool("refine", 100.0, live=100.0, tail=0),
+            "review": pool("review", 91.0, live=91.0, tail=0),   # 9 %: tied
+            "verify": pool("verify", 5000.0, live=0, tail=5000.0),  # history
+        }
+        block = verdict.constraint(table)
+        self.assertEqual(block["station"], "refine")
+        self.assertEqual([row["station"] for row in block["tied_with"]], ["review"])
+        self.assertEqual(block["tied_with"][0]["removable_now_hours"], 91.0)
+
+        table["review"] = pool("review", 89.0, live=89.0, tail=0)  # 11 %: not tied
+        block = verdict.constraint(table)
+        self.assertEqual(block["tied_with"], [])
+
+
+class JiraOnlyVerdictTests(StoreCase):
+    """The live symptom: a Jira-only window has live = 0 at every station."""
+
+    def test_a_jira_only_window_says_no_current_queue(self):
+        fx = ranked_store()
+        # Strip the PR half exactly as a Jira-only scrape would: no PR objects
+        # and no PR events, so no story can have a live PR.
+        fx.objects = [o for o in fx.objects if o["object_type"] != "PR"]
+        fx.events = [e for e in fx.events if e["repo"] is None]
+        _fixture, court, data = self.load(fx)
+        payload = verdict.verdict(court, data, (T0, AS_OF))
+
+        self.assertIsNone(payload["constraint"])
+        self.assertTrue(payload["available"])          # the data is fine
+        self.assertIn("No current queue is visible in this window: 0 h owed now",
+                      payload["note"])
+        self.assertIn("history, not a live constraint", payload["note"])
+        self.assertEqual(payload["next"], [])
+        # history travels as history: the top three tails, sorted
+        history = payload["historical"]
+        self.assertTrue(history)
+        self.assertLessEqual(len(history), 3)
+        tails = [row["tail_hours"] for row in history]
+        self.assertEqual(tails, sorted(tails, reverse=True))
+        self.assertGreater(tails[0], 0)
+        self.assertIn(history[0]["label"], payload["note"])
+        for row in history:
+            self.assertEqual(set(row), {"station", "label", "tail_hours"})
+        # the old rule would have named a station: the biggest removable pool
+        # here owes nothing now, which is exactly what must not be the verdict.
+        pools = {pool["station"]: pool for pool in payload["pools"]}
+        biggest = max(pools.values(), key=lambda pool: pool["removable_hours"])
+        self.assertEqual(biggest["live_hours"], 0.0)
+        self.assertEqual(biggest["removable_now_hours"], 0.0)
+        # the ladder still travels (its exploit rules are real), but the card's
+        # sentence never names a station.
+        self.assertNotIn("The constraint is", payload["note"])
 
 
 def suggestion(rule_id: str, *, impact: float = 10.0) -> dict:

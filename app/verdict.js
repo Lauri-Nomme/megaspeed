@@ -37,7 +37,10 @@ export function poolHours(hours) {
 /** `238 h on 4 stories` — a number and its cohort, never a bare total. */
 export function owedLabel(constraint) {
   const n = Number((constraint && constraint.open_n) || 0);
-  return `${poolHours(constraint && constraint.live_hours)} on ${n} stor${n === 1 ? 'y' : 'ies'}`;
+  const live = constraint && constraint.live_hours != null
+    ? constraint.live_hours
+    : (constraint && constraint.removable_now_hours);
+  return `${poolHours(live)} on ${n} stor${n === 1 ? 'y' : 'ies'}`;
 }
 
 export function stationLabel(constraint) {
@@ -90,13 +93,19 @@ export function tieNote(verdict) {
   const constraint = verdict && verdict.constraint;
   const tied = (constraint && constraint.tied_with) || [];
   if (!tied.length) return '';
-  return `Tied (within 10 %): ${tied.map((row) => `${row.label} ${poolHours(row.removable_hours)}`).join(' · ')} — the card names both, never one.`;
+  return `Tied (within 10 %): ${tied.map((row) => {
+    const now = row.removable_now_hours != null ? row.removable_now_hours : row.removable_hours;
+    return `${row.label} ${poolHours(now)} owed now`;
+  }).join(' · ')} — the card names both, never one.`;
 }
 
 /** The meta line: the cohort, the open items, the clock and the snapshot. */
 export function metaLine(verdict) {
   if (!verdict) return '';
-  const constraint = verdict.constraint || {};
+  // With no constraint (no current queue) the cohort and clock still come from
+  // the reference pool table — never "0 completed stories" on a full store.
+  const constraint = verdict.constraint
+    || ((verdict.pools || [])[0] || {});
   const liveness = verdict.liveness || {};
   const asOf = verdict.as_of ? fmtAbsolute(Date.parse(verdict.as_of)) : 'the snapshot';
   const n = Number(constraint.n_completed || 0);
@@ -298,6 +307,9 @@ export function ladderMarkup(verdict, { base = '' } = {}) {
 
 /** The footer's "next constraint" ranking behind a `<details>`. */
 export function nextConstraint(verdict) {
+  // prd/67 W-04: with no current queue there is no "next constraint" either —
+  // the historical tails render as history (`historicalMarkup`), not as a rank.
+  if (verdict && verdict.available && !verdict.constraint) return [];
   const pools = (verdict && verdict.pools) || [];
   const rows = pools.length ? pools : ((verdict && verdict.next) || []);
   const top = verdict && verdict.constraint && verdict.constraint.station;
@@ -331,9 +343,41 @@ export function nextMarkup(verdict) {
 }
 
 /**
+ * The historical tails, as history.
+ *
+ * Only renders in the no-current-queue state: the payload's `historical` list
+ * names the completed stories' abnormal tails so the page can say what the
+ * history is without calling any of it a constraint (prd/67 W-04).
+ */
+export function historicalRows(verdict) {
+  return ((verdict && verdict.historical) || []).filter((row) => row && row.station);
+}
+
+export function historicalMarkup(verdict) {
+  const rows = historicalRows(verdict);
+  if (!verdict || verdict.constraint || !verdict.available || !rows.length) return '';
+  const line = rows
+    .map((row) => `${row.label || row.station} ${poolHours(row.tail_hours)}`)
+    .join(' · ');
+  return `<details class="verdict-historical" data-verdict-historical>
+    <summary>History, not a queue: ${esc(line)}</summary>
+    <table class="table compact"><thead><tr><th>station</th>
+      <th class="num">abnormal tail</th></tr></thead><tbody>${
+      rows.map((row) => `<tr data-historical-station="${esc(row.station)}">
+        <td>${esc(row.label || row.station)}</td>
+        <td class="num mono">${esc(poolHours(row.tail_hours))}</td>
+      </tr>`).join('')}</tbody></table>
+    <p class="panel-note">The tail is completed stories' hours above the station's
+      own p85 — history, not work anyone owes now.</p>
+  </details>`;
+}
+
+/**
  * The Overview card. A full-bleed panel with one claim; when no pool clears one
  * waiting week it says "No constraint worth naming this week" and still shows
- * the ranking (the disclosure is the honest fallback, not a hidden menu).
+ * the ranking (the disclosure is the honest fallback, not a hidden menu). When
+ * the window has completed work but nothing owed now, it says exactly that
+ * (prd/67 W-04) and lists the historical tails as history.
  */
 export function verdictCard(verdict, { base = '' } = {}) {
   if (!verdict) {
@@ -341,13 +385,16 @@ export function verdictCard(verdict, { base = '' } = {}) {
       + '<div class="empty-row">Loading the constraint verdict…</div></section>';
   }
   const constraint = verdict.constraint;
-  const available = Boolean(verdict.available) && Boolean(constraint);
-  const pill = available
+  const hasConstraint = Boolean(verdict.available) && Boolean(constraint);
+  const noQueue = Boolean(verdict.available) && !constraint;
+  const pill = hasConstraint
     ? `<span class="pill warning" data-constraint-pill title="state: wait is owed now">${esc(
       String(constraint.label || 'constraint').toLowerCase())}</span>`
-    : '<span class="pill neutral" data-constraint-pill>no verdict</span>';
+    : (noQueue
+      ? '<span class="pill neutral" data-constraint-pill title="state: 0 h owed now — history is not a queue">no current queue</span>'
+      : '<span class="pill neutral" data-constraint-pill>no verdict</span>');
   const rows = poolRows(verdict);
-  return `<section class="panel wide verdict-panel" id="verdict" data-verdict-root data-available="${available}">
+  return `<section class="panel wide verdict-panel" id="verdict" data-verdict-root data-available="${Boolean(verdict.available)}"${noQueue ? ' data-verdict-state="no-queue"' : ''}>
     <div class="panel-head"><span class="overline">${OVERLINE}</span> ${pill}
       <span class="grow"></span>
       <button type="button" class="chip" data-verdict-copy
@@ -361,8 +408,9 @@ export function verdictCard(verdict, { base = '' } = {}) {
         <dd class="mono num">${esc(row.value)}</dd>
       </div>`).join('')}</dl>` : ''}
     <p class="verdict-clock" data-verdict-clock>${esc(clockLine(verdict))}</p>
-    ${available ? ladderMarkup(verdict, { base }) : ''}
+    ${verdict.available ? ladderMarkup(verdict, { base }) : ''}
     ${nextMarkup(verdict)}
+    ${historicalMarkup(verdict)}
     <p class="panel-note" data-verdict-basis>${esc(verdict.pool_note || '')}${
       verdict.holders && verdict.holders.available ? ` ${esc(verdict.holder_note || '')}` : ''}</p>
   </section>`;
@@ -370,11 +418,23 @@ export function verdictCard(verdict, { base = '' } = {}) {
 
 /**
  * The one-line Rules banner: the same verdict, with a link to the ladder.
- * It carries the state, the pool and the clock — never a second number.
+ * It carries the state, the pool and the clock — never a second number. With no
+ * current queue it shows the payload's note instead of naming a constraint
+ * (prd/67 W-04).
  */
 export function verdictBanner(verdict) {
-  if (!verdict || !verdict.available || !verdict.constraint) return '';
+  if (!verdict) return '';
   const constraint = verdict.constraint;
+  const asOf = esc(verdict.as_of ? String(verdict.as_of).slice(0, 10) : 'the snapshot');
+  if (!constraint) {
+    if (!verdict.available) return '';   // a refusal has no banner to carry
+    return `<div class="verdict-banner" data-verdict-banner data-verdict-state="no-queue">
+    <span class="pill neutral">no current queue</span>
+    <span class="banner-text"><b>${esc(constraintSentence(verdict))}</b></span>
+    <span class="muted">story clock · ${asOf}</span>
+    <button type="button" class="link" data-go="overview" data-anchor="verdict">see the card →</button>
+  </div>`;
+  }
   const n = Number(constraint.open_n || 0);
   const claim = `The constraint is ${stationLabel(constraint)}. ` +
     `${poolHours(constraint.removable_hours)} of removable wait — ` +
@@ -382,7 +442,7 @@ export function verdictBanner(verdict) {
   return `<div class="verdict-banner" data-verdict-banner>
     <span class="pill warning">the constraint</span>
     <span class="banner-text"><b>${esc(claim)}</b></span>
-    <span class="muted">story clock · ${esc(verdict.as_of ? String(verdict.as_of).slice(0, 10) : 'the snapshot')}</span>
+    <span class="muted">story clock · ${asOf}</span>
     <button type="button" class="link" data-go="overview" data-anchor="verdict">see the ladder →</button>
   </div>`;
 }
@@ -394,6 +454,11 @@ export function verdictMarkdown(verdict, base = '') {
   const lines = ['# The constraint', ''];
   if (!verdict.available || !constraint) {
     lines.push(verdict.note || 'No constraint worth naming this week.', '');
+    const history = historicalRows(verdict);
+    if (verdict.available && history.length) {
+      lines.push(`_Historical tails (not a current queue): ${
+        history.map((row) => `${row.label || row.station} ${poolHours(row.tail_hours)}`).join(' · ')}_`, '');
+    }
   } else {
     lines.push(constraintSentence(verdict), '');
     lines.push(`_${metaLine(verdict)}_`, '');
@@ -420,7 +485,7 @@ export function verdictMarkdown(verdict, base = '') {
     if (note) lines.push(`- policy lab: ${note}`);
     lines.push('');
   }
-  const next = nextLine(verdict);
+  const next = (constraint || !verdict.available) ? nextLine(verdict) : '';
   if (next) lines.push(`_Next: ${next}._`, '');
   lines.push(`_${verdict.pool_note || ''}_`);
   return lines.join('\n');
