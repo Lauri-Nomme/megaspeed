@@ -97,6 +97,28 @@ have emitted. A trace that predates v0.16 lacks the activity id / author needed
 to build the event, so those flips are counted as `question_unappliable` and
 reported, never guessed.
 
+### Batching and resume (`ingest relabel`)
+
+A CPU box labels one text per 15–45 s, so 15k texts is days. Two mechanisms make
+that practical:
+
+* **Batching** (`--batch-size N`): N same-kind texts go into one request, with
+  the per-item schema wrapped in a fixed-length array (`minItems == maxItems ==
+  N`). One system prompt and one thinking budget per batch instead of per text.
+  Every item is validated; a short/malformed array raises, and the caller
+  re-asks that batch **one text at a time** — a batch can never lose a label.
+* **Resume** (`--labels-cache`, default `<out>.labels.jsonl`): every label is
+  appended and flushed after each batch, keyed by `(kind, blake2b(text))` and
+  stamped with model, think flag and classifier version. The file holds no
+  prose. Re-running the same command reuses every matching entry and classifies
+  only the remainder; an entry written under a different model is ignored, not
+  overwritten. `Ctrl-C` keeps the batches already done; a **stop file**
+  (default `<out>.stop`) stops after the current batch, writes no patch, moves
+  the stop file to `.used`, and prints the resume line.
+* **Empty-answer retry**: a thinking model that exhausts `num_predict` returns
+  HTTP 200 with `content: ""`. That used to degrade ~20 % of texts to the mock;
+  the classifier now retries once with `think: false`, which answers the JSON.
+
 ### Relabel (`ingest relabel`)
 
 ```

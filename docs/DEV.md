@@ -222,6 +222,11 @@ Thinking is on by default (the trace is a diagnostic record); `--no-llm-think`
 trades it for throughput. Every call prints one timestamped line with the label
 or the full error.
 
+On a CPU box, batch and resume: `--batch-size 8` labels eight same-kind texts per
+request, and labels are checkpointed to `<out>.labels.jsonl` after every batch.
+`Ctrl-C`, a reboot, or `touch <out>.stop` stops cleanly; re-run the same command
+to continue where it left off.
+
 ---
 
 ## 3. Store schema (`data/megaspeed.duckdb`)

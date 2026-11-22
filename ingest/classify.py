@@ -677,6 +677,11 @@ class OllamaClassifier(Classifier):
         self.max_failures = max(1, int(max_failures))
         self.failures = 0
         self.down = False
+        #: Calls where the thinking model exhausted ``num_predict`` before
+        #: writing an answer, and a no-think retry produced the label.
+        self.retries = 0
+        #: One model request can label several texts (``classify_batch``).
+        self.batches = 0
 
     # -- request / response ----------------------------------------------
     def request_body(self, text: str, kind: str) -> dict:
@@ -696,6 +701,112 @@ class OllamaClassifier(Classifier):
             "format": schema_for(kind),
             "options": {"temperature": 0, "seed": 0, "num_predict": 512 if self.think else 128},
         }
+
+    def batch_request_body(self, texts: Sequence[str], kind: str) -> dict:
+        """One request labelling ``len(texts)`` texts of ``kind``, in order.
+
+        The schema is the same per-item object wrapped in a fixed-length array,
+        so constrained decoding cannot return a different count or shape. The
+        system prompt is paid **once per batch**, and so is the thinking.
+        """
+        _check_kind(kind)
+        count = len(texts)
+        if count < 1:
+            raise ClassifyError("a batch needs at least one text")
+        prompt = system_prompt(kind) + (
+            f"\nThere are {count} numbered texts. Label each one independently and"
+            f" answer with a JSON array of exactly {count} objects, in input order."
+        )
+        return {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": prompt},
+                {
+                    "role": "user",
+                    "content": "\n\n".join(
+                        f"[{index}]\n{text}" for index, text in enumerate(texts, start=1)
+                    ),
+                },
+            ],
+            "stream": False,
+            "think": self.think,
+            "format": {
+                "type": "array",
+                "items": schema_for(kind),
+                "minItems": count,
+                "maxItems": count,
+            },
+            "options": {
+                "temperature": 0,
+                "seed": 0,
+                # Per-item answer budget, plus one thinking budget for the batch.
+                "num_predict": (128 * count) + (1024 if self.think else 0),
+            },
+        }
+
+    def classify_batch(
+        self, items: Sequence[tuple[str, str]]
+    ) -> list[tuple[dict, str]]:
+        """Label several **same-kind** texts in one request.
+
+        Returns ``(labels, version)`` per input, in order. Raises on anything
+        the caller should fall back from: a different kind, a malformed or
+        short array, a connection error. The caller (``ingest.relabel``) then
+        re-asks the texts individually, so a batch can never lose a label.
+
+        The empty-answer retry is the same as the single call: a thinking model
+        that exhausts ``num_predict`` returns HTTP 200 with ``content: ""``;
+        the retry without thinking answers the JSON in a fraction of the budget.
+        """
+        prepared = [(str(text), str(kind)) for text, kind in items]
+        if not prepared:
+            return []
+        if self.down:
+            raise ClassifyError(
+                f"circuit breaker open after {self.failures} consecutive failure(s)"
+            )
+        kinds = {kind for _text, kind in prepared}
+        if len(kinds) != 1:
+            raise ClassifyError(f"a batch must be one kind, got {sorted(kinds)}")
+        kind = kinds.pop()
+        body = self.batch_request_body([text for text, _kind in prepared], kind)
+        with self._lock:
+            self.batches += 1
+        try:
+            answer = self._chat(body)
+            content = (answer.get("message") or {}).get("content")
+            if not str(content or "").strip():
+                with self._lock:
+                    self.retries += 1
+                retry = {
+                    **body,
+                    "think": False,
+                    "options": {**body["options"], "num_predict": 128 * len(prepared) + 128},
+                }
+                answer = self._chat(retry)
+                content = (answer.get("message") or {}).get("content")
+            payload = json.loads(content)
+            if not isinstance(payload, list) or len(payload) != len(prepared):
+                raise ClassifyError(
+                    f"batch answer is not a {len(prepared)}-item array"
+                    f" ({type(payload).__name__}, {len(payload) if isinstance(payload, list) else '?'})"
+                )
+            labels = [parse_labels(kind, item) for item in payload]
+        except (ClassifyError, OSError, ValueError, KeyError, TimeoutError) as exc:
+            with self._lock:
+                self.failures += 1
+                if self.failures >= self.max_failures:
+                    self.down = True
+                self.last_error = f"{type(exc).__name__}: {exc}"[:300]
+            raise
+        with self._lock:
+            self.failures = 0
+            self.last_version = self.version
+        results = []
+        for item_labels in labels:
+            self._count(item_labels)
+            results.append((item_labels, self.version))
+        return results
 
     def classify(self, text: str, kind: str, context: dict | None = None) -> dict:
         _check_kind(kind)
@@ -785,6 +896,20 @@ class OllamaClassifier(Classifier):
         try:
             answer = self._chat(body)
             content = (answer.get("message") or {}).get("content")
+            if not str(content or "").strip():
+                # A thinking model that ran out of num_predict returns HTTP 200
+                # with `content: ""` (the deliberation used the whole budget).
+                # One no-think retry answers the JSON; without it, one in five
+                # texts silently degrades to the mock.
+                with self._lock:
+                    self.retries += 1
+                body = {
+                    **body,
+                    "think": False,
+                    "options": {**body["options"], "num_predict": 256},
+                }
+                answer = self._chat(body)
+                content = (answer.get("message") or {}).get("content")
             labels = parse_labels(kind, content)
         except (ClassifyError, OSError, ValueError, KeyError, TimeoutError) as exc:
             elapsed = (time.monotonic() - started) * 1000.0
@@ -880,6 +1005,8 @@ class OllamaClassifier(Classifier):
             "url": self.url,
             "workers": self.workers,
             "think": self.think,
+            "retries": self.retries,
+            "batches": self.batches,
             "down": self.down,
         }
 

@@ -214,6 +214,99 @@ class ScrapeTraceWiringTests(unittest.TestCase):
 class ClassifierTraceTests(unittest.TestCase):
     """The classifier builds the record: request, response, thinking, error."""
 
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def read(self):
+            return json.dumps(self.payload).encode()
+
+        def close(self):
+            pass
+
+    def test_an_empty_answer_from_a_thinking_model_is_retried_without_thinking(self):
+        good = json.dumps({
+            "comment_type": "blocker", "thread_intent": "unclear",
+            "question": False, "answered": False, "phase": "review",
+        })
+        payloads = [
+            {"message": {"content": "", "thinking": "deliberation used the budget"},
+             "done_reason": "length"},
+            {"message": {"content": good}, "done_reason": "stop"},
+        ]
+        calls: list[dict] = []
+
+        def opener(request, timeout):
+            calls.append(json.loads(request.data))
+            return self.Response(payloads.pop(0))
+
+        classifier = classify.OllamaClassifier(
+            "http://llm.invalid", "qwen3:30b-a3b", opener=opener
+        )
+        labels = classifier.classify("this drops the tenant filter", classify.KIND_COMMENT)
+        self.assertEqual(labels["comment_type"], "blocker")
+        self.assertEqual(classifier.fallbacks, 0)
+        self.assertEqual(classifier.retries, 1)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[0]["think"])
+        self.assertFalse(calls[1]["think"])
+
+    def test_a_batch_request_labels_n_texts_in_one_call(self):
+        answers = [
+            {"comment_type": "nit", "thread_intent": "unclear",
+             "question": False, "answered": False, "phase": "review"},
+            {"comment_type": "blocker", "thread_intent": "acted",
+             "question": False, "answered": False, "phase": "review"},
+        ]
+        calls: list[dict] = []
+
+        def opener(request, timeout):
+            calls.append(json.loads(request.data))
+            return self.Response({
+                "message": {"content": json.dumps(answers)},
+                "done_reason": "stop",
+            })
+
+        classifier = classify.OllamaClassifier(
+            "http://llm.invalid", "qwen3:8b", opener=opener
+        )
+        results = classifier.classify_batch([
+            ("nit: rename this", classify.KIND_COMMENT),
+            ("this crashes on null", classify.KIND_COMMENT),
+        ])
+        self.assertEqual([labels["comment_type"] for labels, _v in results], ["nit", "blocker"])
+        self.assertEqual(len(calls), 1)
+        body = calls[0]
+        self.assertEqual(body["format"]["type"], "array")
+        self.assertEqual(body["format"]["minItems"], 2)
+        self.assertEqual(body["format"]["maxItems"], 2)
+        self.assertIn("JSON array", body["messages"][0]["content"])
+        self.assertEqual(classifier.report()["batches"], 1)
+        self.assertEqual(classifier.report()["calls"], 2)
+
+    def test_a_short_batch_answer_is_rejected_for_the_per_text_fallback(self):
+        def opener(request, timeout):
+            return self.Response({
+                "message": {"content": json.dumps([{
+                    "comment_type": "nit", "thread_intent": "unclear",
+                    "question": False, "answered": False, "phase": "review",
+                }])},
+                "done_reason": "stop",
+            })
+
+        classifier = classify.OllamaClassifier("http://llm.invalid", opener=opener)
+        with self.assertRaises(classify.ClassifyError):
+            classifier.classify_batch([
+                ("a", classify.KIND_COMMENT), ("b", classify.KIND_COMMENT),
+            ])
+
+    def test_a_batch_of_mixed_kinds_is_refused_before_a_request(self):
+        classifier = classify.OllamaClassifier("http://llm.invalid")
+        with self.assertRaises(classify.ClassifyError):
+            classifier.classify_batch([
+                ("a", classify.KIND_COMMENT), ("b", classify.KIND_DESCRIPTION),
+            ])
+
     def test_a_good_answer_traces_the_exact_request_response_and_thinking(self):
         payload = {
             "message": {

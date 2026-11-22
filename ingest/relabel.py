@@ -314,6 +314,136 @@ def _records_from_hans(
     return records
 
 
+class LabelCache:
+    """Append-only, raw-text-free label cache: the resume checkpoint.
+
+    One JSON line per classified text::
+
+        {"kind": "comment", "digest": "…", "labels": {…},
+         "model": "qwen3:30b-a3b", "think": true, "version": "ollama-v1"}
+
+    The digest is :func:`ingest.classify.digest` (a blake2b of the text), so the
+    cache carries **no prose** -- only labels and the model identity that
+    produced them. A resumed run (or a re-run after a model change) reuses an
+    entry only when model, think flag and classifier version all match; anything
+    else is re-classified and appended.
+
+    A torn last line is skipped, exactly like the trace reader.
+    """
+
+    def __init__(self, path: str | Path, *, model: str, think: bool, version: str):
+        self.path = Path(path)
+        self.model = str(model or "")
+        self.think = bool(think)
+        self.version = str(version or "")
+        self.labels: dict[tuple[str, str], dict] = {}
+        self.read = 0
+        self.bad = 0
+        self._handle = None
+        if self.path.is_file():
+            self._load()
+
+    def _key(self, kind: str, text: str) -> tuple[str, str]:
+        return str(kind), classify.digest(str(text)).hex()
+
+    @staticmethod
+    def _project(kind: str, labels: dict) -> dict:
+        """Only the keys that kind actually has (a description has no comment_type)."""
+        return {
+            key: labels[key] for key in classify.labels_for(kind) if key in labels
+        }
+
+    def _matches(self, entry: dict) -> bool:
+        return (
+            str(entry.get("model") or "") == self.model
+            and bool(entry.get("think", False)) == self.think
+            and str(entry.get("version") or "") == self.version
+        )
+
+    def _load(self) -> None:
+        with self.path.open("r", encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    self.bad += 1
+                    continue
+                if not isinstance(entry, dict) or not isinstance(entry.get("labels"), dict):
+                    self.bad += 1
+                    continue
+                kind = str(entry.get("kind") or "")
+                digest = str(entry.get("digest") or "")
+                if not kind or not digest or not self._matches(entry):
+                    continue
+                try:
+                    labels = classify.parse_labels(
+                        kind, self._project(kind, entry["labels"])
+                    )
+                except (classify.ClassifyError, ValueError):
+                    # A hand-edited or truncated label bag must never become a
+                    # patch row: re-classify instead.
+                    self.bad += 1
+                    continue
+                self.labels[(kind, digest)] = labels
+                self.read += 1
+
+    def get(self, kind: str, text: str) -> dict | None:
+        return self.labels.get(self._key(kind, text))
+
+    def put(self, kind: str, text: str, labels: dict) -> None:
+        key = self._key(kind, text)
+        if key in self.labels:
+            return
+        labels = self._project(kind, labels)
+        self.labels[key] = labels
+        if self._handle is None:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._handle = self.path.open("a", encoding="utf-8")
+        entry = {
+            "kind": key[0],
+            "digest": key[1],
+            "labels": labels,
+            "model": self.model,
+            "think": self.think,
+            "version": self.version,
+        }
+        self._handle.write(json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n")
+
+    def flush(self) -> None:
+        if self._handle is not None:
+            self._handle.flush()
+
+    def close(self) -> None:
+        if self._handle is not None:
+            self._handle.close()
+            self._handle = None
+
+    def __del__(self):  # pragma: no cover - a safety net for an error path
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001 - interpreter shutdown
+            pass
+
+    def __len__(self) -> int:
+        return len(self.labels)
+
+
+def _stop_requested(path: Path) -> bool:
+    """A stop file is the polite Ctrl-C: finish the batch, keep the cache, exit."""
+    return path.is_file()
+
+
+def _consume_stop_file(path: Path) -> None:
+    """Move the stop file aside so the resumed run does not stop immediately."""
+    try:
+        path.replace(path.with_name(path.name + ".used"))
+    except OSError:  # pragma: no cover - a locked file just stays
+        pass
+
+
 def relabel(
     cfg,
     *,
@@ -323,6 +453,9 @@ def relabel(
     out: str | Path,
     classifier: classify.Classifier | None = None,
     identity_path: str | Path | None = None,
+    batch_size: int = 1,
+    labels_cache: str | Path | None = None,
+    stop_file: str | Path | None = None,
     limit: int | None = None,
     progress: ProgressReporter | None = None,
 ) -> dict:
@@ -365,18 +498,139 @@ def relabel(
     if reporter.enabled and getattr(text, "on_call", None) is None:
         text.on_call = lambda record: reporter.emit(llmtrace.call_line(record))
 
-    # The same text in ten threads is one model call: cache by (kind, text) and
-    # reuse the answer. The trace still has one record per thread, so one line
-    # per call (not per row) is honest.
-    answers: dict[tuple[str, str], dict] = {}
+    # The same text in ten threads is one model call. The cache is the resume
+    # checkpoint: it is flushed after every batch, so Ctrl-C / a stop file / a
+    # reboot loses at most the batch in flight.
+    cache_path = Path(labels_cache).expanduser() if labels_cache else Path(
+        str(out) + ".labels.jsonl"
+    )
+    stop_path = Path(stop_file).expanduser() if stop_file else Path(str(out) + ".stop")
+    cache = LabelCache(
+        cache_path,
+        model=getattr(text, "model", None) or "",
+        think=bool(getattr(text, "think", False)),
+        version=text.version,
+    )
     started = time.monotonic()
     if reporter.enabled:
         reporter.emit(
             f"[relabel] {len(items)} text(s) to classify · {len(threads)} thread(s)"
-            f" · {len(prs)} PR(s) in the bundle"
+            f" · {len(prs)} PR(s) in the bundle · batch {max(1, int(batch_size))}"
+            f" · cache {cache_path}"
         )
-    replayed = 0
-    reused = 0
+
+    markers: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for record in items:
+        marker = (str(record["kind"]), str(record["text"]))
+        if marker in seen:
+            continue
+        seen.add(marker)
+        markers.append(marker)
+
+    answers: dict[tuple[str, str], dict] = {}
+    pending: list[tuple[str, str]] = []
+    for marker in markers:
+        labels = cache.get(*marker)
+        if labels is not None:
+            answers[marker] = labels
+        else:
+            pending.append(marker)
+    cache_hits = len(markers) - len(pending)
+
+    # -- classification pass: batches of one kind, cache flushed per batch ----
+    model_label = (
+        f"{getattr(text, 'backend', '?')}:{getattr(text, 'model', None) or text.version}"
+    )
+    batch_size = max(1, int(batch_size))
+    classified = 0
+    batches = 0
+    stopped = ""
+    next_log = 500
+    index = 0
+    try:
+        while index < len(pending):
+            if _stop_requested(stop_path):
+                stopped = f"stop file {stop_path}"
+                _consume_stop_file(stop_path)
+                break
+            kind = pending[index][0]
+            group: list[tuple[str, str]] = []
+            while (
+                index < len(pending)
+                and pending[index][0] == kind
+                and len(group) < batch_size
+            ):
+                group.append(pending[index])
+                index += 1
+            bodies = [body for _kind, body in group]
+            batch_started = time.monotonic()
+            try:
+                if len(group) > 1 and hasattr(text, "classify_batch"):
+                    results = text.classify_batch([(body, kind) for body in bodies])
+                else:
+                    results = [
+                        (
+                            text.classify(body, kind),
+                            getattr(text, "last_version", text.version),
+                        )
+                        for body in bodies
+                    ]
+            except KeyboardInterrupt:
+                raise
+            except Exception as exc:  # noqa: BLE001 - a bad batch is retried per text
+                reporter.emit(
+                    f"[relabel] batch of {len(group)} failed"
+                    f" ({type(exc).__name__}: {exc}); retrying one by one"
+                )
+                results = [
+                    (
+                        text.classify(body, kind),
+                        getattr(text, "last_version", text.version),
+                    )
+                    for body in bodies
+                ]
+            for (mkind, body), (labels, _version) in zip(group, results):
+                answers[(mkind, body)] = labels
+                cache.put(mkind, body, labels)
+                classified += 1
+            cache.flush()
+            batches += 1
+            if reporter.enabled and len(group) > 1:
+                reporter.emit(
+                    f"[relabel] batch {len(group)} ·"
+                    f" {time.monotonic() - batch_started:.1f}s · {kind} · {model_label}"
+                )
+            if reporter.enabled and classified >= next_log:
+                elapsed = max(1e-6, time.monotonic() - started)
+                rate = classified / elapsed
+                eta = (len(pending) - classified) / rate if rate > 0 else 0
+                reporter.emit(
+                    f"[relabel] {classified}/{len(pending)} text(s) ·"
+                    f" {cache_hits} cached · {batch_size <= 1 and '1 call' or str(batches) + ' batch(es)'}"
+                    f" · {rate:.2f} text/s · eta {format_elapsed(eta)}"
+                )
+                next_log += 500
+    except KeyboardInterrupt:
+        stopped = "interrupted (Ctrl-C)"
+
+    if stopped:
+        cache.close()
+        return {
+            "mode": "relabel",
+            "stopped": True,
+            "reason": stopped,
+            "input": source_label,
+            "patch": None,
+            "labels_cache": str(cache_path),
+            "cached_labels": len(cache),
+            "classified": classified,
+            "remaining": len(pending) - classified,
+            "texts_total": len(markers),
+            "batches": batches,
+            "classifier": text.report(),
+        }
+
     rows: list[dict] = []
     flips = 0
     added = 0
@@ -393,24 +647,12 @@ def relabel(
         marker = (kind, body)
         labels = answers.get(marker)
         if labels is None:
-            context = record.get("context") or None
-            labels = (
-                text.classify(body, kind, context) if context
-                else text.classify(body, kind)
+            raise RelabelError(
+                f"no label for {kind} text {classify.digest(body).hex()[:12]}"
+                " (the classification pass missed it)"
             )
-            answers[marker] = labels
-            replayed += 1
-        else:
-            reused += 1
         if reporter.enabled and ordinal % 500 == 0:
-            elapsed = max(1e-6, time.monotonic() - started)
-            rate = ordinal / elapsed
-            eta = (len(items) - ordinal) / rate if rate > 0 else 0
-            reporter.emit(
-                f"[relabel] {ordinal}/{len(items)} text(s) · {replayed} call(s),"
-                f" {reused} reused · {len(rows)} row(s) · {rate:.2f} text/s"
-                f" · eta {format_elapsed(eta)}"
-            )
+            reporter.emit(f"[relabel] {ordinal}/{len(items)} text(s) mapped")
 
         if context.get("role") == "description":
             pr_id = f"PR:{context.get('repo')}#{context.get('pr_id')}"
@@ -544,6 +786,7 @@ def relabel(
         # Every call degraded to the deterministic mock: the "new" labels would
         # be the ones already in the bundle, or worse, a half-model mix. Writing
         # that patch would look like a successful re-classification.
+        cache.close()
         raise RelabelError(
             f"every one of {calls} model call(s) fell back to"
             f" {classifier_report.get('version')}: {classifier_report.get('last_error') or 'no model answer'}"
@@ -568,8 +811,12 @@ def relabel(
             "records": len(records),
             "unreadable": bad,
             "replayable": len(items),
-            "texts": len(answers),
-            "reused": reused,
+            "texts": len(markers),
+            "cached": cache_hits,
+            "classified": classified,
+            "batches": batches,
+            "batch_size": batch_size,
+            "labels_cache": cache_path.name,
         },
         "text_classifier": text.report(),
         "counts": {
@@ -583,6 +830,7 @@ def relabel(
             "changed_phase": changed_phases,
         },
     }
+    cache.close()
     written = labelpatch.write_patch(out, manifest=manifest, rows=rows)
     report = {
         "mode": "relabel",
@@ -591,8 +839,12 @@ def relabel(
         "records": len(records),
         "unreadable": bad,
         "replayable": len(items),
-        "texts_classified": replayed,
-        "texts_reused": reused,
+        "texts_classified": classified,
+        "texts_cached": cache_hits,
+        "texts_total": len(markers),
+        "batches": batches,
+        "batch_size": batch_size,
+        "labels_cache": str(cache_path),
         "bundle": str(bundle_path),
         "bundle_sha256": bundle.sha256,
         "patch": str(out),
@@ -615,6 +867,16 @@ def relabel(
 
 
 def _print(report: dict) -> None:
+    if report.get("stopped"):
+        print(f"input          {report['input']}")
+        print(f"stopped        {report['reason']}")
+        print(
+            f"cache          {report['labels_cache']} · {report['cached_labels']}"
+            f" label(s) saved · {report['classified']}/{report['texts_total']} text(s)"
+            f" in this run, {report['remaining']} left"
+        )
+        print("no patch       re-run the same command to resume")
+        return
     print(f"input          {report['input']}")
     print(
         f"               {report['records']} record(s),"
@@ -628,9 +890,11 @@ def _print(report: dict) -> None:
         if part
     )
     print(
-        f"classifier     {detail} · {classifier.get('calls', 0)} call(s),"
+        f"classifier     {detail} · {classifier.get('calls', 0)} label(s),"
+        f" {classifier.get('batches', 0)} batch(es),"
+        f" {classifier.get('retries', 0)} retry(ies),"
         f" {classifier.get('fallbacks', 0)} fallback(s)"
-        + (f" · {report['texts_reused']} text(s) reused" if report["texts_reused"] else "")
+        + (f" · {report['texts_cached']} cached" if report.get("texts_cached") else "")
     )
     print(
         f"patch          {report['patch']}  sha256 {report['patch_sha256'][:16]}…"
@@ -677,6 +941,15 @@ def build_parser(prog: str = "python3 -m ingest relabel") -> argparse.ArgumentPa
     ap.add_argument("--identity", metavar="PATH",
                     help="the scrape's raw-zone identity map (with --hans-scrape this lets"
                          " an added question carry the asker's pseudonym)")
+    ap.add_argument("--batch-size", type=int, default=1, metavar="N",
+                    help="label N same-kind texts per model request (default 1). Each"
+                         " batch is validated item by item; a bad batch is retried per text")
+    ap.add_argument("--labels-cache", default=None, metavar="PATH",
+                    help="resume checkpoint (default: <out>.labels.jsonl). Labels plus"
+                         " model/think/version; no text. Re-run the same command to resume")
+    ap.add_argument("--stop-file", default=None, metavar="PATH",
+                    help="touch this file to stop after the current batch (default:"
+                         " <out>.stop); it is moved to .used and no patch is written")
     ap.add_argument("--out", default=None, metavar="PATH.tgz",
                     help="patch to write (default: <bundle>-labels.tgz)")
     ap.add_argument("--text-backend", choices=("ollama", "mock"), default=None,
@@ -716,6 +989,9 @@ def main(argv: list[str] | None = None) -> int:
         cfg.llm_workers = max(1, int(args.llm_workers))
     if args.llm_think is not None:
         cfg.llm_think = bool(args.llm_think)
+    if args.batch_size < 1:
+        print("--batch-size must be at least 1", file=sys.stderr)
+        return 2
     interval = 0.0 if args.quiet else (
         args.progress_interval if args.progress_interval is not None else 30.0
     )
@@ -730,9 +1006,19 @@ def main(argv: list[str] | None = None) -> int:
             bundle_path=args.bundle,
             out=out,
             identity_path=args.identity,
+            batch_size=args.batch_size,
+            labels_cache=args.labels_cache,
+            stop_file=args.stop_file,
             limit=args.limit,
             progress=ProgressReporter(interval=interval),
         )
+    except KeyboardInterrupt:
+        print(
+            "relabel interrupted — saved labels are in the cache;"
+            " re-run the same command to resume",
+            file=sys.stderr,
+        )
+        return 130
     except (RelabelError, BundleError, classify.ClassifyError) as exc:
         print(f"relabel failed: {exc}", file=sys.stderr)
         return 2

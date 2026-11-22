@@ -498,6 +498,139 @@ class RelabelTests(unittest.TestCase):
         self.assertTrue((self.root / "labels.tgz").is_file())
         self.assertIn("python3 -m ingest import", out.getvalue())
 
+    def test_a_second_run_reuses_the_cache_and_classifies_nothing(self):
+        out = self.root / "labels.tgz"
+        cache = self.root / "labels.cache.jsonl"
+        first = relabel(
+            self.cfg,
+            trace_path=self.trace,
+            bundle_path=self.bundle,
+            out=out,
+            classifier=Recording(comment_type="nit"),
+            labels_cache=cache,
+            progress=QUIET,
+        )
+        self.assertGreater(first["texts_classified"], 0)
+        self.assertIn("labels", first["labels_cache"])
+
+        class Exploding(classify.MockClassifier):
+            version = "recording-v1"  # same identity the cache was written under
+
+            def classify(self, *args, **kwargs):
+                raise AssertionError("a fully cached run must not call the model")
+
+        second = relabel(
+            self.cfg,
+            trace_path=self.trace,
+            bundle_path=self.bundle,
+            out=out,
+            classifier=Exploding(),
+            labels_cache=cache,
+            progress=QUIET,
+        )
+        self.assertEqual(second["texts_classified"], 0)
+        self.assertEqual(second["texts_cached"], first["texts_classified"])
+        self.assertEqual(second["rows"], first["rows"])
+
+    def test_the_cache_is_keyed_by_model_and_thinking(self):
+        out = self.root / "labels.tgz"
+        cache = self.root / "labels.cache.jsonl"
+        relabel(
+            self.cfg, trace_path=self.trace, bundle_path=self.bundle, out=out,
+            classifier=Recording(comment_type="nit"), labels_cache=cache,
+            progress=QUIET,
+        )
+        # A different model identity (classifier version) must not reuse entries.
+        class Other(Recording):
+            version = "recording-v2"
+
+        other = relabel(
+            self.cfg, trace_path=self.trace, bundle_path=self.bundle, out=out,
+            classifier=Other(comment_type="blocker"), labels_cache=cache,
+            progress=QUIET,
+        )
+        self.assertGreater(other["texts_classified"], 0)
+        self.assertEqual(other["texts_cached"], 0)
+
+    def test_the_resume_cache_holds_labels_but_no_text(self):
+        from ingest import llmtrace
+
+        cache = self.root / "labels.cache.jsonl"
+        relabel(
+            self.cfg, trace_path=self.trace, bundle_path=self.bundle,
+            out=self.root / "labels.tgz", classifier=Recording(),
+            labels_cache=cache, progress=QUIET,
+        )
+        data = cache.read_text(encoding="utf-8")
+        self.assertIn('"labels"', data)
+        texts = [
+            record["text"] for record in llmtrace.read_trace(self.trace)[0]
+            if len(record.get("text") or "") > 25
+        ]
+        self.assertTrue(texts)
+        for text in texts[:5]:
+            self.assertNotIn(text[:25], data)
+
+    def test_a_stop_file_stops_before_classifying_and_leaves_a_resume_cache(self):
+        out = self.root / "labels.tgz"
+        stop = self.root / "labels.tgz.stop"
+        stop.write_text("stop", encoding="utf-8")
+        report = relabel(
+            self.cfg, trace_path=self.trace, bundle_path=self.bundle, out=out,
+            classifier=Recording(), stop_file=stop, progress=QUIET,
+        )
+        self.assertTrue(report["stopped"])
+        self.assertIn("stop file", report["reason"])
+        self.assertFalse(out.exists())
+        self.assertFalse(stop.exists())
+        self.assertTrue((self.root / "labels.tgz.stop.used").exists())
+        self.assertEqual(report["classified"], 0)
+        self.assertEqual(report["remaining"], report["texts_total"])
+
+    def test_batching_groups_same_kind_texts(self):
+        class Batching(Recording):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.sizes = []
+
+            def classify_batch(self, items):
+                self.sizes.append(len(items))
+                return [(self._labels_only(text, kind), self.version) for text, kind in items]
+
+        classifier = Batching(comment_type="blocker", intent="acted")
+        report = relabel(
+            self.cfg, trace_path=self.trace, bundle_path=self.bundle,
+            out=self.root / "labels.tgz", classifier=classifier,
+            batch_size=4, progress=QUIET,
+        )
+        self.assertGreaterEqual(len(classifier.sizes), 1)
+        self.assertLessEqual(max(classifier.sizes), 4)
+        # Single-item groups (a PR description between comment runs) use the
+        # ordinary call, so the batched total is at most all classified texts.
+        self.assertLessEqual(sum(classifier.sizes), report["texts_classified"])
+        self.assertGreaterEqual(report["batches"], len(classifier.sizes))
+        self.assertGreater(report["rows"], 0)
+
+    def test_a_failed_batch_falls_back_to_one_text_at_a_time(self):
+        class BadBatch(Recording):
+            def __init__(self, **kwargs):
+                super().__init__(**kwargs)
+                self.batch_attempts = 0
+
+            def classify_batch(self, items):
+                self.batch_attempts += 1
+                raise RuntimeError("model mixed the texts up")
+
+        classifier = BadBatch(comment_type="nit")
+        report = relabel(
+            self.cfg, trace_path=self.trace, bundle_path=self.bundle,
+            out=self.root / "labels.tgz", classifier=classifier,
+            batch_size=4, progress=QUIET,
+        )
+        self.assertGreaterEqual(classifier.batch_attempts, 1)
+        self.assertGreater(report["texts_classified"], 0)
+        self.assertGreater(report["rows"], 0)
+
 
 def _hans_capture(root: Path) -> Path:
     """A two-PR capture (no git) whose comments are readable without a trace."""

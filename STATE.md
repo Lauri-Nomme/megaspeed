@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1444** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
+Tests: **1454** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -35,6 +35,17 @@ Tests: **1444** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`)
   flash echo, scope-consistent aging counts/chart/re-plan, non-colliding percentile labels, the
   policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
   22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
+
+## v0.17.0 — batched, resumable relabel
+
+`--batch-size N` labels N same-kind texts per request (fixed-length array
+schema; per-item validation; a bad batch is retried one by one). `--labels-cache`
+(default `<out>.labels.jsonl`) appends each label, flushed per batch, keyed by
+the text digest and stamped with model/think/version — no prose, so Ctrl-C, a
+stop file (`<out>.stop`) or a reboot resumes with the same command. An empty
+thinking answer (the ~20 % HTTP-200 / `content:""` failures) is retried once
+with `think:false` instead of falling back to the mock. `--identity` supplies the
+asker pseudonym for added question events.
 
 ## v0.16.5 — relabel says what it is doing
 
