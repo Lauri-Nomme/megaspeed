@@ -561,10 +561,13 @@ def _story_rows(court: ballcourt.BallCourt, data: jira.JiraData,
             "reason": status["reason"],
             "last_human": iso(status["last_human"]) if status["last_human"] else None,
             "open_prs": [state.pr["object_id"] for state in open_states],
-            "holder": _holder_block(
-                court, open_states, age,
-                story if status["state"] in LIVE_STATES else None,
-            ),
+            # prd/68 F-03: the story is the fallback holder **whatever its
+            # state**. A Jira-only store has no PR, so every story is `dead` or
+            # `unobserved`; passing `story=None` for those left `holder: []` on
+            # every row (`HOLDER —`) and made `person:*` match nobody. The
+            # assignee owns the story, and the holder block is what the scope
+            # reads.
+            "holder": _holder_block(court, open_states, age, story),
             # a story's own PRs are not downstream dependents; the chase tie
             # break reads the PR list's own count (prd/59 §Layout)
             "dependents": 0,
@@ -924,6 +927,9 @@ def payload(court: ballcourt.BallCourt, data: jira.JiraData | None, *,
     ``>= window.start``). ``counts`` describe the rows that survived the window
     and ``only``; ``hidden`` says how many each filter left out and carries the
     sentence the tab shows, so an empty list is explained rather than silent.
+    The re-plan feed is window-scoped but **not** ``only``-scoped (prd/68 F-06):
+    the note says "— see re-plan", so the feed stays there when the live table is
+    empty, and ``counts.no_live_pr`` (prd/68 F-08) is its length.
     """
     mode = mode or thresholds_mode()
     if kind not in KINDS:
@@ -936,6 +942,12 @@ def payload(court: ballcourt.BallCourt, data: jira.JiraData | None, *,
     stats: dict = {}
     rows = in_flight(court, data, kind, stage, window, mode=mode, stats=stats)
     in_window = len(rows)
+    # prd/68 F-06: keep the window-scoped rows *before* `only` filters them. The
+    # re-plan feed is derived from these, so the hidden note's "— see re-plan"
+    # always names a section that renders: `only=live` (the default) used to
+    # compute it from the already-empty live list and hide the very rows the
+    # note just pointed at.
+    window_rows = list(rows)
     if only == "live":
         rows = [row for row in rows if row["live"] in LIVE_STATES]
     all_rows = list(rows)
@@ -946,7 +958,7 @@ def payload(court: ballcourt.BallCourt, data: jira.JiraData | None, *,
     if limit:
         rows = rows[: int(limit)]
     chase = chase_order(all_rows)
-    abandoned = replan(all_rows)
+    abandoned = replan(window_rows)
     if kind == "story":
         blocks = story_thresholds(court, data, window)
         block_key = STORY_CYCLE if stage in (None, CYCLE, STORY_CYCLE) else f"stage:{stage}"
@@ -966,6 +978,12 @@ def payload(court: ballcourt.BallCourt, data: jira.JiraData | None, *,
         "open": len(all_rows),
         "live": len([row for row in all_rows if row["live"] in LIVE_STATES]),
         "dead": len([row for row in all_rows if row["live"] == "dead"]),
+        # prd/68 F-08: "no live PR" is *both* states of the re-plan feed — a
+        # `dead` story (abandoned) and an `unobserved` one (no PR, a human acted
+        # recently) wait on nothing a nudge can move. `dead` keeps its narrower
+        # meaning for readers that want "abandoned"; the chip/honesty/tab say
+        # `no_live_pr`, which is the re-plan list's own length.
+        "no_live_pr": len(abandoned),
         "over_p50": len([
             row for row in all_rows
             if p50 is not None and row.get("age_hours") is not None
@@ -1052,10 +1070,17 @@ def payload(court: ballcourt.BallCourt, data: jira.JiraData | None, *,
             "replan": [
                 {
                     "object_id": row["object_id"],
+                    "kind": row["kind"],
                     "ticket": row.get("ticket"),
                     "pr": row.get("pr"),
                     "age_hours": row.get("age_hours"),
                     "reason": row.get("reason"),
+                    # prd/68 F-06/F-08: the item carries the same holder the row
+                    # does, so a client scope (person/role/ticket) filters the
+                    # re-plan list with the one predicate — even under
+                    # `only=live`, where no row of that list is on screen.
+                    "holder": row.get("holder"),
+                    "live": row.get("live"),
                     "href": row.get("href"),
                 }
                 for row in abandoned

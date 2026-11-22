@@ -121,7 +121,13 @@ class WindowScopeTests(StoreCase):
         self.assertEqual([row["ticket"] for row in live["rows"]], ["DEL-400"])
         self.assertEqual(live["counts"]["open"], 1)
         self.assertEqual(live["counts"]["dead"], 0)
-        self.assertEqual(live["feed"]["replan"], [])
+        # prd/68 F-06: the re-plan feed survives `only=live` (window-scoped):
+        # the default tab's "see re-plan" now names rows that render.
+        self.assertEqual(
+            [item["ticket"] for item in live["feed"]["replan"]],
+            ["DEL-402", "DEL-403"],
+        )
+        self.assertEqual(live["counts"]["no_live_pr"], 2)
         self.assertEqual(live["hidden"]["outside_window"], 1)
         self.assertEqual(live["hidden"]["no_live_pr"], 2)
         self.assertEqual(live["hidden"]["total"], 3)

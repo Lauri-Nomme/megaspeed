@@ -55,7 +55,7 @@ import {
 import {
   bindLongPress, hintText, initMobile, isPhone, phoneEntryLanes, phoneEntryPage,
 } from '/mobile.js';
-import { pageTitle, parseRoute, serializeRoute, ticketFromHash } from '/route.js';
+import { pageTitle, parseRoute, SCOPE_KINDS, serializeRoute, ticketFromHash } from '/route.js';
 import { createHistory, planSync, routeKey } from '/history.js';
 import { collapseYah, yahPath } from '/yah.js';
 import {
@@ -1537,7 +1537,7 @@ function renderDeliveryPage() {
       const c = a.counts || {};
       setHonesty(
         `${c.open || 0} in flight · ${c.live || 0} live · ${c.over_p85 || 0} past p85` +
-        `${c.dead ? ` · ${c.dead} no live PR` : ''}` +
+        `${c.no_live_pr ? ` · ${c.no_live_pr} no live PR` : ''}` +
         `${c.insufficient ? ` · ${c.insufficient} insufficient history` : ''} · ` +
         `${a.kind === 'pr' ? 'PR clock' : 'story clock'} · ` +
         (filtered ? `filtered to ${scopeSuffix}` : 'whole team') +
@@ -2446,9 +2446,53 @@ function storeLabel(meta) {
   return `${rel} (local, read-only)`;
 }
 
+/**
+ * prd/68 F-13: the dataset's own layers — PR rows only when a PR layer exists.
+ *
+ * On a Jira-only tenant the facts read `PRs 0 kept of 0 seen` and
+ * `dropped: 0 PRs had no ticket key`: two true-zero statements about a layer
+ * the store does not have, beside no mention of the 2,320 stories it does have.
+ * The missing layer is stated once, and the story/epic/sprint counts are shown.
+ */
+function layerFacts(meta) {
+  const facts = [];
+  if (Number(meta.prs)) {
+    facts.push(['PRs', `${meta.prs_kept ?? '—'} kept of ${meta.prs_seen ?? '—'} seen`]);
+    facts.push(['commits', String(meta.commits ?? '—')]);
+    facts.push(['dropped', `${meta.prs_dropped ?? '—'} PRs had no ticket key`]);
+  } else {
+    facts.push(['PR layer', 'not in this dataset']);
+  }
+  for (const key of ['stories', 'epics', 'sprints']) {
+    if (meta[key] != null) facts.push([key, String(meta[key])]);
+  }
+  return facts;
+}
+
+/**
+ * prd/68 F-13: the ingest note names the source(s) the store was built from.
+ *
+ * One Jira ingest run is not "the combined tenant [that] joins the PR half to
+ * the Jira ticket half": say which source built the dataset, and when there are
+ * no PRs, that the Jira half is all of it.
+ */
+function sourcesRunNote(meta) {
+  const runs = Array.isArray(meta.runs) ? meta.runs : [];
+  if (!runs.length) return '';
+  const names = [...new Set(runs.map((run) => run && run.source).filter(Boolean))];
+  const named = names.length ? ` from ${names.join(' + ')}` : '';
+  const plural = runs.length === 1 ? '' : 's';
+  if (!Number(meta.prs)) {
+    return `${runs.length} ingest run${plural}${named} built this dataset; it is the Jira half only — there is no PR layer to join to.`;
+  }
+  if (runs.length === 1) return `1 ingest run${named} built this dataset.`;
+  return `${runs.length} ingest runs${named} built this dataset; the combined tenant joins the PR half to the Jira ticket half on ticket keys.`;
+}
+
 function renderSourcesPage() {
   const meta = state.meta || {};
   const tenant = currentTenant() || {};
+  const prs = Number(meta.prs) || 0;
   const rows = [
     ['tenant', meta.tenant || state.tenant || '—'],
     ['build', versionLabel(state.build) || '—'],
@@ -2457,11 +2501,7 @@ function renderSourcesPage() {
     // prd/38 #18: one age string, the same one the provenance line uses.
     ['snapshot', meta.as_of ? `${fmtStamp(Date.parse(meta.as_of))} (${snapshotAge()})` : '—'],
     ['events', String(meta.events ?? '—')],
-    // "kept of seen" is the ingest run's figure, not the object count: a
-    // combined tenant's latest run is Jira and reports 0 PRs seen.
-    ['PRs', `${meta.prs_kept ?? '—'} kept of ${meta.prs_seen ?? '—'} seen`],
-    ['commits', String(meta.commits ?? '—')],
-    ['dropped', `${meta.prs_dropped ?? '—'} PRs had no ticket key`],
+    ...layerFacts(meta),
     // prd/63 F27: the store span is not the analysis window. The top bar and
     // Rules query the chosen timeframe (1q), so Sources states that window
     // once, and the store span separately.
@@ -2482,16 +2522,17 @@ function renderSourcesPage() {
   const runs = Array.isArray(meta.runs) ? meta.runs : [];
   const sourceTable = runs.length
     ? `<table class="table compact source-runs"><thead><tr>
-        <th>source</th><th>snapshot</th><th class="num">PRs seen</th>
-        <th class="num">PRs kept</th><th class="num">dropped</th></tr></thead><tbody>${
+        <th>source</th><th>snapshot</th>${prs
+    ? '<th class="num">PRs seen</th><th class="num">PRs kept</th><th class="num">dropped</th>'
+    : ''}</tr></thead><tbody>${
         runs.map((run) => `<tr data-source="${esc(run.source)}">
           <td class="mono">${esc(run.source)}</td>
-          <td class="mono">${run.as_of ? esc(fmtStamp(Date.parse(run.as_of))) : '—'}</td>
-          <td class="num">${run.prs_seen ?? '—'}</td>
+          <td class="mono">${run.as_of ? esc(fmtStamp(Date.parse(run.as_of))) : '—'}</td>${prs
+    ? `<td class="num">${run.prs_seen ?? '—'}</td>
           <td class="num">${run.prs_kept ?? '—'}</td>
-          <td class="num">${run.prs_dropped ?? '—'}</td></tr>`).join('')}</tbody></table>
-      <p class="panel-note">${runs.length} ingest run${runs.length === 1 ? '' : 's'} built this dataset;
-        the combined tenant joins the PR half to the Jira ticket half on ticket keys.</p>`
+          <td class="num">${run.prs_dropped ?? '—'}</td>`
+    : ''}</tr>`).join('')}</tbody></table>
+      <p class="panel-note">${esc(sourcesRunNote(meta))}</p>`
     : '';
   $('sources-body').innerHTML = `<dl class="facts">${rows.map(([key, value]) =>
     `<dt>${esc(key)}</dt><dd>${esc(value)}</dd>`).join('')}</dl>
@@ -2923,7 +2964,27 @@ function buildScopeOptions() {
   $('scope').value = `${state.scope.kind}:${state.scope.value || 'all'}`;
 }
 
+/**
+ * prd/68 F-16: a scope is a closed kind *with* a value, or the whole team.
+ *
+ * The `#scope` select's own change handler split its value on `:`; a value
+ * outside the options (a stale option string, an empty selection) arrived as
+ * `setScope('', undefined)` and passed validation, so the banner read
+ * "the undefined queue". Anything the router does not name is `all`.
+ */
+function normalizeScope(kind, value) {
+  const k = String(kind == null ? '' : kind).trim();
+  const v = value == null ? '' : String(value).trim();
+  if (k === 'all' || !SCOPE_KINDS.includes(k) || !v) {
+    return { kind: 'all', value: null, label: 'everything' };
+  }
+  return { kind: k, value: v, label: v };
+}
+
 function setScope(kind, value, { silent = false } = {}) {
+  // prd/68 F-16: coerce before anything reads the scope (the banner, the page
+  // filter, the URL), so no view can render "the undefined queue".
+  ({ kind, value } = normalizeScope(kind, value));
   // prd/64 F-09: a scope edit answers a new question, so a boot/route fallback
   // notice no longer describes the screen. A route restore is not an edit.
   if (!silent) setNotice('');
@@ -2997,6 +3058,15 @@ function ticketPrIds(key) {
 
 /** A person scope is only meaningful inside one tenant's identity space. */
 function validateScope() {
+  // prd/68 F-16: an unknown kind (or a non-`all` kind with no value) is not a
+  // scope at all — coerce it to the whole team, so no label can read
+  // "the undefined queue".
+  const normalized = normalizeScope(state.scope.kind, state.scope.value);
+  if (normalized.kind !== state.scope.kind
+    || normalized.value !== state.scope.value) {
+    state.scope = normalized;
+    return normalized.kind === 'all';
+  }
   const bots = new Set((state.meta && state.meta.bots) || []);
   const person = state.scope.kind === 'person'
     && (state.scope.value === 'system'

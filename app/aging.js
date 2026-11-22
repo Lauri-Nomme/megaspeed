@@ -249,6 +249,14 @@ export function agingChart(payload, { phone = false } = {}) {
   </div>`;
 }
 
+/** `in_verification` → `in verification` — the API's stage key, as prose. */
+export function stageLabel(stage) {
+  // prd/68 F-14: the cell printed the raw key (`in_progress`, `in_verification`).
+  // The key stays in the payload (and the view option's value); only the text a
+  // reader sees is spelled out.
+  return String(stage || '').replace(/_/g, ' ');
+}
+
 /** The holder cell: `FrMo (sentinel)` — every holder shares the wait. */
 export function holderLabel(row) {
   const holders = (row && row.holder) || [];
@@ -309,7 +317,7 @@ export function agingTable(payload, { base = '', onlyLive = false, rowFilter = n
         : `<span class="keys">${esc(row.object_id)}</span>`}${
         row.pr ? ` <span class="mono id">${esc(row.pr)}</span>` : ''}${
         row.repo_short ? ` <span class="repo">${esc(row.repo_short)}</span>` : ''}</td>
-      <td class="c-stage" data-label="stage"><span class="mono">${esc(row.stage || '')}</span></td>
+      <td class="c-stage" data-label="stage"><span class="mono">${esc(stageLabel(row.stage))}</span></td>
       <td class="c-age num" data-label="age"><b>${esc(fmtHours(row.age_hours))}</b>
         <span class="calendar">${esc(fmtCalendarDays(row.calendar_days))}</span>
         <span class="working">${esc(workingDaysLabel(row.age_hours))}</span></td>
@@ -368,6 +376,11 @@ export function agingScopedCounts(rows, payload) {
     open: list.length,
     live: list.filter((row) => row.live === 'live' || row.live === 'unmerged').length,
     dead: list.filter((row) => row.live === 'dead').length,
+    // prd/68 F-08: the chip's "no live PR" is the re-plan population, not the
+    // abandoned-only `dead` count — a `dead` story and an `unobserved` one both
+    // wait on nothing, and both are listed under "no live PR".
+    no_live_pr: list.filter((row) => (row.live === 'dead' || row.live === 'unobserved')
+      && !(row.open_prs || []).length).length,
     over_p50: p50 == null
       ? 0
       : list.filter((row) => row.age_hours != null && Number(row.age_hours) >= p50).length,
@@ -395,18 +408,36 @@ export function scopedAgingPayload(payload, { onlyLive = false, rowFilter = null
   // already the answer, and the chart keeps the payload's own order.
   if (!rowFilter) return payload;
   const kept = agingRows(payload, { onlyLive }).filter(rowFilter);
-  const ids = new Set(kept.map((row) => row.object_id));
+  // A feed item names its object and (when it has one) its ticket; the scope
+  // is a ticket/person question, so both identify the same row.
+  const ids = new Set();
+  for (const row of kept) {
+    ids.add(row.object_id);
+    if (row.ticket) ids.add(row.ticket);
+  }
   const feed = payload.feed
     ? {
       ...payload.feed,
       items: (payload.feed.items || []).filter((item) => ids.has(item.object_id)),
-      replan: (payload.feed.replan || []).filter((item) => ids.has(item.object_id)),
+      // prd/68 F-06: the re-plan list is window-scoped on the server and is not
+      // suppressed by `only=live`, so it cannot be scoped by the *live* rows
+      // (under `only=live` there are none). Each item carries the holder the
+      // row does, so the same predicate filters it directly — the "see re-plan"
+      // note keeps pointing at a section that renders, under a person scope too.
+      replan: (payload.feed.replan || []).filter((item) => (
+        Array.isArray(item.holder)
+          ? rowFilter({ ...item, kind: item.kind || 'story' })
+          : ids.has(item.object_id)
+      )),
     }
     : payload.feed;
+  const counts = agingScopedCounts(kept, payload);
+  // the chip and the re-plan table are the same list (prd/68 F-08)
+  if (feed) counts.no_live_pr = (feed.replan || []).length;
   return {
     ...payload,
     rows: kept,
-    counts: agingScopedCounts(kept, payload),
+    counts,
     feed,
   };
 }
@@ -439,7 +470,7 @@ export function agingMarkup(payload, {
       </select></label>
     <span class="grow"></span>
     <span class="aging-counts" data-aging-counts>${counts.open || 0} open · ${counts.over_p85 || 0} past p85${
-      counts.dead ? ` · ${counts.dead} no live PR` : ''}${counts.insufficient ? ` · ${counts.insufficient} insufficient` : ''}</span>
+      counts.no_live_pr ? ` · ${counts.no_live_pr} no live PR` : ''}${counts.insufficient ? ` · ${counts.insufficient} insufficient` : ''}</span>
   </div>`;
   const sourceLine = block && block.source_label
     ? `<span class="aging-source" data-threshold-source>${esc(block.source)} · ${esc(block.source_label)}</span>`
@@ -454,7 +485,7 @@ export function agingMarkup(payload, {
       : ''}
     <div class="aging-head">
       <h3>${esc(scoped.kind === 'pr' ? 'PRs in flight' : 'Stories in flight')}
-        <span class="muted">${esc(scoped.stage ? String(scoped.stage).replace(/_/g, ' ') : '')}</span></h3>
+        <span class="muted">${esc(scoped.stage ? stageLabel(scoped.stage) : '')}</span></h3>
       ${sourceLine}
     </div>
     ${agingChart(scoped, { phone })}
@@ -491,7 +522,7 @@ export function agingMarkdown(payload, {
     const key = row.ticket || rowTicket(row);
     const ticket = key ? `[${key}](${ticketHref(key, base)})` : row.object_id;
     return `| ${BAND_LABEL[row.band] || row.band || ''} | ${row.kind} | ${ticket}${
-      row.pr ? ` ${row.pr}` : ''} | ${row.stage || ''} | ${fmtHours(row.age_hours)} (${fmtCalendarDays(row.calendar_days)}) | ${
+      row.pr ? ` ${row.pr}` : ''} | ${stageLabel(row.stage)} | ${fmtHours(row.age_hours)} (${fmtCalendarDays(row.calendar_days)}) | ${
       multipleLabel(row)} | ${holderLabel(row)} | ${row.live || 'live'} |`;
   });
   // prd/67 W-03: the export states the same hidden count as the tab.

@@ -106,14 +106,15 @@ class Fixture:
     # -- stories ------------------------------------------------------------ #
     def story(self, key: str, created: datetime, *, done: datetime | None = None,
               in_review: datetime | None = None, points: int = 3,
-              events: list[tuple[datetime, str, str]] | None = None) -> "Fixture":
+              events: list[tuple[datetime, str, str]] | None = None,
+              actor: str = "AaAa") -> "Fixture":
         self.objects.append({
             "object_type": "STORY",
             "object_id": f"STORY:{key}",
             "repo": None,
             "pr_id": None,
             "ticket_keys": [key],
-            "actor": "AaAa",
+            "actor": actor,
             "state": "done" if done else "open",
             "created_at": created,
             "closed_at": done,
@@ -506,8 +507,12 @@ class StoryTests(StoreCase):
         self.assertEqual(cycle_rows["DEL-300"]["live"], "live")
         self.assertEqual(cycle_rows["DEL-301"]["live"], "dead")
         self.assertEqual(cycle_rows["DEL-302"]["live"], "unobserved")
-        # the dead row has no holder and is not chasable
-        self.assertEqual(cycle_rows["DEL-301"]["holder"], [])
+        # prd/68 F-03: a `dead` story still names its owner — the holder is who
+        # the row waits on, and on a Jira-only store that is the assignee.
+        self.assertEqual(cycle_rows["DEL-301"]["holder"],
+                         [{"person": "AaAa", "role": "owner",
+                           "hours": cycle_rows["DEL-301"]["age_hours"]}])
+        self.assertNotEqual(cycle_rows["DEL-301"]["holder"], [])
         self.assertEqual(cycle_rows["DEL-300"]["basis"], aging.BASIS_STORY_CYCLE)
 
         # only the live story is *currently* in review: a story with no status
@@ -532,11 +537,17 @@ class StoryTests(StoreCase):
             [item["ticket"] for item in payload["feed"]["replan"]],
             ["DEL-301", "DEL-302"],   # equal age → stable object_id order
         )
-        # only=live hides abandoned work everywhere, including the re-plan list
-        # (the toggle is what makes the dead rows visible at least once)
+        # prd/68 F-06: `only=live` hides the abandoned rows from the *table* but
+        # not from the re-plan feed — the hidden note says "see re-plan", so the
+        # section has to be there. The feed is window-scoped, not `only`-scoped.
         live_only = aging.payload(court, data, kind="story", only="live")
         self.assertEqual([row["ticket"] for row in live_only["rows"]], ["DEL-300"])
-        self.assertEqual(live_only["feed"]["replan"], [])
+        self.assertEqual([item["ticket"] for item in live_only["feed"]["replan"]],
+                         ["DEL-301", "DEL-302"])
+        # prd/68 F-08: "no live PR" is the re-plan population (dead+unobserved),
+        # which the chip reads; `dead` keeps the abandoned-only meaning.
+        self.assertEqual(live_only["counts"]["no_live_pr"], 2)
+        self.assertEqual(live_only["counts"]["dead"], 0)
         self.assertEqual([row["ticket"] for row in payload["rows"]],
                          ["DEL-300", "DEL-301", "DEL-302"])
 
