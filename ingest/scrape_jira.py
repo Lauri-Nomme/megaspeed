@@ -405,6 +405,20 @@ def jql_for_epics(epics: tuple[str, ...]) -> str:
     return '"Epic Link" in (' + ",".join(epics) + ")"
 
 
+#: A key-scoped JQL is a URL query string: 2,391 keys is ~30 KB and Cloud answers
+#: ``414 Request-URI Too Large``. Walk it in batches; each is an ordinary
+#: ``key in (...)`` query, and the scope itself remains one key set.
+KEY_BATCH_SIZE = 100
+
+
+def key_batches(keys: tuple[str, ...], size: int = KEY_BATCH_SIZE) -> list[tuple[str, ...]]:
+    """Split a key set into walk-sized batches (never empty)."""
+    keys = tuple(keys)
+    if not keys:
+        return []
+    return [keys[index:index + size] for index in range(0, len(keys), size)]
+
+
 def resolve_epic_keys(
     client: JiraClient,
     epics: tuple[str, ...],
@@ -996,95 +1010,104 @@ def collect(
     for index, project in enumerate(project_list):
         if stop or (key_scoped and index > 0):
             break
-        jql = jql_for(
-            project,
-            since=cutoff,
-            keys=scope_keys if key_scoped else (),
-        )
-        for row in client.search(jql):
-            key = str(row.get("key") or "")
-            if not key or key in seen:
-                continue
-            # FR-1: the cap is a *stop*, not a skip. A row beyond the limit was
-            # never read, so it must not advance the cursor (mirrors the
-            # Bitbucket walk, scrape.py ``if limit ... truncated = True``): the
-            # search is ordered by ``updated ASC``, so everything unread is at
-            # or after the last read row and the next run asks for it again.
-            if limit is not None and stats.issues_kept >= limit:
-                truncated = True
-                out.truncated = True
-                stop = True
+        batches = key_batches(scope_keys) if key_scoped else ((),)
+        for batch_no, batch in enumerate(batches, 1):
+            if stop:
                 break
-            seen.add(key)
-            stats.issues_seen += 1
-            updated = _updated(row)
-            if updated is not None:
-                stats.watermark = (
-                    updated if stats.watermark is None else max(stats.watermark, updated)
-                )
-            if not key_filter.accepts(key):
-                stats.issues_skipped += 1
-                continue
-            reason = _unchanged(key, updated, prior, cutoff, resume_run_id)
-            if reason is not None:
-                stats.issues_skipped += 1
-                if reason == "resumed":
-                    stats.issues_skipped_resumed += 1
-                continue
-            # FR-2: a per-issue fetch failure (a 404 on a moved/deleted issue, a
-            # permission error, a 5xx that outlived the transport retries) skips
-            # *this* issue: one bad issue must never abort a two-hour walk.
-            # Nothing is recorded for it, so the next run retries it (within the
-            # watermark overlap, like a failed PR on the Bitbucket side).
-            try:
-                issue = client.issue(key)
-                _complete_worklogs(client, issue)
-            except JiraError as exc:
-                stats.issues_failed += 1
-                out.failures.append({"key": key, "error": str(exc)})
-                if progress is not None:
-                    progress.emit(f"[scrape] skipped {key}: {exc}")
-                continue
-            stats.issues_kept += 1
-            if issue_state is not None:
-                resolved = bool((issue.get("fields") or {}).get("resolution"))
-                issue_state.record(
-                    source,
-                    key,
-                    updated=_updated({"fields": issue.get("fields")}) or updated,
-                    done=resolved,
-                    run_id=run_id,
-                )
-            # Reduce now, not in a final pass: a checkpoint has to carry this
-            # issue's events with its cursor (see the docstring).
-            reducer.prime([issue], [])
-            reducer.reduce_issue(
-                issue,
-                project=_project_of(issue, project_list),
-                memberships=memberships,
-                stats=stats,
+            jql = jql_for(
+                project,
+                since=cutoff,
+                keys=batch if key_scoped else (),
             )
-            if progress is not None:
-                progress.tick(
-                    prs_seen=stats.issues_seen,
-                    prs_kept=stats.issues_kept,
-                    prs_skipped=stats.issues_skipped,
-                    requests=client.requests,
-                    events=len(stats.events),
-                )
-                # The interval tick may be silent on a slow request; a count every
-                # 200 kept issues is the heartbeat a two-hour walk needs.
-                if stats.issues_kept % 200 == 0:
-                    progress.emit(
-                        f"[scrape] {stats.issues_kept:,} issue(s) kept"
-                        f" · {client.requests:,} req"
-                        f" · {len(stats.events):,} events"
+            for row in client.search(jql):
+                key = str(row.get("key") or "")
+                if not key or key in seen:
+                    continue
+                # FR-1: the cap is a *stop*, not a skip. A row beyond the limit was
+                # never read, so it must not advance the cursor (mirrors the
+                # Bitbucket walk, scrape.py ``if limit ... truncated = True``): the
+                # search is ordered by ``updated ASC``, so everything unread is at
+                # or after the last read row and the next run asks for it again.
+                if limit is not None and stats.issues_kept >= limit:
+                    truncated = True
+                    out.truncated = True
+                    stop = True
+                    break
+                seen.add(key)
+                stats.issues_seen += 1
+                updated = _updated(row)
+                if updated is not None:
+                    stats.watermark = (
+                        updated if stats.watermark is None else max(stats.watermark, updated)
                     )
-            if checkpoint is not None and checkpoint_every > 0:
-                pending += 1
-                if pending >= checkpoint_every:
-                    pending = 0
-                    _checkpoint(project)
+                if not key_filter.accepts(key):
+                    stats.issues_skipped += 1
+                    continue
+                reason = _unchanged(key, updated, prior, cutoff, resume_run_id)
+                if reason is not None:
+                    stats.issues_skipped += 1
+                    if reason == "resumed":
+                        stats.issues_skipped_resumed += 1
+                    continue
+                # FR-2: a per-issue fetch failure (a 404 on a moved/deleted issue, a
+                # permission error, a 5xx that outlived the transport retries) skips
+                # *this* issue: one bad issue must never abort a two-hour walk.
+                # Nothing is recorded for it, so the next run retries it (within the
+                # watermark overlap, like a failed PR on the Bitbucket side).
+                try:
+                    issue = client.issue(key)
+                    _complete_worklogs(client, issue)
+                except JiraError as exc:
+                    stats.issues_failed += 1
+                    out.failures.append({"key": key, "error": str(exc)})
+                    if progress is not None:
+                        progress.emit(f"[scrape] skipped {key}: {exc}")
+                    continue
+                stats.issues_kept += 1
+                if issue_state is not None:
+                    resolved = bool((issue.get("fields") or {}).get("resolution"))
+                    issue_state.record(
+                        source,
+                        key,
+                        updated=_updated({"fields": issue.get("fields")}) or updated,
+                        done=resolved,
+                        run_id=run_id,
+                    )
+                # Reduce now, not in a final pass: a checkpoint has to carry this
+                # issue's events with its cursor (see the docstring).
+                reducer.prime([issue], [])
+                reducer.reduce_issue(
+                    issue,
+                    project=_project_of(issue, project_list),
+                    memberships=memberships,
+                    stats=stats,
+                )
+                if progress is not None:
+                    progress.tick(
+                        prs_seen=stats.issues_seen,
+                        prs_kept=stats.issues_kept,
+                        prs_skipped=stats.issues_skipped,
+                        requests=client.requests,
+                        events=len(stats.events),
+                    )
+                    # The interval tick may be silent on a slow request; a count every
+                    # 200 kept issues is the heartbeat a two-hour walk needs.
+                    if stats.issues_kept % 200 == 0:
+                        progress.emit(
+                            f"[scrape] {stats.issues_kept:,} issue(s) kept"
+                            f" · {client.requests:,} req"
+                            f" · {len(stats.events):,} events"
+                        )
+                if checkpoint is not None and checkpoint_every > 0:
+                    pending += 1
+                    if pending >= checkpoint_every:
+                        pending = 0
+                        _checkpoint(project)
+            if progress is not None and key_scoped and len(batches) > 1:
+                progress.emit(
+                    f"[scrape] key batch {batch_no}/{len(batches)}"
+                    f" · {stats.issues_seen:,} seen · {stats.issues_kept:,} kept"
+                )
         if stop:
             break
         # A project boundary is a free checkpoint: nothing is half-read.

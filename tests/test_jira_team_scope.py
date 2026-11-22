@@ -546,6 +546,19 @@ class TeamScrapeTests(_ScrapeCase):
         self.assertIn("in OPS", str(caught.exception.code))
 
 
+class _RecordingTransport:
+    """The fixture transport, recording every search JQL."""
+
+    def __init__(self, inner):
+        self.inner = inner
+        self.jqls: list[str] = []
+
+    def get(self, path: str, params: dict | None = None):
+        if path.endswith("/search") and params and params.get("jql"):
+            self.jqls.append(str(params["jql"]))
+        return self.inner.get(path, params)
+
+
 class SprintMembershipTests(_ScrapeCase):
     """prd/04/66: the ticket's Sprint field is the membership; no board walk."""
 
@@ -563,6 +576,24 @@ class SprintMembershipTests(_ScrapeCase):
             for event in bundle.events
             if event["activity"] in ("sprint_added", "sprint_removed")
         )
+
+    def test_a_large_key_scope_is_walked_in_batches(self):
+        # 2,391 keys in one JQL is a 30 KB URL -> Cloud 414. The walk must batch.
+        keys = tuple(f"PROJ-{index}" for index in range(1, 251))
+        cfg = _config(self.root, ticket_keys=keys)
+        transport = _RecordingTransport(FixtureJiraTransport(_team_fixture()))
+        report = scrape(
+            cfg, transport, JIRA_SOURCE,
+            out=self.root / "batched.tgz",
+            state_dir=self.root / "batched.state",
+            progress=ProgressReporter(stream=io.StringIO(), interval=0),
+        )
+        self.assertEqual(len(report["ticket_keys"]), 250)
+        key_jqls = [jql for jql in transport.jqls if "key in (" in jql]
+        self.assertEqual(len(key_jqls), 3)          # 100 + 100 + 50
+        for jql in key_jqls:
+            clause = jql.split("key in (", 1)[1].split(")", 1)[0]
+            self.assertLessEqual(len(clause.split(",")), 100, jql)
 
     def test_the_default_uses_the_ticket_field_and_skips_the_sprint_walk(self):
         _cfg, report, out = self.scrape("ticket", fixture=_team_fixture())
