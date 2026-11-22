@@ -91,9 +91,25 @@ export function sprintScopeLine(data) {
 }
 
 function windowLabel(sprint) {
-  const start = fmtDay(Date.parse(sprint.band_start));
-  const end = fmtDay(Date.parse(sprint.band_end));
-  return `${start} → ${end}`;
+  const start = Date.parse(sprint.band_start);
+  const end = Date.parse(sprint.band_end);
+  // prd/68 F-02: 28 event-only sprints have no SPRINT object dates. Date.parse
+  // (null) is NaN, and the old label printed "NaN undefined → NaN undefined".
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return 'dates unknown';
+  return `${fmtDay(start)} → ${fmtDay(end)}`;
+}
+
+/** The sprint's state in words, from what the store actually knows.
+ *
+ * prd/68 F-02: `state: null, open: false, closed: false` is an event-only
+ * sprint — its membership is real but its state is unknown, not "closed".
+ */
+export function sprintStateLabel(sprint) {
+  if (!sprint) return 'unknown';
+  if (sprint.state) return sprint.state;
+  if (sprint.open) return 'active';
+  if (sprint.closed === true) return 'closed';
+  return 'unknown';
 }
 
 /** The done-by-end / late / never breakdown of one sprint, in words. */
@@ -323,7 +339,7 @@ export function sprintStrip(data, { base = '', focus = null, forecast = null,
     const plan = sprint.open && sprint.planned_end
       ? `<span class="sprint-plan" title="the band ends at the snapshot; the plan ends on ${esc(sprint.planned_end)}">snapshot band · plan ${esc(sprint.planned_end)}</span>`
       : '';
-    const state = sprint.state || (sprint.open ? 'active' : 'closed');
+    const state = sprintStateLabel(sprint);
     const planned = sprint.planned_days ?? sprint.plannedDays;
     const outlier = Boolean(sprint.length_outlier ?? sprint.lengthOutlier);
     const days = outlier && planned != null

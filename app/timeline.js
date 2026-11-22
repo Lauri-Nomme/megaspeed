@@ -441,33 +441,40 @@ export class Timeline {
     this.sprintScope = data ? data.scope || null : null;
     this.sprintCarry = data ? data.carry_over || null : null;
     this.sprints = ((data && data.sprints) || [])
-      .map((sprint) => ({
-        id: sprint.sprint_id,
-        state: sprint.state,
-        open: Boolean(sprint.open),
-        // an active sprint is one the store says is active (or an old row with
-        // no state but no completion); a closed sprint without an end is still
-        // closed, only its band has to stop at the snapshot
-        active: sprint.state === 'active'
-          || (Boolean(sprint.open) && !sprint.state),
-        start: Date.parse(sprint.band_start),
-        end: Date.parse(sprint.band_end),
-        plannedEnd: sprint.planned_end
-          ? Date.parse(`${sprint.planned_end}T23:59:59Z`) : null,
-        stories: sprint.story_count || 0,
-        storyKeys: sprint.stories || [],
-        points: sprint.points || 0,
-        done: sprint.done_by_end ?? sprint.done ?? 0,
-        doneByEnd: sprint.done_by_end ?? sprint.done ?? 0,
-        doneLate: sprint.done_late || 0,
-        neverDone: sprint.never_done || 0,
-        // prd/43 §5: Jira-done but the story's PRs never merged
-        unmerged: sprint.unmerged || 0,
-        lateHours: sprint.late_hours || 0,
-        carriedIn: sprint.carried_in || [],
-        carriedOut: sprint.carried_out || [],
-      }))
-      .filter((sprint) => Number.isFinite(sprint.start) && Number.isFinite(sprint.end));
+      .map((sprint) => {
+        const start = Date.parse(sprint.band_start);
+        const end = Date.parse(sprint.band_end);
+        return {
+          id: sprint.sprint_id,
+          state: sprint.state,
+          open: Boolean(sprint.open),
+          // an active sprint is one the store says is active (or an old row with
+          // no state but no completion); a closed sprint without an end is still
+          // closed, only its band has to stop at the snapshot
+          active: sprint.state === 'active'
+            || (Boolean(sprint.open) && !sprint.state),
+          start,
+          end,
+          // prd/68 F-02: a dateless event-only sprint has real membership but no
+          // band. Keep it in `this.sprints` so focusing it still filters the
+          // story lanes; only `drawSprintBands` checks `hasBand`.
+          hasBand: Number.isFinite(start) && Number.isFinite(end),
+          plannedEnd: sprint.planned_end
+            ? Date.parse(`${sprint.planned_end}T23:59:59Z`) : null,
+          stories: sprint.story_count || 0,
+          storyKeys: sprint.stories || [],
+          points: sprint.points || 0,
+          done: sprint.done_by_end ?? sprint.done ?? 0,
+          doneByEnd: sprint.done_by_end ?? sprint.done ?? 0,
+          doneLate: sprint.done_late || 0,
+          neverDone: sprint.never_done || 0,
+          // prd/43 §5: Jira-done but the story's PRs never merged
+          unmerged: sprint.unmerged || 0,
+          lateHours: sprint.late_hours || 0,
+          carriedIn: sprint.carried_in || [],
+          carriedOut: sprint.carried_out || [],
+        };
+      });
     this.sprintStory = new Map();
     for (const row of (data && data.rows) || []) {
       if (row && row.key) this.sprintStory.set(row.key, row);
@@ -1379,7 +1386,12 @@ export class Timeline {
     const top = g.laneTop;
     const bottom = g.height;
     const labelY = AXIS_H + HIST_H + 11;
+    // prd/68 F-15: sprint bands overlap by a few days, so label text used to be
+    // painted on top of the previous one (`S15621`/`S16256`). Track the right
+    // edge of the last label like `drawAxis` does and skip a colliding one.
+    let lastLabelRight = -Infinity;
     this.sprints.forEach((sprint, index) => {
+      if (!sprint.hasBand) return;
       const left = Math.max(g.gutter, this.px(sprint.start));
       const right = Math.min(g.gutter + g.plotW, this.px(sprint.end));
       if (right <= left) return;
@@ -1413,12 +1425,18 @@ export class Timeline {
         ctx.font = `600 ${Math.max(10, g.label - 1)}px "JetBrains Mono", ui-monospace, monospace`;
         ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
-        ctx.fillStyle = color('--canvas-region-label');
-        ctx.fillText(
-          fit(ctx, `S${sprint.id}${sprint.active ? ' · active' : ''}${focused ? ' · lens' : ''}`, right - left - 12),
-          left + 6,
-          labelY,
+        const text = fit(
+          ctx, `S${sprint.id}${sprint.active ? ' · active' : ''}${focused ? ' · lens' : ''}`,
+          right - left - 12,
         );
+        const labelLeft = left + 6;
+        const labelWidth = ctx.measureText(text).width;
+        // a label whose box would touch the last one is skipped, not overdrawn
+        if (text && labelLeft >= lastLabelRight + 4) {
+          ctx.fillStyle = color('--canvas-region-label');
+          ctx.fillText(text, labelLeft, labelY);
+          lastLabelRight = labelLeft + labelWidth;
+        }
       }
       // pushed before the lanes, so a bar / event / story hit always wins
       this.hits.push({

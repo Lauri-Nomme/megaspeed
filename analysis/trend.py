@@ -51,6 +51,11 @@ DEFAULT_METRIC = "flow_efficiency"
 #: sprint bucket's cohort is sprints, so two closed sprints is the minimum to
 #: compare.
 MIN_COHORT_N = 5
+#: PR-only count metrics (prd/68 F-11). A count has no minimum cohort, so on a
+#: store with no PR objects these used to report "0 latest · 13/13 measured"
+#: instead of saying the layer is absent. They are the only metrics whose
+#: availability is decided by the store's PR population, not by the bucket.
+PR_COUNT_METRICS = frozenset({"merged", "open", "arrival_prs"})
 MIN_N_BY_METRIC = {
     "flow_efficiency": MIN_COHORT_N,
     "cycle_median": MIN_COHORT_N,
@@ -257,11 +262,18 @@ def sprint_bounds(
     bucket to place points in, and inventing one is exactly what this product
     must not do). An active sprint's band ends at the snapshot and the bucket is
     ``in_progress``.
+
+    prd/68 F-02: a ``future`` sprint (or one starting after the snapshot) has
+    not run, so it is not a bucket at all. Treating ``closed is None`` as
+    in-progress made S7564 the "latest sprint" and inverted the range of every
+    planned-but-not-started sprint.
     """
     out: list[dict] = []
     for sprint in data.sprints.values():
         start = _sprint_datetime(sprint.get("start"))
         if start is None:
+            continue
+        if sprint.get("state") == "future" or start > court.snapshot:
             continue
         end = _sprint_datetime(sprint.get("end"))
         closed = end is not None
@@ -279,6 +291,30 @@ def sprint_bounds(
         })
     out.sort(key=lambda row: (row["start"], row["sprint_id"] or 0))
     return out
+
+
+def _sprint_in_progress(
+    sprint: dict, court: ballcourt.BallCourt,
+) -> bool:
+    """Is this the sprint in flight at the snapshot?
+
+    prd/68 F-02: a future sprint has no measured end either, but it has not
+    started — it must never be named the active sprint. The store's own
+    ``state`` wins; only a state-less open sprint is inferred from its dates.
+    """
+    state = sprint.get("state")
+    if state == "future":
+        return False
+    if state == "active":
+        return True
+    if state is not None:
+        return False
+    start = _sprint_datetime(sprint.get("start"))
+    return (
+        sprint.get("end") is None
+        and start is not None
+        and start <= court.snapshot
+    )
 
 
 def _label(moment: datetime, bucket: str) -> str:
@@ -487,21 +523,32 @@ def _flow_at(
         done = jira_analysis.story_done_at(item)
         if done is not None and done <= point:
             story["done"] += 1
+    pr_bands = [
+        {"id": "created", "label": "created", "value": pr["created"]},
+        {"id": "started", "label": "started", "value": pr["started"]},
+        {"id": "in_review", "label": "in review", "value": pr["in_review"]},
+        {"id": "merged", "label": "merged", "value": pr["merged"]},
+    ]
+    story_bands = [
+        {"id": "created", "label": "created", "value": story["created"]},
+        {"id": "started", "label": "started", "value": story["started"]},
+        {"id": "in_review", "label": "in review", "value": story["in_review"]},
+        {"id": "done", "label": "done", "value": story["done"]},
+    ]
+    # prd/68 F-11: a Jira-only store has no PR layer to plot. The story bands
+    # are already computed here; plotting four flat PR zeroes told a 2,320-story
+    # team it had no work in flight. Use the population the store actually has,
+    # and say which one (the UI legend reads `population`).
+    no_prs = not court.prs
+    story_population = no_prs and bool(data.stories)
+    population = "story" if story_population else "pr"
+    bands = story_bands if story_population else pr_bands
+    created = story["created"] if story_population else pr["created"]
     return {
-        "created": pr["created"],
-        "bands": [
-            {"id": "created", "label": "created", "value": pr["created"]},
-            {"id": "started", "label": "started", "value": pr["started"]},
-            {"id": "in_review", "label": "in review", "value": pr["in_review"]},
-            {"id": "merged", "label": "merged", "value": pr["merged"]},
-        ],
-        "story_bands": [
-            {"id": "created", "label": "created", "value": story["created"]},
-            {"id": "started", "label": "started", "value": story["started"]},
-            {"id": "in_review", "label": "in review", "value": story["in_review"]},
-            {"id": "done", "label": "done", "value": story["done"]},
-        ],
-        "population": "pr",
+        "created": created,
+        "bands": bands,
+        "story_bands": story_bands,
+        "population": population,
         "point": iso(point),
     }
 
@@ -553,6 +600,10 @@ def trend(
             flow[row["start"]] = _flow_at(
                 court, data, min(end_inclusive, court.snapshot)
             )
+    # prd/68 F-11: a PR-only count on a store with no PR objects is not a
+    # measured zero — the layer is absent. The buckets stay in the payload so
+    # the calendar is visible, but every point is unavailable.
+    pr_layer_missing = metric in PR_COUNT_METRICS and not court.prs
     points: list[dict] = []
     for row in bounds:
         low = max(row["start"], start)
@@ -583,6 +634,12 @@ def trend(
         })
 
     measured = [point for point in points if point["available"]]
+    if pr_layer_missing:
+        for point in points:
+            point["available"] = False
+            point["value"] = None
+            point["n"] = 0
+        measured = []
     # prd/63 B8: the bucket containing the snapshot is still accumulating, so
     # it is not the headline and never a delta. "Merged PRs: 0 latest, −2 since
     # the first bucket" was an empty in-progress week plotted as a collapse;
@@ -627,7 +684,7 @@ def trend(
     active_sprint = next(
         (
             sprint for sprint in data.sprints.values()
-            if not jira_analysis.sprint_closed(sprint)
+            if _sprint_in_progress(sprint, court)
         ),
         None,
     )
@@ -649,6 +706,9 @@ def trend(
     annotation_counts["spans_outside"] = sum(
         1 for span in span_rows if not span.get("in_window", True)
     )
+    unavailable_reason = (
+        "no PR objects in this store" if pr_layer_missing else None
+    )
     return {
         "metric": metric,
         **METRICS[metric],
@@ -658,7 +718,8 @@ def trend(
         # floor counts its committed stories, not its bucket count).
         "min_n": min_n,
         "min_n_basis": min_n_basis,
-        "available": bool(points),
+        "available": bool(points) and not pr_layer_missing,
+        "unavailable_reason": unavailable_reason,
         "points": points,
         "annotations": entries,
         "spans": span_rows,
@@ -674,6 +735,9 @@ def trend(
             "change": change,
             "buckets": len(points),
             "measured_buckets": len(measured),
+            # prd/68 F-11: the strip must say the layer is absent, never
+            # "13/13 buckets measured · 0 latest".
+            "unavailable_reason": unavailable_reason,
             # prd/63 B8: the headline names its bucket and its cohort size, and
             # says when it had to fall back to a provisional in-progress point.
             "latest_label": latest["label"] if latest else None,
@@ -726,6 +790,17 @@ def trend(
             }
             if active_sprint is not None else None
         ),
+        # prd/68 F-02: a sprint bucket names the sprint in flight, or says there
+        # is none — never a future placeholder.
+        "active_sprint_note": (
+            (
+                f"S{active_sprint.get('id')} in progress"
+                if active_sprint.get("id") is not None else "a sprint in progress"
+            )
+            if active_sprint is not None else (
+                "no sprint in progress" if bucket == "sprint" else None
+            )
+        ),
         "metrics": metric_ids(),
         "window": {
             "start": iso(start),
@@ -733,6 +808,11 @@ def trend(
             "days": round((end - start).total_seconds() / 86400.0, 1),
         },
         "note": (
+            (
+                "no PR objects in this store: a PR count is not a measured "
+                "zero, the layer is absent"
+            )
+            if pr_layer_missing else
             "no SPRINT object carries a start in this store, so the sprint "
             "bucket has no boundaries — use bucket=week"
             if bucket == "sprint" and not bounds else
