@@ -1464,10 +1464,56 @@ def _slip_hours(court, story: Story, outcome: dict, boundaries: dict,
     return round(court.business_hours(story.actor, start, end), 2)
 
 
+def _store_carry_context(delivery: dict | None) -> tuple[int | None, int | None]:
+    """Carried-over stories across **every** closed sprint, and how many that is.
+
+    prd/67 W-05: the rule's own number is the window's cohort, while the sprint
+    lens counts the whole store — a window-scoped 7 read as a store total. Both
+    scopes travel together, and the store half is read from
+    :func:`sprint_delivery`'s per-closed-sprint rows (``done_late`` +
+    ``never_done``), never from a second walk of the store. A store with no
+    closed sprint says ``None``, not 0.
+    """
+    rows = (delivery or {}).get("sprints") or []
+    if not rows:
+        return None, None
+    carried = sum(
+        (row.get("done_late") or 0) + (row.get("never_done") or 0)
+        for row in rows
+    )
+    return carried, len(rows)
+
+
+def _sprints_closed_in(
+    window: tuple[datetime, datetime],
+    boundaries: dict[int, dict],
+    memberships: dict[str, dict],
+) -> int:
+    """Closed sprints with committed stories whose close falls in the window.
+
+    prd/67 W-05: the title names "the 1 sprint closed in this window" so the
+    count cannot be read as the store's own sprint total. The universe is the
+    same one :func:`sprint_delivery` measures — a closed sprint with at least one
+    committed story — so the window count and ``store_sprints`` never disagree
+    about what a sprint is. A closed sprint with no recorded end closes at the
+    snapshot, which is the window's own end.
+    """
+    committed = {
+        sid for membership in memberships.values() for sid in membership["sprints"]
+    }
+    start, end = window
+    return sum(
+        1 for sid, boundary in boundaries.items()
+        if sid in committed and boundary["closed"] and boundary["end"] is not None
+        and start <= boundary["end"] <= end
+    )
+
+
 def carry_over(
     court: ballcourt.BallCourt,
     data: JiraData,
     window: tuple[datetime, datetime],
+    delivery: dict | None = None,
 ) -> dict:
     """Stories committed to a sprint but not done by its close (prd/37 §1).
 
@@ -1483,6 +1529,11 @@ def carry_over(
     calendar. ``status`` says whether the story finished late or never;
     ``explicit_readds`` keeps the old multi-sprint count as context, never as
     the headline.
+
+    prd/67 W-05: the count is the **window's cohort**, so the payload states the
+    whole store beside it — ``store_carried_over`` / ``store_sprints`` from the
+    delivery rows, and ``window_sprints`` for the sprints that closed inside the
+    window. No number of the metric itself changes.
     """
     stories = cohort(data, window)
     memberships, outcomes, boundaries = sprint_outcomes(court, data)
@@ -1524,6 +1575,11 @@ def carry_over(
     with_sprints = sum(1 for story in stories if memberships[story.key]["sprints"])
     late = sum(1 for row in rows if row["status"] == "late")
     never = carried - late
+    # prd/67 W-05: both scopes, side by side. The window half is this cohort;
+    # the store half is the delivery rows' own per-closed-sprint accounting.
+    store_carried, store_sprints = _store_carry_context(
+        delivery if delivery is not None else sprint_delivery(court, data, window)
+    )
     return {
         "available": with_sprints > 0,
         "stories": len(stories),
@@ -1550,6 +1606,12 @@ def carry_over(
         ),
         "median_wait_hours": _median([row["wait_hours"] for row in rows]),
         "sprints_involved": len({sid for row in rows for sid in row["missed_sprints"]}),
+        # prd/67 W-05: the window's own sprint count, so "1 sprint in this
+        # window" is visible without opening the drill-down, and the store's
+        # whole scope sits beside it. Both are counts of *closed* sprints.
+        "window_sprints": _sprints_closed_in(window, boundaries, memberships),
+        "store_carried_over": store_carried,
+        "store_sprints": store_sprints,
         # the old signal, kept as context: an explicit re-add into another sprint
         "explicit_readds": readded,
         "readded_same_sprint": sum(
@@ -3870,7 +3932,11 @@ def metrics(
 ) -> dict:
     """Every prd/21 metric, in one deterministic pass."""
     data = data or EMPTY
-    carry = carry_over(court, data, window)
+    # prd/67 W-05: the carry-over metric states the store's whole scope beside
+    # its window cohort, and it reads that scope from these same delivery rows —
+    # one pass, no second walk of the store.
+    delivery = sprint_delivery(court, data, window)
+    carry = carry_over(court, data, window, delivery=delivery)
     churn = point_churn(court, data, window)
     return {
         "jira": data.summary(),
@@ -3878,7 +3944,7 @@ def metrics(
         "carry_over": carry,
         # prd/37: done-by-end / late / never per closed sprint, and the on-time
         # share the sprint lens and the on-time rule both quote.
-        "sprint_delivery": sprint_delivery(court, data, window),
+        "sprint_delivery": delivery,
         "point_churn": churn,
         "worklog_cross_check": worklog_cross_check(court, data, window),
         "jira_conformance": conformance(
