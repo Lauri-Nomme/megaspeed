@@ -46,6 +46,8 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import time
 from pathlib import Path
 
 from .transport import API, BitbucketError, _page
@@ -500,13 +502,20 @@ class HansTransport:
 
     # -- plumbing --------------------------------------------------------
     def _git(self, *args: str, check: bool = True) -> str:
-        """Run one read-only git command against the mirror."""
+        """Run one read-only git command against the mirror.
+
+        ``MEGASPEED_GIT_TRACE=1`` prints the command, its duration and its
+        output size to stderr: on a large capture the only way to see which
+        git call is slow (the transport is otherwise a black box between PRs).
+        """
         if not self.git:
             raise BitbucketError("git is not installed: cannot derive commits from the mirror")
         command = [self.git, "-C", str(self.mirror), *args]
         env = dict(os.environ)
         env["GIT_TERMINAL_PROMPT"] = "0"
         env["LC_ALL"] = "C"
+        trace = bool(os.environ.get("MEGASPEED_GIT_TRACE"))
+        started = time.monotonic()
         try:
             proc = subprocess.run(
                 command,
@@ -515,7 +524,20 @@ class HansTransport:
                 env=env,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
+            if trace:
+                print(
+                    f"[hans-git] {' '.join(args)[:160]} · "
+                    f"{time.monotonic() - started:.2f}s · FAILED {exc}",
+                    file=sys.stderr, flush=True,
+                )
             raise BitbucketError(f"git {args[0]} could not run: {exc}") from exc
+        if trace:
+            print(
+                f"[hans-git] {' '.join(args)[:160]} · "
+                f"{time.monotonic() - started:.2f}s · {len(proc.stdout)} bytes"
+                f" · rc={proc.returncode}",
+                file=sys.stderr, flush=True,
+            )
         self._last_code = proc.returncode
         if check and proc.returncode != 0:
             raise BitbucketError(

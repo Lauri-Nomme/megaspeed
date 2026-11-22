@@ -273,6 +273,20 @@ def _jira_probe(cfg: Config, transport, as_json: bool, client=None,
     return 0
 
 
+def _scrape_limit(args, hans) -> int | None:
+    """``--limit`` caps every source; ``--n`` is the legacy fixture-file cap.
+
+    The hans path used to honour only ``--n``, so ``--limit 1`` silently walked
+    the whole capture (the "still lagging" report). ``--limit`` is the documented
+    cap and always wins; ``--n`` remains the fixture-file replay cap.
+    """
+    if getattr(args, "limit", None) is not None:
+        return args.limit
+    if (getattr(args, "fixture_file", None) or hans is not None) and args.n is not None:
+        return args.n
+    return None
+
+
 def _print_jira_scrape(r: dict) -> None:
     print(f"source         {r['source']} (run {r['run_id']})")
     print(f"bundle         {r['bundle']}  ({r['bundle_bytes']} bytes)")
@@ -765,7 +779,7 @@ def main(argv: list[str] | None = None) -> int:
             source,
             out=out,
             state_dir=state_dir,
-            limit=args.n if ((args.fixture_file or hans is not None) and args.n is not None) else None,
+            limit=_scrape_limit(args, hans),
             overlap_hours=args.overlap_hours,
             full=args.full,
             identity_path=args.identity,

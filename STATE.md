@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1392** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
+Tests: **1394** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -35,6 +35,13 @@ Tests: **1392** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`)
   flash echo, scope-consistent aging counts/chart/re-plan, non-colliding percentile labels, the
   policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
   22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
+
+## v0.14.4 — hans --limit honoured + git tracing
+
+`--limit` was ignored on the hans path (only the legacy `--n` capped it), so
+`--limit 1` walked the whole capture. `--limit` now caps every source. With
+`MEGASPEED_GIT_TRACE=1`, every mirror git command prints its duration and output
+size, so a slow step in a large capture is visible instead of a blank console.
 
 ## v0.14.3 — hans merge-base in one query
 

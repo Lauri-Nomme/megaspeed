@@ -397,6 +397,14 @@ class HansTransportTests(unittest.TestCase):
         self.assertEqual(len(base), 40)
         self.assertNotEqual(base, detail["toRef"]["latestCommit"])
 
+    def test_git_trace_names_the_command_and_its_duration(self):
+        err = io.StringIO()
+        with mock.patch.dict(os.environ, {"MEGASPEED_GIT_TRACE": "1"}):
+            with contextlib.redirect_stderr(err):
+                self.transport._git("rev-parse", "HEAD")
+        self.assertIn("[hans-git] rev-parse HEAD", err.getvalue())
+        self.assertIn("bytes", err.getvalue())
+
     def test_a_missing_index_is_a_clear_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(BitbucketError):
@@ -679,6 +687,18 @@ class HansCliTests(unittest.TestCase):
         self.assertEqual(report["prs_kept"], 2)
         self.assertEqual(report["hans_scrape"]["project"], "DEMO")
         self.assertTrue(out.is_file())
+
+    def test_limit_caps_a_hans_scrape(self):
+        # prd/68 follow-up: --limit used to be ignored on the hans path (only
+        # --n capped it), so a "one PR" test walked the whole capture.
+        out = self.corpus.root / "cli" / "limit.tgz"
+        code, report, err = self.run_cli(
+            "--hans-scrape", str(self.corpus.scrape_dir),
+            "--limit", "1", "--no-push-class",
+            "--out", str(out), "--json", "--quiet", "--text-backend", "mock",
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(report["prs_kept"], 1)
 
     def test_the_environment_variable_selects_the_same_source(self):
         out = self.corpus.root / "cli" / "env.tgz"
