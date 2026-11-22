@@ -137,7 +137,9 @@ const state = {
   // controls are per-user preferences, like the benchmark toggle.
   aging: null,
   agingView: 'story:cycle',
-  agingOnly: false,
+  // prd/67 W-03: an honest empty list beats hundreds of abandoned rows, so the
+  // tab opens on `only=live`; the toggle still shows the all-time tail.
+  agingOnly: true,
   agingSource: 'self',
   queues: null,
   blocking: null,

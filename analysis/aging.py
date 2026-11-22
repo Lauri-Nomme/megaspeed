@@ -21,7 +21,11 @@ that forward-looking half of flow:
 * **hours at risk** — ``age − p85`` (≥ 0), the removable wait the chase action
   carries, and the ranked ``chase_order`` (live rows whose band is aging/very
   old) that prd/54's card and prd/58's exploit rung read instead of typing the
-  three items by hand.
+  three items by hand;
+* **a window-scoped list** (prd/67 W-03) — an in-flight row is listed only when
+  it moved in the chosen window (created, entered its stage, or last human event
+  ``≥ window.start``); its age is still the censored age to the snapshot, and
+  ``hidden`` says how many rows the window / ``only`` filter left out.
 
 Percentiles are **nearest-rank on the sorted cohort**, index
 ``round(q × (n − 1))`` (the formula ``ballcourt._p90`` uses), so a tick equals a
@@ -493,8 +497,28 @@ def _holder_block(court: ballcourt.BallCourt, states, hours: float | None,
 # --------------------------------------------------------------------------- #
 # in-flight rows
 # --------------------------------------------------------------------------- #
+def _active_in_window(created: datetime | None, entered: datetime | None,
+                      last_human: datetime | None,
+                      window: tuple[datetime, datetime] | None) -> bool:
+    """prd/67 W-03: an in-flight row belongs to the window only when it moved in it.
+
+    The age stays the censored age to the snapshot; the *window* decides which
+    rows the list is about. A story is in the window when any of its own clocks
+    started in it — ``created``, the stage it entered (``entered``), or the last
+    human event (``last_human``) — so a 1,243-day-old abandoned ticket no longer
+    sits in a 90-day view. ``window=None`` is the whole store, unchanged.
+    """
+    if window is None:
+        return True
+    start = window[0]
+    return any(stamp is not None and stamp >= start
+               for stamp in (created, entered, last_human))
+
+
 def _story_rows(court: ballcourt.BallCourt, data: jira.JiraData,
-                stage: str | None) -> list[dict]:
+                stage: str | None,
+                window: tuple[datetime, datetime] | None = None,
+                stats: dict | None = None) -> list[dict]:
     done_keys = jira.done_keys(data)
     rows: list[dict] = []
     for story in data.stories:
@@ -511,11 +535,18 @@ def _story_rows(court: ballcourt.BallCourt, data: jira.JiraData,
             entered = entered_stage
         if entered is None or entered > court.snapshot:
             continue
-        age = round(court.business_hours(story.actor, entered, court.snapshot), 2)
         open_states = _story_prs(story)
         status = liveness(
             court, story, done=story.key in done_keys,
         )
+        # prd/67 W-03: the window scopes the list, not the age. A row whose last
+        # human event predates the window is hidden here (and counted, so the
+        # view can say how many it hid) — it is still in the store, not deleted.
+        if not _active_in_window(created, entered, status["last_human"], window):
+            if stats is not None:
+                stats["outside_window"] = int(stats.get("outside_window") or 0) + 1
+            continue
+        age = round(court.business_hours(story.actor, entered, court.snapshot), 2)
         rows.append({
             "kind": "story",
             "object_id": story.object_id,
@@ -616,12 +647,15 @@ def _pr_rows(court: ballcourt.BallCourt, data: jira.JiraData | None,
 def in_flight(court: ballcourt.BallCourt, data: jira.JiraData | None,
               kind: str = "story", stage: str | None = None,
               window: tuple[datetime, datetime] | None = None,
-              mode: str | None = None) -> list[dict]:
-    """One row per open item, with its age, band, rank and holder.
+              mode: str | None = None,
+              stats: dict | None = None) -> list[dict]:
+    """One row per open item active in the window, with its age, band, rank, holder.
 
     ``kind="story"`` uses the story clock (cycle or the given workflow stage);
     ``kind="pr"`` the review clock (``stage=review``, the default) or the PR
     cycle (``stage=cycle``). The clocks are never mixed in one row's age.
+    ``window`` scopes the story rows (prd/67 W-03); ``stats``, when given,
+    receives ``{"outside_window": n}`` so the payload can state the hidden count.
     """
     if kind not in KINDS:
         raise ValueError(f"unknown kind {kind!r}: kind must be one of {', '.join(KINDS)}")
@@ -636,7 +670,7 @@ def in_flight(court: ballcourt.BallCourt, data: jira.JiraData | None,
         ]
         for stage_key, cohort in stage_cohort(court, data, window).items():
             values[f"stage:{stage_key}"] = cohort
-        rows = _story_rows(court, data, stage)
+        rows = _story_rows(court, data, stage, window, stats)
         block_key = (
             STORY_CYCLE if stage in (None, CYCLE, STORY_CYCLE) else f"stage:{stage}"
         )
@@ -846,6 +880,28 @@ def window_for(court: ballcourt.BallCourt, data: jira.JiraData | None,
     return max(first, court.snapshot - timedelta(days=float(days))), court.snapshot
 
 
+def hidden_note(outside_window: int, no_live_pr: int) -> str | None:
+    """prd/67 W-03: how many in-flight rows the window / ``only`` filter hid.
+
+    The Aging tab states this rather than leaving the reader to wonder why a
+    90-day view is short: the rows still exist, they are old or they have no
+    live PR, and the re-plan feed (also window-scoped) is where they are named.
+    """
+    total = int(outside_window) + int(no_live_pr)
+    if total <= 0:
+        return None
+    if total == 1:
+        reason = "is outside this window" if outside_window else "has no live PR"
+        return f"1 open item {reason} — see re-plan"
+    if outside_window and no_live_pr:
+        reason = "are outside this window or have no live PR"
+    elif outside_window:
+        reason = "are outside this window"
+    else:
+        reason = "have no live PR"
+    return f"{total} open items {reason} — see re-plan"
+
+
 def stages_for(kind: str, court: ballcourt.BallCourt,
                data: jira.JiraData | None,
                window: tuple[datetime, datetime] | None = None) -> list[str]:
@@ -861,7 +917,14 @@ def payload(court: ballcourt.BallCourt, data: jira.JiraData | None, *,
             only: str = "all", limit: int | None = None,
             window: tuple[datetime, datetime] | None = None,
             min_n: int = MIN_N, mode: str | None = None) -> dict:
-    """``GET /api/aging``: thresholds, the in-flight rows, the chase feed."""
+    """``GET /api/aging``: thresholds, the in-flight rows, the chase feed.
+
+    The story rows are scoped to the window (prd/67 W-03): a row is listed only
+    when it moved in it (``created``, its stage entry or its last human event is
+    ``>= window.start``). ``counts`` describe the rows that survived the window
+    and ``only``; ``hidden`` says how many each filter left out and carries the
+    sentence the tab shows, so an empty list is explained rather than silent.
+    """
     mode = mode or thresholds_mode()
     if kind not in KINDS:
         raise ValueError(f"unknown kind {kind!r}: kind must be one of {', '.join(KINDS)}")
@@ -870,10 +933,16 @@ def payload(court: ballcourt.BallCourt, data: jira.JiraData | None, *,
         raise ValueError(
             f"unknown stage {stage!r}: stage must be one of {', '.join(stages)}"
         )
-    rows = in_flight(court, data, kind, stage, window, mode=mode)
+    stats: dict = {}
+    rows = in_flight(court, data, kind, stage, window, mode=mode, stats=stats)
+    in_window = len(rows)
     if only == "live":
         rows = [row for row in rows if row["live"] in LIVE_STATES]
     all_rows = list(rows)
+    # prd/67 W-03: the window hid these (they are not gone, they are old), and
+    # `only=live` hid the rest; the tab states both rather than looking empty.
+    outside_window = int(stats.get("outside_window") or 0)
+    no_live_pr = max(0, in_window - len(all_rows))
     if limit:
         rows = rows[: int(limit)]
     chase = chase_order(all_rows)
@@ -938,6 +1007,14 @@ def payload(court: ballcourt.BallCourt, data: jira.JiraData | None, *,
         "active_threshold": block_key,
         "rows": rows,
         "counts": counts,
+        # prd/67 W-03: what the window and `only` hid, with the sentence the tab
+        # shows — the counts above describe the rows on screen, this names the rest
+        "hidden": {
+            "outside_window": outside_window,
+            "no_live_pr": no_live_pr,
+            "total": outside_window + no_live_pr,
+            "note": hidden_note(outside_window, no_live_pr),
+        },
         "review_p75": {
             "value": review.get("p75"),
             "p50": review.get("p50"),

@@ -14,12 +14,15 @@
  *     tint, `normal`/`watch` stay neutral (prd/10 §3.3);
  *   · a duration is business hours through the shared formatter, and the
  *     calendar-day span is spelled as such (concepts.md §1);
+ *   · the list is window-scoped: a row is shown only when it moved in the
+ *     chosen window, and the tab states how many open rows the window / live
+ *     filter hid (prd/67 W-03);
  *   · on a phone the strip is a tick line (no chart), the rows stack to two
  *     lines, and nothing forces horizontal scroll (prd/10 §5.3, prd/28).
  */
 
 import {
-  esc, fmtHours, fmtCalendarDays, BUSINESS_HOURS_PER_DAY,
+  esc, fmtHours, fmtCalendarDays, fmtDayYear, BUSINESS_HOURS_PER_DAY,
 } from './format.js';
 import { ticketHref, ticketLink, rowTicket } from './tickets.js';
 
@@ -105,6 +108,53 @@ export function tickLine(payload) {
   const ticks = agingTicks(payload);
   if (!ticks.length) return 'no percentile — insufficient history';
   return ticks.map((tick) => `${tick.label} ${fmtHours(tick.hours)}`).join(' · ');
+}
+
+/**
+ * prd/67 W-03: what the window and the only-live filter hid, as three numbers.
+ *
+ * The server scopes the rows to the window (a story must have moved in it) and
+ * `only=live` hides the rest; `hidden` says how many of each, so the tab can
+ * explain a short or empty list instead of looking broken.
+ */
+export function agingHidden(payload) {
+  const hidden = (payload && payload.hidden) || {};
+  const outsideWindow = Number(hidden.outside_window) || 0;
+  const noLivePr = Number(hidden.no_live_pr) || 0;
+  return {
+    outside_window: outsideWindow,
+    no_live_pr: noLivePr,
+    total: outsideWindow + noLivePr,
+  };
+}
+
+/** The window the payload was scoped to: `5 Jan 2026 → 1 Mar 2026`. */
+export function agingWindowLabel(payload) {
+  const window = (payload && payload.window) || {};
+  const start = Date.parse(window.start);
+  const end = Date.parse(window.end);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return '';
+  return `${fmtDayYear(start)} → ${fmtDayYear(end)}`;
+}
+
+/**
+ * The one sentence that explains a short aging list (prd/67 W-03).
+ *
+ * `9 open items are outside this window or have no live PR — see re-plan`. The
+ * same words the API states in `hidden.note`, built here from the numbers the
+ * same way, so the tab and an API reader cannot read two different counts.
+ */
+export function agingHiddenNote(payload) {
+  const hidden = agingHidden(payload);
+  if (!hidden.total) return '';
+  if (hidden.total === 1) {
+    return `1 open item ${hidden.outside_window
+      ? 'is outside this window' : 'has no live PR'} — see re-plan`;
+  }
+  const reason = hidden.outside_window && hidden.no_live_pr
+    ? 'are outside this window or have no live PR'
+    : (hidden.outside_window ? 'are outside this window' : 'have no live PR');
+  return `${hidden.total} open items ${reason} — see re-plan`;
 }
 
 /** The strip's x scale, shared by the dots, the ticks and the row bars. */
@@ -236,8 +286,16 @@ export function agingTable(payload, { base = '', onlyLive = false, rowFilter = n
   if (rowFilter) rows = rows.filter(rowFilter);
   const block = thresholdOf(payload);
   if (!rows.length) {
+    // prd/67 W-03: an empty list is honest only when it says what it hid — the
+    // window it was scoped to and how many open items the window/only filter left
+    // out (they are still in the store; the re-plan feed names the dead ones).
+    const window = agingWindowLabel(payload);
+    const hidden = agingHidden(payload);
+    const note = agingHiddenNote(payload);
     return `<div class="empty-row" data-aging-empty>Nothing in flight matches this view${
-      onlyLive ? ' with a live PR' : ''} — an empty list here is a real result.</div>`;
+      onlyLive ? ' with a live PR' : ''} — an empty list here is a real result.${
+      window ? ` Window: ${esc(window)}.` : ''}${
+      hidden.total ? ` ${esc(note)}.` : ''}</div>`;
   }
   const body = rows.map((row) => {
     const key = row.ticket || rowTicket(row);
@@ -386,8 +444,14 @@ export function agingMarkup(payload, {
   const sourceLine = block && block.source_label
     ? `<span class="aging-source" data-threshold-source>${esc(block.source)} · ${esc(block.source_label)}</span>`
     : '';
+  // prd/67 W-03: the window scopes the list, so the tab says what it hid rather
+  // than letting a short list read as "nothing is in flight".
+  const hiddenNote = agingHiddenNote(scoped);
   return `<div class="aging-view" data-aging-view-root data-kind="${esc(scoped.kind || '')}">
     ${controls}
+    ${hiddenNote
+      ? `<p class="aging-hidden muted" data-aging-hidden>${esc(hiddenNote)}</p>`
+      : ''}
     <div class="aging-head">
       <h3>${esc(scoped.kind === 'pr' ? 'PRs in flight' : 'Stories in flight')}
         <span class="muted">${esc(scoped.stage ? String(scoped.stage).replace(/_/g, ' ') : '')}</span></h3>
@@ -430,7 +494,13 @@ export function agingMarkdown(payload, {
       row.pr ? ` ${row.pr}` : ''} | ${row.stage || ''} | ${fmtHours(row.age_hours)} (${fmtCalendarDays(row.calendar_days)}) | ${
       multipleLabel(row)} | ${holderLabel(row)} | ${row.live || 'live'} |`;
   });
-  return [...head, ...body].join('\n');
+  // prd/67 W-03: the export states the same hidden count as the tab.
+  const hidden = agingHiddenNote(payload);
+  const window = agingWindowLabel(payload);
+  const footer = [
+    ...(hidden ? ['', `_${hidden}${window ? ` (window ${window})` : ''}_`] : []),
+  ];
+  return [...head, ...body, ...footer].join('\n');
 }
 
 /** The tab's count, from the same rows the table renders. */
