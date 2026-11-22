@@ -136,12 +136,16 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # Two halves, two CLIs: `python3 -m ingest scrape|import ...`. The scrape
     # side is also its own artifact (scrape/build.sh -> megaspeed-scrape).
-    if argv and argv[0] in ("scrape", "import"):
+    if argv and argv[0] in ("scrape", "import", "relabel"):
         command, rest = argv[0], argv[1:]
         if command == "scrape":
             from .scrape_cli import main as scrape_main
 
             return scrape_main(rest)
+        if command == "relabel":
+            from .relabel import main as relabel_main
+
+            return relabel_main(rest)
         from .importer import main as import_main
 
         return import_main(rest)
@@ -214,8 +218,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if report["ok"] else 1
 
     if args.import_bundle:
-        from .importer import import_bundle as do_import
-        from .importer import _print_import
+        from .importer import import_path as do_import
+        from .importer import _print_import, _print_label_patch
         from .bundle import BundleError
         from .importer import ImportRejected
 
@@ -226,6 +230,8 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if args.json:
             print(json.dumps(imported, indent=2, default=str))
+        elif imported.get("mode") == "label-patch":
+            _print_label_patch(imported)
         else:
             _print_import(imported)
         return 0 if imported["verified"] is not False else 1

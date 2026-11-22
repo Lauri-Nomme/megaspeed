@@ -146,6 +146,14 @@ class Config:
     #: In-flight classification requests for one PR's batch (the local box's
     #: parallel capacity). 1 restores the old strictly-serial client.
     llm_workers: int = classify.DEFAULT_WORKERS
+    #: Let the model think and keep the deliberation in the raw trace. On by
+    #: default (the trace is a diagnostic record); ``--no-llm-think`` trades the
+    #: reasoning for throughput on a big corpus.
+    llm_think: bool = classify.DEFAULT_THINK
+    #: Write every classifier call (full input, full output incl. thinking,
+    #: timings, context ids) to ``<state-dir>/classify-trace.jsonl``. Raw zone:
+    #: the trace never enters a bundle. Off only for a throwaway run.
+    classify_trace: bool = True
     # -- Jira source (prd/04) ---------------------------------------------
     #: Jira DC base URL, e.g. http://127.0.0.1:8090. Credentials never live in
     #: the config file: MEGASPEED_JIRA_TOKEN or _USER/_PASSWORD.
@@ -556,6 +564,13 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         llm_model=str(os.environ.get("MEGASPEED_LLM_MODEL", classify_cfg.get("llm_model", classify.DEFAULT_MODEL))),
         llm_timeout=float(os.environ.get("MEGASPEED_LLM_TIMEOUT", classify_cfg.get("llm_timeout", classify.DEFAULT_TIMEOUT))),
         llm_workers=int(os.environ.get("MEGASPEED_LLM_WORKERS", classify_cfg.get("workers", classify.DEFAULT_WORKERS))),
+        llm_think=_env_flag(
+            os.environ.get("MEGASPEED_LLM_THINK"),
+            classify_cfg.get("think", classify.DEFAULT_THINK),
+        ),
+        classify_trace=_env_flag(
+            os.environ.get("MEGASPEED_CLASSIFY_TRACE"), classify_cfg.get("trace", True)
+        ),
         jira_base_url=os.environ.get("MEGASPEED_JIRA_BASE_URL", jira.get("base_url", "")).rstrip("/"),
         jira_projects=parse_projects(
             os.environ.get("MEGASPEED_JIRA_PROJECTS", jira.get("projects", [])),

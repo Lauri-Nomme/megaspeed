@@ -1,10 +1,11 @@
 """Periodic progress reporting for long scrapes (prd/14).
 
-Scraping a huge project takes minutes, so the operator needs to see that the run
+A scrape of a huge project takes minutes, so the operator needs to see that the run
 is alive -- without a line per PR. This reporter emits **one** line to **stderr**
-at most once per ``interval`` seconds (default 30):
+at most once per ``interval`` seconds (default 30), each with a UTC timestamp so
+it can be lined up with the model/server log:
 
-    [scrape] 02:15 elapsed · 3,214 PRs seen · 412 kept · 2,802 skipped · 1,041 req · 4,120 events · 23.8 PR/s · 7.7 req/s
+    [2026-11-22T07:12:03.421Z] [scrape] 02:15 elapsed · 3,214 PRs seen · 412 kept · 2,802 skipped · 1,041 req · 4,120 events · 23.8 PR/s · 7.7 req/s
 
 It never touches stdout or the bundle, so a piped ``--json`` report stays clean.
 The gate is a cheap ``time.monotonic()`` comparison at natural loop boundaries
@@ -18,8 +19,12 @@ printed by the CLI as before, never by this module.
 from __future__ import annotations
 
 import sys
+import threading
 import time
+from datetime import datetime
 from typing import Callable, TextIO
+
+from . import logs
 
 #: Seconds between progress lines. Overridable by ``--progress-interval`` /
 #: ``MEGASPEED_PROGRESS_INTERVAL``; ``0`` disables reporting.
@@ -42,13 +47,18 @@ class ProgressReporter:
         stream: TextIO | None = None,
         interval: float = DEFAULT_INTERVAL,
         clock: Callable[[], float] = time.monotonic,
+        wall: logs.Clock | None = None,
     ):
         self.stream = sys.stderr if stream is None else stream
         self.interval = float(interval)
         self.clock = clock
+        #: Wall clock behind the ``[stamp]`` prefix; injectable for tests.
+        self.wall = wall or logs.now
         self.started = clock()
         self.last = self.started
         self.lines = 0
+        #: Worker threads emit classification lines through the same reporter.
+        self._lock = threading.Lock()
 
     @property
     def enabled(self) -> bool:
@@ -103,7 +113,11 @@ class ProgressReporter:
         return self.emit(self.line(unit=unit, **counts))
 
     def emit(self, text: str) -> bool:
-        self.stream.write(text + "\n")
-        self.stream.flush()
-        self.lines += 1
+        """Write one ``[stamp] text`` line. Every line carries its wall-clock
+        time: a scrape is hours long and the model box has its own log."""
+        line = f"[{logs.iso(self.wall)}] {text}"
+        with self._lock:
+            self.stream.write(line + "\n")
+            self.stream.flush()
+            self.lines += 1
         return True

@@ -58,12 +58,14 @@ import hashlib
 import json
 import re
 import threading
+import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Sequence
 from urllib.parse import urlsplit
 
 from . import taxonomy
+from .logs import iso as _iso
 
 # --------------------------------------------------------------------------- #
 # kinds and vocabulary
@@ -103,6 +105,12 @@ DEFAULT_TIMEOUT = 180.0
 #: 1/latency (the review measured 4.4 h for 8k comments at 2 s). Four keeps the
 #: local box busy without queueing requests behind each other.
 DEFAULT_WORKERS = 4
+#: Qwen3 is a *thinking* model. Thinking is on by default because the raw trace
+#: is a diagnostic record -- the deliberation is often why a label was chosen --
+#: and because a relabel run can be audited against it. It costs tokens and wall
+#: time: pass ``think=False`` / ``--no-llm-think`` for a throughput run. Ollama
+#: ignores the flag for a model that does not think.
+DEFAULT_THINK = True
 
 
 def digest(text: str) -> bytes:
@@ -316,6 +324,20 @@ def _bool(value: Any, key: str) -> bool:
 # --------------------------------------------------------------------------- #
 # the pluggable interface
 # --------------------------------------------------------------------------- #
+def _item(item: Sequence) -> tuple[str, str, dict | None]:
+    """``(text, kind)`` or ``(text, kind, context)`` -> the three parts."""
+    text, kind = item[0], item[1]
+    context = item[2] if len(item) > 2 else None
+    return str(text), str(kind), (dict(context) if context else None)
+
+
+def _call(classifier: "Classifier", text: str, kind: str, context: dict | None) -> dict:
+    """Call a classifier without breaking a test double that takes 2 arguments."""
+    if context is None:
+        return classifier.classify(text, kind)
+    return classifier.classify(text, kind, context)
+
+
 class Classifier:
     """``classify(text, kind) -> {closed labels}``; nothing else crosses.
 
@@ -349,6 +371,16 @@ class Classifier:
         self.last_error = ""
         #: Optional ``(exception)`` callback, invoked on the **first** fallback.
         self.on_fallback: Callable[[Exception], None] | None = None
+        #: Optional ``(record)`` callback, invoked for **every** call, including
+        #: a fallback and a breaker-skipped call. The record is the raw-zone
+        #: trace entry (:mod:`ingest.llmtrace`): text, request, response,
+        #: thinking, labels or the full error, plus the caller's context. The
+        #: scrape writes it to ``<state-dir>/classify-trace.jsonl`` and prints
+        #: one line per call.
+        self.on_call: Callable[[dict], None] | None = None
+        #: Monotonic call numbering for the trace (``calls`` counts *label*
+        #: results, which a skipped call never produces).
+        self.attempts = 0
 
     def _progress(self, done: int, total: int) -> None:
         """Report one classified text; a reporter error never kills the scrape."""
@@ -360,22 +392,94 @@ class Classifier:
         except Exception:  # noqa: BLE001 - progress must never abort a run
             pass
 
+    def _record(
+        self,
+        *,
+        text: str,
+        kind: str,
+        context: dict | None,
+        labels: dict | None,
+        label_version: str,
+        error: str = "",
+        sent: bool = True,
+        request: dict | None = None,
+        response: Any = None,
+        content: Any = None,
+        thinking: Any = None,
+        timings: dict | None = None,
+        fallback: bool = False,
+    ) -> dict:
+        """Build the trace record for one call and hand it to ``on_call``.
+
+        Never raises: a trace sink that is full, gone or broken must not abort a
+        multi-hour scrape. The record keeps the **final** labels (whatever the
+        store will get) and names the backend that produced them, so a fallback
+        is visible both by ``fallback`` and by ``label_version``.
+        """
+        with self._lock:
+            self.attempts += 1
+            call = self.attempts
+        body = str(text)
+        record = {
+            "ts": _iso(),
+            "call": call,
+            "backend": self.backend,
+            "label_version": label_version,
+            "model": getattr(self, "model", None),
+            "url": getattr(self, "url", None),
+            "kind": kind,
+            "context": dict(context or {}),
+            "text": body,
+            "text_digest": digest(body).hex(),
+            "text_chars": len(body),
+            "sent": bool(sent),
+            "request": request,
+            "response": response,
+            "content": content,
+            "thinking": thinking,
+            "timings": timings,
+            "labels": dict(labels) if labels is not None else None,
+            "fallback": bool(fallback),
+            "ok": not error,
+            "error": error,
+        }
+        callback = self.on_call
+        if callback is not None:
+            try:
+                callback(record)
+            except Exception:  # noqa: BLE001 - tracing must never abort a run
+                pass
+        return record
+
     # -- to implement ----------------------------------------------------
-    def classify(self, text: str, kind: str) -> dict:
+    def classify(self, text: str, kind: str, context: dict | None = None) -> dict:
         raise NotImplementedError
 
-    def classify_many(self, items: Sequence[tuple[str, str]]) -> list[tuple[dict, str]]:
-        """Classify ``(text, kind)`` pairs; ``(labels, version)`` in input order.
+    def classify_many(
+        self, items: Sequence[tuple]
+    ) -> list[tuple[dict, str]]:
+        """Classify ``(text, kind[, context])`` pairs; ``(labels, version)`` in order.
 
         The default is the serial loop every backend has always had, so the
         deterministic mock (and any test double) is unchanged and synchronous.
         :class:`OllamaClassifier` overrides it with a bounded thread pool.
         """
         out: list[tuple[dict, str]] = []
-        for index, (text, kind) in enumerate(items):
-            out.append((self.classify(text, kind), self.last_version))
+        for index, item in enumerate(items):
+            text, kind, context = _item(item)
+            out.append((_call(self, text, kind, context), self.last_version))
             self._progress(index + 1, len(items))
         return out
+
+    def _labels_only(self, text: str, kind: str) -> dict:
+        """The labels for ``text`` without counting or tracing this classifier.
+
+        A wrapper that degrades to a fallback calls this: the *wrapper* emits
+        one trace record for the call (with ``fallback: true``); the fallback
+        must not emit a second one for the same text.
+        """
+        return self.classify(text, kind)
+
 
     # -- shared bookkeeping ----------------------------------------------
     def _count(self, labels: dict) -> dict:
@@ -480,15 +584,26 @@ class MockClassifier(Classifier):
         ),
     )
 
-    def classify(self, text: str, kind: str) -> dict:
-        _check_kind(kind)
+    def classify(self, text: str, kind: str, context: dict | None = None) -> dict:
+        labels = self._labels_only(text, kind)
+        self._record(
+            text=text,
+            kind=kind,
+            context=context,
+            labels=labels,
+            label_version=self.version,
+            sent=False,
+        )
         self.last_version = self.version
+        return self._count(labels)
+
+    def _labels_only(self, text: str, kind: str) -> dict:
+        """The deterministic labels, without bookkeeping (see ``_labels_only``)."""
+        _check_kind(kind)
         body = str(text or "").strip()
         if kind == KIND_DESCRIPTION:
             question = bool(re.search(r"\?", body))
-            return self._count(
-                {"question": question, "phase": PHASES_BY_KIND[kind][0]}
-            )
+            return {"question": question, "phase": PHASES_BY_KIND[kind][0]}
         comment_type = DEFAULT_COMMENT_TYPE
         for pattern, label in self._TYPE_RULES:
             if pattern.search(body):
@@ -500,15 +615,13 @@ class MockClassifier(Classifier):
                 intent = label
                 break
         question = comment_type == "question"
-        return self._count(
-            {
-                "comment_type": comment_type,
-                "thread_intent": intent,
-                "question": question,
-                "answered": bool(not question and intent == "acted"),
-                "phase": PHASES_BY_KIND[kind][0],
-            }
-        )
+        return {
+            "comment_type": comment_type,
+            "thread_intent": intent,
+            "question": question,
+            "answered": bool(not question and intent == "acted"),
+            "phase": PHASES_BY_KIND[kind][0],
+        }
 
 
 class OllamaClassifier(Classifier):
@@ -541,6 +654,7 @@ class OllamaClassifier(Classifier):
         opener: Callable[[urllib.request.Request, float], Any] | None = None,
         max_failures: int = 5,
         workers: int = DEFAULT_WORKERS,
+        think: bool = DEFAULT_THINK,
     ):
         super().__init__()
         self.url = validate_llm_url(url or DEFAULT_URL).rstrip("/")
@@ -553,6 +667,9 @@ class OllamaClassifier(Classifier):
         self.version = "ollama-v1"
         self.last_prompt_tokens: int | None = None
         self.last_duration_ms: float | None = None
+        #: Send ``"think": true`` and keep the model's deliberation in the trace.
+        #: Off for a throughput run (see :data:`DEFAULT_THINK`).
+        self.think = bool(think)
         #: Bounded in-flight requests for one batch (see ``classify_many``).
         self.workers = max(1, int(workers))
         #: Circuit breaker: a scrape is hours long, so a model box that is down
@@ -572,20 +689,20 @@ class OllamaClassifier(Classifier):
                 {"role": "user", "content": f"kind={kind}\n---\n{text}"},
             ],
             "stream": False,
-            # Qwen3 is a thinking model; the classifier wants the 30-token JSON,
-            # not a page of deliberation (a plain "hi" spent 190 thinking tokens
-            # / 18.7 s). Newer Ollama ignores this for non-thinking models.
-            "think": False,
+            # Qwen3 is a thinking model. The trace is a diagnostic record, so
+            # thinking is on unless the operator asks for throughput; the JSON
+            # classifier never needs it to answer, only to explain.
+            "think": self.think,
             "format": schema_for(kind),
-            "options": {"temperature": 0, "seed": 0, "num_predict": 128},
+            "options": {"temperature": 0, "seed": 0, "num_predict": 512 if self.think else 128},
         }
 
-    def classify(self, text: str, kind: str) -> dict:
+    def classify(self, text: str, kind: str, context: dict | None = None) -> dict:
         _check_kind(kind)
-        labels, _version = self._classify_one(text, kind)
+        labels, _version = self._classify_one(text, kind, context)
         return self._count(labels)
 
-    def classify_many(self, items: Sequence[tuple[str, str]]) -> list[tuple[dict, str]]:
+    def classify_many(self, items: Sequence[tuple]) -> list[tuple[dict, str]]:
         """Classify one PR's texts with a **bounded** thread pool.
 
         ``workers`` requests are in flight at a time (default
@@ -599,15 +716,15 @@ class OllamaClassifier(Classifier):
         A single item, ``workers == 1`` or an already-open breaker runs inline:
         there is nothing to overlap.
         """
-        prepared = [(str(text), kind) for text, kind in items]
-        for _text, kind in prepared:
+        prepared = [_item(item) for item in items]
+        for _text, kind, _context in prepared:
             _check_kind(kind)
         if not prepared:
             return []
         if self.workers <= 1 or len(prepared) == 1 or self.down:
             results = []
-            for index, (text, kind) in enumerate(prepared):
-                results.append((self.classify(text, kind), self.last_version))
+            for index, (text, kind, context) in enumerate(prepared):
+                results.append((_call(self, text, kind, context), self.last_version))
                 self._progress(index + 1, len(prepared))
             return results
         answers: list[tuple[dict, str] | None] = [None] * len(prepared)
@@ -616,8 +733,8 @@ class OllamaClassifier(Classifier):
             thread_name_prefix="megaspeed-classify",
         ) as pool:
             futures = {
-                pool.submit(self._classify_one, text, kind): index
-                for index, (text, kind) in enumerate(prepared)
+                pool.submit(self._classify_one, text, kind, context): index
+                for index, (text, kind, context) in enumerate(prepared)
             }
             # Fill by index (input order) but report completion as each worker
             # finishes, so a slow first text still shows the run is alive.
@@ -634,22 +751,45 @@ class OllamaClassifier(Classifier):
             results.append((labels, version))
         return results
 
-    def _classify_one(self, text: str, kind: str) -> tuple[dict, str]:
+    def _classify_one(
+        self, text: str, kind: str, context: dict | None = None
+    ) -> tuple[dict, str]:
         """Ask the box for one text; degrade to the fallback on any failure.
 
         Never raises and never counts the classification itself (the caller
         does): it is what a worker thread runs, so the only shared state it
-        touches is guarded by the lock.
+        touches is guarded by the lock. Every outcome -- including a call the
+        breaker refused to send -- is traced through ``on_call``.
         """
         if self.down:
+            labels = self.fallback._labels_only(text, kind)
             with self._lock:
                 self.fallbacks += 1
                 self.last_version = self.fallback.version
-            return self.fallback.classify(text, kind), self.fallback.version
+            self._record(
+                text=text,
+                kind=kind,
+                context=context,
+                labels=labels,
+                label_version=self.fallback.version,
+                error=(
+                    f"circuit breaker open after {self.failures} consecutive failure(s)"
+                    f"{(': ' + self.last_error) if self.last_error else ''}"
+                ),
+                sent=False,
+                fallback=True,
+            )
+            return labels, self.fallback.version
+        body = self.request_body(text, kind)
+        started = time.monotonic()
         try:
-            payload = self._chat(self.request_body(text, kind))
-            labels = parse_labels(kind, payload)
+            answer = self._chat(body)
+            content = (answer.get("message") or {}).get("content")
+            labels = parse_labels(kind, content)
         except (ClassifyError, OSError, ValueError, KeyError, TimeoutError) as exc:
+            elapsed = (time.monotonic() - started) * 1000.0
+            error = f"{type(exc).__name__}: {exc}"
+            fallback = self.fallback._labels_only(text, kind)
             with self._lock:
                 self.failures += 1
                 if self.failures >= self.max_failures:
@@ -658,20 +798,55 @@ class OllamaClassifier(Classifier):
                     self.down = True
                 self.fallbacks += 1
                 self.last_version = self.fallback.version
-                self.last_error = f"{type(exc).__name__}: {exc}"[:300]
+                self.last_error = error[:300]
                 first = self.fallbacks == 1
+            self._record(
+                text=text,
+                kind=kind,
+                context=context,
+                labels=fallback,
+                label_version=self.fallback.version,
+                error=error,
+                request=body,
+                timings={"wall_ms": round(elapsed, 1)},
+                fallback=True,
+            )
             if first and self.on_fallback is not None:
                 try:
                     self.on_fallback(exc)
                 except Exception:  # noqa: BLE001 - reporting must never abort
                     pass
-            return self.fallback.classify(text, kind), self.fallback.version
+            return fallback, self.fallback.version
+        elapsed = (time.monotonic() - started) * 1000.0
+        message = answer.get("message") or {}
+        timings = {
+            "wall_ms": round(elapsed, 1),
+            "total_duration_ns": answer.get("total_duration"),
+            "load_duration_ns": answer.get("load_duration"),
+            "prompt_eval_count": answer.get("prompt_eval_count"),
+            "prompt_eval_duration_ns": answer.get("prompt_eval_duration"),
+            "eval_count": answer.get("eval_count"),
+            "eval_duration_ns": answer.get("eval_duration"),
+            "done_reason": answer.get("done_reason"),
+        }
+        self._record(
+            text=text,
+            kind=kind,
+            context=context,
+            labels=labels,
+            label_version=self.version,
+            request=body,
+            response=answer,
+            content=message.get("content"),
+            thinking=message.get("thinking"),
+            timings=timings,
+        )
         with self._lock:
             self.failures = 0
             self.last_version = self.version
         return labels, self.version
 
-    def _chat(self, body: dict) -> Any:
+    def _chat(self, body: dict) -> dict:
         request = urllib.request.Request(
             f"{self.url}/api/chat",
             data=json.dumps(body).encode(),
@@ -686,11 +861,13 @@ class OllamaClassifier(Classifier):
             if callable(close):
                 close()
         answer = json.loads(raw.decode() or "{}")
-        message = answer.get("message") or {}
-        # Ollama returns ``message.content``; the logproxy sidecar unwraps
-        # nothing, so the same shape holds on both ports.
+        if not isinstance(answer, dict):
+            raise ClassifyError(f"backend answer is not an object: {type(answer).__name__}")
+        # Ollama returns ``message.content`` (+ ``message.thinking`` when the
+        # model thinks); the logproxy sidecar unwraps nothing, so the same shape
+        # holds on both ports.
         self.last_duration_ms = float(answer.get("total_duration") or 0) / 1e6 or None
-        return message.get("content")
+        return answer
 
     @staticmethod
     def _urlopen(request: urllib.request.Request, timeout: float):
@@ -702,6 +879,7 @@ class OllamaClassifier(Classifier):
             "model": self.model,
             "url": self.url,
             "workers": self.workers,
+            "think": self.think,
             "down": self.down,
         }
 
@@ -771,6 +949,7 @@ def for_scrape(cfg, source: str, *, backend: str | None = None) -> Classifier | 
         getattr(cfg, "llm_model", DEFAULT_MODEL),
         timeout=float(getattr(cfg, "llm_timeout", DEFAULT_TIMEOUT)),
         workers=int(getattr(cfg, "llm_workers", DEFAULT_WORKERS)),
+        think=bool(getattr(cfg, "llm_think", DEFAULT_THINK)),
     )
 
 
@@ -778,6 +957,7 @@ __all__ = [
     "ClassifyError",
     "Classifier",
     "DEFAULT_MODEL",
+    "DEFAULT_THINK",
     "DEFAULT_URL",
     "DEFAULT_WORKERS",
     "KIND_COMMENT",

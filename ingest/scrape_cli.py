@@ -460,6 +460,12 @@ def _print_scrape(r: dict) -> None:
             print(f"bot notices    {text['bot_comments_skipped']} skipped (not dialogue)")
     elif text:
         print("text classify  off (no comment/description labels)")
+    trace = r.get("text_trace") or {}
+    if trace.get("enabled"):
+        print(
+            f"text trace     {trace.get('path')} · {trace.get('records', 0)} call(s),"
+            f" {trace.get('bytes', 0):,} bytes  (raw zone; `python3 -m ingest relabel`)"
+        )
 
 
 def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
@@ -533,6 +539,15 @@ def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
                     help="in-flight classification requests per PR (default"
                          f" MEGASPEED_LLM_WORKERS, {classify.DEFAULT_WORKERS});"
                          " 1 restores the strictly serial client")
+    ap.add_argument("--llm-think", dest="llm_think", action="store_true", default=None,
+                    help="let the model think and keep the deliberation in the trace"
+                         " (the default; a thinking model spends extra tokens/time)")
+    ap.add_argument("--no-llm-think", dest="llm_think", action="store_false",
+                    help="send think:false for throughput (the JSON labels do not need"
+                         " the reasoning; the trace then has no thinking text)")
+    ap.add_argument("--no-llm-trace", action="store_true",
+                    help="do not write <state-dir>/classify-trace.jsonl (the raw-zone"
+                         " record of every model call that `ingest relabel` replays)")
     ap.add_argument("--progress-interval", type=float, default=None, metavar="SECONDS",
                     help="progress line on stderr every N seconds; 0 disables"
                          f" (default {DEFAULT_PROGRESS_INTERVAL:g})")
@@ -630,6 +645,10 @@ def main(argv: list[str] | None = None) -> int:
         cfg.llm_model = args.llm_model
     if args.llm_workers is not None:
         cfg.llm_workers = max(1, int(args.llm_workers))
+    if args.llm_think is not None:
+        cfg.llm_think = bool(args.llm_think)
+    if args.no_llm_trace:
+        cfg.classify_trace = False
 
     # prd/31: the hans scrape names its own project/repo, and needs no
     # credentials and no server -- the transport reads the capture on disk.

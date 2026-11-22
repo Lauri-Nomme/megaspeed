@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1403** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
+Tests: **1440** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -35,6 +35,28 @@ Tests: **1403** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`)
   flash echo, scope-consistent aging counts/chart/re-plan, non-colliding percentile labels, the
   policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
   22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
+
+## v0.16.0 — raw-zone LLM trace + label-only relabel (prd/69)
+
+The classifier now writes **every** call to `<state-dir>/classify-trace.jsonl`:
+the exact text, the `/api/chat` body (thinking flag + JSON schema), the full
+answer including `message.thinking`, Ollama timings, the parsed labels or the
+full error, and the ids it came from (repo, PR, PR commits, ticket keys, thread,
+comment, activity, role). It is raw-zone state: never in a bundle, never in the
+store. Thinking is back on by default (diagnostic record) with `--no-llm-think`
+for throughput. Every call also prints one timestamped progress line (label or
+full error); all progress and hans git/merge lines now carry UTC stamps.
+
+`python3 -m ingest relabel --trace … --bundle … --out labels.tgz` replays the
+trace through a (different) model and writes a **label-patch** tgz: THREAD
+comment_type / thread_outcome / classifier_version and question_raised `phase`,
+keyed by object id. `ingest import` auto-detects and applies it as an UPDATE —
+no global event re-emit, no new events, idempotent. Question flips (which would
+add/remove an event) are counted, not applied. `--hans-scrape DIR` reads the
+texts from the capture instead, so a bundle that predates the trace can be
+re-labelled without re-walking git. THREAD objects now carry `anchor_changed`
+and `resolver_is_commenter` so an outcome can be re-derived from a new intent
+without the source.
 
 ## v0.15.2 — no thinking tokens in the text classifier
 

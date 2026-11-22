@@ -193,6 +193,35 @@ saved):
 
 `MEGASPEED_BB_TOKEN` (bearer) is preferred over user/password when available.
 
+### Text labels: raw-zone trace and label-only relabel
+
+`--hans-scrape` / `--live` runs classify comment prose with the local model and
+write **every** call to `<state-dir>/classify-trace.jsonl` (raw zone: the full
+text, request body, response including thinking, timings, and the PR/thread/
+comment ids). It never enters the bundle, which carries labels only.
+
+Re-determine the labels later, without re-walking git, and import the result as
+a patch:
+
+```bash
+# replay the trace (or a capture that predates the trace) through a model
+.venv/bin/python -m ingest relabel --trace export/hans.state/classify-trace.jsonl \
+    --bundle export/hans.tgz --out export/hans-labels.tgz \
+    --llm-url http://127.0.0.1:11434 --llm-model qwen3:8b --no-llm-think
+
+# ... or, for a bundle whose scrape ran before the trace existed:
+.venv/bin/python -m ingest relabel --hans-scrape ~/dev/hans/scrape/<capture> \
+    --bundle export/hans.tgz --out export/hans-labels.tgz \
+    --llm-url http://127.0.0.1:11434 --llm-model qwen3:8b
+
+# apply it (auto-detected; THREAD labels + question phases only, idempotent)
+.venv/bin/python -m ingest import export/hans-labels.tgz --db data/demo.duckdb
+```
+
+Thinking is on by default (the trace is a diagnostic record); `--no-llm-think`
+trades it for throughput. Every call prints one timestamped line with the label
+or the full error.
+
 ---
 
 ## 3. Store schema (`data/megaspeed.duckdb`)

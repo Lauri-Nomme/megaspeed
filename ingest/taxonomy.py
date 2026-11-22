@@ -259,6 +259,13 @@ OBJECT_ATTRIBUTE_SPEC: dict[str, Any] = {
     "comment_type": COMMENT_TYPE,
     "thread_outcome": THREAD_OUTCOME,
     "classifier_version": CLASSIFIER_TOKEN,
+    # prd/16 "replayable labels": the deterministic half of ``thread_outcome``
+    # (resolved + did the diff move at the anchor + did the commenter resolve
+    # it). With these on the THREAD, a label patch can re-derive the outcome
+    # from a re-classified intent without the source. ``anchor_changed`` is
+    # absent when the diff was unknown (REST-only scrape).
+    "anchor_changed": bool,
+    "resolver_is_commenter": bool,
     "merge_commit": HASH,
     # prd/22 "stacked-PR cascade": the PR's source and target refs as keyed
     # one-way digests. Equal digests mean "same branch", so ``A.target_ref ==

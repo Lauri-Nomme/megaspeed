@@ -34,6 +34,7 @@ from .store import (
     SOURCES,
     connect,
     ensure_schema,
+    imported_scope,
     object_shape_problems,
     summary,
     utcnow,
@@ -286,6 +287,117 @@ def import_bundle(cfg: Config, path: str | Path, *, verify_contract: bool = True
     }
 
 
+def import_label_patch(cfg: Config, path: str | Path, *, verify_contract: bool = True) -> dict:
+    """Apply a labels-only tgz (:mod:`ingest.labelpatch`) to ``cfg.db_path``.
+
+    Label-only by construction: the patch is checked (checksums, closed
+    vocabularies, identifier shapes) before the store opens, the updates run in
+    one transaction, and ``verify`` is the final gate before ``COMMIT``. No
+    event, object or relation is created or removed; a bundle built against a
+    different store simply reports the rows it could not find.
+    """
+    from . import labelpatch
+
+    patch = labelpatch.read_patch(path)
+    cfg.db_path.parent.mkdir(parents=True, exist_ok=True)
+    con = connect(cfg.db_path)
+    try:
+        ensure_schema(con)
+        before = con.execute("SELECT count(*) FROM events").fetchone()[0]
+        before_objects = con.execute("SELECT count(*) FROM objects").fetchone()[0]
+        con.execute("BEGIN")
+        try:
+            applied = labelpatch.apply_patch(con, patch)
+            report = verify(
+                con, cfg.key_shape, cfg.ticket_projects,
+                cfg.ticket_keys or imported_scope(con),
+            ) if verify_contract else None
+            if report is not None and not report["ok"]:
+                raise ImportRejected(
+                    "label patch applied but the store failed the pseudonymisation"
+                    " contract; rolled back:\n  - " + "\n  - ".join(report["problems"])
+                )
+            con.execute("COMMIT")
+        except Exception:
+            try:
+                con.execute("ROLLBACK")
+            except Exception:
+                pass
+            raise
+        after = con.execute("SELECT count(*) FROM events").fetchone()[0]
+        after_objects = con.execute("SELECT count(*) FROM objects").fetchone()[0]
+        totals = summary(con)
+    finally:
+        con.close()
+
+    return {
+        "mode": "label-patch",
+        "bundle": str(patch.path),
+        "bundle_sha256": patch.sha256,
+        "source": patch.source,
+        "as_of": patch.manifest.get("created_at"),
+        "db": str(cfg.db_path),
+        "classifier_version": taxonomy.CLASSIFIER_VERSION,
+        "schema_version": patch.manifest.get("schema_version"),
+        "applies_to": patch.manifest.get("applies_to") or {},
+        "text_classifier": patch.manifest.get("text_classifier") or {},
+        "rows": len(patch.rows),
+        "applied": applied,
+        "events_loaded": 0,
+        "events_new": int(after - before),
+        "events_rewritten": 0,
+        "events_derived": 0,
+        "objects": int(after_objects - before_objects),
+        "verified": bool(report["ok"]) if report else None,
+        "problems": list(report["problems"]) if report else [],
+        "summary": totals,
+    }
+
+
+def import_path(cfg: Config, path: str | Path, *, verify_contract: bool = True) -> dict:
+    """Import a bundle -- or apply a label patch when the tgz says it is one."""
+    from . import labelpatch
+
+    if labelpatch.is_label_patch(path):
+        return import_label_patch(cfg, path, verify_contract=verify_contract)
+    return import_bundle(cfg, path, verify_contract=verify_contract)
+
+
+def _print_label_patch(r: dict) -> None:
+    applied = r["applied"]
+    print(f"label patch    {r['bundle']}  sha256 {r['bundle_sha256'][:16]}…")
+    print(f"source         {r['source']} · applied to {r['db']}")
+    applies = r.get("applies_to") or {}
+    if applies.get("bundle"):
+        print(
+            f"applies to     {applies['bundle']}"
+            f" ({str(applies.get('bundle_sha256') or '')[:16]}…)"
+        )
+    classifier = r.get("text_classifier") or {}
+    print(
+        f"classifier     {classifier.get('backend', '?')}:"
+        f"{classifier.get('model') or classifier.get('version', '?')}"
+        f" · {classifier.get('calls', 0)} call(s),"
+        f" {classifier.get('fallbacks', 0)} fallback(s)"
+    )
+    print(
+        f"labels         {r['rows']} row(s) · {applied['threads']} thread(s) updated,"
+        f" {applied['threads_unchanged']} unchanged, {applied['threads_missing']} missing"
+        f" · {applied['questions']} question phase update(s)"
+    )
+    if applied["questions_missing"]:
+        print(
+            f"not found      {applied['questions_missing']} question row(s): no"
+            " question_raised event is linked to that object (the patch cannot add one)"
+        )
+    print(
+        "store now      "
+        f"{r['summary']['events']} events, {r['summary']['prs']} PRs,"
+        f" as_of {r['summary']['as_of']}"
+    )
+    print(f"contract       {'OK — no free text, no canaries' if r['verified'] else 'VIOLATED'}")
+
+
 def _print_import(r: dict) -> None:
     print(f"bundle         {r['bundle']}  sha256 {r['bundle_sha256'][:16]}…")
     print(f"source         {r['source']} (run {r['run_id']})")
@@ -335,7 +447,7 @@ def main(argv: list[str] | None = None) -> int:
         cfg.db_path = Path(args.db).expanduser().resolve()
 
     try:
-        report = import_bundle(cfg, args.bundle, verify_contract=not args.no_verify)
+        report = import_path(cfg, args.bundle, verify_contract=not args.no_verify)
     except BundleError as exc:
         print(f"bundle rejected: {exc}", file=sys.stderr)
         return 2
@@ -345,6 +457,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.json:
         print(json.dumps(report, indent=2, default=str))
+    elif report.get("mode") == "label-patch":
+        _print_label_patch(report)
     else:
         _print_import(report)
     if report["verified"] is False:
@@ -355,7 +469,15 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-__all__ = ["BundleError", "ImportRejected", "bundles_supported", "import_bundle", "main"]
+__all__ = [
+    "BundleError",
+    "ImportRejected",
+    "bundles_supported",
+    "import_bundle",
+    "import_label_patch",
+    "import_path",
+    "main",
+]
 
 
 def bundles_supported() -> tuple[int, ...]:

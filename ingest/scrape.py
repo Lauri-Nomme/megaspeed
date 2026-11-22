@@ -112,7 +112,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import bundle as bundle_mod
-from . import classify, gitclass, pepper as pepper_mod, taxonomy
+from . import classify, gitclass, llmtrace, pepper as pepper_mod, taxonomy
 from .bitbucket import BitbucketClient, PullRequest
 from .config import Config
 from .pipeline import KeyFilter, Reducer, Stats, _object
@@ -1214,9 +1214,12 @@ def scrape(
             text_label = (
                 f"text {text.backend}:{model}{('@' + url) if url else ''} ({workers}w)"
             )
+        trace_label = ""
+        if text is not None and source != "fixture" and getattr(cfg, "classify_trace", True):
+            trace_label = f" · trace {state_dir / llmtrace.TRACE_FILE}"
         reporter.emit(
             f"[scrape] {source} · {repos_label} · writing {out}"
-            f"{key_scope} · {text_label}"
+            f"{key_scope} · {text_label}{trace_label}"
         )
         if text is not None:
             labeled = {"n": 0}
@@ -1368,26 +1371,41 @@ def scrape(
         )
         state.save()
 
-    collected = collect(
-        cfg,
-        transport,
-        source,
-        limit,
-        identity=IdentityTable(ident_path),
-        state=state,
-        pr_state=pr_state,
-        full=full,
-        progress=reporter,
-        push_classifier=classifier,
-        text_classifier=text,
-        resume_run_id=resume_run_id,
-        carry_events=carry_events,
-        carry_objects=carry_objects,
-        checkpoint=checkpoint,
-        checkpoint_every=max(0, int(checkpoint_every)),
-        verify_quiet=quiet_check,
-        pepper=pepper,
-    )
+    text_trace: llmtrace.TraceWriter | None = None
+    if text is not None and source != "fixture" and getattr(cfg, "classify_trace", True):
+        text_trace = llmtrace.TraceWriter(state_dir / llmtrace.TRACE_FILE)
+
+        def _trace_call(record: dict) -> None:
+            text_trace(record)
+            if reporter.enabled:
+                reporter.emit(llmtrace.call_line(record))
+
+        text.on_call = _trace_call
+
+    try:
+        collected = collect(
+            cfg,
+            transport,
+            source,
+            limit,
+            identity=IdentityTable(ident_path),
+            state=state,
+            pr_state=pr_state,
+            full=full,
+            progress=reporter,
+            push_classifier=classifier,
+            text_classifier=text,
+            resume_run_id=resume_run_id,
+            carry_events=carry_events,
+            carry_objects=carry_objects,
+            checkpoint=checkpoint,
+            checkpoint_every=max(0, int(checkpoint_every)),
+            verify_quiet=quiet_check,
+            pepper=pepper,
+        )
+    finally:
+        if text_trace is not None:
+            text_trace.close()
 
     events = _emitted_events(collected)
     emitted = max((e["ts"] for e in events), default=None)
@@ -1402,6 +1420,10 @@ def scrape(
         events_emitted=len(events),
         ref_digest_key_id=ref_digest_key_id,
     )
+    if text_trace is not None:
+        # Provenance, not content: the trace stays in the raw zone; the bundle
+        # only records that it exists and how many calls it holds.
+        manifest["text_trace"] = text_trace.report()
     if collected.identity is not None:
         collected.identity.save()
     written = _write_bundle_atomic(
@@ -1492,6 +1514,11 @@ def scrape(
                 "bot_comments_skipped": collected.stats.bot_comments_skipped,
             }
             if collected.text_classifier is not None
+            else {"enabled": False}
+        ),
+        "text_trace": (
+            {**text_trace.report(), "path": str(text_trace.path)}
+            if text_trace is not None
             else {"enabled": False}
         ),
     }

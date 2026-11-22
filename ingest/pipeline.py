@@ -30,7 +30,7 @@ from . import classify, taxonomy
 from .bitbucket import PullRequest
 from .config import Config
 from .pseudonym import IdentityTable
-from .timeutil import to_naive_utc
+from .timeutil import iso, to_naive_utc
 
 SYSTEM_ACTOR = "system"
 #: The synthetic CI actor (store ``ACTOR_RE`` allows ``CI``). ``build_status``
@@ -393,7 +393,7 @@ class Reducer:
         # batch returns the same labels in the same order, so nothing below
         # changes -- it just no longer waits for one comment at a time.
         ordered = sorted(activities, key=lambda a: (a.get("createdDate") or 0, a.get("id") or 0))
-        self._labels = self._classify_batch(pr, ordered)
+        self._labels = self._classify_batch(pr, ordered, commit_ids, keys)
 
         # prd/16: the PR description is read *here*, classified, and dropped.
         # A description that raises a question is the cheapest place to catch
@@ -478,7 +478,12 @@ class Reducer:
                     # that opened it. The raw body never leaves this branch.
                     if comment_action != "UPDATED" and self.classifier is not None:
                         labels, classifier_version = self._comment_labels(
-                            actor, comment.get("text"), severity, stats
+                            actor, comment.get("text"), severity, stats,
+                            context=self._text_context(
+                                pr, role="opener", keys=keys, commit_ids=commit_ids,
+                                thread_id=thread_id, comment_id=comment["id"],
+                                activity_id=activity.get("id"), ts=ts,
+                            ),
                         )
                     if labels is not None:
                         entry.setdefault("classifier_version", classifier_version)
@@ -499,7 +504,10 @@ class Reducer:
                             # A reply inside a question thread is the answer --
                             # classify only those replies (one call per thread,
                             # not one per reply everywhere).
-                            answer = self._reply_answer(comment, ts, stats)
+                            answer = self._reply_answer(
+                                comment, ts, stats, pr=pr, thread_id=thread_id,
+                                keys=keys, commit_ids=commit_ids,
+                            )
                             if answer is not None:
                                 entry.setdefault("answer", answer)
                 if comment_action == "UPDATED":
@@ -644,6 +652,14 @@ class Reducer:
             resolver_is_commenter = bool(
                 resolver_actor and resolver_actor == entry.get("commenter")
             )
+            # The two deterministic inputs ``thread_outcome`` needed, kept on the
+            # object so a label patch (ingest.relabel) can re-derive the outcome
+            # from a new ``thread_intent`` without re-reading the source. Both
+            # are closed booleans; ``anchor_changed`` is absent when the diff was
+            # unknown (no git cache), which the outcome reads as "intent decides".
+            attributes["resolver_is_commenter"] = resolver_is_commenter
+            if entry.get("anchor_changed") is not None:
+                attributes["anchor_changed"] = bool(entry["anchor_changed"])
             if entry.get("comment_type"):
                 # prd/16: comment_type + thread_outcome are the labels the
                 # "comment tax" analysis (prd/15 Q4) joins on.
@@ -685,7 +701,46 @@ class Reducer:
         self._labels = {}
 
     # -- prd/16 text classification --------------------------------------
-    def _classify_batch(self, pr: PullRequest, ordered: list[dict]) -> dict:
+    def _text_context(
+        self,
+        pr: PullRequest,
+        *,
+        role: str,
+        keys: list[str],
+        commit_ids: set[str] | None = None,
+        thread_id: str | None = None,
+        comment_id: Any = None,
+        activity_id: Any = None,
+        ts: datetime | None = None,
+    ) -> dict:
+        """Where one classified text came from -- the trace's join key.
+
+        It rides in the raw-zone trace only (``<state-dir>/classify-trace.jsonl``)
+        so a relabel run can map a fresh answer back to the exact THREAD object
+        (and PR / commit) it belongs to, and an operator can see which PR a slow
+        call was for. None of it is raw content.
+        """
+        context = {
+            "repo": f"{pr.project}/{pr.repo}",
+            "pr_id": pr.id,
+            "role": role,
+            "thread_id": thread_id,
+            "comment_id": comment_id,
+            "activity_id": activity_id,
+            "ticket_keys": list(keys),
+            "ts": iso(ts) if ts is not None else None,
+        }
+        if commit_ids is not None:
+            context["commit_ids"] = sorted(str(c) for c in commit_ids)
+        return context
+
+    def _classify_batch(
+        self,
+        pr: PullRequest,
+        ordered: list[dict],
+        commit_ids: set[str] | None = None,
+        keys: list[str] | None = None,
+    ) -> dict:
         """Classify this PR's description + comment bodies in one bounded batch.
 
         The texts are exactly the ones :meth:`_comment_labels` /
@@ -703,10 +758,21 @@ class Reducer:
         classifier = self.classifier
         if classifier is None:
             return {}
-        items: list[tuple[str, str]] = []
+        keys = list(keys or ())
+        repo_label = f"{pr.project}/{pr.repo}"
+        items: list[tuple] = []
         description = str(pr.pr.get("description") or "").strip()
         if description:
-            items.append((description, classify.KIND_DESCRIPTION))
+            items.append(
+                (
+                    description,
+                    classify.KIND_DESCRIPTION,
+                    self._text_context(
+                        pr, role="description", keys=keys, commit_ids=commit_ids,
+                        ts=_ts(pr.pr.get("createdDate"), self.as_of),
+                    ),
+                )
+            )
         for activity in ordered:
             if str(activity.get("action") or "") != "COMMENTED":
                 continue
@@ -722,15 +788,32 @@ class Reducer:
                 continue
             body = str(comment.get("text") or "").strip()
             if body:
-                items.append((body, classify.KIND_COMMENT))
+                items.append(
+                    (
+                        body,
+                        classify.KIND_COMMENT,
+                        self._text_context(
+                            pr,
+                            role="opener",
+                            keys=keys,
+                            commit_ids=commit_ids,
+                            thread_id=f"THREAD:{repo_label}#{pr.id}:{comment['id']}",
+                            comment_id=comment["id"],
+                            activity_id=activity.get("id"),
+                            ts=_ts(activity.get("createdDate"), self.as_of),
+                        ),
+                    )
+                )
         if not items:
             return {}
-        # A text repeated inside one PR costs one request, not two.
-        unique = list(dict.fromkeys(items))
-        answers = classifier.classify_many(unique)
+        # No dedupe: an identical text in two threads still needs its own trace
+        # record, and the record is grouped by the thread it came from (the
+        # label map below stays keyed by content digest, so the reducer is
+        # unaffected).
+        answers = classifier.classify_many(items)
         return {
             (kind, classify.digest(text)): answer
-            for (text, kind), answer in zip(unique, answers)
+            for (text, kind, _context), answer in zip(items, answers)
         }
 
     def _batched(self, text: str, kind: str) -> tuple[dict, str] | None:
@@ -738,7 +821,13 @@ class Reducer:
         return self._labels.get((kind, classify.digest(text)))
 
     def _comment_labels(
-        self, actor: str, text: Any, severity: str, stats: Stats
+        self,
+        actor: str,
+        text: Any,
+        severity: str,
+        stats: Stats,
+        *,
+        context: dict | None = None,
     ) -> tuple[dict | None, str | None]:
         """Raw comment body -> (closed labels, backend version).
 
@@ -771,7 +860,7 @@ class Reducer:
             }, self.classifier.version
         answer = self._batched(body, classify.KIND_COMMENT)
         if answer is None:
-            labels = self.classifier.classify(body, classify.KIND_COMMENT)
+            labels = self.classifier.classify(body, classify.KIND_COMMENT, context)
             version = getattr(self.classifier, "last_version", "") or self.classifier.version
         else:
             labels, version = answer
@@ -783,7 +872,15 @@ class Reducer:
         return labels, version
 
     def _reply_answer(
-        self, comment: dict, ts: datetime, stats: Stats
+        self,
+        comment: dict,
+        ts: datetime,
+        stats: Stats,
+        *,
+        pr: PullRequest | None = None,
+        thread_id: str | None = None,
+        keys: list[str] | None = None,
+        commit_ids: set[str] | None = None,
     ) -> tuple[datetime, str] | None:
         """The first reply the classifier reads as an answer, or ``None``."""
         assert self.classifier is not None
@@ -792,7 +889,14 @@ class Reducer:
             body = str(reply.get("text") or "").strip()
             if not body:
                 continue
-            labels = self.classifier.classify(body, classify.KIND_COMMENT)
+            context = None
+            if pr is not None:
+                context = self._text_context(
+                    pr, role="reply", keys=list(keys or ()), commit_ids=commit_ids,
+                    thread_id=thread_id, comment_id=reply.get("id"),
+                    ts=_ts(reply.get("createdDate"), ts),
+                )
+            labels = self.classifier.classify(body, classify.KIND_COMMENT, context)
             if not labels["answered"]:
                 continue
             return (_ts(reply.get("createdDate"), ts), self._actor(reply.get("author"), stats))
@@ -815,7 +919,11 @@ class Reducer:
             return
         answer = self._batched(body, classify.KIND_DESCRIPTION)
         if answer is None:
-            labels = self.classifier.classify(body, classify.KIND_DESCRIPTION)
+            labels = self.classifier.classify(
+                body,
+                classify.KIND_DESCRIPTION,
+                self._text_context(pr, role="description", keys=[], ts=created),
+            )
         else:
             labels = answer[0]
         if not labels["question"]:

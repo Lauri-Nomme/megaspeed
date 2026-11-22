@@ -50,7 +50,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import mergebase
+from . import logs, mergebase
 from .transport import API, BitbucketError, _page
 
 #: ``/projects/<P>/repos/<R>`` and whatever follows it: the pull-request
@@ -478,7 +478,7 @@ class HansTransport:
             self._bases[pr_id] = answer
         if os.environ.get("MEGASPEED_GIT_TRACE"):
             print(
-                f"[hans-merge] {len(pairs)} pair(s) in "
+                f"[{logs.iso()}] [hans-merge] {len(pairs)} pair(s) in "
                 f"{time.monotonic() - started:.2f}s · {self.merge_base_binary}",
                 file=sys.stderr, flush=True,
             )
@@ -590,14 +590,14 @@ class HansTransport:
         except (OSError, subprocess.TimeoutExpired) as exc:
             if trace:
                 print(
-                    f"[hans-git] {' '.join(args)[:160]} · "
+                    f"[{logs.iso()}] [hans-git] {' '.join(args)[:160]} · "
                     f"{time.monotonic() - started:.2f}s · FAILED {exc}",
                     file=sys.stderr, flush=True,
                 )
             raise BitbucketError(f"git {args[0]} could not run: {exc}") from exc
         if trace:
             print(
-                f"[hans-git] {' '.join(args)[:160]} · "
+                f"[{logs.iso()}] [hans-git] {' '.join(args)[:160]} · "
                 f"{time.monotonic() - started:.2f}s · {len(proc.stdout)} bytes"
                 f" · rc={proc.returncode}",
                 file=sys.stderr, flush=True,

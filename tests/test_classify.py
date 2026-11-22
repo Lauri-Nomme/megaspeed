@@ -291,7 +291,8 @@ class SchemaContractTests(unittest.TestCase):
         self.assertEqual(body["format"], classify.schema_for(classify.KIND_COMMENT))
         self.assertEqual(body["options"]["temperature"], 0)
         self.assertFalse(body["stream"])
-        self.assertFalse(body["think"])
+        # Thinking is the default: the raw trace is a diagnostic record.
+        self.assertTrue(body["think"])
         self.assertEqual(body["model"], classify.DEFAULT_MODEL)
         self.assertEqual(
             [message["role"] for message in body["messages"]], ["system", "user"]
@@ -418,7 +419,7 @@ class OllamaOfflineTests(unittest.TestCase):
         self.assertEqual(self.timeout, 5)
         body = json.loads(self.request.data)
         self.assertEqual(body["format"], classify.schema_for(classify.KIND_COMMENT))
-        self.assertFalse(body["think"])
+        self.assertTrue(body["think"])
 
     def test_garbage_degrades_to_the_mock_and_is_counted(self):
         classifier = self._classifier({"message": {"content": "I think this is a nit."}})
@@ -619,6 +620,12 @@ class ClassificationConcurrencyTests(unittest.TestCase):
         # The operator can set it per run as well.
         from ingest.scrape_cli import build_parser
         self.assertEqual(build_parser().parse_args(["--llm-workers", "3"]).llm_workers, 3)
+        # Thinking is the diagnostic default; both switches exist.
+        args = build_parser().parse_args([])
+        self.assertIsNone(args.llm_think)
+        self.assertTrue(build_parser().parse_args(["--llm-think"]).llm_think)
+        self.assertFalse(build_parser().parse_args(["--no-llm-think"]).llm_think)
+        self.assertTrue(build_parser().parse_args(["--no-llm-trace"]).no_llm_trace)
 
 
 class ReducerBatchTests(unittest.TestCase):
@@ -672,13 +679,19 @@ class ReducerBatchTests(unittest.TestCase):
         self._reduce(pr)
         self.assertEqual(len(self.classifier.batches), 1)
         self.assertEqual(
-            [kind for _text, kind in self.classifier.batches[0]],
+            [item[1] for item in self.classifier.batches[0]],
             [classify.KIND_DESCRIPTION, classify.KIND_COMMENT, classify.KIND_COMMENT],
         )
         self.assertEqual(
-            [text for text, _kind in self.classifier.batches[0]],
+            [item[0] for item in self.classifier.batches[0]],
             ["PROJ-1: why two retries?", "nit: rename this variable",
              "this crashes on a null payload"],
+        )
+        self.assertEqual(
+            self.classifier.batches[0][0][2]["role"], "description"
+        )
+        self.assertEqual(
+            self.classifier.batches[0][1][2]["thread_id"], "THREAD:ENG/platform#1:101"
         )
 
     def test_a_batched_label_is_the_one_the_thread_gets(self):
@@ -706,11 +719,14 @@ class ReducerBatchTests(unittest.TestCase):
                       commentAction="ADDED"),
         ])
         stats = self._reduce(pr)
-        texts = [text for batch in self.classifier.batches for text, _kind in batch]
+        texts = [item[0] for batch in self.classifier.batches for item in batch]
         self.assertEqual(texts, ["typo in the docstring"])
         self.assertEqual(stats.bot_comments_skipped, 1)
 
-    def test_a_text_repeated_inside_one_pr_costs_one_request(self):
+    def test_a_text_repeated_in_two_threads_is_classified_and_traced_twice(self):
+        # The trace is per call and carries the thread it came from: a relabel
+        # run must be able to correct *both* threads, so an identical text in
+        # two threads is two records (the labels are, of course, identical).
         pr = _pr(description="", activities=[
             _activity(1, "OPENED", 0, ADA),
             _activity(2, "COMMENTED", 5, GRACE,
@@ -719,7 +735,11 @@ class ReducerBatchTests(unittest.TestCase):
                       comment=_comment(102, "nit: rename this"), commentAction="ADDED"),
         ])
         self._reduce(pr)
-        self.assertEqual(len(self.classifier.batches[0]), 1)
+        self.assertEqual(len(self.classifier.batches[0]), 2)
+        self.assertEqual(
+            [item[2]["thread_id"] for item in self.classifier.batches[0]],
+            ["THREAD:ENG/platform#1:101", "THREAD:ENG/platform#1:102"],
+        )
 
     def test_the_batch_is_dropped_after_the_pr(self):
         pr = _pr(activities=[_activity(1, "OPENED", 0, ADA)])
@@ -1354,9 +1374,9 @@ class ScrapeBundleTests(unittest.TestCase):
         class Recording(classify.MockClassifier):
             texts = 0
 
-            def classify(self, text, kind):
+            def classify(self, text, kind, context=None):
                 Recording.texts += 1
-                return super().classify(text, kind)
+                return super().classify(text, kind, context)
 
         report = scrape(
             self.cfg,

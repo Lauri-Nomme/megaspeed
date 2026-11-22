@@ -78,8 +78,11 @@ class ProgressReporterTests(unittest.TestCase):
         self.clock.advance(135)
         self.tick(prs_seen=3214, prs_kept=412, prs_skipped=2802, requests=1041, events=4120)
         line = self.lines()[0]
+        # Every emitted line carries a UTC stamp so it can be aligned with the
+        # model/server log; the payload after it is unchanged.
+        self.assertRegex(line, r"^\[\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\] ")
         self.assertEqual(
-            line,
+            line.split("] ", 1)[1],
             "[scrape] 02:15 elapsed · 3,214 PRs seen · 412 kept · 2,802 skipped"
             " · 1,041 req · 4,120 events · 23.8 PR/s · 7.7 req/s",
         )
@@ -139,10 +142,11 @@ class ProgressCliTests(unittest.TestCase):
         self.assertNotIn("[scrape]", out)
         report = json.loads(out)  # stdout stayed a single machine-readable document
         self.assertEqual(report["mode"], "scrape")
-        line = next(line for line in err.splitlines() if line.startswith("[scrape]"))
+        line = next(line for line in err.splitlines() if "[scrape]" in line)
         self.assertRegex(
             line,
-            r"^\[scrape\] \d\d:\d\d elapsed · [\d,]+ PRs seen · [\d,]+ kept"
+            r"^\[\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z\] \[scrape\]"
+            r" \d\d:\d\d elapsed · [\d,]+ PRs seen · [\d,]+ kept"
             r" · [\d,]+ skipped · [\d,]+ req · [\d,]+ events"
             r" · [\d.]+ PR/s · [\d.]+ req/s$",
         )
