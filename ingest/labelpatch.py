@@ -302,6 +302,9 @@ def apply_patch(con, patch: LabelPatch) -> dict:
     Idempotent and label-only: an ``UPDATE`` of the ``attributes`` JSON, never
     an insert or delete. Returns which rows matched, so a patch built from a
     different store is visible instead of silently doing nothing.
+
+    Threads are merged in **bulk** (one ``SELECT ... IN`` plus one
+    ``UPDATE ... FROM``): a 13k-thread corpus is a second, not a minute.
     """
     stats = {
         "threads": 0,
@@ -310,49 +313,66 @@ def apply_patch(con, patch: LabelPatch) -> dict:
         "questions": 0,
         "questions_missing": 0,
     }
-    for row in patch.rows:
-        if row["target"] == "thread":
-            found = con.execute(
-                "SELECT attributes FROM objects WHERE object_type = 'THREAD'"
-                " AND object_id = ?",
-                [row["object_id"]],
-            ).fetchone()
-            if found is None:
+    thread_rows = [row for row in patch.rows if row["target"] == "thread"]
+    if thread_rows:
+        existing: dict[str, dict] = {}
+        ids = [row["object_id"] for row in thread_rows]
+        for start in range(0, len(ids), 5000):
+            chunk = ids[start : start + 5000]
+            placeholders = ",".join("?" * len(chunk))
+            for object_id, attributes in con.execute(
+                "SELECT object_id, CAST(attributes AS VARCHAR) FROM objects"
+                f" WHERE object_type = 'THREAD' AND object_id IN ({placeholders})",
+                chunk,
+            ).fetchall():
+                existing[object_id] = json.loads(attributes or "{}")
+        changes: list[tuple[str, str]] = []
+        for row in thread_rows:
+            attributes = existing.get(row["object_id"])
+            if attributes is None:
                 stats["threads_missing"] += 1
                 continue
-            attributes = found[0] if isinstance(found[0], dict) else json.loads(found[0] or "{}")
             merged = {**attributes, **row["labels"]}
             if merged == attributes:
                 stats["threads_unchanged"] += 1
                 continue
+            changes.append((row["object_id"], _compact(merged)))
+        if changes:
+            merged_rel = con.values(*changes)
             con.execute(
-                "UPDATE objects SET attributes = CAST(? AS JSON)"
-                " WHERE object_type = 'THREAD' AND object_id = ?",
-                [_compact(merged), row["object_id"]],
+                "UPDATE objects SET attributes = CAST(m.col1 AS JSON)"
+                " FROM merged_rel m"
+                " WHERE objects.object_type = 'THREAD' AND objects.object_id = m.col0"
             )
-            stats["threads"] += 1
-        else:
-            events = con.execute(
-                "SELECT e.event_key, CAST(e.attributes AS VARCHAR)"
-                " FROM events e JOIN event_objects r ON e.event_key = r.event_key"
-                " WHERE e.activity = 'question_raised'"
-                "   AND r.object_type = ? AND r.object_id = ?",
-                [row["object_id"].split(":", 1)[0], row["object_id"]],
-            ).fetchall()
-            # A PR also relates to its threads' questions; only the description
-            # event (`…:desc:q`) is the PR's own phase. Same rule as relabel.
-            if row["object_id"].startswith("PR:"):
-                events = [event for event in events if str(event[0]).endswith(":desc:q")]
-            if not events:
-                stats["questions_missing"] += 1
+            stats["threads"] = len(changes)
+
+    for row in patch.rows:
+        if row["target"] != "question":
+            continue
+        events = con.execute(
+            "SELECT e.event_key, CAST(e.attributes AS VARCHAR)"
+            " FROM events e JOIN event_objects r ON e.event_key = r.event_key"
+            " WHERE e.activity = 'question_raised'"
+            "   AND r.object_type = ? AND r.object_id = ?",
+            [row["object_id"].split(":", 1)[0], row["object_id"]],
+        ).fetchall()
+        # A PR also relates to its threads' questions; only the description
+        # event (`…:desc:q`) is the PR's own phase. Same rule as relabel.
+        if row["object_id"].startswith("PR:"):
+            events = [event for event in events if str(event[0]).endswith(":desc:q")]
+        if not events:
+            stats["questions_missing"] += 1
+            continue
+        for event_key, attributes in events:
+            current = json.loads(attributes or "{}")
+            merged = {**current, **row["labels"]}
+            if merged == current:
                 continue
-            for event_key, attributes in events:
-                current = json.loads(attributes or "{}")
-                con.execute(
-                    "UPDATE events SET attributes = CAST(? AS JSON) WHERE event_key = ?",
-                    [_compact({**current, **row["labels"]}), event_key],
-                )
-                stats["questions"] += 1
+            con.execute(
+                "UPDATE events SET attributes = CAST(? AS JSON) WHERE event_key = ?",
+                [_compact(merged), event_key],
+            )
+            stats["questions"] += 1
     return stats
 
 
