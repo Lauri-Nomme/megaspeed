@@ -1232,8 +1232,19 @@ def queues(request: Request):
             payload = analyse.queue_series(court, level, window, bucket_hours)
             # prd/42 M7: a pseudonym legend by role (sentinel / bot / author /
             # reviewer / story owner) — never a real name (prd/02). A repo scope
-            # lists only the people who act in that repo (prd/49).
-            payload["legend"] = analyse.person_legend(court, jira.stories)
+            # lists only the people who act in that repo (prd/49), and prd/67
+            # W-02 lists only the people who acted in *this window*.
+            #
+            # A Jira-only store has no PR intervals, so `window_from_events`
+            # collapses to the snapshot (a point in time). The legend's own clock
+            # is the story-extended one the Rules tab uses, so "no activity in
+            # this window" stays a statement about the chosen timeframe.
+            legend_window = window
+            if window[1] <= window[0]:
+                legend_window = insights_rules.window_for(court, _days(days), jira)
+            payload["legend"] = analyse.person_legend(
+                court, jira.stories, window=legend_window,
+            )
             # prd/44 DES-5: the calendar identity travels with the hours.
             payload["calendar_id"] = court.calendar_id
             payload["repo"] = repo
@@ -1591,7 +1602,10 @@ def insights(request: Request):
     payload["repo"] = repo
     # prd/53 §2: the pseudonym legend rides with the rules too, so "who is the
     # sentinel" is answerable next to the worklog card without visiting Queue.
-    payload["legend"] = analyse.person_legend(court, jira.stories if jira else None)
+    # prd/67 W-02: the same window as the rules, so the chips match the cards.
+    payload["legend"] = analyse.person_legend(
+        court, jira.stories if jira else None, window=window,
+    )
     return payload
 
 
