@@ -2,8 +2,8 @@
 
 Every view used to name a different bottleneck at a different magnitude, and the
 Rules page recommended four levers at once — accurate, but not decisive. This
-module answers with **one** sentence: the station with the largest *removable*
-wait pool, on **one** canonical clock, with the at-stake hours and the items
+module answers with **one** sentence: the station with the largest queue owed
+**now**, on **one** canonical clock, with the at-stake hours and the items
 behind it. It then walks Goldratt's ladder so *elevate* (more capacity) is never
 proposed while *exploit* options are still unrun.
 
@@ -13,12 +13,18 @@ The definitions are the ones ``docs/concepts.md`` §6 now carries:
   (``refine`` · ``plan`` · ``start`` · ``develop`` · ``review`` · ``verify``).
   The stations *partition* the nine segments, so a segment belongs to exactly
   one station and the pools cannot double-count a wait.
-* **removable pool** — a station's open wait an action can remove now:
+* **removable pool** — a station's open wait an action can remove:
   ``live_hours`` (in-station age of open stories with a live PR) + ``tail_hours``
   (the completed stories' station hours above the station's own p85). It is not
-  the station's total, and it is never added to ``history_hours``.
-* **constraint verdict** — the station with the largest removable pool, reported
-  with its holder split, its ties (within 10 %), and its adjacent findings.
+  the station's total, and it is never added to ``history_hours``. The pool table
+  keeps it for reference; the **verdict ranks ``live_hours`` alone** — what is
+  owed *now* — because a historical tail is not a queue anyone can work.
+* **constraint verdict** — the station with the largest *current* queue
+  (``removable_now_hours = live_hours``), reported with its holder split, its
+  ties (within 10 %), and its adjacent findings. A station with ``live == 0``
+  cannot be the constraint: when every station is at zero the payload says so
+  (``constraint: null``, a plain ``note`` and the top ``historical`` tails), so a
+  window with no PRs never dresses history up as a live bottleneck.
 
 **One clock per concept.** The station pools are **story-clock** business hours
 measured from the same segment boundaries the ticket page draws (the assignee's
@@ -179,6 +185,11 @@ EXPLOIT_NOTE = (
     "rules' claim, not the lab's."
 )
 NO_CONSTRAINT = "No constraint worth naming this week"
+NO_QUEUE_HEAD = "No current queue is visible in this window: {owed:g} h owed now."
+NO_QUEUE_TAIL = "this is history, not a live constraint."
+NO_QUEUE_EMPTY = "No completed story left an abnormal tail in this window either."
+#: How many historical tails the payload names (the note names the first two).
+HISTORICAL_LIMIT = 3
 HOLDER_NOTE = (
     "Holder hours are person-hours with the ball in review, priced on each "
     "holder's own calendar (the PR ball clock) — not response time, not "
@@ -351,6 +362,9 @@ def pools(court, data, window=None) -> dict:
             "live_hours": live,
             "open_n": len(live_rows),
             "removable_hours": round(live + tail, 2),
+            # the verdict's number: what is owed *now*. The tail above is a
+            # historical fact and never a queue (prd/67 W-04).
+            "removable_now_hours": live,
             "items": [
                 {"key": row["key"], "hours": row["hours"], "href": row["href"]}
                 for row in sorted(live_rows, key=lambda item: -float(item["hours"] or 0))
@@ -359,27 +373,93 @@ def pools(court, data, window=None) -> dict:
     return out
 
 
+def _now_hours(pool: dict) -> float:
+    """A station's queue owed now — never its historical tail."""
+    return round(max(0.0, float(
+        pool.get("removable_now_hours", pool.get("live_hours", 0.0)) or 0.0
+    )), 2)
+
+
 def rank_pools(pool_table: dict) -> list[dict]:
-    """Stations by removable pool, largest first (ties broken by station order)."""
+    """Stations by queue owed **now**, then by the reference removable pool.
+
+    The verdict is live-first (prd/67 W-04): a station with no live PR cannot be
+    the constraint. ``removable_hours`` (live + tail) is the second key only so
+    the reference table is ordered sensibly among stations that owe nothing now.
+    """
     order = {sid: index for index, sid in enumerate(STATION_IDS)}
     return sorted(
         pool_table.values(),
-        key=lambda pool: (-pool["removable_hours"], order[pool["station"]]),
+        key=lambda pool: (
+            -_now_hours(pool),
+            -round(float(pool.get("removable_hours") or 0.0), 2),
+            order[pool["station"]],
+        ),
     )
 
 
+def historical(pool_table: dict, limit: int = HISTORICAL_LIMIT) -> list[dict]:
+    """The largest completed-story tails, largest first (history, not a queue)."""
+    order = {sid: index for index, sid in enumerate(STATION_IDS)}
+    rows = [
+        pool for pool in pool_table.values()
+        if float(pool.get("tail_hours") or 0.0) > 0
+    ]
+    rows.sort(key=lambda pool: (
+        -round(float(pool.get("tail_hours") or 0.0), 2),
+        order[pool["station"]],
+    ))
+    return [
+        {
+            "station": pool["station"],
+            "label": pool["label"],
+            "tail_hours": round(float(pool.get("tail_hours") or 0.0), 2),
+        }
+        for pool in rows[:max(0, int(limit))]
+    ]
+
+
+def no_queue_note(pool_table: dict) -> str:
+    """The plain sentence for a window in which no station owes work now.
+
+    A zero-owed historical tail is a fact, not a constraint: name the largest
+    tails as history and say so, instead of manufacturing a station (prd/67 W-04).
+    """
+    owed = round(sum(_now_hours(pool) for pool in pool_table.values()), 2)
+    head = NO_QUEUE_HEAD.format(owed=owed)
+    tails = historical(pool_table, limit=2)
+    if not tails:
+        return f"{head} {NO_QUEUE_EMPTY}"
+    named = " and ".join(
+        f"{row['label']} ({row['tail_hours']:g} h)" for row in tails
+    )
+    noun = "tails are" if len(tails) > 1 else "tail is"
+    return f"{head} The largest historical {noun} {named}; {NO_QUEUE_TAIL}"
+
+
 def constraint(pool_table: dict) -> dict | None:
-    """The largest removable pool, with its ties (within 10 %) named."""
+    """The largest current queue, with its ties (within 10 %) named.
+
+    Ranks by what is owed **now** (``removable_now_hours`` = ``live_hours``).
+    A station with ``live_hours == 0`` can never be the constraint, however
+    large its historical tail (prd/67 W-04); when every station is at zero this
+    returns ``None`` and the caller states the no-current-queue note instead.
+    """
     ranked = rank_pools(pool_table)
-    if not ranked or ranked[0]["removable_hours"] <= 0:
+    if not ranked or _now_hours(ranked[0]) <= 0:
         return None
     top = ranked[0]
+    top_now = _now_hours(top)
     tied = [
-        {"station": pool["station"], "label": pool["label"],
-         "removable_hours": pool["removable_hours"]}
+        {
+            "station": pool["station"],
+            "label": pool["label"],
+            "removable_hours": pool.get("removable_hours", 0.0),
+            "removable_now_hours": _now_hours(pool),
+        }
         for pool in ranked[1:]
-        if pool["removable_hours"] > 0
-        and pool["removable_hours"] >= top["removable_hours"] * (1.0 - TIE_SHARE)
+        if _now_hours(pool) > 0
+        and _now_hours(pool) >= top_now * (1.0 - TIE_SHARE)
     ]
     return {**top, "tied_with": tied, "hours_kind": "story"}
 
@@ -743,11 +823,16 @@ def verdict(court, data, window, suggestions=None, cross_check=None) -> dict:
 
     ``available: false`` with a stated reason (never a zero-filled card) when the
     window has fewer than :data:`MIN_COMPLETED` finished stories or the largest
-    removable pool is under one waiting week. The full ranking still travels in
-    ``pools`` so the disclosure can show it.
+    removable pool (live + tail) is under one waiting week. A window with
+    completed work but no live queue (e.g. a Jira-only store with no PRs) is
+    **available** with ``constraint: null``, a plain ``note`` and the top
+    ``historical`` tails — the data is fine, there is simply nothing owed now
+    (prd/67 W-04). The full ranking still travels in ``pools`` so the disclosure
+    can show it.
     """
     pool_table = pools(court, data, window)
     constraint_block = constraint(pool_table)
+    historical_rows = historical(pool_table)
     completed_n = max((pool["n_completed"] for pool in pool_table.values()), default=0)
     done_keys = jira.done_keys(data)
     delivery = ballcourt.delivery_list(court, done_tickets=done_keys)
@@ -795,9 +880,14 @@ def verdict(court, data, window, suggestions=None, cross_check=None) -> dict:
             f"no verdict: the window has {completed_n} completed "
             f"storie{'s' if completed_n != 1 else 'y'} (needs {MIN_COMPLETED})"
         )
-    elif constraint_block is None or constraint_block["removable_hours"] < FLOOR_HOURS:
+    elif constraint_block is None:
+        # The data is fine; nothing is owed now. History is named as history
+        # (prd/67 W-04), never dressed up as a constraint.
+        available = True
+        note = no_queue_note(pool_table)
+    elif constraint_block["removable_hours"] < FLOOR_HOURS:
         available = False
-        biggest = constraint_block["removable_hours"] if constraint_block else 0.0
+        biggest = constraint_block["removable_hours"]
         note = (
             f"{NO_CONSTRAINT}: the largest removable pool is {biggest:g} h, "
             f"under one waiting week ({FLOOR_HOURS:g} h). The full ranking is "
@@ -812,6 +902,7 @@ def verdict(court, data, window, suggestions=None, cross_check=None) -> dict:
         "calendar_id": court.calendar_id,
         "window": {"start": iso(start), "end": iso(end), "days": days},
         "constraint": constraint_block,
+        "historical": historical_rows,
         "pools": rank_pools(pool_table),
         "holders": holder_block,
         "adjacent": findings,
@@ -823,16 +914,16 @@ def verdict(court, data, window, suggestions=None, cross_check=None) -> dict:
             "note": EXPLOIT_NOTE,
         },
         "ladder": rungs,
-        "next": [
+        "next": [] if constraint_block is None else [
             {
                 "station": pool["station"],
                 "label": pool["label"],
                 "removable_hours": pool["removable_hours"],
+                "removable_now_hours": pool["removable_now_hours"],
             }
             for pool in rank_pools(pool_table)
             if pool["removable_hours"] > 0
-            and (constraint_block is None
-                 or pool["station"] != constraint_block["station"])
+            and pool["station"] != constraint_block["station"]
         ],
         "liveness": {
             "open_prs": len(delivery_rows),
@@ -856,7 +947,8 @@ def verdict(court, data, window, suggestions=None, cross_check=None) -> dict:
             "one canonical clock: station pools are business hours on the story "
             "clock (the segment boundaries the ticket page draws, assignee's "
             "calendar); the review detail's holders use the PR ball clock. "
-            "removable = live hours + the completed stories' hours above the "
-            "station's own p85."
+            "The verdict ranks the queue owed now (live hours); removable = live "
+            "hours + the completed stories' hours above the station's own p85 is "
+            "the reference pool, and the tail is history, not a live constraint."
         ),
     }
