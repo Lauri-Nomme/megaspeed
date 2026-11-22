@@ -63,25 +63,31 @@ class ProgressReporter:
         requests: int,
         events: int,
         elapsed: float | None = None,
+        unit: str = "PR",
     ) -> str:
-        """One progress line. Pure formatting, so it is testable on its own."""
+        """One progress line. Pure formatting, so it is testable on its own.
+
+        ``unit`` names the walked rows: ``PR`` for the Bitbucket half, ``issue``
+        for the Jira half (the counters are shared, the noun is not).
+        """
         seconds = (self.clock() - self.started) if elapsed is None else elapsed
+        plural = unit if unit.endswith("s") else unit + "s"
 
         def rate(count: int) -> str:
             return f"{count / seconds:.1f}" if seconds > 0 else "—"
 
         return (
             f"[scrape] {format_elapsed(seconds)} elapsed"
-            f" · {prs_seen:,} PRs seen"
+            f" · {prs_seen:,} {plural} seen"
             f" · {prs_kept:,} kept"
             f" · {prs_skipped:,} skipped"
             f" · {requests:,} req"
             f" · {events:,} events"
-            f" · {rate(prs_seen)} PR/s"
+            f" · {rate(prs_seen)} {unit}/s"
             f" · {rate(requests)} req/s"
         )
 
-    def tick(self, **counts: int) -> bool:
+    def tick(self, *, unit: str = "PR", **counts: int) -> bool:
         """Print a line if the interval elapsed. Returns True when it printed.
 
         Callers invoke this at loop boundaries; the interval gate means a fast
@@ -94,7 +100,7 @@ class ProgressReporter:
         if now - self.last < self.interval:
             return False
         self.last = now
-        return self.emit(self.line(**counts))
+        return self.emit(self.line(unit=unit, **counts))
 
     def emit(self, text: str) -> bool:
         self.stream.write(text + "\n")

@@ -1084,6 +1084,7 @@ def collect(
                 )
                 if progress is not None:
                     progress.tick(
+                        unit="issue",
                         prs_seen=stats.issues_seen,
                         prs_kept=stats.issues_kept,
                         prs_skipped=stats.issues_skipped,
