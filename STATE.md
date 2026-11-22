@@ -36,6 +36,20 @@ Tests: **1461** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`)
   policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
   22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
 
+## Data repair — live store rekey (2026-11-23)
+
+The Bitbucket half was imported with surname-first pseudonyms (`NoLa`) while Jira
+had `LaNo`. Since BB events/objects are exactly the rows with `repo IS NOT NULL`,
+the store itself gave the mapping: 57 BB actors had their initials swapped;
+per-event PERSON links (actor, reviewer, assignee) were remapped with the same
+table, so `NoLa`→`LaNo` merges with Jira (17,841 events), `MiMe` 5,470, `FuSu`
+6,932, etc. `BuMa`/`MaBu` are two mirrored humans (both sides), handled as a
+source-scoped swap rather than a merge; `ClLa` is a BB/Jira split (`LaCl`).
+PERSON rows went 329→223 (merged plus pre-existing orphans), events unchanged at
+76,213, `--verify` OK. Backup: `/data/personal/work/demo-tlla.pre-rekey.duckdb`.
+The laptop's `identity.json` still holds the old pseudonyms: swap its `bb:`
+entries before the next scrape, or the rekeyed actors come back.
+
 ## v0.17.3 — name order, cross-source linking, concurrent relabel
 
 **Actor bug:** Bitbucket's `users.json` renders `"Nomme, Lauri"` while Jira
