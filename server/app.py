@@ -2432,6 +2432,13 @@ def simulate(request: Request):
             # prd/49: the lab calibrates on the repo's own cohort.
             court, jira = _repo_scope(bundle.court, jira, repo)
             window = analyse.window_from_events(court, _days(days))
+            # prd/68 F-04: a Jira-only store has no PR intervals, so the court
+            # window collapses to the snapshot — every Jira measurement (the
+            # refinement segment included) then reads as empty and the lab
+            # claims "no Jira layer". Calibrate on the story-extended window
+            # the Rules page already uses when the court window is degenerate.
+            if window[1] <= window[0]:
+                window = insights_rules.window_for(court, _days(days), jira)
             refinement = jira_analysis.refinement_cost(court, jira, window)
             calibration = policy_lab.calibrate(
                 court, window, conn=con, refinement=refinement,

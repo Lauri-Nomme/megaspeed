@@ -86,14 +86,16 @@ test('prd/64 F-03: null refinement hours means the knob is unavailable', () => {
   assert.equal(refinementUnavailable(undefined), false);
 });
 
-test('the refine knob is disabled and says "not measurable (no Jira layer)"', () => {
+test('the refine knob is disabled and names the missing segment', () => {
   const markup = policyConfigMarkup(defaultScenario(), unmeasured);
   const refine = markup.match(/<input[^>]*data-knob="refine_before_start"[^>]*>/)[0];
   assert.match(refine, /disabled/);
   assert.match(refine, /aria-disabled="true"/);
   // a scenario serialised from an earlier state cannot smuggle it back in
   assert.doesNotMatch(refine, / checked/);
-  assert.match(markup, /id="policy-knob-refine_before_start-note"[^>]*>not measurable \(no Jira layer\)/);
+  // prd/68 F-04: the note quotes the calibration's own basis, so a Jira store
+  // with no measured segment never claims it has no Jira layer.
+  assert.match(markup, /id="policy-knob-refine_before_start-note"[^>]*>not measurable — no measured created → ready segment/);
   // the other knobs stay usable: only refinement lacks a measured input
   const wip = markup.match(/<select[^>]*data-knob="wip_limit"[^>]*>/)[0];
   assert.doesNotMatch(wip, /disabled/);
@@ -103,7 +105,7 @@ test('the refine preset is disabled with the same reason', () => {
   const markup = policyConfigMarkup(defaultScenario(), unmeasured);
   const preset = markup.match(/<button[^>]*data-preset="refine"[^>]*>/)[0];
   assert.match(preset, /disabled/);
-  assert.match(preset, /title="not measurable \(no Jira layer\)"/);
+  assert.match(preset, /title="not measurable — no measured created → ready segment/);
   const other = markup.match(/<button[^>]*data-preset="sla4"[^>]*>/)[0];
   assert.doesNotMatch(other, /disabled/);
 });

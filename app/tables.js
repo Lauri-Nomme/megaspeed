@@ -504,7 +504,19 @@ export function doneOpenMarkup(delivery, { base = '', scope = null, id = 'done-o
       return matchesScope(probe, scope);
     });
   }
-  if (!done || !done.available) return '';
+  if (!done) return '';
+  if (!done.available) {
+    // prd/68 F-10: with no PR layer the panel cannot say a ticket's code was
+    // merged. Neutral pill, the real reason, never a green "none — every
+    // ticket marked Done has its code merged".
+    return `<section class="panel wide done-open-panel" id="${esc(id)}"
+        data-done-open-unavailable>
+      <div class="panel-head"><h2>Done in Jira, PR open</h2>
+        <span class="pill neutral">unavailable</span></div>
+      <p class="panel-note">${esc(done.unavailable_reason || done.note ||
+        'unavailable: this panel needs both the Jira and the PR layer')}</p>
+    </section>`;
+  }
   const scoped = Boolean(scope && scope.kind !== 'all');
   if (!rows.length) {
     // prd/63 B7: "none" under a scope means none *in this scope*, not "every
