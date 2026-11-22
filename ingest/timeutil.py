@@ -28,6 +28,14 @@ def to_naive_utc(value: datetime | int | float | str) -> datetime:
         text = str(value).strip()
         if not text:
             raise ValueError("empty timestamp")
+        if text.endswith("Z"):
+            # The bundle's own encoding (``…T19:02:14Z``): already UTC, so the
+            # parse skips the astimezone conversion. 128k of these per read is
+            # a measurable share of a big bundle's load time.
+            try:
+                return datetime.fromisoformat(text[:-1])
+            except ValueError:
+                pass
         dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc).replace(tzinfo=None)

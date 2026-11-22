@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1441** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
+Tests: **1444** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -35,6 +35,18 @@ Tests: **1441** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`)
   flash echo, scope-consistent aging counts/chart/re-plan, non-colliding percentile labels, the
   policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
   22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
+
+## v0.16.4 — one read per artifact
+
+The relabel capture mode read the bundle twice (once to scope the replay, once
+to patch) — now one parse serves both. `is_label_patch` used to call
+`getmembers()`, decompressing the whole archive just to pick a reader; it now
+stops at the first member (0.5 ms instead of 35 ms on the 2.9 MB hans bundle,
+and no full scan on a 100 MB one). Bundle timestamps ending in `Z` parse without
+a tz conversion (~7 % off the 81k-row parse). The gzip itself was never the
+bottleneck: ~65 ms of the ~900 ms `read_bundle`; JSON + closed-vocabulary
+validation is the rest. Tests pin one read per relabel and a sniff that never
+scans the archive.
 
 ## v0.16.0 — raw-zone LLM trace + label-only relabel (prd/69)
 

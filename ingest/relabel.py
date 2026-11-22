@@ -329,6 +329,7 @@ def relabel(
     bundle_path = Path(bundle_path).expanduser()
     out = Path(out).expanduser()
     reporter = progress if progress is not None else ProgressReporter(interval=30)
+    bundle = read_bundle(bundle_path)
     records: list[dict] = []
     bad = 0
     source_label = ""
@@ -337,11 +338,9 @@ def relabel(
 
         transport = HansTransport(hans_scrape)
         source_label = f"capture {transport.root}"
-        bundle_for_records = read_bundle(bundle_path)
         identity = IdentityTable(Path(identity_path).expanduser()) if identity_path else None
-        records = _records_from_hans(
-            cfg, transport, bundle_for_records, reporter, identity=identity
-        )
+        # One read: the same parsed bundle scopes the replay and is patched.
+        records = _records_from_hans(cfg, transport, bundle, reporter, identity=identity)
         texts_seen = len(records)
     else:
         if trace_path is None:
@@ -358,7 +357,6 @@ def relabel(
     items = _replay_items(records)
     if limit is not None:
         items = items[: max(0, int(limit))]
-    bundle = read_bundle(bundle_path)
     threads, questions, prs = _index(bundle)
     text = classifier if classifier is not None else classify.for_scrape(cfg, "hans")
     if text is None:

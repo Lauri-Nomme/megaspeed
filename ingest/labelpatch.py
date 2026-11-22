@@ -173,18 +173,25 @@ def is_label_patch(path: str | Path) -> bool:
     """``True`` when the tgz says ``kind: label-patch`` (a cheap sniff).
 
     A corrupt or unreadable file is not a label patch; the ordinary bundle
-    reader then reports the real error.
+    reader then reports the real error. The manifest is the **first** member of
+    both containers, so this stops there: sniffing must not decompress a 100 MB
+    bundle just to decide which reader to hand it to.
     """
     path = Path(path)
     if not path.is_file():
         return False
     try:
         with tarfile.open(path, "r:gz") as tar:
-            member = next(
-                (m for m in tar.getmembers()
-                 if Path(m.name).as_posix() in (MANIFEST, f"{BUNDLE_DIR}/{MANIFEST}")),
-                None,
-            )
+            member = None
+            for _ in range(8):  # the manifest is first; never scan the archive
+                candidate = tar.next()
+                if candidate is None:
+                    break
+                if Path(candidate.name).as_posix() in (
+                    MANIFEST, f"{BUNDLE_DIR}/{MANIFEST}"
+                ):
+                    member = candidate
+                    break
             if member is None:
                 return False
             handle = tar.extractfile(member)

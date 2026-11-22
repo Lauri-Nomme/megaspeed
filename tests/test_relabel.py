@@ -22,6 +22,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ingest import classify, fixtures, labelpatch
 from ingest.bundle import read_bundle
@@ -604,6 +605,93 @@ class HansSourceRelabelTests(unittest.TestCase):
             progress=QUIET,
         )
         self.assertEqual(report["replayable"], 1)
+
+
+class BundleIoOptimizationTests(unittest.TestCase):
+    """One artifact, one read: no re-unpacking per text or per phase."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_relabel_reads_the_bundle_exactly_once_from_a_capture(self):
+        from ingest.relabel import read_bundle as relabel_read_bundle
+
+        capture = _hans_capture(self.root)
+        cfg = _config(self.root)
+        cfg.repos = [("DEMO", "widget")]
+        cfg.ticket_projects = ("DEMO",)
+        from ingest.hans import HansTransport
+
+        bundle = self.root / "export" / "hans.tgz"
+        scrape(cfg, HansTransport(capture), "hans", out=bundle,
+               state_dir=self.root / "hans.state",
+               text_classifier=classify.MockClassifier(), progress=QUIET)
+        calls = []
+        real = relabel_read_bundle
+
+        def counted(path):
+            calls.append(path)
+            return real(path)
+
+        with mock.patch("ingest.relabel.read_bundle", side_effect=counted):
+            relabel(
+                cfg,
+                hans_scrape=capture,
+                bundle_path=bundle,
+                out=self.root / "labels.tgz",
+                classifier=Recording(),
+                progress=QUIET,
+            )
+        self.assertEqual(len(calls), 1, calls)
+
+    def test_the_patch_sniff_does_not_scan_the_whole_archive(self):
+        import tarfile
+
+        capture = _hans_capture(self.root)
+        cfg = _config(self.root)
+        cfg.repos = [("DEMO", "widget")]
+        cfg.ticket_projects = ("DEMO",)
+        from ingest.hans import HansTransport
+
+        bundle = self.root / "export" / "hans.tgz"
+        scrape(cfg, HansTransport(capture), "hans", out=bundle,
+               state_dir=self.root / "hans.state",
+               text_classifier=classify.MockClassifier(), progress=QUIET)
+
+        def refuse(self):  # pragma: no cover - called only on a regression
+            raise AssertionError("is_label_patch must not call getmembers()")
+
+        with mock.patch.object(tarfile.TarFile, "getmembers", refuse):
+            self.assertFalse(labelpatch.is_label_patch(bundle))
+            patch = self.root / "labels.tgz"
+            labelpatch.write_patch(
+                patch,
+                manifest={"created_at": "x", "source": "hans",
+                          "classifier_version": "deterministic-v2"},
+                rows=[],
+            )
+            self.assertTrue(labelpatch.is_label_patch(patch))
+
+    def test_a_z_timestamp_parses_like_an_explicit_utc_offset(self):
+        from ingest.timeutil import to_naive_utc
+
+        self.assertEqual(
+            to_naive_utc("2026-11-22T07:12:03Z"),
+            to_naive_utc("2026-11-22T07:12:03+00:00"),
+        )
+        self.assertEqual(
+            str(to_naive_utc("2026-11-22T07:12:03.421Z")),
+            "2026-11-22 07:12:03.421000",
+        )
+        # A real offset must still be converted, not assumed UTC.
+        self.assertEqual(
+            str(to_naive_utc("2026-11-22T09:12:03+02:00")),
+            "2026-11-22 07:12:03",
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover
