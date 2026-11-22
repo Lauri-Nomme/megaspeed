@@ -440,13 +440,35 @@ class OllamaOfflineTests(unittest.TestCase):
             raise OSError("connection refused")
 
         classifier = classify.OllamaClassifier("http://llm.invalid", opener=opener, max_failures=3)
+        seen: list[str] = []
+        classifier.on_fallback = lambda exc: seen.append(str(exc))
         for _ in range(10):
             labels = classifier.classify("nit: rename", classify.KIND_COMMENT)
             self.assertEqual(labels["comment_type"], "nit")
         self.assertEqual(len(calls), 3, "the breaker must stop the requests")
         self.assertTrue(classifier.down)
         self.assertEqual(classifier.fallbacks, 10)
-        self.assertTrue(classifier.report()["down"])
+        # The first failure is surfaced once and recorded: a 100%-fallback run
+        # can no longer look like a working one at the end.
+        self.assertEqual(len(seen), 1)
+        self.assertIn("connection refused", classifier.last_error)
+        report = classifier.report()
+        self.assertTrue(report["down"])
+        self.assertEqual(report["url"], "http://llm.invalid")
+        self.assertIn("connection refused", report["last_error"])
+
+    def test_a_good_answer_leaves_no_error(self):
+        classifier = self._classifier({"message": {"content": json.dumps({
+            "comment_type": "nit", "thread_intent": "acted",
+            "question": False, "answered": False, "phase": "review",
+        })}})
+        seen: list[str] = []
+        classifier.on_fallback = lambda exc: seen.append(str(exc))
+        labels = classifier.classify("nit: rename", classify.KIND_COMMENT)
+        self.assertEqual(labels["comment_type"], "nit")
+        self.assertEqual(classifier.fallbacks, 0)
+        self.assertEqual(classifier.last_error, "")
+        self.assertEqual(seen, [])
 
     def test_the_report_records_backend_model_and_counts(self):
         classifier = self._classifier({"message": {"content": "{}"}})

@@ -1210,7 +1210,10 @@ def scrape(
         else:
             model = getattr(text, "model", "") or text.version
             workers = getattr(text, "workers", 1)
-            text_label = f"text {text.backend}:{model} ({workers}w)"
+            url = getattr(text, "url", "")
+            text_label = (
+                f"text {text.backend}:{model}{('@' + url) if url else ''} ({workers}w)"
+            )
         reporter.emit(
             f"[scrape] {source} · {repos_label} · writing {out}"
             f"{key_scope} · {text_label}"
@@ -1227,6 +1230,15 @@ def scrape(
                     )
 
             text.on_progress = _text_progress
+
+            def _text_failed(exc: Exception) -> None:
+                fallback = getattr(getattr(text, "fallback", None), "version", "mock")
+                reporter.emit(
+                    f"[scrape] text classifier failed: {exc} — falling back to"
+                    f" {fallback} (later failures are silent)"
+                )
+
+            text.on_fallback = _text_failed
     quiet_check = (source not in ("fixture", "hans")) if verify_quiet is None else bool(verify_quiet)
     prior_repo_entries = state.repo_entries(source)
     # Crash safety is incremental (see ``checkpoint``): the in-flight rows are

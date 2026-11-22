@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1402** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
+Tests: **1403** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -35,6 +35,14 @@ Tests: **1402** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`)
   flash echo, scope-consistent aging counts/chart/re-plan, non-colliding percentile labels, the
   policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
   22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
+
+## v0.15.1 — visible text-classifier endpoint and fallback reason
+
+A run with a wrong `--llm-url` silently fell back to mock for all 15,540 texts
+(the compiled default is the precision-network box). The start line now prints
+`ollama:model@url`, the first fallback prints its reason once, and
+`text_classifier.last_error`/`url` ride in the manifest, so a 100 %-fallback run
+cannot look healthy at the end.
 
 ## v0.15.0 — key-scoped hans capture
 

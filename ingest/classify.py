@@ -343,6 +343,12 @@ class Classifier:
         #: batch (a 30B model can take 30–180 s per text, and the ordinary
         #: interval tick only fires at PR boundaries).
         self.on_progress: Callable[[int, int], None] | None = None
+        #: The first failure's reason (connection refused, timeout, bad JSON);
+        #: reported in the manifest and printed once by the scrape. A run with
+        #: 100 % fallbacks otherwise looks identical to a working one at the end.
+        self.last_error = ""
+        #: Optional ``(exception)`` callback, invoked on the **first** fallback.
+        self.on_fallback: Callable[[Exception], None] | None = None
 
     def _progress(self, done: int, total: int) -> None:
         """Report one classified text; a reporter error never kills the scrape."""
@@ -390,6 +396,7 @@ class Classifier:
             "version": self.version,
             "calls": self.calls,
             "fallbacks": self.fallbacks,
+            "last_error": self.last_error,
             "labels": dict(sorted(self.labels.items())),
         }
 
@@ -638,7 +645,7 @@ class OllamaClassifier(Classifier):
         try:
             payload = self._chat(self.request_body(text, kind))
             labels = parse_labels(kind, payload)
-        except (ClassifyError, OSError, ValueError, KeyError, TimeoutError):
+        except (ClassifyError, OSError, ValueError, KeyError, TimeoutError) as exc:
             with self._lock:
                 self.failures += 1
                 if self.failures >= self.max_failures:
@@ -647,6 +654,13 @@ class OllamaClassifier(Classifier):
                     self.down = True
                 self.fallbacks += 1
                 self.last_version = self.fallback.version
+                self.last_error = f"{type(exc).__name__}: {exc}"[:300]
+                first = self.fallbacks == 1
+            if first and self.on_fallback is not None:
+                try:
+                    self.on_fallback(exc)
+                except Exception:  # noqa: BLE001 - reporting must never abort
+                    pass
             return self.fallback.classify(text, kind), self.fallback.version
         with self._lock:
             self.failures = 0
