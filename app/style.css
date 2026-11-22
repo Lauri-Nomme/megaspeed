@@ -2224,6 +2224,15 @@ a.child.ticket-link { color: var(--link); }
   .sprint-row .sprint-id, .sprint-row .sprint-state, .sprint-row .sprint-window,
   .sprint-row .sprint-days, .sprint-row .sprint-scope-count, .sprint-row .sprint-done,
   .sprint-row .sprint-plan, .sprint-row .sprint-carry { white-space: nowrap; }
+  /* prd/68 F-15: the longest scope line ("70 stories · 107 pts · 31 committed
+     at start · 39 adopted") reached 415.5 px on a 412 px viewport. It may wrap
+     inside the row; the date/id facts above stay unbroken units. */
+  .sprint-row .sprint-scope-count {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    min-width: 0;
+    max-width: 100%;
+  }
   .phase-legend { gap: 4px 10px; }
   .sprint-rows { gap: 6px; }
   .sprint-row { white-space: normal; }
@@ -2731,17 +2740,22 @@ tr.response-row:hover td, tr.response-row:focus-visible td { background: var(--b
 }
 .aging-insufficient p { margin: 0 0 4px; }
 .aging-insufficient p:last-child { margin-bottom: 0; }
-.aging .c-band { width: 104px; }
+.aging .c-band { width: 124px; }
 /* prd/65 N-08: 58 px clipped `story` to `sto…` (scrollWidth 59 > clientWidth
  * 58) and 170 px clipped `64 d 4 h · 91 calendar days`; the columns now fit
  * their content instead of truncating it. */
 .aging .c-kind { width: 68px; }
-.aging .c-id { width: 230px; }
-.aging .c-stage { width: 100px; }
-.aging .c-age { width: 195px; }
-.aging .c-mult { width: 64px; }
-.aging .c-holder { width: 200px; white-space: normal; }
-.aging .c-live { width: 120px; white-space: normal; }
+.aging .c-id { width: 144px; }
+/* prd/68 F-14: the Jira-only store has multi-year ages and long stage names.
+ * `in_verification` → `in verification` (G1) and `420 d 6 h 610 calendar days`
+ * clipped at 100/195 px; `unobserved`/`very old` pills clipped at 120 px. The
+ * widths below fit every cell and still total ≤ 1048 px (the 1600×1000
+ * delivery panel), so the aging table does not scroll. */
+.aging .c-stage { width: 140px; }
+.aging .c-age { width: 232px; }
+.aging .c-mult { width: 60px; }
+.aging .c-holder { width: 130px; white-space: normal; }
+.aging .c-live { width: 146px; white-space: normal; }
 .aging td.c-age .calendar { color: var(--text-tertiary); font-size: 10px; margin-left: 5px; }
 /* prd/59 phone: the second line of a row says the age in working days. */
 .aging td.c-age .working { display: none; }

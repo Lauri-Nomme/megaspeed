@@ -146,6 +146,10 @@ function cumulativeFlowPaths(geometry) {
 
 /** The inline SVG chart, with the active bucket banded and labelled. */
 export function trendChart(payload) {
+  // prd/68 F-11: an absent PR layer is not an empty chart with a measured zero.
+  if (payload && payload.available === false && payload.unavailable_reason) {
+    return `<p class="empty-row" data-trend-unavailable="true">unavailable: ${esc(payload.unavailable_reason)}</p>`;
+  }
   const geometry = trendGeometry(payload);
   if (!geometry.points.length) {
     return `<p class="empty-row">No bucket in this window has a measured value for ${esc((payload && payload.label) || 'this metric')}.</p>`;
@@ -262,9 +266,14 @@ export function cumulativeFlowLegend(payload) {
   const point = ((payload && payload.points) || []).find((entry) => entry.bands);
   if (!point) return '';
   const tokens = ['--series-default', '--info-accent', '--warning', '--healthy'];
-  return `<p class="cfd-legend">${(point.bands || []).map((band, index) =>
+  // prd/68 F-11: on a Jira-only store the fallback plots the story bands; the
+  // legend must name the population it is actually drawing.
+  const population = point.population === 'story' ? 'story' : 'pr';
+  return `<p class="cfd-legend" data-cfd-population="${population}">${(point.bands || []).map((band, index) =>
     `<span class="cfd-key" data-band="${esc(band.id)}"><i style="background:${color(tokens[index % tokens.length])}"></i>${esc(band.label)}</span>`).join('')}
-    <span class="muted">cumulative PRs by stage, binned on each bucket's end</span></p>`;
+    <span class="muted">${population === 'story'
+      ? 'cumulative stories by stage'
+      : 'cumulative PRs by stage'}, binned on each bucket's end</span></p>`;
 }
 
 /** What the min-N floor counts: the bucket cohort (`n`) or a sprint's stories.
@@ -334,6 +343,13 @@ export function trendTable(payload) {
 export function trendStats(payload) {
   if (!payload) return '';
   const summary = payload.summary || {};
+  // prd/68 F-11: "13/13 buckets measured · 0 latest" is a lie on a store with no
+  // PR objects. State the missing layer, then how many buckets were measured.
+  const unavailable = payload.unavailable_reason || summary.unavailable_reason;
+  if (unavailable) {
+    return `<span class="stat-inline" data-trend-unavailable="true"><b>–</b> unavailable · ${esc(unavailable)}</span>
+    <span class="stat-inline"><b>${summary.measured_buckets || 0}</b>/${summary.buckets || 0} ${esc(payload.bucket || '')} buckets measured</span>`;
+  }
   // prd/63 B8: the headline is the latest *settled* bucket (the server already
   // chose it), names its label and its N, and never compares against an empty
   // in-progress bucket.
@@ -348,6 +364,9 @@ export function trendStats(payload) {
   const latest = summary.latest;
   const label = summary.latest_label;
   const active = (summary.in_progress || [])[0];
+  const idleSprint = payload.bucket === 'sprint' && !active
+    ? '<span class="stat-inline" data-sprint-idle="true">no sprint in progress</span>'
+    : '';
   const minN = summary.min_n;
   const basis = minNBasis(payload);
   const below = Array.isArray(summary.below_min) ? summary.below_min : [];
@@ -365,7 +384,7 @@ export function trendStats(payload) {
         ? `no sprint meets the ${esc(minN ?? 5)} committed-story floor`
         : `no bucket meets the n≥${esc(minN ?? 5)} floor`}${detail}</span>
       <span class="stat-inline"><b>${summary.measured_buckets || 0}</b>/${summary.buckets || 0} buckets measured</span>
-      ${active ? `<span class="stat-inline"><b>${esc(active)}</b> in progress</span>` : ''}`;
+      ${active ? `<span class="stat-inline"><b>${esc(active)}</b> in progress</span>` : ''}${idleSprint}`;
   }
   const cohort = basis === 'stories'
     ? `${esc(summary.latest_done_by_end ?? '–')}/${esc(summary.latest_stories ?? '–')} stories`
@@ -385,7 +404,7 @@ export function trendStats(payload) {
     ${lowAfter.length
       ? `<span class="stat-inline muted" title="a bucket below the minimum cohort is drawn and named, but is not the headline">${esc(lowAfter.length)} newer bucket${lowAfter.length === 1 ? '' : 's'} below ${floorText(minN, payload)}${lowAfter.length ? ` (${esc(lowAfter.join(', '))})` : ''}</span>`
       : ''}
-    ${active ? `<span class="stat-inline"><b>${esc(active)}</b> in progress${summary.latest_provisional ? '' : ' (not in the headline)'}</span>` : ''}`;
+    ${active ? `<span class="stat-inline"><b>${esc(active)}</b> in progress${summary.latest_provisional ? '' : ' (not in the headline)'}</span>` : ''}${idleSprint}`;
 }
 
 /** The error state a failed `/api/trend` fetch renders — never a spinner. */
@@ -413,6 +432,9 @@ export function trendMarkup(payload, { bucket = 'week', enabled = true, error = 
           class="${bucket === 'sprint' ? 'on' : ''}">sprint</button>
       </div>
     </div>`;
+  if (payload.unavailable_reason) {
+    return `${tabs}<p class="empty-row" data-trend-unavailable="true">unavailable: ${esc(payload.unavailable_reason)}</p>`;
+  }
   if (!payload.available && !(payload.points || []).length) {
     return `${tabs}<p class="empty-row">${esc(payload.note || 'No trend for this metric in this store.')}</p>`;
   }

@@ -2127,7 +2127,36 @@ def first_pass_yield(
         if n >= MIN_DELIVERIES and all(rates[step] is not None for step, _, _ in YIELD_STEPS)
         else None
     )
-    clean_joint = sum(1 for story in cohort if all(clean[story.key].values()))
+    # prd/68 F-07: a step that is not measured (no merged PR → review
+    # unfalsifiable) cannot be part of a joint clean count. The old code summed
+    # `all(clean.values())`, so every story read as unclean at review and the
+    # panel printed "0 / 84" for a cohort that simply has no PR layer.
+    unavailable = [
+        (entry["id"], entry["label"]) for entry in steps if not entry["available"]
+    ]
+    clean_joint = (
+        None if unavailable
+        else sum(1 for story in cohort if all(clean[story.key].values()))
+    )
+    rolled_reason = None
+    if rolled is None:
+        if any(step_id == "review" for step_id, _ in unavailable):
+            rolled_reason = (
+                "Rolled %C&A is unavailable because Reviewed is not measured "
+                "in this store (no merged PRs)"
+            )
+        elif unavailable:
+            labels = ", ".join(label for _, label in unavailable)
+            rolled_reason = (
+                f"Rolled %C&A is unavailable because {labels} "
+                f"{'is' if len(unavailable) == 1 else 'are'} not measured in "
+                "this store"
+            )
+        elif n < MIN_DELIVERIES:
+            rolled_reason = (
+                f"{n} deliveries — too few for a rate "
+                f"(minimum {MIN_DELIVERIES})"
+            )
     payload = {
         "available": bool(cohort),
         "cohort": "completed stories",
@@ -2135,8 +2164,12 @@ def first_pass_yield(
         "min_deliveries": MIN_DELIVERIES,
         "steps": steps,
         "rolled": rolled,
+        "rolled_reason": rolled_reason,
         "clean_joint": clean_joint,
-        "joint_rate": round(clean_joint / n, 3) if n else None,
+        "joint_rate": (
+            round(clean_joint / n, 3)
+            if clean_joint is not None and n else None
+        ),
         "no_pr": no_pr,
         "basis": (
             "%C&A = the share of items that left this step complete and "
@@ -3010,23 +3043,48 @@ def sprints(
 
     # -- per-sprint scope ---------------------------------------------------
     def _empty_sprint_row(sprint: dict | None, sid: int) -> dict:
-        band_start = sprint.get("start") if sprint else None
-        band_end = (sprint.get("end") or court.snapshot) if sprint else None
+        start = sprint.get("start") if sprint else None
+        end = sprint.get("end") if sprint else None
+        state = sprint.get("state") if sprint else None
+        # prd/68 F-02: a future sprint has not run. Its band is its plan
+        # (start → planned end), never start → snapshot (which would invert the
+        # range and paint a Q4 placeholder over the current sprint). A dateless
+        # sprint has no band at all; its membership is still real.
+        future = state == "future" or (
+            start is not None and start > court.snapshot
+        )
+        band_start = start
+        if start is None:
+            band_end = None
+        elif end is not None:
+            band_end = end
+        elif future:
+            planned = _sprint_datetime(sprint.get("planned_end")) if sprint else None
+            band_end = planned if planned is not None and planned > start else None
+        else:
+            # an active sprint (or a closed one whose completion was lost)
+            # stops at the snapshot; the state, not the band, says which
+            band_end = court.snapshot
         boundary = boundaries.get(sid) or {}
         return {
             "sprint_id": sid,
             "object_id": sprint.get("object_id") if sprint else None,
-            "state": sprint.get("state") if sprint else None,
-            "start": iso(sprint["start"]) if sprint and sprint.get("start") else None,
-            "end": iso(sprint["end"]) if sprint and sprint.get("end") else None,
+            "state": state,
+            "start": iso(start) if start else None,
+            "end": iso(end) if end else None,
             "planned_end": sprint.get("planned_end") if sprint else None,
             "goal_class": sprint.get("goal_class") if sprint else None,
-            "open": bool(sprint and sprint.get("end") is None),
+            "open": bool(sprint and end is None and state != "future"),
             # prd/37: the close "done by end" is measured at
             "closed": bool(boundary.get("closed")),
+            # prd/68 F-02: the UI must be able to say "dates unknown" and
+            # "unknown" without guessing from an absent field.
+            "date_known": start is not None and end is not None,
+            "dates_known": band_start is not None and band_end is not None,
+            "state_known": state is not None,
             "band_start": iso(band_start) if band_start else None,
             # an active sprint's band ends at the data, not at the plan
-            "band_end": iso(band_end) if band_start else None,
+            "band_end": iso(band_end) if band_end else None,
             "days": (
                 round((band_end - band_start).total_seconds() / 86400.0, 1)
                 if band_start and band_end and band_end > band_start else None
@@ -3161,6 +3219,13 @@ def sprints(
         row["carried_out"].sort()
         row["story_count"] = len(row["stories"])
         row["current_count"] = len(row["current_stories"])
+        # prd/68 F-02: a future placeholder with no stories is not a band. It
+        # stays in the list (its id is real) but must not paint the canvas.
+        if row.get("state") == "future" and not row["story_count"]:
+            row["band_start"] = None
+            row["band_end"] = None
+            row["dates_known"] = False
+            row["days"] = None
         row["added_after_start_stories"].sort()
         row["added_after_start"] = len(row["added_after_start_stories"])
         row["added_after_start_share"] = _share(
@@ -3350,7 +3415,12 @@ def sprints(
     active_sid = next(
         (
             row["sprint_id"] for row in bands
-            if row["state"] == "active" or (row["open"] and not row["state"])
+            if row["state"] == "active"
+            or (
+                row["open"] and not row["state"]
+                and _sprint_datetime(row.get("start")) is not None
+                and _sprint_datetime(row.get("start")) <= court.snapshot
+            )
         ),
         None,
     )
