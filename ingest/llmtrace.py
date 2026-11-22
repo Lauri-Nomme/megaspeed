@@ -45,9 +45,12 @@ The two consumers:
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
+
+from . import logs
 
 #: File name inside ``--state-dir``.
 TRACE_FILE = "classify-trace.jsonl"
@@ -72,6 +75,11 @@ class TraceWriter:
         self.skipped = 0
         self._lock = threading.Lock()
         self._handle = None
+        #: The first write failure ("IsADirectoryError", "Permission denied");
+        #: reported once, because a silently empty trace is undebuggable.
+        self.last_error = ""
+        #: Optional ``(message)`` sink (the progress reporter adds a timestamp).
+        self.on_error: Callable[[str], None] | None = None
 
     @property
     def enabled(self) -> bool:
@@ -92,14 +100,29 @@ class TraceWriter:
                 if isinstance(value, str) and len(value) > 8192:
                     record[key] = value[:8192] + f"…[truncated {len(value) - 8192} chars]"
             line = json.dumps(record, sort_keys=True, default=str) + "\n"
-        with self._lock:
-            if self._handle is None:
-                self.path.parent.mkdir(parents=True, exist_ok=True)
-                self._handle = self.path.open("a", encoding="utf-8")
-            self._handle.write(line)
-            self._handle.flush()
-            self.count += 1
-            self.bytes += len(line)
+        try:
+            with self._lock:
+                if self._handle is None:
+                    self.path.parent.mkdir(parents=True, exist_ok=True)
+                    self._handle = self.path.open("a", encoding="utf-8")
+                self._handle.write(line)
+                self._handle.flush()
+                self.count += 1
+                self.bytes += len(line)
+        except OSError as exc:
+            # A trace that must not abort the run also must not fail silently.
+            message = f"[trace] cannot write {self.path}: {type(exc).__name__}: {exc}"
+            with self._lock:
+                self.skipped += 1
+                first = not self.last_error
+                if first:
+                    self.last_error = f"{type(exc).__name__}: {exc}"
+                    self._handle = None
+            if first:
+                if self.on_error is not None:
+                    self.on_error(message)
+                else:
+                    print(f"[{logs.iso()}] {message}", file=sys.stderr, flush=True)
 
     def close(self) -> None:
         with self._lock:
@@ -120,6 +143,7 @@ class TraceWriter:
             "records": self.count,
             "bytes": self.bytes,
             "skipped": self.skipped,
+            "last_error": self.last_error,
         }
 
     def __enter__(self) -> "TraceWriter":

@@ -1374,6 +1374,7 @@ def scrape(
     text_trace: llmtrace.TraceWriter | None = None
     if text is not None and source != "fixture" and getattr(cfg, "classify_trace", True):
         text_trace = llmtrace.TraceWriter(state_dir / llmtrace.TRACE_FILE)
+        text_trace.on_error = reporter.emit
 
         def _trace_call(record: dict) -> None:
             text_trace(record)

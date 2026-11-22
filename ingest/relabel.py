@@ -505,6 +505,8 @@ def relabel(
         if call_trace_path
         else None
     )
+    if trace_writer is not None:
+        trace_writer.on_error = reporter.emit
 
     def _emit_call(record: dict) -> None:
         if trace_writer is not None:
@@ -542,6 +544,7 @@ def relabel(
             f"[relabel] {len(items)} text(s) to classify · {len(threads)} thread(s)"
             f" · {len(prs)} PR(s) in the bundle · batch {max(1, int(batch_size))}"
             f" · cache {cache_path}"
+            f" · trace {trace_writer.path if trace_writer is not None else 'off'}"
         )
 
     markers: list[tuple[str, str]] = []

@@ -70,6 +70,19 @@ class TraceWriterTests(unittest.TestCase):
         self.assertEqual([r["call"] for r in records], [1])
         self.assertEqual(bad, 1)
 
+    def test_a_write_failure_is_reported_once_and_never_aborts_the_run(self):
+        target = Path(self.tmp.name) / "a-directory"
+        target.mkdir()
+        writer = llmtrace.TraceWriter(target)          # a directory, not a file
+        seen: list[str] = []
+        writer.on_error = seen.append
+        writer({"call": 1})
+        writer({"call": 2})
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(writer.count, 0)
+        self.assertGreaterEqual(writer.skipped, 1)
+        self.assertIn("IsADirectoryError", writer.report()["last_error"])
+
     def test_an_enormous_text_is_truncated_but_the_call_survives(self):
         writer = llmtrace.TraceWriter(self.path)
         writer({

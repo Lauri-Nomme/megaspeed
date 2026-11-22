@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1455** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
+Tests: **1456** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -35,6 +35,14 @@ Tests: **1455** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`)
   flash echo, scope-consistent aging counts/chart/re-plan, non-colliding percentile labels, the
   policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
   22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
+
+## v0.17.2 — a trace that cannot be written says so
+
+v0.17.1 swallowed a trace write failure (the callback is guarded so tracing can
+never abort a run), which left a 0-byte `.trace.jsonl` with no explanation. The
+writer now reports the first failure once (through the timestamped reporter),
+records `last_error`/`skipped` in its report, and both the scrape and relabel
+print the exact trace path in the start line.
 
 ## v0.17.1 — relabel writes the model-call trace too
 
