@@ -1992,7 +1992,43 @@ def response_times(bc: BallCourt, window: tuple[datetime, datetime] | None = Non
     }
 
 
-def person_legend(bc: BallCourt, stories: list | None = None) -> dict:
+LEGEND_BASIS = (
+    "roles, not names: the store holds pseudonyms only. "
+    "sentinel = mandatory approver on every PR; bot = automation, never "
+    "a constraint; story owner = assigned Jira stories, not PRs"
+)
+
+
+def _story_done_at(story) -> datetime | None:
+    """When a story reached done, by the ticket layer's one clock.
+
+    ``analysis.jira`` imports this module, so the import is local: the legend
+    must not grow a second definition of "done" (prd/36 §4: the first done
+    status event, else the close of a story whose state is done) just to stay
+    import-order-safe.
+    """
+    from analysis import jira as jira_analysis
+    return jira_analysis.story_done_at(story)
+
+
+def _story_in_window(story, start: datetime, end: datetime) -> bool:
+    """Does the story's work intersect ``[start, end]``?
+
+    The prd/67 W-02 rule, on the story's own timestamps: it existed by the
+    window's end (``created ≤ end``) and had not finished before it began
+    (``done is None or done ≥ start``). An open story always intersects a
+    window that starts after it was created; a story finished months ago does
+    not own a row in a view of last month.
+    """
+    created = getattr(story, "start", None)
+    if created is None or created > end:
+        return False
+    done = _story_done_at(story)
+    return done is None or done >= start
+
+
+def person_legend(bc: BallCourt, stories: list | None = None,
+                  window: tuple[datetime, datetime] | None = None) -> dict:
     """prd/42 M7: who is who, by role, without leaving the pseudonym contract.
 
     The store holds no real names (prd/02), so the legend can only say *role*:
@@ -2000,28 +2036,78 @@ def person_legend(bc: BallCourt, stories: list | None = None) -> dict:
     (approvals) and story owner (assigned Jira stories). That is enough to
     answer "who is the sentinel" — the one person on every PR — without
     identifying anybody.
+
+    ``window`` (prd/67 W-02) makes the legend describe the same window as the
+    charts beside it: PR activity (a PR opened, an approval, a review response)
+    counts only inside ``[start, end]``, and an owned story counts only when its
+    work intersects the window. A person with no window activity at all is
+    dropped — the live Jira-only corpus listed 252 chips, most ``0/0/0/0`` —
+    and ``hidden`` / the note say how many were dropped. Without a window the
+    old all-time legend is returned unchanged (``hidden: 0``).
     """
+    start, end = window if window is not None else (None, None)
+
+    def in_window(stamp: datetime | None) -> bool:
+        if start is None:
+            return True
+        return stamp is not None and start <= stamp <= end
+
     authored: dict[str, int] = defaultdict(int)
     approvals: dict[str, int] = defaultdict(int)
     reviews: dict[str, int] = defaultdict(int)
+    # the all-time roster, only to report how many people the window hides
+    authored_all: dict[str, int] = defaultdict(int)
+    approvals_all: dict[str, int] = defaultdict(int)
+    reviews_all: dict[str, int] = defaultdict(int)
+    #: A bot is never charged a count (it is not a person), so its *activity*
+    #: is what keeps its chip: the legend says who acted, not who exists.
+    bots_active: set[str] = set()
     for state in bc.prs:
         author = state.pr["actor"]
+        if in_window(state.pr["created_ts"]) and author in bc.bots:
+            bots_active.add(author)
         if author not in bc.bots:
-            authored[author] += 1
+            authored_all[author] += 1
+            if in_window(state.pr["created_ts"]):
+                authored[author] += 1
         for event in state.events:
             actor = event["actor"]
+            windowed = in_window(event["_ts"])
+            if windowed and actor in bc.bots:
+                bots_active.add(actor)
             if actor in bc.bots or actor == author:
+                continue
+            if event["activity"] == "pr_approved":
+                approvals_all[actor] += 1
+            if event["activity"] in RESPONSE_ACTIONS:
+                reviews_all[actor] += 1
+            if not windowed:
                 continue
             if event["activity"] == "pr_approved":
                 approvals[actor] += 1
             if event["activity"] in RESPONSE_ACTIONS:
                 reviews[actor] += 1
     owned: dict[str, int] = defaultdict(int)
+    owned_all: dict[str, int] = defaultdict(int)
     for story in stories or ():
         actor = getattr(story, "actor", None)
-        if actor:
+        if not actor:
+            continue
+        owned_all[actor] += 1
+        if start is None or _story_in_window(story, start, end):
             owned[actor] += 1
-    everyone = set(authored) | set(approvals) | set(reviews) | set(owned) | set(bc.bots)
+    # The four counted activities are the whole membership rule (prd/67 W-02):
+    # a chip whose every count is 0 is exactly the noise the window removes.
+    # With no window the old all-time union (including every bot) is unchanged.
+    everyone = set(authored) | set(approvals) | set(reviews) | set(owned)
+    if start is None:
+        everyone |= set(bc.bots)
+    else:
+        everyone |= bots_active
+    # The all-time roster the pre-window legend printed: the denominator of the
+    # honest `hidden` count. With no window everyone == roster, so it is 0.
+    roster = (set(authored_all) | set(approvals_all) | set(reviews_all)
+              | set(owned_all) | set(bc.bots))
     people = []
     for person in sorted(everyone):
         if person in bc.bots:
@@ -2048,14 +2134,16 @@ def person_legend(bc: BallCourt, stories: list | None = None) -> dict:
         {"sentinel": 0, "bot": 1, "story owner": 2, "author": 3, "reviewer": 4}[row["role"]],
         -row["approvals"], row["person"],
     ))
-    return {
-        "people": people,
-        "note": (
-            "roles, not names: the store holds pseudonyms only. "
-            "sentinel = mandatory approver on every PR; bot = automation, never "
-            "a constraint; story owner = assigned Jira stories, not PRs"
-        ),
-    }
+    # prd/67 W-02: the people this window drops. With no window nothing is
+    # dropped (the all-time legend), so `hidden` is 0 rather than a guess.
+    hidden = len(roster - {row["person"] for row in people})
+    note = LEGEND_BASIS
+    if hidden:
+        note = (
+            f"{hidden} {'person' if hidden == 1 else 'people'} with no activity "
+            f"in this window {'is' if hidden == 1 else 'are'} hidden — {LEGEND_BASIS}"
+        )
+    return {"people": people, "hidden": hidden, "note": note}
 
 
 # --------------------------------------------------------------------------- #

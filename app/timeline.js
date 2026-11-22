@@ -105,6 +105,10 @@ const GUTTER_PHONE = 112;
 const AXIS_H = 42;
 const HIST_H = 36;
 const HEADER_H = 22;
+// prd/67 W-01: the one-line "N people … hidden" note gets its own row under the
+// lane header, so it never runs into the section header or a sprint band label
+// (on a 412px phone there is no free space on the header row itself).
+const NOTE_H = 15;
 const SECTION_GAP = 18;
 const BOTTOM = 14;
 
@@ -136,6 +140,18 @@ export function laneLabel(row, { narrow = false, dim = 'actor' } = {}) {
   }
   const indent = row.depth ? `${'  '.repeat(row.depth)}↳ ` : '';
   return `${indent}${row.label || row.key || ''}`;
+}
+
+/** W-01 (prd/67): the one line that says why the actor lanes are short.
+ *
+ * A window that hides every actor still says so — an empty list is an answer
+ * ("nobody acted in this window"), not a missing one. `0` is silent, so the
+ * note appears only when it is true.
+ */
+export function actorHiddenNote(hidden) {
+  const n = Number(hidden) || 0;
+  if (n <= 0) return '';
+  return `${n} ${n === 1 ? 'person' : 'people'} with no activity in this window hidden`;
 }
 
 /** The section header over the gutter. A phone gets the short form, because
@@ -829,15 +845,72 @@ export class Timeline {
         return { key, hours, count: Math.round(hours), label: `${key} · ${fmtCompact(hours)} h` };
       }).filter((row) => row.hours > 0);
     }
-    // B4: rows come from ALL events, so toggling a legend key never re-sorts
-    // the lanes. Counts are totals, not "visible" counts.
-    if (this._actorRows && this._actorRows.events === this.events) return this._actorRows.rows;
-    const counts = this.activityCounts();
-    const keys = [...new Set(this.events.map((e) => e.actor))];
-    keys.sort((a, b) => (counts.get(b) - counts.get(a)) || a.localeCompare(b));
-    const rows = keys.map((key) => ({ key, count: counts.get(key) }));
-    this._actorRows = { events: this.events, rows };
+    // W-01 (prd/67): an actor lane is someone who acted *inside the window*.
+    // The list used to be every actor ever seen — a 252-person Jira store drew
+    // hundreds of empty lanes, whatever the timeframe. The window is part of
+    // the cache key, so a pan/zoom/timeframe change rebuilds the list, and
+    // `hidden` reports how many people this window hides (the note is drawn
+    // next to the lane header, never invented when it is 0).
+    //
+    // B4 is preserved: a row's `count` stays its all-time event total, so a
+    // toggle of a legend key never re-sorts the lanes.
+    const start = this.view.start;
+    const end = this.view.end;
+    const cache = this._actorRows;
+    if (cache && cache.events === this.events
+        && cache.start === start && cache.end === end) return cache.rows;
+    const counts = this.actorCounts();
+    const active = new Set();
+    for (let i = this.firstEventIndex(start); i < this.events.length; i += 1) {
+      const event = this.events[i];
+      if (event.t > end) break;
+      active.add(event.actor);
+    }
+    const rows = [...active]
+      .sort((a, b) => ((counts.get(b) || 0) - (counts.get(a) || 0)) || a.localeCompare(b))
+      .map((key) => ({ key, count: counts.get(key) || 0 }));
+    this._actorRows = {
+      events: this.events, start, end, rows,
+      hidden: Math.max(0, counts.size - rows.length),
+    };
     return rows;
+  }
+
+  /** Every actor's all-time event count (the lane order and row total).
+   *
+   * Cached per `setData`: a pan rebuilds the actor rows (the window changed),
+   * and re-walking the log for the same totals on every frame would make a
+   * windowed lane list cost more than the unwindowed one it replaced.
+   */
+  actorCounts() {
+    if (this._actorCounts && this._actorCounts.events === this.events) {
+      return this._actorCounts.counts;
+    }
+    const counts = new Map();
+    for (const event of this.events) {
+      counts.set(event.actor, (counts.get(event.actor) || 0) + 1);
+    }
+    this._actorCounts = { events: this.events, counts };
+    return counts;
+  }
+
+  /** Index of the first event at or after `t` (`this.events` is time-sorted). */
+  firstEventIndex(t) {
+    let lo = 0;
+    let hi = this.events.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (this.events[mid].t < t) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  }
+
+  /** W-01: how many actors the current window hides (0 outside the actor dim). */
+  hiddenActors() {
+    if (this.dim !== 'actor') return 0;
+    this.laneRows();
+    return (this._actorRows && this._actorRows.hidden) || 0;
   }
 
   /** Stories as lanes with their PRs nested beneath (prd/25, epic → story → PR).
@@ -1071,7 +1144,12 @@ export class Timeline {
     const objectMode = this.dim === 'object' || this.dim === 'story';
     const laneH = objectMode ? Math.max(m.bar + 6, m.lane) : m.lane;
     const barRows = objectMode ? [] : this.prs;
-    const laneTop = AXIS_H + HIST_H + HEADER_H;
+    // prd/67 W-01: the actor dim owns a note row only when the window hides
+    // someone; every other dim and a fully-visible actor list keeps the old
+    // geometry exactly.
+    const hiddenPeople = this.dim === 'actor' ? this.hiddenActors() : 0;
+    const noteH = hiddenPeople > 0 ? NOTE_H : 0;
+    const laneTop = AXIS_H + HIST_H + HEADER_H + noteH;
     const laneBottom = laneTop + lanes.length * laneH;
     const barTop = laneBottom + SECTION_GAP + HEADER_H;
     // The lane list in content pixels. This is what the scroll container
@@ -1097,7 +1175,7 @@ export class Timeline {
     this.geom = {
       width, height, contentHeight, scrollTop, maxScroll,
       gutter, plotW: Math.max(80, width - gutter - 10),
-      axisH: AXIS_H, histH: HIST_H, headerH: HEADER_H, laneH, barH: m.bar,
+      axisH: AXIS_H, histH: HIST_H, headerH: HEADER_H, noteH, hiddenPeople, laneH, barH: m.bar,
       label: m.label, marker: m.marker, objectMode,
       laneTop, laneBottom, barTop, lanes, barRows,
       window: {
@@ -1226,11 +1304,13 @@ export class Timeline {
         sprintCarry: this.sprintCarry,
       });
     }
+    const hiddenPeople = this.dim === 'actor' ? this.hiddenActors() : 0;
     this.canvas.setAttribute(
       'aria-label',
       `Event timeline, ${fmtDay(this.view.start)} ${fmtClock(this.view.start)} to ` +
       `${fmtDay(this.view.end)} ${fmtClock(this.view.end)}; ${visibleWord(this)} events, ` +
       `${g.lanes.length} ${this.dim === 'actor' ? 'actor' : this.dim === 'object' ? 'PR' : this.dim === 'story' ? 'story' : 'queue'} lanes. ` +
+      (hiddenPeople > 0 ? `${actorHiddenNote(hiddenPeople)}. ` : '') +
       'Arrow keys pan, plus and minus zoom, Home fits.',
     );
   }
@@ -1487,6 +1567,21 @@ export class Timeline {
       g.gutter - 10,
       AXIS_H + HIST_H + 11,
     );
+    // W-01 (prd/67): the honest counterpart of a short lane list. Its own row
+    // under the lane header keeps it clear of the section header and of any
+    // sprint band label (a phone has no free space on the header row).
+    if (g.hiddenPeople > 0) {
+      ctx.font = `500 ${Math.max(9, g.label - 2)}px "JetBrains Mono", ui-monospace, monospace`;
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = color('--canvas-muted');
+      ctx.fillText(
+        fit(ctx, actorHiddenNote(g.hiddenPeople), g.plotW - 20),
+        g.gutter + 6,
+        AXIS_H + HIST_H + HEADER_H + g.noteH / 2 + 1,
+      );
+      ctx.font = `500 ${g.label}px "JetBrains Mono", ui-monospace, monospace`;
+    }
 
     // prd/33 §3: only the rows inside the viewport (plus overscan) are drawn,
     // so the cost of a frame is O(visible lanes), not O(store).
