@@ -555,17 +555,27 @@ class CarryOverTests(StoreCase):
         payload = self.payload(self.fixture())
         suggestion = by_id(payload, "jira-carry-over")
         self.assertIsNotNone(suggestion)
-        # prd/63 F10: the window basis is stated in the title (the sprint strip
-        # counts the whole store and may be larger).
-        self.assertTrue(suggestion["title"].startswith(
-            "2 stories committed but not done by their sprint's close"
-        ))
-        self.assertIn("day window", suggestion["title"])
+        # prd/67 W-05: the title names the window's sprint count and the
+        # denominator, so the carried count cannot be read as a store total.
+        days = payload["metrics"]["carry_over"]["window"]["days"]
+        self.assertEqual(
+            suggestion["title"],
+            f"2 of 3 stories committed in the 1 sprint closed in this "
+            f"{days}-day window were not done by its close",
+        )
         self.assertEqual(suggestion["severity"], "critical")   # 2 of 3 ≥ 25%
         self.assertEqual(suggestion["evidence"]["carried_over"], 2)
         self.assertEqual(suggestion["evidence"]["late"], 1)
         self.assertEqual(suggestion["evidence"]["never"], 1)
         self.assertEqual(suggestion["evidence"]["sprints"], 1)
+        # prd/67 W-05: the window's sprint count and the store's scope travel
+        # with the number. Sprint 2 closed with no members, so it is in neither
+        # count: the store scope names only the sprint the delivery rows cover.
+        self.assertEqual(suggestion["evidence"]["window_sprints"], 1)
+        self.assertEqual(suggestion["evidence"]["store_carried_over"], 2)
+        self.assertEqual(suggestion["evidence"]["store_sprints"], 1)
+        self.assertIn("The whole store carries 2 across 1 closed sprint",
+                      suggestion["suggestion"])
 
     def test_the_rule_states_the_window_it_counts(self):
         """prd/41 B8: the sprint lens (27/20/90) and the rule (24/18/75) differ
@@ -595,6 +605,88 @@ class CarryOverTests(StoreCase):
         self.assertTrue(metric["available"])
         self.assertEqual(metric["carried_over"], 0)
         self.assertIsNone(by_id(payload, "jira-carry-over"))
+
+
+class CarryOverScopeTests(StoreCase):
+    """prd/67 W-05: the carried count is window-scoped, and says so.
+
+    Two closed sprints — one inside the 28-day window, one long before it — each
+    with a carried-over story. The rule quotes the window (1 sprint, 1 story)
+    while `store_carried_over` counts both, and the all-time view shows the
+    store total. No number changes: the window count, the share and the hours at
+    stake are the ones the old card already stated.
+    """
+
+    def fixture(self) -> Fixture:
+        fx = Fixture()
+        # sprint 1 closed 70 days ago; sprint 2 closed 10 days ago (inside 28 d)
+        old_close = AS_OF - timedelta(days=70)
+        recent_close = AS_OF - timedelta(days=10)
+        fx.sprint(1, old_close - timedelta(days=14), end=old_close, closed=old_close)
+        fx.sprint(2, recent_close - timedelta(days=14), end=recent_close,
+                 closed=recent_close)
+        # ENG-2 was created before the window and missed the old sprint
+        fx.story("ENG-2", AS_OF - timedelta(days=90))
+        fx.add_to_sprint("ENG-2", AS_OF - timedelta(days=83), 1, at_start=True)
+        # ENG-1 was created inside the window and missed the recent sprint
+        fx.story("ENG-1", AS_OF - timedelta(days=20))
+        fx.add_to_sprint("ENG-1", AS_OF - timedelta(days=20), 2, at_start=True)
+        return fx
+
+    def test_the_window_count_and_the_store_total_are_side_by_side(self):
+        metric = self.metric(self.fixture(), "carry_over", days=28)
+        self.assertEqual(metric["carried_over"], 1)
+        self.assertEqual(metric["stories_in_a_sprint"], 1)
+        self.assertEqual(metric["window_sprints"], 1)
+        self.assertEqual(metric["store_carried_over"], 2)
+        self.assertEqual(metric["store_sprints"], 2)
+        # the store half is the delivery rows' own accounting, not a re-walk
+        delivery = self.metric(self.fixture(), "sprint_delivery", days=28)
+        self.assertEqual(
+            metric["store_carried_over"],
+            delivery["done_late"] + delivery["never_done"],
+        )
+        self.assertEqual(metric["store_sprints"], delivery["closed_sprints"])
+
+        suggestion = by_id(self.payload(self.fixture(), days=28), "jira-carry-over")
+        self.assertIsNotNone(suggestion)
+        days = metric["window"]["days"]
+        self.assertEqual(
+            suggestion["title"],
+            f"1 of 1 story committed in the 1 sprint closed in this {days}-day "
+            "window was not done by its close",
+        )
+        self.assertEqual(suggestion["evidence"]["window_sprints"], 1)
+        self.assertEqual(suggestion["evidence"]["store_carried_over"], 2)
+        self.assertEqual(suggestion["evidence"]["store_sprints"], 2)
+        # the impact is unchanged: the window's late hours, not the store's
+        self.assertEqual(suggestion["impact_hours"], metric["late_hours"])
+
+    def test_no_window_shows_the_store_total(self):
+        metric = self.metric(self.fixture(), "carry_over")
+        self.assertEqual(metric["carried_over"], 2)
+        self.assertEqual(metric["window_sprints"], 2)
+        self.assertEqual(metric["store_carried_over"], 2)
+        self.assertEqual(metric["store_sprints"], 2)
+        suggestion = by_id(self.payload(self.fixture()), "jira-carry-over")
+        self.assertIsNotNone(suggestion)
+        self.assertTrue(suggestion["title"].startswith(
+            "2 of 2 stories committed in the 2 sprints closed in this "
+        ), suggestion["title"])
+        self.assertEqual(suggestion["evidence"]["carried_over"], 2)
+        self.assertEqual(suggestion["evidence"]["store_carried_over"], 2)
+
+    def test_a_store_without_a_closed_sprint_has_no_store_scope(self):
+        fx = Fixture()
+        fx.sprint(1, AS_OF - timedelta(days=7), state="active")
+        fx.story("ENG-1", AS_OF - timedelta(days=20))
+        fx.add_to_sprint("ENG-1", AS_OF - timedelta(days=20), 1, at_start=True)
+        metric = self.metric(fx, "carry_over", days=28)
+        self.assertTrue(metric["available"])
+        self.assertEqual(metric["carried_over"], 0)
+        self.assertEqual(metric["window_sprints"], 0)
+        self.assertIsNone(metric["store_carried_over"])
+        self.assertIsNone(metric["store_sprints"])
 
 
 # --------------------------------------------------------------------------- #

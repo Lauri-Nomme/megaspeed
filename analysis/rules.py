@@ -3125,26 +3125,49 @@ def templates(
         severity = (
             "critical" if co["share"] >= 0.25 or carried >= 5 else "warning"
         )
-        # prd/41 B8: the sprint lens counts every story in the store; this rule
-        # counts the stories created in the chosen timeframe. Both numbers are
-        # right for their scope, so the scope is stated with the number.
+        # prd/41 B8 + prd/67 W-05: this rule counts the stories created in the
+        # chosen timeframe; the sprint lens counts every story in the store. The
+        # old title ("7 stories committed but not done by their sprint's close")
+        # was correct for the window and read as a store total, so the title now
+        # names the window's sprint count and the evidence states the store's
+        # scope beside it. Neither the count nor the threshold changes.
         cohort_window = co.get("window") or {}
-        scope_note = (
-            f" (stories created in the {cohort_window.get('days')}-day window; the "
-            "sprint lens counts every story in the store)"
-            if cohort_window.get("days") is not None else ""
+        days = cohort_window.get("days")
+        window_sprints = co.get("window_sprints") or 0
+        store_carried = co.get("store_carried_over")
+        store_sprints = co.get("store_sprints")
+        if days is not None and window_sprints:
+            scope_subject = (
+                f"the {window_sprints} sprint"
+                f"{'s' if window_sprints != 1 else ''} closed in this "
+                f"{days}-day window"
+            )
+        elif days is not None:
+            scope_subject = f"this {days}-day window"
+        else:
+            scope_subject = "the sprints"
+        store_fact = (
+            f" The whole store carries {store_carried} across {store_sprints} "
+            f"closed sprint{'s' if store_sprints != 1 else ''}; this count is "
+            "only the window's cohort."
+            if store_carried is not None and store_sprints is not None else ""
         )
         out.append(_suggestion(
             "jira-carry-over", "carry_over",
-            f"{carried} stor{'y' if carried == 1 else 'ies'} committed but not "
-            "done by their sprint's close"
-            + (f" ({cohort_window.get('days')}-day window; the sprint lens "
-               "counts the whole store)" if cohort_window.get("days") is not None else ""),
+            f"{carried} of {co['stories_in_a_sprint']} stor"
+            f"{'y' if co['stories_in_a_sprint'] == 1 else 'ies'} committed in "
+            f"{scope_subject} {'was' if carried == 1 else 'were'} not done by "
+            f"{'its' if window_sprints == 1 else 'their'} close",
             {
                 "carried_over": carried,
+                # prd/67 W-05: the window's story and sprint counts, then the
+                # store's, side by side so one cannot stand for the other.
+                "stories_in_a_sprint": co["stories_in_a_sprint"],
+                "window_sprints": window_sprints,
+                "store_carried_over": store_carried,
+                "store_sprints": store_sprints,
                 "late": co["late"],
                 "never": co["never"],
-                "stories_in_a_sprint": co["stories_in_a_sprint"],
                 "share": co["share"],
                 "sprints": co["sprints_involved"],
                 "late_hours": co["late_hours"],
@@ -3152,7 +3175,7 @@ def templates(
                 "median_wait_hours": co["median_wait_hours"],
                 "target_share": co["target_share"],
                 # prd/41 B8: the window this count is filtered to
-                "window_days": cohort_window.get("days"),
+                "window_days": days,
                 "window_start": cohort_window.get("start"),
                 "window_end": cohort_window.get("end"),
                 # prd/25: ticket keys in evidence are doorways to the detail page
@@ -3164,9 +3187,10 @@ def templates(
             "story until it fits one sprint, and leave it in the backlog until "
             "it does — a carry-over is a commitment the team already knew it "
             "would break."
-            + (f" This count is the stories created in the {cohort_window.get('days')}"
-               "-day window; the sprint lens counts every story in the store, "
-               "so it can be larger." if cohort_window.get("days") is not None else ""),
+            + (f" This count is the stories created in the {days}-day window; "
+               "the sprint lens counts every story in the store, so it can be "
+               "larger." if days is not None else "")
+            + store_fact,
             severity, co["late_hours"], co["stories_in_a_sprint"] or carried,
         ))
 

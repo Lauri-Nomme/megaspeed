@@ -111,6 +111,8 @@ export function evidenceLabel(key) {
     sprint_length_days: 'sprint length (calendar days)',
     sprint_length_outlier: 'length an outlier',
     sprint_length_note: 'length flag',
+    // prd/67 W-05: the window's own sprint count, beside the store's scope.
+    window_sprints: 'sprints closed in this window',
   }[key];
   if (sprint) return sprint;
   // prd/22: the stack evidence reads as prose, not as snake_case.
@@ -173,9 +175,41 @@ export function evidenceValue(key, value) {
 }
 
 function evidenceItems(evidence) {
-  return Object.entries(evidence || {})
-    .filter(([, value]) => value !== null && value !== undefined && value !== '')
-    .map(([key, value]) => ({ key, label: evidenceLabel(key), value: evidenceValue(key, value) }));
+  const store = {};
+  const items = [];
+  for (const [key, value] of Object.entries(evidence || {})) {
+    if (value === null || value === undefined || value === '') continue;
+    // prd/67 W-05: the two store-wide carry-over numbers are one fact, placed
+    // next to the window count — not two snake_case chips a reader must add up.
+    if (key === 'store_carried_over' || key === 'store_sprints') {
+      store[key] = value;
+      continue;
+    }
+    items.push({ key, label: evidenceLabel(key), value: evidenceValue(key, value) });
+  }
+  const scoped = storeScopeItem(store.store_carried_over, store.store_sprints);
+  if (scoped) {
+    const at = items.findIndex((item) => item.key === 'carried_over');
+    items.splice(at >= 0 ? at + 1 : items.length, 0, scoped);
+  }
+  return items;
+}
+
+/** prd/67 W-05: "the whole store: 412 carried over across 106 sprints".
+ *
+ * The carry-over rule counts the stories created in the chosen window; the
+ * sprint lens counts every story in the store. The two scopes sit side by side
+ * so the window count cannot be read as the store total. `null` (the store has
+ * no closed sprint) renders nothing rather than a zero.
+ */
+export function storeScopeItem(carried, sprints) {
+  if (carried == null || sprints == null) return null;
+  return {
+    key: 'store_carried_over',
+    label: 'the whole store',
+    value: `${carried} carried over across ${sprints} ` +
+      `sprint${sprints === 1 ? '' : 's'}`,
+  };
 }
 
 /* ------------------------------------------------------- evidence drill-down
