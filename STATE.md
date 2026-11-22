@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1361** (`tests/`) + **99** (`scrape/tests`) + **519** (node `app/test`) green.
+Tests: **1366** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -35,6 +35,15 @@ Tests: **1361** (`tests/`) + **99** (`scrape/tests`) + **519** (node `app/test`)
   flash echo, scope-consistent aging counts/chart/re-plan, non-colliding percentile labels, the
   policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
   22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
+
+## v0.14.1 — v0.14.0 QA fixes (prd/68)
+
+16 findings from the Jira-only QA: the Queue crash on an unscoped empty response, dateless/future
+sprints (`dates unknown`, focus filters, no inverted bands), person scope on Aging (Jira assignee as
+holder), the policy lab falsely disabling refine, day counts printed as hours, the re-plan section under
+`only=live`, the no-live-PR count, the duplicate verdict disclaimer, the false “every ticket merged”,
+PR-only trend tabs on a 0-PR store (now unavailable; cumulative flow plots story bands), the epic
+Markdown export, Sources’ PR-only copy, aging-column clipping and timeline label/phone overflow.
 
 ## v0.14.0 — window scoping (prd/67)
 
