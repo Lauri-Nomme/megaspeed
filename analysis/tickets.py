@@ -1044,12 +1044,29 @@ def done_but_open(court: ballcourt.BallCourt, data: jira.JiraData,
         -(row["waiting_hours"] or 0),
         row["key"],
     ))
+    has_prs = bool(court.prs)
+    if not has_prs:
+        unavailable = (
+            "unavailable: this dataset holds no pull requests, so whether a "
+            "Done ticket's code was merged cannot be checked here"
+        )
+    elif not data.stories:
+        unavailable = (
+            "unavailable: this dataset holds no Jira stories, so there is no "
+            "Done ticket to check against the PRs"
+        )
+    else:
+        unavailable = None
     return {
-        "available": bool(data.stories),
+        # prd/68 F-10: the panel joins both layers. A Jira-only store has 0 PRs,
+        # and an empty row list there is *unmeasured*, not "every ticket has its
+        # code merged".
+        "available": unavailable is None,
         "count": len(out),
         "opened_after_close": sum(1 for row in out if row["opened_after_close"]),
         "rows": out,
-        "note": (
+        "unavailable_reason": unavailable,
+        "note": unavailable or (
             "a ticket is Done when its final done boundary exists; the PR is "
             "still open at the snapshot. 'PR opened after the ticket closed' is "
             "a stronger finding: the work cannot have been part of the delivered "

@@ -139,18 +139,39 @@ export function scenarioQuery(scenario, { seed } = {}) {
 
 /** Is the refinement knob measurable on this calibration?
  *
- * prd/64 F-03: a store with no `created → ready` segment (a PR-only store has
- * no Jira layer) reports `refinement.hours: null`. The knob is then disabled
- * and says so, rather than pricing the policy at an invented 1 h default.
+ * prd/64 F-03: a store with no `created → ready` segment reports
+ * `refinement.hours: null`. The knob is then disabled and says so, rather than
+ * pricing the policy at an invented 1 h default.
+ *
+ * prd/68 F-04: only the measured hours decide this. A Jira-only store has no
+ * review sample to fit but still has a measured refinement segment, so it must
+ * keep the knob enabled — a missing `refinement` key is the *only* thing that
+ * may mean "no Jira layer".
  */
+export const REFINEMENT_NO_JIRA = 'not measurable (no Jira layer) — this store has ' +
+  'no created → ready segment, so refine before start is unavailable';
+
+/** Why the refinement knob has no measured price, or `null` when it has one. */
+export function refinementUnavailableReason(calibration) {
+  if (!calibration) return null;       // no model shown here; leave the control alone
+  const refinement = calibration.refinement;
+  if (!refinement) return REFINEMENT_NO_JIRA;
+  if (refinement.hours != null) return null;
+  const basis = String(refinement.basis || '').trim();
+  // the measured-segment basis is the real reason; "no Jira layer" is only
+  // true when that is what the calibration actually says.
+  if (!basis || /^no jira layer/i.test(basis)) return REFINEMENT_NO_JIRA;
+  return `not measurable — ${basis}, so refine before start is unavailable`;
+}
+
 export function refinementUnavailable(calibration) {
-  if (!calibration) return false;      // no model shown here; leave the control alone
-  return ((calibration.refinement || {}).hours == null);
+  return refinementUnavailableReason(calibration) !== null;
 }
 
 export function policyConfigMarkup(scenario, calibration) {
   const current = scenario || defaultScenario();
-  const noRefinement = refinementUnavailable(calibration);
+  const noRefinementReason = refinementUnavailableReason(calibration);
+  const noRefinement = noRefinementReason !== null;
   const rows = KNOBS.map((knob) => {
     const value = current[knob.key];
     // prd/37 §5 (a11y): every control has a real <label for>, not just a span
@@ -158,10 +179,7 @@ export function policyConfigMarkup(scenario, calibration) {
     const id = `policy-knob-${knob.key}`;
     const noteId = `${id}-note`;
     const unavailable = knob.key === 'refine_before_start' && noRefinement;
-    const note = unavailable
-      ? 'not measurable (no Jira layer) — this store has no created → ready ' +
-        'segment, so refine before start is unavailable'
-      : knob.note;
+    const note = unavailable ? noRefinementReason : knob.note;
     let control = '';
     if (knob.kind === 'toggle') {
       control = `<input type="checkbox" id="${id}" data-knob="${knob.key}"` +
@@ -183,7 +201,7 @@ export function policyConfigMarkup(scenario, calibration) {
   const presets = PRESETS.map((preset) => {
     const unavailable = preset.id === 'refine' && noRefinement;
     return `<button type="button" class="chip" data-preset="${esc(preset.id)}"` +
-      `${unavailable ? ' disabled aria-disabled="true" title="not measurable (no Jira layer)"' : ''}>` +
+      `${unavailable ? ` disabled aria-disabled="true" title="${esc(noRefinementReason)}"` : ''}>` +
       `${esc(preset.label)}</button>`;
   }).join('');
   return `<div class="policy-knobs">${rows}</div>

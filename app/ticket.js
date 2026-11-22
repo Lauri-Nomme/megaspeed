@@ -740,9 +740,57 @@ export function ticketMarkup(payload, { base = '', benchmark = true } = {}) {
     </section>`;
 }
 
+/**
+ * Copy-as-Markdown for an epic (prd/68 F-12).
+ *
+ * The story template below describes a created → done cycle an epic does not
+ * have, and its worklog/sprint sections were empty placeholders ("logged — in
+ * undefined worklogs"). An epic exports its own header and the child table the
+ * page shows, so the copy is the page.
+ */
+export function epicMarkdown(payload, base = '') {
+  const epic = payload.epic || {};
+  const key = payload.key || epic.key || '';
+  const children = epic.stories || [];
+  const count = epic.story_count ?? children.length;
+  const state = epic.state || 'unknown state';
+  const points = epic.points == null ? '—' : epic.points;
+  const childRows = children.map((story) => `| ${
+    ticketHref(story.key, base)
+      ? `[${story.key}](${ticketHref(story.key, base)})`
+      : story.key} | ${story.state || 'unknown'}${
+    story.censored && story.state !== 'open' ? ' · open' : ''} | ${
+    story.points == null ? '—' : story.points} | ${
+    story.cycle_hours == null ? '—' : segmentHours(story.cycle_hours)} |`);
+  return [
+    `# ${key} — epic`,
+    '',
+    `> ${payload.answer || `${key} is an epic — a parent grouping of ${count} stories.`}`,
+    '',
+    `_${payload.hours_mode === 'business' ? 'business hours' : 'wall-clock hours'} · ` +
+      `timestamps UTC · snapshot ${payload.snapshot || '—'} · [open in the app](${ticketHref(key, base)})_`,
+    '',
+    '| epic | state | stories | points |',
+    '| --- | --- | --- | --- |',
+    `| ${key} | ${state} | ${count} | ${points} |`,
+    '',
+    `## child stories (${count})`,
+    '',
+    ...(children.length
+      ? [
+        '| story | state | points | cycle |',
+        '| --- | --- | --- | --- |',
+        ...childRows,
+      ]
+      : ['No story in this store names this epic, so there is nothing to drill into.']),
+    '',
+  ].join('\n');
+}
+
 /** Copy-as-Markdown: the same answer, with ticket keys as clickable links. */
 export function ticketMarkdown(payload, base = '') {
   if (!payload) return '';
+  if (payload.kind === 'epic') return epicMarkdown(payload, base);
   const story = payload.story || {};
   const segments = payload.segments || {};
   const key = payload.key || '';
@@ -760,8 +808,11 @@ export function ticketMarkdown(payload, base = '') {
       : []),
     ...(payload.yield && (payload.yield.steps || []).length
       ? ['', `**first pass:** ${payload.yield.steps.map((step) =>
-        `${step.label.toLowerCase()} ${step.clean ? 'clean' : 'bounced'}`).join(' · ')}` +
-        ` — ${payload.yield.rolled_clean ? 'clean at every step' : 'a loop-back somewhere'}`]
+        `${step.label.toLowerCase()} ${step.available === false
+          ? 'not measured' : step.clean ? 'clean' : 'bounced'}`).join(' · ')}` +
+        ` — ${(payload.yield.steps || []).some((step) => step.available === false)
+          ? 'not measurable for this story'
+          : payload.yield.rolled_clean ? 'clean at every step' : 'a loop-back somewhere'}`]
       : []),
     ...((payload.open_prs || []).length
       ? ['', `**still open:** ${(payload.open_prs || []).map((pr) =>

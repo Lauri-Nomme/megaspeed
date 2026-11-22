@@ -736,6 +736,27 @@ def _store_bots(conn) -> set[str]:
     return rules_module.load_bots(conn)
 
 
+def _refinement_block(refinement: dict | None) -> dict:
+    """The refinement knob's calibrated input, present on every calibration.
+
+    prd/68 F-04: the Jira layer is independent of the PR samples, so a store
+    with no PRs (a Jira-only dataset) still has a measured ``created → ready``
+    segment. The block therefore travels with the calibration — including the
+    early return when there is no review sample to fit — so the UI can price
+    the knob instead of reading a missing key as "no Jira layer".
+    """
+    if refinement:
+        return {
+            "hours": refinement.get("hours"),
+            "n": refinement.get("n", 0),
+            "basis": refinement.get("basis"),
+        }
+    return {
+        "hours": None, "n": 0,
+        "basis": "no Jira layer, so the created → ready cost is unavailable",
+    }
+
+
 def calibrate(court, window=None, conn=None, bots=None,
               include_bots: bool = False, refinement: dict | None = None) -> dict:
     """Derive the model from the store. Every number here is recomputable.
@@ -774,6 +795,9 @@ def calibrate(court, window=None, conn=None, bots=None,
                 "nothing to calibrate a review service time from"
             ),
             "prs": {"n": len(cohort)},
+            # prd/68 F-04: no PR sample to fit, but the refinement segment is
+            # measured from the Jira layer and must still reach the UI.
+            "refinement": _refinement_block(refinement),
         }
 
     pool = sorted(person for person in samples["review"] if person not in bots)
@@ -1090,17 +1114,8 @@ def calibrate(court, window=None, conn=None, bots=None,
         },
         "stack_depth": _stack_depth(court),
         # prd/42 M3: the refinement knob's measured cost (created → ready).
-        "refinement": (
-            {
-                "hours": refinement.get("hours"),
-                "n": refinement.get("n", 0),
-                "basis": refinement.get("basis"),
-            }
-            if refinement else {
-                "hours": None, "n": 0,
-                "basis": "no Jira layer, so the created → ready cost is unavailable",
-            }
-        ),
+        # prd/68 F-04: one block on every path, so a Jira-only store keeps it.
+        "refinement": _refinement_block(refinement),
         "queueing": {
             "model": (
                 "M/G/1 with a realised-queue factor: "

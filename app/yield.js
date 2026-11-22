@@ -94,6 +94,36 @@ function stepColumn(step, n, implied, base) {
   </li>`;
 }
 
+/** Why the rolled product has no number because a step is unfalsifiable.
+ *
+ * prd/68 F-07: on a Jira-only store `rolled` is `null` even with 84 deliveries
+ * because Reviewed has no merged PR to falsify it. That is not "too few for a
+ * rate" and not "0 of 84" — the product is unknown, and the reason is a step
+ * the store does not measure.
+ */
+export function rolledUnavailableReason(payload) {
+  if (!payload || payload.rolled != null) return '';
+  const steps = payload.steps || [];
+  const missing = YIELD_STEPS
+    .map(({ id }) => steps.find((step) => step.id === id))
+    .filter((step) => step && step.available === false);
+  if (!missing.length) return '';
+  return `Rolled %C&A is unavailable because ${missing
+    .map((step) => step.label).join(' and ')} ${missing.length === 1 ? 'is' : 'are'} ` +
+    'not measured in this store';
+}
+
+/** The rolled sentence for an export: measured, unavailable, or too few. */
+function rolledSentence(payload) {
+  if (payload.rolled != null) {
+    return [`Only ${payload.clean_joint} of ${payload.n} stories went through without a ` +
+      `loop-back (joint clean ${payload.clean_joint}; the product is ${fmtShare(payload.rolled)}).`];
+  }
+  const reason = rolledUnavailableReason(payload);
+  if (reason) return [`${reason}.`];
+  return [`${payload.n} deliveries — too few for a rate (minimum ${payload.min_deliveries || 10}).`];
+}
+
 /**
  * The `First-pass yield` panel: `REFINED 100 % · … → ROLLED 8.6 %`.
  *
@@ -115,12 +145,26 @@ export function yieldPanel(metrics, { base = '' } = {}) {
   const byId = new Map(steps.map((step) => [step.id, step]));
   const ordered = YIELD_STEPS.map((step) => byId.get(step.id)).filter(Boolean);
   const rolled = payload.rolled == null ? '–' : fmtShare(payload.rolled);
-  const joint = payload.clean_joint;
   const n = payload.n;
-  const hidden = payload.rolled == null
+  const minDeliveries = Number(payload.min_deliveries || 10);
+  // prd/68 F-07: `rolled == null` has two very different causes. A genuinely
+  // small cohort is "too few for a rate"; a step the store cannot falsify
+  // (Reviewed on a Jira-only store) makes the product unavailable, not zero.
+  const rolledReason = rolledUnavailableReason(payload);
+  const unmeasured = rolledReason !== '';
+  const tooFew = payload.rolled == null && !unmeasured && Number(n) < minDeliveries;
+  // the joint clean count is a measurement of all four steps; when one is not
+  // measured the count is not 0, it is unknown.
+  const joint = payload.clean_joint == null || unmeasured
+    ? '–'
+    : payload.clean_joint;
+  const hidden = tooFew
     ? `<p class="yield-step-note" data-yield-too-few>${esc(
-      `${n} deliveries — too few for a rate (minimum ${payload.min_deliveries || 10})`,
+      `${n} deliveries — too few for a rate (minimum ${minDeliveries})`,
     )}</p>`
+    : '';
+  const unavailableNote = rolledReason
+    ? `<p class="yield-step-note" data-yield-unavailable>${esc(rolledReason)}.</p>`
     : '';
   const noPr = payload.no_pr
     ? `<p class="yield-step-note">${payload.no_pr} stor${payload.no_pr === 1 ? 'y has' : 'ies have'} no merged PR, so ${payload.no_pr === 1 ? 'it is' : 'they are'} excluded from the review denominator.</p>`
@@ -144,7 +188,7 @@ export function yieldPanel(metrics, { base = '' } = {}) {
       </li>
     </ol>
     ${sentence ? `<p class="yield-sentence">${sentence}</p>` : ''}
-    ${hidden}${noPr}
+    ${hidden}${unavailableNote}${noPr}
     ${payload.implied && (payload.implied.steps && Object.keys(payload.implied.steps).length)
       ? `<p class="yield-step-note">${esc(payload.implied.basis || '')}</p>` : ''}
     <p class="panel-note">${esc(payload.basis || '')}</p>
@@ -234,13 +278,12 @@ export function yieldMarkdown(metrics, base = '') {
     '| step | %C&A | clean / n | signals |',
     '| --- | --- | --- | --- |',
     ...(payload.steps || []).map((step) => `| ${step.label} | ${
-      step.rate == null ? '–' : fmtShare(step.rate)} | ${
+      step.available === false
+        ? 'not measured'
+        : step.rate == null ? '–' : fmtShare(step.rate)} | ${
       step.clean_n ?? '–'} / ${step.n} | ${(step.signals || []).join(', ')} |`),
     '',
-    payload.rolled == null
-      ? `${payload.n} deliveries — too few for a rate (minimum ${payload.min_deliveries || 10}).`
-      : `Only ${payload.clean_joint} of ${payload.n} stories went through without a loop-back ` +
-        `(joint clean ${payload.clean_joint}; the product is ${fmtShare(payload.rolled)}).`,
+    ...rolledSentence(payload),
     '',
   ];
   const stability = metrics && metrics.stability;
