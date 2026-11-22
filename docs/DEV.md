@@ -225,7 +225,13 @@ or the full error.
 On a CPU box, batch and resume: `--batch-size 8` labels eight same-kind texts per
 request, and labels are checkpointed to `<out>.labels.jsonl` after every batch.
 `Ctrl-C`, a reboot, or `touch <out>.stop` stops cleanly; re-run the same command
-to continue where it left off. Every model call is also written to
+to continue where it left off. Relabel runs up to `--llm-workers` requests in
+flight (the container needs `OLLAMA_NUM_PARALLEL` for that to help).
+
+Identity maps are per tenant and must be shared across sources: scraping Jira on
+one machine and Bitbucket on another produces two maps, and a person can end up
+with two pseudonyms (`LaNo` from `"Lauri Nomme"`, `NoLa` from `"Nomme, Lauri"`).
+Copy one map to the other side and pass `--identity`. Every model call is also written to
 `<out>.trace.jsonl` (full request/response incl. thinking; `--no-call-trace`
 disables it). That trace is raw zone — never transfer it.
 

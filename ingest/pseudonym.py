@@ -24,7 +24,7 @@ import json
 import re
 from pathlib import Path
 
-_SPLIT = re.compile(r"[\s._\-/@+]+")
+_SPLIT = re.compile(r"[\s._\-/@+,]+")
 _NON_ALPHA = re.compile(r"[^A-Za-z]")
 
 GIVEN_NAME, SURNAME, DISPLAY, EMAIL = "given", "surname", "display", "email"
@@ -45,9 +45,24 @@ def split_name(user: dict) -> tuple[str, str]:
     ``displayName`` first, then the slug/username, then the email local part.
     Single token names are duplicated (``lauri`` -> ``LaLa``) rather than
     guessed.
+
+    A **comma** is the directory convention ``"Surname, Given"`` (the same
+    person Bitbucket renders as ``"Nomme, Lauri"`` and Jira as
+    ``"Lauri Nomme"``). The comma is flipped before splitting, otherwise the
+    pseudonym is reversed (``NoLa`` instead of ``LaNo``) and one human becomes
+    two identities -- which the analysis then counts twice.
     """
     for candidate in (user.get("displayName"), user.get("name"), str(user.get("emailAddress") or "").split("@")[0]):
-        tokens = [t for t in _SPLIT.split(str(candidate or "")) if t]
+        raw = str(candidate or "").strip()
+        if not raw:
+            continue
+        if "," in raw:
+            surname_part, _, given_part = raw.partition(",")
+            given = [t for t in _SPLIT.split(given_part) if t]
+            surname = [t for t in _SPLIT.split(surname_part) if t]
+            if given and surname:
+                return given[0], surname[-1]
+        tokens = [t for t in _SPLIT.split(raw) if t]
         if len(tokens) >= 2:
             return tokens[0], tokens[-1]
         if len(tokens) == 1:
@@ -106,7 +121,23 @@ def _identity_tokens(key: str, entry: dict) -> set[str]:
     display = _normalise(entry.get("display"))
     if display:
         tokens.add(display)
+    name = _name_token(entry.get("display"))
+    if name:
+        tokens.add(name)
     return {token for token in tokens if token}
+
+
+def _name_token(value: object) -> str:
+    """Order-independent name token: ``"Nomme, Lauri"`` == ``"Lauri Nomme"``.
+
+    Cross-source linking used the normalised display string, so a comma-form
+    name from Bitbucket ("nommelauri") never matched the same human in Jira
+    ("laurinomme") and one person became two pseudonyms.
+    """
+    tokens = sorted(
+        token.lower() for token in _SPLIT.split(str(value or "")) if token.isalpha()
+    )
+    return " ".join(tokens)
 
 
 def _user_tokens(user: dict) -> set[str]:
@@ -122,6 +153,9 @@ def _user_tokens(user: dict) -> set[str]:
     display = _normalise(user.get("displayName"))
     if display:
         tokens.add(display)
+    name = _name_token(user.get("displayName"))
+    if name:
+        tokens.add(name)
     return {token for token in tokens if token}
 
 

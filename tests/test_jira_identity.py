@@ -104,6 +104,19 @@ class LinkingTests(unittest.TestCase):
         jira = {"name": "ln", "displayName": "Lauri Nomme", "emailAddress": ""}
         self.assertEqual(self.table.pseudonym(jira, source=JIRA), "LaNo")
 
+    def test_link_is_name_order_and_comma_insensitive(self):
+        # Bitbucket users.json renders "Surname, Given"; Jira renders
+        # "Given Surname". With no shared username/e-mail, the name alone must
+        # still link -- otherwise the human gets two pseudonyms.
+        jira = {"name": "x1", "displayName": "Lauri Nomme", "emailAddress": ""}
+        self.table.pseudonym(jira, source=JIRA)
+        bitbucket = {
+            "name": "x2",
+            "displayName": "Nomme, Lauri",
+            "emailAddress": "",
+        }
+        self.assertEqual(self.table.pseudonym(bitbucket), "LaNo")
+
     def test_an_unknown_jira_actor_gets_its_own_pseudonym(self):
         self.table.pseudonym(LAURI_BB)
         self.assertEqual(self.table.pseudonym(CAROL_JIRA, source=JIRA), "CaOs")

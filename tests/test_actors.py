@@ -19,7 +19,7 @@ from pathlib import Path
 from ingest import fixtures
 from ingest.config import Config
 from ingest.pipeline import KeyFilter, Reducer, classify_actor, run
-from ingest.pseudonym import IdentityTable
+from ingest.pseudonym import IdentityTable, base_pseudonym, split_name
 from ingest.store import connect, list_objects, verify
 from ingest.transport import FixtureTransport
 
@@ -27,6 +27,28 @@ AS_OF = datetime(2026, 11, 15, 12, 0, 0)
 SERVICE = {"name": "bitbucket.system-user", "slug": "bitbucket.system-user",
            "displayName": "Bitbucket", "type": "SERVICE"}
 HUMAN = {"name": "grace", "displayName": "Grace Hopper", "type": "NORMAL"}
+
+
+class NameSplitTests(unittest.TestCase):
+    """The pseudonym must not depend on whether the source renders names
+    ``"Lauri Nomme"`` (Jira) or ``"Nomme, Lauri"`` (Bitbucket users.json)."""
+
+    def test_given_first_and_comma_surname_first_agree(self):
+        for display in ("Lauri Nomme", "Nomme, Lauri"):
+            given, surname = split_name({"displayName": display})
+            self.assertEqual((given, surname), ("Lauri", "Nomme"), display)
+            self.assertEqual(base_pseudonym(given, surname), "LaNo")
+
+        for display in ("Mihkel Mets", "Mets, Mihkel"):
+            given, surname = split_name({"displayName": display})
+            self.assertEqual(base_pseudonym(given, surname), "MiMe")
+
+    def test_a_compound_surname_uses_its_last_token(self):
+        given, surname = split_name({"displayName": "van der Berg, Jan"})
+        self.assertEqual((given, surname), ("Jan", "Berg"))
+
+    def test_a_single_token_is_duplicated(self):
+        self.assertEqual(split_name({"displayName": "lauri"}), ("lauri", "lauri"))
 
 
 class ActorKindTests(unittest.TestCase):

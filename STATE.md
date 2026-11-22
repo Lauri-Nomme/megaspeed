@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1456** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
+Tests: **1461** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -35,6 +35,28 @@ Tests: **1456** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`)
   flash echo, scope-consistent aging counts/chart/re-plan, non-colliding percentile labels, the
   policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
   22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
+
+## v0.17.3 — name order, cross-source linking, concurrent relabel
+
+**Actor bug:** Bitbucket's `users.json` renders `"Nomme, Lauri"` while Jira
+renders `"Lauri Nomme"`. `split_name` split on spaces only, so the comma stuck
+to the first token and the pseudonym came out reversed (`NoLa` vs `LaNo`), and
+the linking token (`nommelauri` vs `laurinomme`) never matched. Commas are now
+flipped, both orders produce `LaNo`, and the linking token is the sorted name
+(`"lauri nomme"`). Existing identity-map entries keep their stored pseudonym
+(stability by design) — see the repair note below.
+
+**Concurrent relabel:** relabel's classification loop was serial even with
+`--llm-workers 4`, so the container's `OLLAMA_NUM_PARALLEL=4` was unused. It now
+runs up to `workers` groups in flight (cache writes stay on the main thread), and
+the progress line reports the group count.
+
+**Repair:** a store built from *separate* Jira and Bitbucket identity maps can
+hold both `LaNo` and `NoLa`. Import does not reject either (both are valid
+pseudonyms); the analysis counts them as two people. To repair, scrape both
+sources with **one** identity map (copy the Jira map next to the Bitbucket
+scrape and pass `--identity`), re-import (same event keys, actor rewritten), then
+drop PERSON objects that no event references.
 
 ## v0.17.2 — a trace that cannot be written says so
 

@@ -672,6 +672,39 @@ class RelabelTests(unittest.TestCase):
         self.assertTrue(singles)
         self.assertTrue(singles[0]["text"])
 
+    def test_workers_classify_groups_concurrently(self):
+        import threading
+        import time as _time
+
+        class Slow(Recording):
+            workers = 4
+
+            def __init__(self):
+                super().__init__(comment_type="nit")
+                self.active = 0
+                self.peak = 0
+                self._guard = threading.Lock()
+
+            def classify(self, text, kind, context=None):
+                with self._guard:
+                    self.active += 1
+                    self.peak = max(self.peak, self.active)
+                try:
+                    _time.sleep(0.05)
+                    return super().classify(text, kind, context)
+                finally:
+                    with self._guard:
+                        self.active -= 1
+
+        classifier = Slow()
+        report = relabel(
+            self.cfg, trace_path=self.trace, bundle_path=self.bundle,
+            out=self.root / "labels.tgz", classifier=classifier,
+            batch_size=1, progress=QUIET,
+        )
+        self.assertGreater(classifier.peak, 1)
+        self.assertGreater(report["texts_classified"], 0)
+
     def test_a_failed_batch_falls_back_to_one_text_at_a_time(self):
         class BadBatch(Recording):
             def __init__(self, **kwargs):

@@ -31,6 +31,7 @@ import argparse
 import json
 import sys
 import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -569,52 +570,44 @@ def relabel(
     cache_hits = len(markers) - len(pending)
 
     # -- classification pass: batches of one kind, cache flushed per batch ----
+    # ``workers`` (the classifier's pool size / --llm-workers) groups are in
+    # flight at once. Ollama serves them concurrently when OLLAMA_NUM_PARALLEL
+    # allows it; the cache is written from this thread only, so a race cannot
+    # interleave a half-written line.
     model_label = (
         f"{getattr(text, 'backend', '?')}:{getattr(text, 'model', None) or text.version}"
     )
     batch_size = max(1, int(batch_size))
-    classified = 0
-    batches = 0
+    workers = max(1, int(getattr(text, "workers", 1)))
+    counters = {"classified": 0, "batches": 0, "next_log": 500}
     stopped = ""
-    next_log = 500
     index = 0
-    try:
-        while index < len(pending):
-            if _stop_requested(stop_path):
-                stopped = f"stop file {stop_path}"
-                _consume_stop_file(stop_path)
-                break
-            kind = pending[index][0]
-            group: list[tuple[str, str]] = []
-            while (
-                index < len(pending)
-                and pending[index][0] == kind
-                and len(group) < batch_size
-            ):
-                group.append(pending[index])
-                index += 1
-            bodies = [body for _kind, body in group]
-            batch_started = time.monotonic()
-            try:
-                if len(group) > 1 and hasattr(text, "classify_batch"):
-                    results = text.classify_batch([
-                        (body, kind, contexts.get((kind, body))) for body in bodies
-                    ])
-                else:
-                    results = [
-                        (
-                            text.classify(body, kind, contexts.get((kind, body))),
-                            getattr(text, "last_version", text.version),
-                        )
-                        for body in bodies
-                    ]
-            except KeyboardInterrupt:
-                raise
-            except Exception as exc:  # noqa: BLE001 - a bad batch is retried per text
-                reporter.emit(
-                    f"[relabel] batch of {len(group)} failed"
-                    f" ({type(exc).__name__}: {exc}); retrying one by one"
-                )
+
+    def take_group() -> list[tuple[str, str]] | None:
+        nonlocal index
+        if index >= len(pending):
+            return None
+        kind = pending[index][0]
+        group: list[tuple[str, str]] = []
+        while (
+            index < len(pending)
+            and pending[index][0] == kind
+            and len(group) < batch_size
+        ):
+            group.append(pending[index])
+            index += 1
+        return group
+
+    def run_group(group: list[tuple[str, str]]) -> list[tuple[dict, str]]:
+        kind = group[0][0]
+        bodies = [body for _kind, body in group]
+        batch_started = time.monotonic()
+        try:
+            if len(group) > 1 and hasattr(text, "classify_batch"):
+                results = text.classify_batch([
+                    (body, kind, contexts.get((kind, body))) for body in bodies
+                ])
+            else:
                 results = [
                     (
                         text.classify(body, kind, contexts.get((kind, body))),
@@ -622,29 +615,93 @@ def relabel(
                     )
                     for body in bodies
                 ]
-            for (mkind, body), (labels, _version) in zip(group, results):
-                answers[(mkind, body)] = labels
-                cache.put(mkind, body, labels)
-                classified += 1
-            cache.flush()
-            batches += 1
-            if reporter.enabled and len(group) > 1:
-                reporter.emit(
-                    f"[relabel] batch {len(group)} ·"
-                    f" {time.monotonic() - batch_started:.1f}s · {kind} · {model_label}"
+        except Exception as exc:  # noqa: BLE001 - a bad batch is retried per text
+            reporter.emit(
+                f"[relabel] batch of {len(group)} failed"
+                f" ({type(exc).__name__}: {exc}); retrying one by one"
+            )
+            results = [
+                (
+                    text.classify(body, kind, contexts.get((kind, body))),
+                    getattr(text, "last_version", text.version),
                 )
-            if reporter.enabled and classified >= next_log:
-                elapsed = max(1e-6, time.monotonic() - started)
-                rate = classified / elapsed
-                eta = (len(pending) - classified) / rate if rate > 0 else 0
-                reporter.emit(
-                    f"[relabel] {classified}/{len(pending)} text(s) ·"
-                    f" {cache_hits} cached · {batch_size <= 1 and '1 call' or str(batches) + ' batch(es)'}"
-                    f" · {rate:.2f} text/s · eta {format_elapsed(eta)}"
-                )
-                next_log += 500
+                for body in bodies
+            ]
+        if reporter.enabled and len(group) > 1:
+            reporter.emit(
+                f"[relabel] batch {len(group)} ·"
+                f" {time.monotonic() - batch_started:.1f}s · {kind} · {model_label}"
+            )
+        return results
+
+    def absorb(group: list[tuple[str, str]], results: list[tuple[dict, str]]) -> None:
+        for (mkind, body), (labels, _version) in zip(group, results):
+            answers[(mkind, body)] = labels
+            cache.put(mkind, body, labels)
+            counters["classified"] += 1
+        cache.flush()
+        counters["batches"] += 1
+        if reporter.enabled and counters["classified"] >= counters["next_log"]:
+            elapsed = max(1e-6, time.monotonic() - started)
+            rate = counters["classified"] / elapsed
+            eta = (len(pending) - counters["classified"]) / rate if rate > 0 else 0
+            reporter.emit(
+                f"[relabel] {counters['classified']}/{len(pending)} text(s) ·"
+                f" {cache_hits} cached · {counters['batches']} group(s),"
+                f" {workers} in flight max · {rate:.2f} text/s"
+                f" · eta {format_elapsed(eta)}"
+            )
+            counters["next_log"] += 500
+
+    in_flight: dict = {}
+    try:
+        if workers == 1:
+            while True:
+                if _stop_requested(stop_path):
+                    stopped = f"stop file {stop_path}"
+                    _consume_stop_file(stop_path)
+                    break
+                group = take_group()
+                if group is None:
+                    break
+                absorb(group, run_group(group))
+        else:
+            with ThreadPoolExecutor(
+                max_workers=workers, thread_name_prefix="relabel"
+            ) as pool:
+                while True:
+                    while (
+                        not stopped
+                        and index < len(pending)
+                        and len(in_flight) < workers
+                    ):
+                        if _stop_requested(stop_path):
+                            stopped = f"stop file {stop_path}"
+                            _consume_stop_file(stop_path)
+                            break
+                        group = take_group()
+                        if group is None:
+                            break
+                        in_flight[pool.submit(run_group, group)] = group
+                    if not in_flight:
+                        break
+                    done, _pending = wait(in_flight, return_when=FIRST_COMPLETED)
+                    for future in done:
+                        group = in_flight.pop(future)
+                        absorb(group, future.result())
     except KeyboardInterrupt:
         stopped = "interrupted (Ctrl-C)"
+        if in_flight:
+            reporter.emit(
+                f"[relabel] waiting for {len(in_flight)} in-flight request(s)…"
+            )
+            for future, group in list(in_flight.items()):
+                try:
+                    absorb(group, future.result())
+                except Exception:  # noqa: BLE001 - the cache keeps what finished
+                    pass
+    classified = counters["classified"]
+    batches = counters["batches"]
 
     if stopped:
         cache.close()
