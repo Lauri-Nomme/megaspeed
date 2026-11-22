@@ -88,6 +88,10 @@ def _replay_items(records: list[dict]) -> list[dict]:
     """
     items: dict[tuple, dict] = {}
     for record in records:
+        if record.get("batch"):
+            # A relabel trace can hold batched call records (diagnostics only);
+            # only per-text records know which row they came from.
+            continue
         context = record.get("context") or {}
         if context.get("role") not in REPLAY_ROLES:
             continue
@@ -456,6 +460,7 @@ def relabel(
     batch_size: int = 1,
     labels_cache: str | Path | None = None,
     stop_file: str | Path | None = None,
+    call_trace_path: str | Path | None = None,
     limit: int | None = None,
     progress: ProgressReporter | None = None,
 ) -> dict:
@@ -495,8 +500,28 @@ def relabel(
     text = classifier if classifier is not None else classify.for_scrape(cfg, "hans")
     if text is None:
         raise RelabelError("text classification is off (MEGASPEED_TEXT_CLASSIFY=0)")
-    if reporter.enabled and getattr(text, "on_call", None) is None:
-        text.on_call = lambda record: reporter.emit(llmtrace.call_line(record))
+    trace_writer = (
+        llmtrace.TraceWriter(Path(call_trace_path).expanduser())
+        if call_trace_path
+        else None
+    )
+
+    def _emit_call(record: dict) -> None:
+        if trace_writer is not None:
+            trace_writer(record)
+        if reporter.enabled:
+            reporter.emit(llmtrace.call_line(record))
+
+    def _emit_batch(record: dict) -> None:
+        if trace_writer is not None:
+            trace_writer(record)
+        if reporter.enabled:
+            reporter.emit(llmtrace.batch_line(record))
+
+    if trace_writer is not None or reporter.enabled:
+        text.on_call = _emit_call
+        if hasattr(text, "on_batch"):
+            text.on_batch = _emit_batch
 
     # The same text in ten threads is one model call. The cache is the resume
     # checkpoint: it is flushed after every batch, so Ctrl-C / a stop file / a
@@ -520,6 +545,7 @@ def relabel(
         )
 
     markers: list[tuple[str, str]] = []
+    contexts: dict[tuple[str, str], dict] = {}
     seen: set[tuple[str, str]] = set()
     for record in items:
         marker = (str(record["kind"]), str(record["text"]))
@@ -527,6 +553,7 @@ def relabel(
             continue
         seen.add(marker)
         markers.append(marker)
+        contexts[marker] = record.get("context") or {}
 
     answers: dict[tuple[str, str], dict] = {}
     pending: list[tuple[str, str]] = []
@@ -567,11 +594,13 @@ def relabel(
             batch_started = time.monotonic()
             try:
                 if len(group) > 1 and hasattr(text, "classify_batch"):
-                    results = text.classify_batch([(body, kind) for body in bodies])
+                    results = text.classify_batch([
+                        (body, kind, contexts.get((kind, body))) for body in bodies
+                    ])
                 else:
                     results = [
                         (
-                            text.classify(body, kind),
+                            text.classify(body, kind, contexts.get((kind, body))),
                             getattr(text, "last_version", text.version),
                         )
                         for body in bodies
@@ -585,7 +614,7 @@ def relabel(
                 )
                 results = [
                     (
-                        text.classify(body, kind),
+                        text.classify(body, kind, contexts.get((kind, body))),
                         getattr(text, "last_version", text.version),
                     )
                     for body in bodies
@@ -616,6 +645,8 @@ def relabel(
 
     if stopped:
         cache.close()
+        if trace_writer is not None:
+            trace_writer.close()
         return {
             "mode": "relabel",
             "stopped": True,
@@ -628,6 +659,8 @@ def relabel(
             "remaining": len(pending) - classified,
             "texts_total": len(markers),
             "batches": batches,
+            "trace": str(trace_writer.path) if trace_writer is not None else None,
+            "trace_records": trace_writer.count if trace_writer is not None else 0,
             "classifier": text.report(),
         }
 
@@ -817,6 +850,11 @@ def relabel(
             "batches": batches,
             "batch_size": batch_size,
             "labels_cache": cache_path.name,
+            "trace": (
+                {"file": trace_writer.path.name, "records": trace_writer.count}
+                if trace_writer is not None
+                else {"enabled": False}
+            ),
         },
         "text_classifier": text.report(),
         "counts": {
@@ -831,6 +869,8 @@ def relabel(
         },
     }
     cache.close()
+    if trace_writer is not None:
+        trace_writer.close()
     written = labelpatch.write_patch(out, manifest=manifest, rows=rows)
     report = {
         "mode": "relabel",
@@ -845,6 +885,8 @@ def relabel(
         "batches": batches,
         "batch_size": batch_size,
         "labels_cache": str(cache_path),
+        "trace": str(trace_writer.path) if trace_writer is not None else None,
+        "trace_records": trace_writer.count if trace_writer is not None else 0,
         "bundle": str(bundle_path),
         "bundle_sha256": bundle.sha256,
         "patch": str(out),
@@ -875,6 +917,8 @@ def _print(report: dict) -> None:
             f" label(s) saved · {report['classified']}/{report['texts_total']} text(s)"
             f" in this run, {report['remaining']} left"
         )
+        if report.get("trace"):
+            print(f"call trace     {report['trace']} · {report.get('trace_records', 0)} record(s)")
         print("no patch       re-run the same command to resume")
         return
     print(f"input          {report['input']}")
@@ -896,6 +940,8 @@ def _print(report: dict) -> None:
         f" {classifier.get('fallbacks', 0)} fallback(s)"
         + (f" · {report['texts_cached']} cached" if report.get("texts_cached") else "")
     )
+    if report.get("trace"):
+        print(f"call trace     {report['trace']} · {report.get('trace_records', 0)} record(s)")
     print(
         f"patch          {report['patch']}  sha256 {report['patch_sha256'][:16]}…"
         f"  ({report['rows']} row(s))"
@@ -950,6 +996,11 @@ def build_parser(prog: str = "python3 -m ingest relabel") -> argparse.ArgumentPa
     ap.add_argument("--stop-file", default=None, metavar="PATH",
                     help="touch this file to stop after the current batch (default:"
                          " <out>.stop); it is moved to .used and no patch is written")
+    ap.add_argument("--call-trace", dest="call_trace", default=None, metavar="PATH",
+                    help="write every model call here -- full request, response and"
+                         " thinking (default <out>.trace.jsonl; raw zone, never imported)")
+    ap.add_argument("--no-call-trace", action="store_true",
+                    help="do not write the model-call trace")
     ap.add_argument("--out", default=None, metavar="PATH.tgz",
                     help="patch to write (default: <bundle>-labels.tgz)")
     ap.add_argument("--text-backend", choices=("ollama", "mock"), default=None,
@@ -998,6 +1049,15 @@ def main(argv: list[str] | None = None) -> int:
     out = Path(args.out).expanduser() if args.out else Path(
         str(Path(args.bundle).expanduser().with_suffix("")) + "-labels.tgz"
     )
+    call_trace_path = (
+        None
+        if args.no_call_trace
+        else (
+            Path(args.call_trace).expanduser()
+            if args.call_trace
+            else Path(str(out) + ".trace.jsonl")
+        )
+    )
     try:
         report = relabel(
             cfg,
@@ -1009,6 +1069,7 @@ def main(argv: list[str] | None = None) -> int:
             batch_size=args.batch_size,
             labels_cache=args.labels_cache,
             stop_file=args.stop_file,
+            call_trace_path=call_trace_path,
             limit=args.limit,
             progress=ProgressReporter(interval=interval),
         )

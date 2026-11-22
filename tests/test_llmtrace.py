@@ -263,16 +263,19 @@ class ClassifierTraceTests(unittest.TestCase):
         def opener(request, timeout):
             calls.append(json.loads(request.data))
             return self.Response({
-                "message": {"content": json.dumps(answers)},
+                "message": {"content": json.dumps(answers),
+                            "thinking": "two remarks"},
                 "done_reason": "stop",
             })
 
         classifier = classify.OllamaClassifier(
             "http://llm.invalid", "qwen3:8b", opener=opener
         )
+        traced: list[dict] = []
+        classifier.on_batch = traced.append
         results = classifier.classify_batch([
-            ("nit: rename this", classify.KIND_COMMENT),
-            ("this crashes on null", classify.KIND_COMMENT),
+            ("nit: rename this", classify.KIND_COMMENT, {"pr_id": 1}),
+            ("this crashes on null", classify.KIND_COMMENT, {"pr_id": 2}),
         ])
         self.assertEqual([labels["comment_type"] for labels, _v in results], ["nit", "blocker"])
         self.assertEqual(len(calls), 1)
@@ -283,6 +286,14 @@ class ClassifierTraceTests(unittest.TestCase):
         self.assertIn("JSON array", body["messages"][0]["content"])
         self.assertEqual(classifier.report()["batches"], 1)
         self.assertEqual(classifier.report()["calls"], 2)
+        self.assertEqual(len(traced), 1)
+        self.assertTrue(traced[0]["batch"])
+        self.assertEqual(traced[0]["thinking"], "two remarks")
+        self.assertEqual(
+            [item["context"] for item in traced[0]["texts"]],
+            [{"pr_id": 1}, {"pr_id": 2}],
+        )
+        self.assertEqual(len(traced[0]["labels"]), 2)
 
     def test_a_short_batch_answer_is_rejected_for_the_per_text_fallback(self):
         def opener(request, timeout):

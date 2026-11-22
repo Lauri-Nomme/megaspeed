@@ -225,7 +225,9 @@ or the full error.
 On a CPU box, batch and resume: `--batch-size 8` labels eight same-kind texts per
 request, and labels are checkpointed to `<out>.labels.jsonl` after every batch.
 `Ctrl-C`, a reboot, or `touch <out>.stop` stops cleanly; re-run the same command
-to continue where it left off.
+to continue where it left off. Every model call is also written to
+`<out>.trace.jsonl` (full request/response incl. thinking; `--no-call-trace`
+disables it). That trace is raw zone — never transfer it.
 
 ---
 

@@ -378,6 +378,11 @@ class Classifier:
         #: scrape writes it to ``<state-dir>/classify-trace.jsonl`` and prints
         #: one line per call.
         self.on_call: Callable[[dict], None] | None = None
+        #: Optional ``(record)`` callback for a **batched** call: one request
+        #: labelled N texts. The record carries the request/response and the N
+        #: texts with their labels; the per-text ``on_call`` record would be
+        #: N records for one call.
+        self.on_batch: Callable[[dict], None] | None = None
         #: Monotonic call numbering for the trace (``calls`` counts *label*
         #: results, which a skipped call never produces).
         self.attempts = 0
@@ -444,6 +449,65 @@ class Classifier:
             "error": error,
         }
         callback = self.on_call
+        if callback is not None:
+            try:
+                callback(record)
+            except Exception:  # noqa: BLE001 - tracing must never abort a run
+                pass
+        return record
+
+    def _record_batch(
+        self,
+        *,
+        kind: str,
+        prepared: list[tuple[str, str, dict | None]],
+        labels: list[dict] | None,
+        request: dict,
+        response: Any = None,
+        content: Any = None,
+        thinking: Any = None,
+        timings: dict | None = None,
+        error: str = "",
+    ) -> dict:
+        """Trace one **batched** call (N texts, one request).
+
+        The callback is ``on_batch``; a scrape never batches, so this is the
+        relabel path. The record keeps every text (raw zone) with its context and
+        the array of labels, so a batch is as auditable as N single calls.
+        """
+        with self._lock:
+            self.attempts += 1
+            call = self.attempts
+        record = {
+            "ts": _iso(),
+            "call": call,
+            "batch": True,
+            "count": len(prepared),
+            "backend": self.backend,
+            "label_version": self.version,
+            "model": getattr(self, "model", None),
+            "url": getattr(self, "url", None),
+            "kind": kind,
+            "texts": [
+                {
+                    "text": str(text),
+                    "digest": digest(text).hex(),
+                    "chars": len(str(text)),
+                    "context": dict(context or {}),
+                }
+                for text, _kind, context in prepared
+            ],
+            "request": request,
+            "response": response,
+            "content": content,
+            "thinking": thinking,
+            "timings": timings,
+            "labels": list(labels) if labels is not None else None,
+            "fallback": False,
+            "ok": not error,
+            "error": error,
+        }
+        callback = self.on_batch
         if callback is not None:
             try:
                 callback(record)
@@ -745,33 +809,36 @@ class OllamaClassifier(Classifier):
         }
 
     def classify_batch(
-        self, items: Sequence[tuple[str, str]]
+        self, items: Sequence[tuple]
     ) -> list[tuple[dict, str]]:
         """Label several **same-kind** texts in one request.
 
-        Returns ``(labels, version)`` per input, in order. Raises on anything
-        the caller should fall back from: a different kind, a malformed or
-        short array, a connection error. The caller (``ingest.relabel``) then
-        re-asks the texts individually, so a batch can never lose a label.
+        ``items`` are ``(text, kind)`` or ``(text, kind, context)``. Returns
+        ``(labels, version)`` per input, in order. Raises on anything the caller
+        should fall back from: a different kind, a malformed or short array, a
+        connection error. The caller (``ingest.relabel``) then re-asks the texts
+        individually, so a batch can never lose a label.
 
         The empty-answer retry is the same as the single call: a thinking model
         that exhausts ``num_predict`` returns HTTP 200 with ``content: ""``;
         the retry without thinking answers the JSON in a fraction of the budget.
+        Every attempt -- success or error -- is traced through ``on_batch``.
         """
-        prepared = [(str(text), str(kind)) for text, kind in items]
+        prepared = [_item(item) for item in items]
         if not prepared:
             return []
         if self.down:
             raise ClassifyError(
                 f"circuit breaker open after {self.failures} consecutive failure(s)"
             )
-        kinds = {kind for _text, kind in prepared}
+        kinds = {kind for _text, kind, _context in prepared}
         if len(kinds) != 1:
             raise ClassifyError(f"a batch must be one kind, got {sorted(kinds)}")
         kind = kinds.pop()
-        body = self.batch_request_body([text for text, _kind in prepared], kind)
+        body = self.batch_request_body([text for text, _kind, _c in prepared], kind)
         with self._lock:
             self.batches += 1
+        started = time.monotonic()
         try:
             answer = self._chat(body)
             content = (answer.get("message") or {}).get("content")
@@ -783,6 +850,7 @@ class OllamaClassifier(Classifier):
                     "think": False,
                     "options": {**body["options"], "num_predict": 128 * len(prepared) + 128},
                 }
+                body = retry
                 answer = self._chat(retry)
                 content = (answer.get("message") or {}).get("content")
             payload = json.loads(content)
@@ -793,15 +861,46 @@ class OllamaClassifier(Classifier):
                 )
             labels = [parse_labels(kind, item) for item in payload]
         except (ClassifyError, OSError, ValueError, KeyError, TimeoutError) as exc:
+            elapsed = (time.monotonic() - started) * 1000.0
+            error = f"{type(exc).__name__}: {exc}"
             with self._lock:
                 self.failures += 1
                 if self.failures >= self.max_failures:
                     self.down = True
-                self.last_error = f"{type(exc).__name__}: {exc}"[:300]
+                self.last_error = error[:300]
+            self._record_batch(
+                kind=kind,
+                prepared=prepared,
+                labels=None,
+                request=body,
+                timings={"wall_ms": round(elapsed, 1)},
+                error=error,
+            )
             raise
+        elapsed = (time.monotonic() - started) * 1000.0
+        message = answer.get("message") or {}
         with self._lock:
             self.failures = 0
             self.last_version = self.version
+        self._record_batch(
+            kind=kind,
+            prepared=prepared,
+            labels=labels,
+            request=body,
+            response=answer,
+            content=message.get("content"),
+            thinking=message.get("thinking"),
+            timings={
+                "wall_ms": round(elapsed, 1),
+                "total_duration_ns": answer.get("total_duration"),
+                "load_duration_ns": answer.get("load_duration"),
+                "prompt_eval_count": answer.get("prompt_eval_count"),
+                "prompt_eval_duration_ns": answer.get("prompt_eval_duration"),
+                "eval_count": answer.get("eval_count"),
+                "eval_duration_ns": answer.get("eval_duration"),
+                "done_reason": answer.get("done_reason"),
+            },
+        )
         results = []
         for item_labels in labels:
             self._count(item_labels)

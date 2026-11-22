@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1454** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
+Tests: **1455** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -35,6 +35,14 @@ Tests: **1454** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`)
   flash echo, scope-consistent aging counts/chart/re-plan, non-colliding percentile labels, the
   policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
   22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
+
+## v0.17.1 — relabel writes the model-call trace too
+
+`relabel` now writes every model call (full request, full response incl.
+thinking, timings, labels) to `<out>.trace.jsonl` (`--call-trace PATH`,
+`--no-call-trace`). A batch is one record holding all N texts and their
+contexts. Raw zone only: never in the patch, never imported. The label cache is
+still prose-free.
 
 ## v0.17.0 — batched, resumable relabel
 

@@ -118,6 +118,13 @@ that practical:
 * **Empty-answer retry**: a thinking model that exhausts `num_predict` returns
   HTTP 200 with `content: ""`. That used to degrade ~20 % of texts to the mock;
   the classifier now retries once with `think: false`, which answers the JSON.
+* **Call trace** (`--call-trace`, default `<out>.trace.jsonl`): relabel now writes
+  the same raw-zone record as the scrape — the exact request, the full response
+  including `thinking`, timings and the labels. A batched request is **one**
+  record (`batch: true`) carrying all N texts, their contexts, the array of
+  labels; a single call is the usual per-text record. The trace is diagnostic
+  raw-zone state: it is never in the patch, and `--no-call-trace` disables it.
+  The label cache (`<out>.labels.jsonl`) remains prose-free.
 
 ### Relabel (`ingest relabel`)
 

@@ -107,6 +107,12 @@ class TraceWriter:
                 self._handle.close()
                 self._handle = None
 
+    def __del__(self):  # pragma: no cover - a safety net for an error path
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001 - interpreter shutdown
+            pass
+
     def report(self) -> dict:
         return {
             "enabled": True,
@@ -200,9 +206,40 @@ def call_line(record: dict) -> str:
     return f"{head} · ok · {_labels(record.get('labels') or {})}"
 
 
+def batch_line(record: dict) -> str:
+    """One operator line for a **batched** call (N texts, one request)."""
+    texts = record.get("texts") or []
+    first_context = (texts[0].get("context") if texts else None) or {}
+    took_ms = (record.get("timings") or {}).get("wall_ms")
+    took = f"{float(took_ms) / 1000:.2f}s" if took_ms is not None else "—"
+    backend = record.get("backend") or "?"
+    model = record.get("model") or record.get("label_version") or "?"
+    count = record.get("count") or len(texts)
+    where = _where(first_context)
+    head = (
+        f"[classify] batch {count} · {where} · {record.get('kind') or '?'}"
+        f" · {backend}:{model} · {took}"
+    )
+    error = str(record.get("error") or "")
+    if error:
+        return f"{head} · FAIL {record.get('label_version') or backend} · {error}"
+    labels = record.get("labels") or []
+    summary = ", ".join(
+        str(label.get("comment_type") or label.get("phase") or "?") for label in labels
+    )
+    return f"{head} · ok · {summary}"
+
+
 def iter_trace(path: str | Path) -> Iterator[dict]:
     records, _bad = read_trace(path)
     yield from records
 
 
-__all__ = ["TRACE_FILE", "TraceWriter", "call_line", "iter_trace", "read_trace"]
+__all__ = [
+    "TRACE_FILE",
+    "TraceWriter",
+    "batch_line",
+    "call_line",
+    "iter_trace",
+    "read_trace",
+]

@@ -595,7 +595,9 @@ class RelabelTests(unittest.TestCase):
 
             def classify_batch(self, items):
                 self.sizes.append(len(items))
-                return [(self._labels_only(text, kind), self.version) for text, kind in items]
+                return [
+                    (self._labels_only(item[0], item[1]), self.version) for item in items
+                ]
 
         classifier = Batching(comment_type="blocker", intent="acted")
         report = relabel(
@@ -610,6 +612,65 @@ class RelabelTests(unittest.TestCase):
         self.assertLessEqual(sum(classifier.sizes), report["texts_classified"])
         self.assertGreaterEqual(report["batches"], len(classifier.sizes))
         self.assertGreater(report["rows"], 0)
+
+    def test_the_call_trace_holds_each_batch_with_texts_and_labels(self):
+        from ingest import llmtrace
+
+        def answer(format_schema):
+            props = format_schema["items"]["properties"] if format_schema.get("type") == "array" else format_schema["properties"]
+            count = format_schema.get("minItems", 1) if format_schema.get("type") == "array" else 1
+            objects = []
+            for _ in range(count):
+                obj = {}
+                for key, spec in props.items():
+                    if spec.get("type") == "boolean":
+                        obj[key] = False
+                    else:
+                        obj[key] = spec["enum"][0]
+                objects.append(obj)
+            return json.dumps(objects if format_schema.get("type") == "array" else objects[0])
+
+        class Response:
+            def __init__(self, text):
+                self.text = text
+
+            def read(self):
+                return json.dumps({"message": {"content": self.text,
+                                               "thinking": "batch thought"},
+                                   "done_reason": "stop"}).encode()
+
+            def close(self):
+                pass
+
+        def opener(request, timeout):
+            body = json.loads(request.data)
+            return Response(answer(body["format"]))
+
+        classifier = classify.OllamaClassifier(
+            "http://llm.invalid", "test-model", opener=opener, workers=1
+        )
+        trace = self.root / "calls.jsonl"
+        report = relabel(
+            self.cfg, trace_path=self.trace, bundle_path=self.bundle,
+            out=self.root / "labels.tgz", classifier=classifier,
+            batch_size=4, call_trace_path=trace, progress=QUIET,
+        )
+        self.assertEqual(report["trace"], str(trace))
+        records, bad = llmtrace.read_trace(trace)
+        self.assertEqual(bad, 0)
+        self.assertTrue(records)
+        batches = [record for record in records if record.get("batch")]
+        self.assertTrue(batches)
+        record = batches[0]
+        self.assertEqual(len(record["texts"]), record["count"])
+        self.assertTrue(all(item["text"] for item in record["texts"]))
+        self.assertEqual(record["thinking"], "batch thought")
+        self.assertTrue(record["labels"])
+        self.assertIn("format", record["request"])
+        self.assertTrue(record["ok"])
+        singles = [record for record in records if not record.get("batch")]
+        self.assertTrue(singles)
+        self.assertTrue(singles[0]["text"])
 
     def test_a_failed_batch_falls_back_to_one_text_at_a_time(self):
         class BadBatch(Recording):
