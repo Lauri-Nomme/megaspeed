@@ -605,6 +605,13 @@ def collect(
                     if not detail_fetched and _needs_detail(pr.pr):
                         pr.pr = _with_detail(pr.pr, client.pull_request(project, repo, pr.id))
                     pr.commits = list(client.iter_commits(project, repo, pr.id))
+                    # hans only: stamp the mirror-derived base on the kept PR's
+                    # record for the diff-size classifier. iter_commits already
+                    # computed and cached it, so this is a dictionary lookup.
+                    if push_classifier is not None and "megaspeedDiffBase" not in pr.pr:
+                        base = client.diff_base(project, repo, pr.id)
+                        if base:
+                            pr.pr["megaspeedDiffBase"] = base
                     keys = key_filter.keys(
                         (pr.pr.get("fromRef") or {}).get("displayId"),
                         pr.pr.get("title"),

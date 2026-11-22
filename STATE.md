@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1394** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
+Tests: **1399** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -35,6 +35,20 @@ Tests: **1394** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`)
   flash echo, scope-consistent aging counts/chart/re-plan, non-colliding percentile labels, the
   policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
   22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
+
+## v0.14.5 — hans merge-base accelerator + cheap list/limit
+
+Three fixes from the real-capture profile:
+- `--limit` was ignored on the hans path (only `--n` capped it), so `--limit 1`
+  walked the whole capture;
+- `HansTransport._list_values()` computed `megaspeedDiffBase` for **every row in
+  the list page** before the limit could stop (two git processes per row);
+- per-PR `git merge-base` spawns are replaced by hans's libgit2 **batch**
+  accelerator (`tools/bb-merge-base`, pre-built per platform): one process,
+  all (target, head) pairs (`[hans-merge] 10 pair(s) in 0.00s` on golden10),
+  with a git fallback. Merged-PR parents stay lazily resolved with one
+  `rev-list --ancestry-path`. `MEGASPEED_GIT_TRACE=1` logs every remaining git
+  call and the accelerator batch.
 
 ## v0.14.4 — hans --limit honoured + git tracing
 

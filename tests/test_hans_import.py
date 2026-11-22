@@ -26,6 +26,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -37,6 +38,7 @@ from ingest.bitbucket import BitbucketClient, request_kind
 from ingest.config import Config
 from ingest.hans import HansTransport
 from ingest.importer import ImportRejected, import_bundle
+from ingest.mergebase import batch_merge_bases, find_binary
 from ingest.scrape import scrape
 from ingest.store import connect, verify
 from ingest.transport import API, BitbucketError
@@ -405,10 +407,107 @@ class HansTransportTests(unittest.TestCase):
         self.assertIn("[hans-git] rev-parse HEAD", err.getvalue())
         self.assertIn("bytes", err.getvalue())
 
+    def test_the_list_page_does_not_derive_a_base_per_row(self):
+        """--limit must not pay a merge-base for every row in the first page."""
+        transport = self.transport
+        transport._list = None
+        calls: list[str] = []
+        original = transport._git
+
+        def counting(*args, **kwargs):
+            calls.append(args[0])
+            return original(*args, **kwargs)
+
+        transport._git = counting
+        transport.get(self.path("/pull-requests"))
+        self.assertEqual(calls, [])
+
     def test_a_missing_index_is_a_clear_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             with self.assertRaises(BitbucketError):
                 HansTransport(tmp)
+
+
+# --------------------------------------------------------------------------- #
+# the bb-merge-base accelerator (hans's libgit2 helper)
+# --------------------------------------------------------------------------- #
+def _fake_accelerator(directory: Path) -> Path:
+    """A executable stand-in: answers ``git merge-base`` for stdin pairs."""
+    script = directory / "bb-merge-base-fake"
+    script.write_text(
+        "#!/bin/sh\n"
+        'mirror="$1"\n'
+        'while read -r a b; do git -C "$mirror" merge-base "$a" "$b" < /dev/null 2>/dev/null || true; done\n'
+    )
+    script.chmod(0o755)
+    return script
+
+
+class MergeBaseAcceleratorTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.corpus = SyntheticScrape()
+        cls.transport = HansTransport(cls.corpus.scrape_dir)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.corpus.cleanup()
+
+    def test_the_batch_protocol_returns_one_line_per_pair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "echo-pairs"
+            script.write_text(
+                "#!/bin/sh\nwhile read -r a b; do printf '%s-%s\\n' \"$a\" \"$b\"; done\n"
+            )
+            script.chmod(0o755)
+            self.assertEqual(
+                batch_merge_bases(script, "/irrelevant", [("a", "b"), ("c", "d")]),
+                ["a-b", "c-d"],
+            )
+
+    def test_the_host_binary_is_preferred_over_other_platforms(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "scrape" / "capture"
+            root.mkdir(parents=True)
+            dist = Path(tmp) / "tools" / "bb-merge-base" / "dist"
+            dist.mkdir(parents=True)
+            names = {
+                "linux": "bb-merge-base-linux-x86_64",
+                "darwin": "bb-merge-base-macos",
+                "win32": "bb-merge-base-windows-x86_64.exe",
+            }
+            for name in names.values():
+                (dist / name).write_text("")
+            expected = names["win32" if sys.platform == "win32" else
+                                "darwin" if sys.platform == "darwin" else "linux"]
+            self.assertEqual(Path(find_binary(root)).name, expected)
+
+    def test_a_fake_accelerator_derives_the_same_bases_without_git_merge_base(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script = _fake_accelerator(Path(tmp))
+            with mock.patch.dict(os.environ, {"MEGASPEED_BB_MERGE_BASE": str(script)}):
+                accelerated = HansTransport(self.transport.root)
+            self.assertEqual(accelerated.merge_base_binary, str(script))
+            calls: list[str] = []
+            original = accelerated._git
+
+            def counting(*args, **kwargs):
+                calls.append(args[0])
+                return original(*args, **kwargs)
+
+            accelerated._git = counting
+            for pr_id in (1, 2):
+                self.assertEqual(
+                    accelerated._diff_base(pr_id), self.transport._diff_base(pr_id)
+                )
+            self.assertNotIn("merge-base", calls, calls)
+
+    def test_the_finder_accepts_an_explicit_binary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "bb-merge-base"
+            script.write_text("")
+            with mock.patch.dict(os.environ, {"MEGASPEED_BB_MERGE_BASE": str(script)}):
+                self.assertEqual(find_binary(None), str(script))
 
 
 # --------------------------------------------------------------------------- #
@@ -690,15 +789,18 @@ class HansCliTests(unittest.TestCase):
 
     def test_limit_caps_a_hans_scrape(self):
         # prd/68 follow-up: --limit used to be ignored on the hans path (only
-        # --n capped it), so a "one PR" test walked the whole capture.
+        # --n capped it), so a "one PR" test walked the whole capture. The list
+        # page must also stay cheap: no merge-base per row.
         out = self.corpus.root / "cli" / "limit.tgz"
         code, report, err = self.run_cli(
             "--hans-scrape", str(self.corpus.scrape_dir),
             "--limit", "1", "--no-push-class",
             "--out", str(out), "--json", "--quiet", "--text-backend", "mock",
+            env={"MEGASPEED_GIT_TRACE": "1"},
         )
         self.assertEqual(code, 0, err)
         self.assertEqual(report["prs_kept"], 1)
+        self.assertLessEqual(err.count("[hans-git]"), 6, err)
 
     def test_the_environment_variable_selects_the_same_source(self):
         out = self.corpus.root / "cli" / "env.tgz"

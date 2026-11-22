@@ -50,6 +50,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import mergebase
 from .transport import API, BitbucketError, _page
 
 #: ``/projects/<P>/repos/<R>`` and whatever follows it: the pull-request
@@ -132,6 +133,10 @@ class HansTransport:
         #: merged PRs against that target. The chain is large; recomputing it for
         #: every PR was one of the two O(history) costs here.
         self._chains: dict[str, list[str]] = {}
+        #: hans ships a libgit2 ``bb-merge-base`` binary; it is a **batch** tool
+        #: (stdout flushes at EOF), so all fork points are computed in one run.
+        self.merge_base_binary = mergebase.find_binary(self.root)
+        self._bases_loaded = False
         self._list: list[dict] | None = None
         self.users = self._load_users()
         #: Requests served, for diagnostics (BitbucketClient counts its own).
@@ -283,15 +288,21 @@ class HansTransport:
             values = [row for row in values if str(row.get("state") or "OPEN").upper() == state]
         if str(params.get("order") or "NEWEST").upper() == "NEWEST":
             values.sort(key=lambda row: int(row.get("updatedDate") or 0), reverse=True)
-        # The scrape reduces the *list* rows (DC's list carries a full record),
-        # so the derived diff base has to ride along with them, not only with the
-        # detail document.
-        out = []
-        for row in values:
-            pr_id = row.get("id")
-            base = self._diff_base(int(pr_id)) if pr_id is not None else ""
-            out.append({**row, "megaspeedDiffBase": base} if base else row)
-        return out
+        # The list must stay **cheap**: it is one page of rows, and computing the
+        # diff base here ran two git commands per row *before* the scrape's
+        # --limit could stop (a whole page paid the merge-base cost even for
+        # --limit 1). The base is derived lazily for a PR the scrape keeps, via
+        # ``diff_base()`` (cached with the commit walk), and still rides on the
+        # detail document below.
+        return values
+
+    def diff_base(self, pr_id: int) -> str:
+        """The cached diff base for one PR (lazy; ``""`` when underivable).
+
+        The scrape calls this for a **kept** PR, after ``iter_commits`` has
+        already computed and cached it, so the list page pays nothing.
+        """
+        return self._diff_base(int(pr_id))
 
     def _detail(self, pr_id: int) -> dict:
         """``rest/pr_<id>.json``, plus the base the mirror says the PR forked from.
@@ -397,9 +408,9 @@ class HansTransport:
         3. nothing derivable (a trimmed mirror): ``""``, and the callers fall
            back to "unknown" instead of guessing.
         """
+        if not self._bases_loaded:
+            self._precompute_bases()
         cached = self._bases.get(pr_id)
-        if cached is not None:
-            return cached
         base = ""
         try:
             record = self._raw_detail(pr_id)
@@ -409,15 +420,68 @@ class HansTransport:
             return ""
         target = self._target(record)
         head = self._head(record, pr_id)
+        if cached is not None:
+            base = cached
+            if base == head and target and head:
+                # merge-base == head: the head is already in the target (merged),
+                # so the diff starts at the merge's first parent. Resolved lazily
+                # -- only for PRs the scrape actually walks.
+                base = self._merge_parent(target, head)
+                self._bases[pr_id] = base
+            return base
         if target and head and self.mirror_available:
             if head == target:
                 base = ""
-            elif self._is_ancestor(target, head):
-                base = self._merge_parent(target, head)
             else:
                 base = self._git("merge-base", target, head).strip()
+                # Same merged-PR rule as above.
+                if base == head:
+                    base = self._merge_parent(target, head)
         self._bases[pr_id] = base
         return base
+
+    def _precompute_bases(self) -> None:
+        """One ``bb-merge-base`` run for every direct (target, head) pair.
+
+        The accelerator opens the repository once and answers thousands of
+        pairs, which is what replaces the per-PR ``git merge-base`` process.
+        PRs whose head/target is only resolvable through git refs are left to
+        the lazy path, and a missing/failed binary falls back to git entirely.
+        The merged-PR parent is still resolved lazily in ``_diff_base``.
+        """
+        self._bases_loaded = True
+        if not (self.merge_base_binary and self.mirror_available):
+            return
+        pairs: list[tuple[str, str]] = []
+        ids: list[int] = []
+        for pr_id in self._pr_ids:
+            try:
+                record = self._raw_detail(pr_id)
+            except BitbucketError:
+                continue
+            target = str((record.get("toRef") or {}).get("latestCommit") or "")
+            head = str((record.get("fromRef") or {}).get("latestCommit") or "")
+            if not (target and head) or target == head:
+                continue
+            pairs.append((target, head))
+            ids.append(pr_id)
+        if not pairs:
+            return
+        started = time.monotonic()
+        answers = mergebase.batch_merge_bases(
+            self.merge_base_binary, self.mirror, pairs
+        )
+        if answers is None:
+            self.merge_base_binary = ""
+            return
+        for pr_id, answer in zip(ids, answers):
+            self._bases[pr_id] = answer
+        if os.environ.get("MEGASPEED_GIT_TRACE"):
+            print(
+                f"[hans-merge] {len(pairs)} pair(s) in "
+                f"{time.monotonic() - started:.2f}s · {self.merge_base_binary}",
+                file=sys.stderr, flush=True,
+            )
 
     def _target(self, record: dict) -> str:
         target = str((record.get("toRef") or {}).get("latestCommit") or "")
@@ -560,6 +624,7 @@ class HansTransport:
             "repo": self.repo,
             "prs": len(self._pr_ids),
             "mirror": str(self.mirror) if self.mirror_available else None,
+            "merge_base_accel": self.merge_base_binary or None,
             "users": len(self.users),
             "requests": self.requests,
         }

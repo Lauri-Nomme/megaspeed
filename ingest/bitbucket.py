@@ -192,6 +192,16 @@ class BitbucketClient:
         path = f"{API}/projects/{project}/repos/{repo}/pull-requests/{pr_id}/commits"
         yield from self._pages(path, kind="commits")
 
+    def diff_base(self, project: str, repo: str, pr_id: int) -> str:
+        """The source's cached diff base for a PR (hans only; ``""`` otherwise).
+
+        A hans mirror knows the real fork point (a merged PR's target has moved
+        past the branch). The scrape asks for it **after** deciding to keep the
+        PR, so a list page does no merge-base work for rows a limit discards.
+        """
+        method = getattr(self.transport, "diff_base", None)
+        return method(int(pr_id)) if method is not None else ""
+
     def build_statuses(self, commit_id: str) -> list[dict]:
         """The build statuses DC recorded for one commit (prd/44 DES-2).
 
