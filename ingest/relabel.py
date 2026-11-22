@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 from . import classify, labelpatch, llmtrace, taxonomy
@@ -37,6 +38,8 @@ from .bundle import Bundle, BundleError, read_bundle
 from .config import load_config
 from .logs import iso
 from .progress import ProgressReporter
+from .pseudonym import IdentityTable
+from .timeutil import iso as ts_iso
 
 #: Roles whose label lands on a stored row. ``reply`` is traced but not patched.
 REPLAY_ROLES = ("opener", "description")
@@ -46,8 +49,8 @@ class RelabelError(RuntimeError):
     """The trace/bundle pairing cannot produce a meaningful patch."""
 
 
-def _index(bundle: Bundle) -> tuple[dict[str, dict], dict[str, list[dict]]]:
-    """THREAD objects by id, and ``question_raised`` events by linked object id.
+def _index(bundle: Bundle) -> tuple[dict[str, dict], dict[str, list[dict]], dict[str, dict]]:
+    """THREAD objects by id, question events by object id, and PR objects by id.
 
     A description question is keyed by its **PR** (``…:desc:q``); a thread
     question is keyed by its **THREAD**. The PR key deliberately holds only the
@@ -56,6 +59,9 @@ def _index(bundle: Bundle) -> tuple[dict[str, dict], dict[str, list[dict]]]:
     """
     threads = {
         obj["object_id"]: obj for obj in bundle.objects if obj.get("object_type") == "THREAD"
+    }
+    prs = {
+        obj["object_id"]: obj for obj in bundle.objects if obj.get("object_type") == "PR"
     }
     questions: dict[str, list[dict]] = {}
     for event in bundle.events:
@@ -70,7 +76,7 @@ def _index(bundle: Bundle) -> tuple[dict[str, dict], dict[str, list[dict]]]:
         for object_id in event.get("objects") or []:
             if str(object_id).startswith("THREAD:"):
                 questions.setdefault(str(object_id), []).append(event)
-    return threads, questions
+    return threads, questions, prs
 
 
 def _replay_items(records: list[dict]) -> list[dict]:
@@ -109,6 +115,76 @@ def _outcome(thread: dict, intent: str) -> str:
     )
 
 
+def _add_question_events(
+    record: dict, thread: dict | None, pr: dict | None, phase: str
+) -> list[dict] | None:
+    """The derived event(s) a re-label that *adds* a question must create.
+
+    Mirrors the reducer: ``question_raised`` at the comment's (or description's)
+    timestamp by the pseudonym that wrote it, plus a ``question_answered`` with
+    ``answer_source: resolution`` when the thread was closed by someone other
+    than the asker. ``None`` means the trace lacks the facts to build it (a
+    pre-v0.16 trace), and the flip is reported as unappliable, never guessed.
+    """
+    context = record.get("context") or {}
+    repo = str(context.get("repo") or "")
+    pr_id = context.get("pr_id")
+    if not repo or not isinstance(pr_id, int):
+        return None
+    actor = str(
+        context.get("actor")
+        or (pr or {}).get("actor")
+        or (thread or {}).get("actor")
+        or ""
+    )
+    if not actor:
+        return None
+    stamp = str(context.get("ts") or iso())
+    tickets = [f"TICKET:{key}" for key in context.get("ticket_keys") or []]
+    common = {"repo": repo, "pr_id": pr_id, "as_of": stamp}
+    events: list[dict] = []
+    if context.get("role") == "description":
+        events.append({
+            **common,
+            "event_key": f"{repo}#{pr_id}:desc:q",
+            "ts": stamp,
+            "actor": actor,
+            "objects": [f"PR:{repo}#{pr_id}", *tickets],
+            "attributes": {"phase": phase},
+        })
+        return events
+    activity_id = context.get("activity_id")
+    thread_id = str(context.get("thread_id") or "")
+    if activity_id is None or not thread_id:
+        return None
+    events.append({
+        **common,
+        "event_key": f"{repo}#{pr_id}:act:{activity_id}:q",
+        "ts": stamp,
+        "actor": actor,
+        "objects": [f"PR:{repo}#{pr_id}", *tickets, thread_id],
+        "attributes": {"phase": phase},
+    })
+    attributes = (thread or {}).get("attributes") or {}
+    if (
+        thread is not None
+        and thread.get("state") == "resolved"
+        and not attributes.get("resolver_is_commenter")
+        and thread.get("actor")
+        and thread.get("closed_at")
+    ):
+        events.append({
+            **common,
+            "event_key": f"{repo}#{pr_id}:t{context.get('comment_id')}:a",
+            "ts": ts_iso(thread["closed_at"]),
+            "as_of": ts_iso(thread["closed_at"]),
+            "actor": thread["actor"],
+            "objects": [f"PR:{repo}#{pr_id}", *tickets, thread_id],
+            "attributes": {"phase": phase, "answer_source": "resolution"},
+        })
+    return events
+
+
 def _thread_pr_id(object_id: str) -> int | None:
     """``THREAD:DEMO/widget#11096:123`` -> ``11096`` (``None`` on a bad shape)."""
     try:
@@ -117,8 +193,20 @@ def _thread_pr_id(object_id: str) -> int | None:
         return None
 
 
+def _ms_iso(value) -> str | None:
+    """Epoch milliseconds (the DC payload) -> the event's ISO stamp."""
+    try:
+        return ts_iso(datetime.fromtimestamp(int(value) / 1000, tz=timezone.utc))
+    except (TypeError, ValueError, OSError):
+        return None
+
+
 def _records_from_hans(
-    cfg, transport, bundle: Bundle, progress: ProgressReporter | None = None
+    cfg,
+    transport,
+    bundle: Bundle,
+    progress: ProgressReporter | None = None,
+    identity=None,
 ) -> list[dict]:
     """Re-read the texts from the **capture** instead of a trace.
 
@@ -127,9 +215,17 @@ def _records_from_hans(
     bundle holds, re-applies the reducer's deterministic gating (human author,
     ``ADDED`` comment, non-empty body), and produces the same record shape the
     trace does -- so the patch builder is shared. It touches no git.
+
+    ``identity`` is the scrape's raw-zone identity map: with it, a question a
+    re-label adds can carry the **asker's** pseudonym (not the PR author's).
     """
     from .bitbucket import BitbucketClient
     from .pipeline import classify_actor
+
+    def pseudonym(user: dict | None) -> str | None:
+        if identity is None or not user:
+            return None
+        return identity.pseudonym(user)
 
     client = BitbucketClient(transport, page_limit=1000, min_interval=0.0)
     project, repo = transport.project, transport.repo
@@ -180,7 +276,8 @@ def _records_from_hans(
                     "thread_id": None,
                     "comment_id": None,
                     "activity_id": None,
-                    "ts": None,
+                    "ts": _ms_iso(detail.get("createdDate")),
+                    "actor": pseudonym(detail.get("author")),
                 },
             })
         for activity in activities:
@@ -209,7 +306,8 @@ def _records_from_hans(
                     "thread_id": thread_id,
                     "comment_id": comment_id,
                     "activity_id": activity.get("id"),
-                    "ts": None,
+                    "ts": _ms_iso(activity.get("createdDate")),
+                    "actor": pseudonym(activity.get("user") or comment.get("author")),
                 },
             })
     return records
@@ -223,6 +321,7 @@ def relabel(
     bundle_path: str | Path,
     out: str | Path,
     classifier: classify.Classifier | None = None,
+    identity_path: str | Path | None = None,
     limit: int | None = None,
     progress: ProgressReporter | None = None,
 ) -> dict:
@@ -239,7 +338,10 @@ def relabel(
         transport = HansTransport(hans_scrape)
         source_label = f"capture {transport.root}"
         bundle_for_records = read_bundle(bundle_path)
-        records = _records_from_hans(cfg, transport, bundle_for_records, reporter)
+        identity = IdentityTable(Path(identity_path).expanduser()) if identity_path else None
+        records = _records_from_hans(
+            cfg, transport, bundle_for_records, reporter, identity=identity
+        )
         texts_seen = len(records)
     else:
         if trace_path is None:
@@ -257,7 +359,7 @@ def relabel(
     if limit is not None:
         items = items[: max(0, int(limit))]
     bundle = read_bundle(bundle_path)
-    threads, questions = _index(bundle)
+    threads, questions, prs = _index(bundle)
     text = classifier if classifier is not None else classify.for_scrape(cfg, "hans")
     if text is None:
         raise RelabelError("text classification is off (MEGASPEED_TEXT_CLASSIFY=0)")
@@ -272,6 +374,9 @@ def relabel(
     reused = 0
     rows: list[dict] = []
     flips = 0
+    added = 0
+    removed = 0
+    unappliable = 0
     missing = 0
     changed_types = 0
     changed_outcomes = 0
@@ -297,8 +402,34 @@ def relabel(
         if context.get("role") == "description":
             pr_id = f"PR:{context.get('repo')}#{context.get('pr_id')}"
             events = questions.get(pr_id) or []
+            phase = str(labels.get("phase") or "implementation")
             if bool(labels.get("question")) != bool(events):
                 flips += 1
+                if labels.get("question"):
+                    built = _add_question_events(record, None, prs.get(pr_id), phase)
+                    if built:
+                        rows.append({
+                            "target": "question",
+                            "object_id": pr_id,
+                            "action": "add",
+                            "labels": {"phase": phase},
+                            "events": built,
+                            "previous": {"phase": None},
+                        })
+                        added += 1
+                    else:
+                        unappliable += 1
+                else:
+                    rows.append({
+                        "target": "question",
+                        "object_id": pr_id,
+                        "action": "delete",
+                        "labels": {"phase": phase},
+                        "previous": {
+                            "phase": (events[0].get("attributes") or {}).get("phase")
+                        },
+                    })
+                    removed += 1
             elif events and labels.get("phase"):
                 phase = labels["phase"]
                 if any((event.get("attributes") or {}).get("phase") != phase for event in events):
@@ -353,8 +484,32 @@ def relabel(
                 changed_outcomes += 1
 
         events = questions.get(thread_id) or []
+        phase = str(labels.get("phase") or attributes.get("phase") or "review")
         if bool(labels.get("question")) != bool(events):
             flips += 1
+            if labels.get("question"):
+                built = _add_question_events(record, thread, prs.get(f"PR:{context.get('repo')}#{context.get('pr_id')}"), phase)
+                if built:
+                    rows.append({
+                        "target": "question",
+                        "object_id": thread_id,
+                        "action": "add",
+                        "labels": {"phase": phase},
+                        "events": built,
+                        "previous": {"phase": None},
+                    })
+                    added += 1
+                else:
+                    unappliable += 1
+            else:
+                rows.append({
+                    "target": "question",
+                    "object_id": thread_id,
+                    "action": "delete",
+                    "labels": {"phase": phase},
+                    "previous": {"phase": (events[0].get("attributes") or {}).get("phase")},
+                })
+                removed += 1
         elif events and labels.get("phase"):
             phase = labels["phase"]
             if any((event.get("attributes") or {}).get("phase") != phase for event in events):
@@ -406,6 +561,9 @@ def relabel(
         "text_classifier": text.report(),
         "counts": {
             "question_flips": flips,
+            "question_added": added,
+            "question_removed": removed,
+            "question_unappliable": unappliable,
             "missing_threads": missing,
             "changed_comment_type": changed_types,
             "changed_thread_outcome": changed_outcomes,
@@ -431,6 +589,9 @@ def relabel(
         "threads": sum(1 for row in rows if row["target"] == "thread"),
         "questions": sum(1 for row in rows if row["target"] == "question"),
         "question_flips": flips,
+        "question_added": added,
+        "question_removed": removed,
+        "question_unappliable": unappliable,
         "missing_threads": missing,
         "changed_comment_type": changed_types,
         "changed_thread_outcome": changed_outcomes,
@@ -469,8 +630,15 @@ def _print(report: dict) -> None:
     )
     if report["question_flips"]:
         print(
-            f"question flips {report['question_flips']} (not applied: a label patch"
-            " cannot add or remove a question_raised event)"
+            f"question flips {report['question_flips']} applied ·"
+            f" {report['question_added']} event(s) added,"
+            f" {report['question_removed']} removed"
+            + (
+                f" · {report['question_unappliable']} not buildable (pre-v0.16 trace:"
+                " no activity id / author)"
+                if report["question_unappliable"]
+                else ""
+            )
         )
     if report.get("missing_threads"):
         print(
@@ -493,6 +661,9 @@ def build_parser(prog: str = "python3 -m ingest relabel") -> argparse.ArgumentPa
                          " whose bundle predates the trace); reads no git")
     ap.add_argument("--bundle", required=True, metavar="PATH.tgz",
                     help="the bundle that run wrote (the patch is built against it)")
+    ap.add_argument("--identity", metavar="PATH",
+                    help="the scrape's raw-zone identity map (with --hans-scrape this lets"
+                         " an added question carry the asker's pseudonym)")
     ap.add_argument("--out", default=None, metavar="PATH.tgz",
                     help="patch to write (default: <bundle>-labels.tgz)")
     ap.add_argument("--text-backend", choices=("ollama", "mock"), default=None,
@@ -545,6 +716,7 @@ def main(argv: list[str] | None = None) -> int:
             hans_scrape=args.hans_scrape,
             bundle_path=args.bundle,
             out=out,
+            identity_path=args.identity,
             limit=args.limit,
             progress=ProgressReporter(interval=interval),
         )

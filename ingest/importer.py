@@ -383,8 +383,14 @@ def _print_label_patch(r: dict) -> None:
     print(
         f"labels         {r['rows']} row(s) · {applied['threads']} thread(s) updated,"
         f" {applied['threads_unchanged']} unchanged, {applied['threads_missing']} missing"
-        f" · {applied['questions']} question phase update(s)"
+        f" · {applied['questions']} phase update(s)"
     )
+    if applied.get("questions_added") or applied.get("questions_removed"):
+        print(
+            f"question flips {applied['questions_added']} derived event(s) added,"
+            f" {applied['questions_removed']} removed,"
+            f" {applied['questions_unchanged']} already in place"
+        )
     if applied["questions_missing"]:
         print(
             f"not found      {applied['questions_missing']} question row(s): no"

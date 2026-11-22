@@ -86,9 +86,16 @@ A tamperproof tgz (`manifest.json`, `labels.jsonl`, `sha256sums`) whose rows are
 idempotent, reports rows that matched / were unchanged / were missing, and never
 inserts or deletes a row.
 
-Structural changes are out of scope by design: a re-classification that flips
-"is this a question" would add or remove a `question_raised` event, so it is
-counted as `question_flips` in the manifest and reported, not applied.
+A re-classification that flips "is this a question" rewrites the **derived**
+event, never an occurred one: an `add` row carries the `question_raised` event to
+insert (and a resolution `question_answered` when the thread was closed by
+someone other than the asker), a `delete` row removes the derived
+`question_raised`/`question_answered` events linked to the object. Both are
+idempotent and stay label-only in the sense that matters: no source activity,
+timestamp or relation is invented beyond the derived event the reducer would
+have emitted. A trace that predates v0.16 lacks the activity id / author needed
+to build the event, so those flips are counted as `question_unappliable` and
+reported, never guessed.
 
 ### Relabel (`ingest relabel`)
 

@@ -66,6 +66,11 @@ TARGET_LABELS = {
     "thread": frozenset({"comment_type", "thread_outcome", "classifier_version"}),
     "question": frozenset({"phase"}),
 }
+#: A question row either **sets** the phase on the event that exists, **adds**
+#: the derived event (a re-label turned a non-question into a question) or
+#: **deletes** it (the reverse). Add/delete rewrite the derived event, never the
+#: source: no occurred activity is touched.
+ACTIONS = ("set", "add", "delete")
 VOCAB = {
     "comment_type": taxonomy.COMMENT_TYPE,
     "thread_outcome": taxonomy.THREAD_OUTCOME,
@@ -208,6 +213,55 @@ def _check_sums(path: Path, members: dict[str, bytes]) -> None:
         raise PatchError(f"{path}: sha256sums covers unknown member(s) {sorted(extra)}")
 
 
+def _event_row(path: Path, object_id: str, event: dict) -> dict:
+    """Validate one derived ``question_raised`` event a patch wants to add."""
+    from .store import ACTOR_RE, EVENT_KEY_RE, REPO_RE
+    from .timeutil import to_naive_utc
+
+    if not isinstance(event, dict):
+        raise PatchError(f"{path}: {object_id} event is not an object")
+    key = str(event.get("event_key") or "")
+    if not re.fullmatch(EVENT_KEY_RE, key):
+        raise PatchError(f"{path}: {object_id} event_key {key!r} is not an identifier")
+    actor = str(event.get("actor") or "")
+    if not re.fullmatch(ACTOR_RE, actor):
+        raise PatchError(f"{path}: {object_id} event actor {actor!r} is not a pseudonym")
+    repo = str(event.get("repo") or "")
+    if not re.fullmatch(REPO_RE, repo):
+        raise PatchError(f"{path}: {object_id} event repo {repo!r} is not a slug")
+    if not isinstance(event.get("pr_id"), int):
+        raise PatchError(f"{path}: {object_id} event pr_id must be an integer")
+    try:
+        ts = to_naive_utc(event.get("ts"))
+        as_of = to_naive_utc(event.get("as_of")) if event.get("as_of") else ts
+    except (TypeError, ValueError) as exc:
+        raise PatchError(f"{path}: {object_id} event timestamp is bad ({exc})") from exc
+    attributes = dict(event.get("attributes") or {})
+    try:
+        attributes = taxonomy.check_attributes(attributes)
+    except taxonomy.TaxonomyError as exc:
+        raise PatchError(f"{path}: {object_id} event attributes: {exc}") from exc
+    objects = [str(o) for o in event.get("objects") or []]
+    if not objects or not any(o == object_id for o in objects):
+        raise PatchError(f"{path}: {object_id} event does not reference its object")
+    for other in objects:
+        if not re.fullmatch(_THREAD_ID.pattern + "|" + _PR_ID.pattern + r"|TICKET:[A-Z][A-Z0-9_]{0,9}-\d{1,6}", other):
+            raise PatchError(f"{path}: {object_id} event references a bad object id {other!r}")
+    return {
+        "event_key": key,
+        "ts": ts,
+        "as_of": as_of,
+        "activity": "question_raised",
+        "actor": actor,
+        "repo": repo,
+        "pr_id": int(event["pr_id"]),
+        "objects": objects,
+        "attributes": attributes,
+        "classifier_version": taxonomy.CLASSIFIER_VERSION,
+        "content_hash": None,
+    }
+
+
 def _row(path: Path, row: dict) -> dict:
     target = str(row.get("target") or "")
     if target not in TARGETS:
@@ -234,12 +288,24 @@ def _row(path: Path, row: dict) -> dict:
             raise PatchError(
                 f"{path}: {object_id} {key}={value!r} is outside the closed vocabulary"
             )
-    return {
+    action = str(row.get("action") or "set")
+    if action not in ACTIONS:
+        raise PatchError(f"{path}: {object_id} action {action!r} is outside {ACTIONS}")
+    if target == "thread" and action != "set":
+        raise PatchError(f"{path}: {object_id} a thread row has no add/delete action")
+    out = {
         "target": target,
         "object_id": object_id,
+        "action": action,
         "labels": {str(k): str(v) for k, v in labels.items()},
         "previous": dict(row.get("previous") or {}),
     }
+    if action == "add":
+        events = row.get("events")
+        if not isinstance(events, list) or not events:
+            raise PatchError(f"{path}: {object_id} add row carries no derived event(s)")
+        out["events"] = [_event_row(path, object_id, event) for event in events]
+    return out
 
 
 def read_patch(path: str | Path) -> LabelPatch:
@@ -297,11 +363,13 @@ def _compact(value: dict) -> str:
 
 
 def apply_patch(con, patch: LabelPatch) -> dict:
-    """Merge the patch's labels into THREAD objects and question events.
+    """Merge the patch's labels into THREAD objects and derived question events.
 
-    Idempotent and label-only: an ``UPDATE`` of the ``attributes`` JSON, never
-    an insert or delete. Returns which rows matched, so a patch built from a
-    different store is visible instead of silently doing nothing.
+    ``set`` updates the phase of the event that exists; ``add`` inserts the
+    derived ``question_raised`` (+ a resolution ``question_answered`` when the
+    thread was resolved by someone else); ``delete`` removes the derived events
+    linked to the object. All three are idempotent and touch no *occurred*
+    event: the source activity is never rewritten.
 
     Threads are merged in **bulk** (one ``SELECT ... IN`` plus one
     ``UPDATE ... FROM``): a 13k-thread corpus is a second, not a minute.
@@ -312,6 +380,9 @@ def apply_patch(con, patch: LabelPatch) -> dict:
         "threads_unchanged": 0,
         "questions": 0,
         "questions_missing": 0,
+        "questions_added": 0,
+        "questions_removed": 0,
+        "questions_unchanged": 0,
     }
     thread_rows = [row for row in patch.rows if row["target"] == "thread"]
     if thread_rows:
@@ -348,6 +419,54 @@ def apply_patch(con, patch: LabelPatch) -> dict:
 
     for row in patch.rows:
         if row["target"] != "question":
+            continue
+        action = row.get("action") or "set"
+        if action == "add":
+            for event in row.get("events") or []:
+                if con.execute(
+                    "SELECT 1 FROM events WHERE event_key = ?", [event["event_key"]]
+                ).fetchone():
+                    stats["questions_unchanged"] += 1
+                    continue
+                con.execute(
+                    "INSERT INTO events (event_key, ts, activity, actor, repo, pr_id,"
+                    " attributes, classifier_version, content_hash, as_of)"
+                    " VALUES (?, ?, ?, ?, ?, ?, CAST(? AS JSON), ?, ?, ?)",
+                    [
+                        event["event_key"], event["ts"], event["activity"],
+                        event["actor"], event["repo"], event["pr_id"],
+                        _compact(event["attributes"]), event["classifier_version"],
+                        event["content_hash"], event["as_of"],
+                    ],
+                )
+                for object_id in event["objects"]:
+                    con.execute(
+                        "INSERT OR IGNORE INTO event_objects"
+                        " (event_key, object_type, object_id) VALUES (?, ?, ?)",
+                        [event["event_key"], object_id.split(":", 1)[0], object_id],
+                    )
+                stats["questions_added"] += 1
+            continue
+        if action == "delete":
+            events = con.execute(
+                "SELECT e.event_key FROM events e"
+                " JOIN event_objects r ON e.event_key = r.event_key"
+                " WHERE e.activity IN ('question_raised', 'question_answered')"
+                "   AND r.object_type = ? AND r.object_id = ?",
+                [row["object_id"].split(":", 1)[0], row["object_id"]],
+            ).fetchall()
+            keys = [str(event[0]) for event in events]
+            # A PR also relates to its threads' questions; only the description
+            # event (and nothing answered) is the PR's own.
+            if row["object_id"].startswith("PR:"):
+                keys = [key for key in keys if key.endswith(":desc:q")]
+            if not keys:
+                stats["questions_unchanged"] += 1
+                continue
+            placeholders = ",".join("?" * len(keys))
+            con.execute(f"DELETE FROM event_objects WHERE event_key IN ({placeholders})", keys)
+            con.execute(f"DELETE FROM events WHERE event_key IN ({placeholders})", keys)
+            stats["questions_removed"] += len(keys)
             continue
         events = con.execute(
             "SELECT e.event_key, CAST(e.attributes AS VARCHAR)"

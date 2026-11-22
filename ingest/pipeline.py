@@ -393,7 +393,7 @@ class Reducer:
         # batch returns the same labels in the same order, so nothing below
         # changes -- it just no longer waits for one comment at a time.
         ordered = sorted(activities, key=lambda a: (a.get("createdDate") or 0, a.get("id") or 0))
-        self._labels = self._classify_batch(pr, ordered, commit_ids, keys)
+        self._labels = self._classify_batch(pr, ordered, commit_ids, keys, author)
 
         # prd/16: the PR description is read *here*, classified, and dropped.
         # A description that raises a question is the cheapest place to catch
@@ -712,6 +712,7 @@ class Reducer:
         comment_id: Any = None,
         activity_id: Any = None,
         ts: datetime | None = None,
+        actor: str | None = None,
     ) -> dict:
         """Where one classified text came from -- the trace's join key.
 
@@ -729,6 +730,7 @@ class Reducer:
             "activity_id": activity_id,
             "ticket_keys": list(keys),
             "ts": iso(ts) if ts is not None else None,
+            "actor": actor,
         }
         if commit_ids is not None:
             context["commit_ids"] = sorted(str(c) for c in commit_ids)
@@ -740,6 +742,7 @@ class Reducer:
         ordered: list[dict],
         commit_ids: set[str] | None = None,
         keys: list[str] | None = None,
+        author: str | None = None,
     ) -> dict:
         """Classify this PR's description + comment bodies in one bounded batch.
 
@@ -769,7 +772,7 @@ class Reducer:
                     classify.KIND_DESCRIPTION,
                     self._text_context(
                         pr, role="description", keys=keys, commit_ids=commit_ids,
-                        ts=_ts(pr.pr.get("createdDate"), self.as_of),
+                        ts=_ts(pr.pr.get("createdDate"), self.as_of), actor=author,
                     ),
                 )
             )
@@ -801,6 +804,7 @@ class Reducer:
                             comment_id=comment["id"],
                             activity_id=activity.get("id"),
                             ts=_ts(activity.get("createdDate"), self.as_of),
+                            actor=self.ident.pseudonym(activity.get("user") or {}),
                         ),
                     )
                 )

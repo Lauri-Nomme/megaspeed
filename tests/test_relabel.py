@@ -357,9 +357,13 @@ class RelabelTests(unittest.TestCase):
         finally:
             con.close()
 
-    def test_a_question_flip_is_counted_not_silently_dropped(self):
-        # No question_raised event exists in this corpus; claiming every thread
-        # is a question would require adding one, which a label patch cannot do.
+    def test_a_question_flip_adds_the_derived_event_and_is_idempotent(self):
+        # No question_raised event exists for these threads; claiming one is a
+        # question must add the derived event, not silently drop the correction.
+        import_bundle(self.cfg, self.bundle)
+        before = connect(self.cfg.db_path)
+        events_before = before.execute("SELECT count(*) FROM events").fetchone()[0]
+        before.close()
         report = relabel(
             self.cfg,
             trace_path=self.trace,
@@ -368,9 +372,73 @@ class RelabelTests(unittest.TestCase):
             classifier=Recording(question=True),
             progress=QUIET,
         )
-        self.assertGreater(report["question_flips"], 0)
+        self.assertGreater(report["question_added"], 0)
         patch = labelpatch.read_patch(report["patch"])
-        self.assertEqual([row for row in patch.rows if row["target"] == "question"], [])
+        adds = [row for row in patch.rows if row.get("action") == "add"]
+        self.assertTrue(adds)
+        self.assertTrue(all(row["events"][0]["event_key"].endswith(":q") for row in adds))
+        thread_adds = [
+            row for row in adds
+            if any(o.startswith("THREAD:") for o in row["events"][0]["objects"])
+        ]
+        self.assertTrue(thread_adds)
+
+        applied = import_path(self.cfg, report["patch"])
+        expected = sum(len(row.get("events") or []) for row in adds)
+        self.assertEqual(applied["applied"]["questions_added"], expected)
+        con = connect(self.cfg.db_path)
+        try:
+            self.assertGreater(
+                con.execute("SELECT count(*) FROM events").fetchone()[0], events_before
+            )
+            key = thread_adds[0]["events"][0]["event_key"]
+            self.assertIsNotNone(con.execute(
+                "SELECT 1 FROM events WHERE event_key = ?", [key]
+            ).fetchone())
+            self.assertTrue(con.execute(
+                "SELECT 1 FROM event_objects WHERE event_key = ? AND object_type = 'THREAD'",
+                [key],
+            ).fetchone())
+        finally:
+            con.close()
+        second = import_path(self.cfg, report["patch"])["applied"]
+        self.assertEqual(second["questions_added"], 0)
+        self.assertEqual(second["questions_unchanged"], expected)
+
+    def test_a_question_flip_removes_the_derived_event(self):
+        cfg, bundle, _trace = _scrape(self.root, bundle=_with_question(self.root), name="flip")
+        import_bundle(cfg, bundle)
+        con = connect(cfg.db_path)
+        try:
+            events_before = con.execute("SELECT count(*) FROM events").fetchone()[0]
+            questions_before = con.execute(
+                "SELECT count(*) FROM events WHERE activity = 'question_raised'"
+            ).fetchone()[0]
+        finally:
+            con.close()
+        self.assertGreaterEqual(questions_before, 1)
+        report = relabel(
+            cfg,
+            trace_path=_trace,
+            bundle_path=bundle,
+            out=self.root / "labels.tgz",
+            classifier=Recording(comment_type="nit", question=False),
+            progress=QUIET,
+        )
+        self.assertGreater(report["question_removed"], 0)
+        applied = import_path(cfg, report["patch"])
+        self.assertGreaterEqual(applied["applied"]["questions_removed"], 1)
+        con = connect(cfg.db_path)
+        try:
+            questions_after = con.execute(
+                "SELECT count(*) FROM events WHERE activity = 'question_raised'"
+            ).fetchone()[0]
+            self.assertLess(questions_after, questions_before)
+            self.assertLess(
+                con.execute("SELECT count(*) FROM events").fetchone()[0], events_before
+            )
+        finally:
+            con.close()
 
     def test_limit_replays_only_the_first_n_texts(self):
         report = relabel(
