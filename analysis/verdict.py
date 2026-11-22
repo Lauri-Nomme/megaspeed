@@ -794,6 +794,9 @@ def ladder(suggestions, cross_check, exploit_n: int) -> list[dict]:
             reason = (
                 f"exploit first: {exploit_n} "
                 f"item{'s are' if exploit_n != 1 else ' is'} still owed"
+                if exploit_n else
+                f"exploit first: {len(by_rung['exploit'])} rule"
+                f"{'' if len(by_rung['exploit']) == 1 else 's'} on the exploit rung"
             )
         run_labs = labs.get(rung) or []
         note = "; ".join(

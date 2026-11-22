@@ -595,6 +595,25 @@ class JiraOnlyVerdictTests(StoreCase):
         # the ladder still travels (its exploit rules are real), but the card's
         # sentence never names a station.
         self.assertNotIn("The constraint is", payload["note"])
+        # prd/68 F-09: with 0 items owed, elevate names the exploit *rule*, not
+        # "0 items are still owed" (this fixture's slice has no rules, so the
+        # dedicated test below drives the rule path).
+        states = {rung["step"]: rung for rung in payload["ladder"]}
+        self.assertNotIn("0 items are still owed",
+                         (states["elevate"].get("reason") or ""))
+
+    def test_a_zero_owed_exploit_rule_names_the_rule(self):
+        suggestions = [{
+            "id": "jira-waiting-time", "title": "waiting time", "metric": "waiting_time_decomposition",
+            "severity": "warning", "impact_hours": 1.0, "rank": 1,
+        }]
+        rungs = verdict.ladder(suggestions, {}, 0)
+        states = {rung["step"]: rung for rung in rungs}
+        self.assertEqual(states["exploit"]["state"], "open")
+        self.assertEqual(states["elevate"]["state"], "blocked")
+        self.assertEqual(states["elevate"]["reason"],
+                         "exploit first: 1 rule on the exploit rung")
+        self.assertNotIn("0 items", states["elevate"]["reason"])
 
 
 def suggestion(rule_id: str, *, impact: float = 10.0) -> dict:
