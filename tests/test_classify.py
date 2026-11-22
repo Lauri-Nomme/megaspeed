@@ -291,6 +291,7 @@ class SchemaContractTests(unittest.TestCase):
         self.assertEqual(body["format"], classify.schema_for(classify.KIND_COMMENT))
         self.assertEqual(body["options"]["temperature"], 0)
         self.assertFalse(body["stream"])
+        self.assertFalse(body["think"])
         self.assertEqual(body["model"], classify.DEFAULT_MODEL)
         self.assertEqual(
             [message["role"] for message in body["messages"]], ["system", "user"]
@@ -417,6 +418,7 @@ class OllamaOfflineTests(unittest.TestCase):
         self.assertEqual(self.timeout, 5)
         body = json.loads(self.request.data)
         self.assertEqual(body["format"], classify.schema_for(classify.KIND_COMMENT))
+        self.assertFalse(body["think"])
 
     def test_garbage_degrades_to_the_mock_and_is_counted(self):
         classifier = self._classifier({"message": {"content": "I think this is a nit."}})

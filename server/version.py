@@ -33,7 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # The hardcoded last resort (prd/32). Bumped by hand only if a build has neither
 # git metadata nor a VERSION file.
-__version__ = "0.15.1"
+__version__ = "0.15.2"
 
 VERSION_FILE = "VERSION"
 

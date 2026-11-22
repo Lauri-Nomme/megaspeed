@@ -572,6 +572,10 @@ class OllamaClassifier(Classifier):
                 {"role": "user", "content": f"kind={kind}\n---\n{text}"},
             ],
             "stream": False,
+            # Qwen3 is a thinking model; the classifier wants the 30-token JSON,
+            # not a page of deliberation (a plain "hi" spent 190 thinking tokens
+            # / 18.7 s). Newer Ollama ignores this for non-thinking models.
+            "think": False,
             "format": schema_for(kind),
             "options": {"temperature": 0, "seed": 0, "num_predict": 128},
         }

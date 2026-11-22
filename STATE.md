@@ -36,6 +36,13 @@ Tests: **1403** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`)
   policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
   22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
 
+## v0.15.2 — no thinking tokens in the text classifier
+
+Qwen3 is a thinking model: a plain "hi" spent 190 thinking tokens / 18.7 s, and
+the classifier only needs a 30-token JSON object. `/api/chat` now sends
+`"think": false` (ignored by non-thinking models), so a 15,540-text run is not
+multiplied by a page of deliberation.
+
 ## v0.15.1 — visible text-classifier endpoint and fallback reason
 
 A run with a wrong `--llm-url` silently fell back to mock for all 15,540 texts
