@@ -461,12 +461,23 @@ export function responseTable(data, { benchmark = true, scope = null } = {}) {
         : true)));
   }
   // prd/63 F26: an empty scoped table is a result, not a blank panel.
-  if (!people.length && response) {
+  // prd/68 F-01: `scope` is null on the unscoped Queue page (`scope=all`), so
+  // the scoped sentence must not dereference `scope.label` — it used to throw a
+  // TypeError here and leave the legend, assumption and honesty blank below.
+  if (!people.length && response && scope) {
     return `<section class="response-panel" aria-labelledby="response-title">
       <div class="response-head"><h2 class="policy-h" id="response-title">Response time</h2>
         <span class="muted">added as reviewer → first response</span></div>
       <p class="empty-row">No review requests for scope ${esc(scope.label || scope.value)} in this window —
         the person has no reviewer queue here.</p></section>`;
+  }
+  // prd/68 F-01: unscoped and empty — say so plainly. An empty result is a
+  // result (a Jira-only store has no reviewer queue); it is not a crash.
+  if (!people.length && response) {
+    return `<section class="response-panel" aria-labelledby="response-title">
+      <div class="response-head"><h2 class="policy-h" id="response-title">Response time</h2>
+        <span class="muted">added as reviewer → first response</span></div>
+      <p class="empty-row">No review requests in this window.</p></section>`;
   }
   if (!people.length) return '';
   const peer = response.reviewer_median_hours;

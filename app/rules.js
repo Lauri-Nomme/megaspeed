@@ -143,6 +143,30 @@ export function isDurationKey(key) {
   return /(^|_)hours?($|_)/.test(String(key || ''));
 }
 
+/** A key that names a count of days, not a pool of hours.
+ *
+ * prd/68 F-05: `window_days: 1880.4`, `limit_days: 2.93` and
+ * `sprint_length_days` are day counts. Passing one to `fmtImpact` printed
+ * `≈1.9k h` — a day count wearing the hour unit.
+ */
+export function isDaysKey(key) {
+  return /(^|_)days?($|_)/.test(String(key || ''));
+}
+
+/** A day count with its unit: `1880.4 calendar days`.
+ *
+ * `limit_days` is derived from the stale-PR threshold in business hours
+ * (`analysis/rules.py`: `limit_hours / BUSINESS_HOURS_PER_DAY`), so it keeps
+ * the business-day unit; window and sprint lengths are calendar days.
+ */
+export function fmtDayCount(key, value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return String(value);
+  const shown = Number(number.toFixed(1));
+  const unit = key === 'limit_days' ? 'business days' : 'calendar days';
+  return `${shown} ${shown === 1 ? unit.replace(/s$/, '') : unit}`;
+}
+
 /** A concrete number from evidence, formatted by its unit. */
 export function evidenceValue(key, value) {
   if (value == null || value === '') return '–';
@@ -166,9 +190,12 @@ export function evidenceValue(key, value) {
       return `${Math.round(value * 100)}%`;
     }
     if (Number.isInteger(value)) return String(value);
+    // prd/68 F-05: a day count is a day count — `window_days: 1880.4` must
+    // read "1880.4 calendar days", never `≈1.9k h`.
+    if (isDaysKey(key)) return fmtDayCount(key, value);
     // prd/64 F-18 guard: a key that *looks* like a duration but slipped past
     // `isDurationKey` (e.g. `hours_to_merge`) still must not print `6.01`.
-    if (/(^|_)(hour|minute|day|duration)/.test(String(key))) return fmtImpact(value);
+    if (/(^|_)(hour|minute|duration)/.test(String(key))) return fmtImpact(value);
     return String(value);
   }
   return String(value);
