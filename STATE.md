@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1399** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
+Tests: **1402** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -35,6 +35,16 @@ Tests: **1399** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`)
   flash echo, scope-consistent aging counts/chart/re-plan, non-colliding percentile labels, the
   policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
   22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
+
+## v0.15.0 — key-scoped hans capture
+
+A hans capture is its own scope (keyless PRs are kept), which made a 10,733-PR
+repo capture classify every PR's comments. `--keys-only` restores the ordinary
+ticket scope: a PR whose keys are not in `MEGASPEED_TICKET_KEYS` /
+`MEGASPEED_TICKET_KEYS_FILE` is dropped **before** activities and text
+classification (the cheap key prefilter runs first; the commit log is still read
+when the list row has no key). The team's 2,391 resolved keys are in
+`ollama-export/demo-team-keys.txt` (sha256 9f490819…).
 
 ## v0.14.5 — hans merge-base accelerator + cheap list/limit
 

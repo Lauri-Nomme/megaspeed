@@ -484,6 +484,10 @@ def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
     ap.add_argument("--tempo", action="store_true",
                     help="read worklogs through the Tempo add-on instead of Jira's native"
                          " worklog (prd/30); implies --jira, and applies to --jira-cloud too")
+    ap.add_argument("--keys-only", action="store_true",
+                    help="hans only: keep only PRs carrying a ticket key from"
+                         " MEGASPEED_TICKET_KEYS / MEGASPEED_TICKET_KEYS_FILE; drop"
+                         " keyless PRs before activities and text classification")
     ap.add_argument("--project", action="append", default=None, metavar="KEY",
                     help="--jira: override the configured Jira projects (repeatable)")
     ap.add_argument("--team", action="append", default=None, metavar="NAME",
@@ -638,6 +642,20 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         if not args.repo:
             cfg.repos = [(hans.project, hans.repo)]
+        if args.keys_only:
+            # prd/31: a capture is normally its own scope, so a keyless PR is
+            # kept. --keys-only restores the usual ticket scope: a PR with no
+            # key in the configured set is dropped *before* activities/text are
+            # read, which is what turns a 10k-PR repo capture into the team's
+            # few thousand PRs.
+            if not cfg.ticket_keys:
+                print(
+                    "--keys-only needs MEGASPEED_TICKET_KEYS or"
+                    " MEGASPEED_TICKET_KEYS_FILE (the keys to keep)",
+                    file=sys.stderr,
+                )
+                return 2
+            hans.unscoped = False
         # Offline: there is no local LLM next to an airgapped capture, and the
         # deterministic mock is the same classifier the fixture path uses.
         if not cfg.text_backend:
@@ -649,6 +667,9 @@ def main(argv: list[str] | None = None) -> int:
                 " size cannot be derived",
                 file=sys.stderr,
             )
+    elif args.keys_only:
+        print("--keys-only is a --hans-scrape option", file=sys.stderr)
+        return 2
 
     if args.jira_cloud:
         # prd/24: one source, two shapes. ``--jira-cloud`` is a Jira scrape with

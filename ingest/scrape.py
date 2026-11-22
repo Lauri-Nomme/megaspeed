@@ -1201,13 +1201,20 @@ def scrape(
         # interval tick does not fire until the first PR completes. Fixture runs
         # stay silent (their tests pin an empty stderr; they finish instantly).
         repos_label = ", ".join(f"{project}/{repo}" for project, repo in cfg.repos) or "—"
+        key_scope = (
+            f" · key-scoped ({len(cfg.ticket_keys)} key(s))"
+            if cfg.ticket_keys and not getattr(transport, "unscoped", False) else ""
+        )
         if text is None:
             text_label = "text off"
         else:
             model = getattr(text, "model", "") or text.version
             workers = getattr(text, "workers", 1)
             text_label = f"text {text.backend}:{model} ({workers}w)"
-        reporter.emit(f"[scrape] {source} · {repos_label} · writing {out} · {text_label}")
+        reporter.emit(
+            f"[scrape] {source} · {repos_label} · writing {out}"
+            f"{key_scope} · {text_label}"
+        )
         if text is not None:
             labeled = {"n": 0}
 

@@ -802,6 +802,47 @@ class HansCliTests(unittest.TestCase):
         self.assertEqual(report["prs_kept"], 1)
         self.assertLessEqual(err.count("[hans-git]"), 6, err)
 
+    def test_keys_only_drops_the_keyless_pr(self):
+        out = self.corpus.root / "cli" / "keys-only.tgz"
+        code, report, err = self.run_cli(
+            "--hans-scrape", str(self.corpus.scrape_dir),
+            "--keys-only", "--out", str(out), "--json", "--quiet",
+            "--text-backend", "mock",
+            env={"MEGASPEED_TICKET_KEYS": "DEMO-1",
+                 "MEGASPEED_TICKET_KEYS_FILE": ""},
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(report["prs_seen"], 2)
+        self.assertEqual(report["prs_kept"], 1)
+        self.assertEqual(report["prs_dropped"], 1)
+
+    def test_keys_only_reads_the_keys_file(self):
+        keys = self.corpus.root / "cli" / "keys.txt"
+        keys.parent.mkdir(parents=True, exist_ok=True)
+        keys.write_text("DEMO-1\n")
+        out = self.corpus.root / "cli" / "keys-file.tgz"
+        code, report, err = self.run_cli(
+            "--hans-scrape", str(self.corpus.scrape_dir),
+            "--keys-only", "--out", str(out), "--json", "--quiet",
+            "--text-backend", "mock",
+            env={"MEGASPEED_TICKET_KEYS": "",
+                 "MEGASPEED_TICKET_KEYS_FILE": str(keys)},
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(report["prs_kept"], 1)
+        self.assertEqual(report["prs_dropped"], 1)
+
+    def test_keys_only_needs_a_key_set(self):
+        out = self.corpus.root / "cli" / "keys-none.tgz"
+        code, _report, err = self.run_cli(
+            "--hans-scrape", str(self.corpus.scrape_dir),
+            "--keys-only", "--out", str(out), "--json", "--quiet",
+            "--text-backend", "mock",
+            env={"MEGASPEED_TICKET_KEYS": "", "MEGASPEED_TICKET_KEYS_FILE": ""},
+        )
+        self.assertEqual(code, 2)
+        self.assertIn("--keys-only needs", err)
+
     def test_the_environment_variable_selects_the_same_source(self):
         out = self.corpus.root / "cli" / "env.tgz"
         code, report, err = self.run_cli(
