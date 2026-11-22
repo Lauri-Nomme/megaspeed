@@ -23,6 +23,7 @@ without a live LLM:
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -38,6 +39,7 @@ from ingest.config import Config, load_config
 from ingest.gitclass import PushClassifier
 from ingest.importer import import_bundle
 from ingest.pipeline import KeyFilter, Reducer, Stats, run
+from ingest.progress import ProgressReporter
 from ingest.pseudonym import IdentityTable
 from ingest.scrape import scrape
 from ingest.store import connect, verify
@@ -177,6 +179,27 @@ class MockCommentTypeTests(unittest.TestCase):
     def test_an_unknown_kind_is_refused(self):
         with self.assertRaises(classify.ClassifyError):
             self.mock.classify("hello", "pull_request_title")
+
+
+class ClassifierProgressTests(unittest.TestCase):
+    """A long model batch must report progress inside one PR (not only per PR)."""
+
+    def test_the_mock_reports_each_text(self):
+        seen: list[tuple[int, int]] = []
+        classifier = classify.MockClassifier()
+        classifier.on_progress = lambda done, total: seen.append((done, total))
+        classifier.classify_many([("nit: rename", classify.KIND_COMMENT),
+                                  ("why?", classify.KIND_COMMENT)])
+        self.assertEqual(seen, [(1, 2), (2, 2)])
+
+    def test_a_broken_progress_callback_never_aborts_the_batch(self):
+        classifier = classify.MockClassifier()
+
+        def boom(done, total):
+            raise RuntimeError("reporter failed")
+
+        classifier.on_progress = boom
+        self.assertEqual(len(classifier.classify_many([("nit", classify.KIND_COMMENT)])), 1)
 
 
 class ThreadOutcomeTests(unittest.TestCase):
@@ -355,6 +378,21 @@ class OllamaOfflineTests(unittest.TestCase):
         return classify.OllamaClassifier(
             "http://llm.example.invalid:11434", "test-model", timeout=5, opener=opener
         )
+
+    def test_a_parallel_batch_reports_each_completion(self):
+        classifier = self._classifier({
+            "message": {"content": json.dumps({
+                "comment_type": "blocker", "thread_intent": "acted",
+                "question": False, "answered": False, "phase": "review",
+            })}
+        })
+        seen: list[tuple[int, int]] = []
+        classifier.on_progress = lambda done, total: seen.append((done, total))
+        items = [("one", classify.KIND_COMMENT), ("two", classify.KIND_COMMENT),
+                 ("three", classify.KIND_COMMENT)]
+        self.assertEqual(len(classifier.classify_many(items)), 3)
+        self.assertEqual(sorted(done for done, _total in seen), [1, 2, 3])
+        self.assertTrue(all(total == 3 for _done, total in seen))
 
     def test_a_valid_answer_is_parsed_into_labels(self):
         classifier = self._classifier(
@@ -1210,6 +1248,25 @@ class ScrapeBundleTests(unittest.TestCase):
 
     def tearDown(self):
         self.tmp.cleanup()
+
+    def test_the_run_says_what_it_is_doing_before_the_first_request(self):
+        # prd/68 follow-up: a 30B text classifier can spend minutes on the first
+        # PR; the start line names the source, scope and model immediately.
+        # Fixture runs stay silent (tests pin an empty stderr); use the hans
+        # source with the deterministic classifier.
+        stream = io.StringIO()
+        scrape(
+            self.cfg,
+            FixtureTransport(fixtures.generate(n=3, seed=11)),
+            "hans",
+            out=self.out,
+            state_dir=self.root / "export" / "state-line",
+            progress=ProgressReporter(stream=stream, interval=30),
+            text_classifier=classify.MockClassifier(),
+        )
+        text = stream.getvalue()
+        self.assertIn("[scrape] hans", text)
+        self.assertIn("text mock:mock-v1", text)
 
     def test_labels_cross_the_bundle_and_the_store_verifies(self):
         report = scrape(

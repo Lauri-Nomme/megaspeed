@@ -657,6 +657,12 @@ def collect(
                                 project, repo, pr.pr, pr.activities, pr.commits
                             )
                     tick()
+                    if (source != "fixture" and text_classifier is not None
+                            and progress is not None and progress.enabled
+                            and stats.prs_kept <= 3):
+                        progress.emit(
+                            f"[scrape] {pr.label}: classifying text with {text_classifier.version}…"
+                        )
                     reducer.reduce(pr, keys, pr.activities, stats)
                     if pr_state is not None:
                         pr_state.record(
@@ -1182,6 +1188,31 @@ def scrape(
         if text_classifier is not None
         else classify.for_scrape(cfg, source)
     )
+    if reporter.enabled and source != "fixture":
+        # Say what is about to happen *before* the first request: a text
+        # classifier's first batch can take minutes on a CPU-only box, and the
+        # interval tick does not fire until the first PR completes. Fixture runs
+        # stay silent (their tests pin an empty stderr; they finish instantly).
+        repos_label = ", ".join(f"{project}/{repo}" for project, repo in cfg.repos) or "—"
+        if text is None:
+            text_label = "text off"
+        else:
+            model = getattr(text, "model", "") or text.version
+            workers = getattr(text, "workers", 1)
+            text_label = f"text {text.backend}:{model} ({workers}w)"
+        reporter.emit(f"[scrape] {source} · {repos_label} · writing {out} · {text_label}")
+        if text is not None:
+            labeled = {"n": 0}
+
+            def _text_progress(done: int, total: int) -> None:
+                labeled["n"] += 1
+                if labeled["n"] == 1 or labeled["n"] % 10 == 0:
+                    reporter.emit(
+                        f"[scrape] text labels: {labeled['n']} classified"
+                        f" · {text.version} ({done}/{total} in this batch)"
+                    )
+
+            text.on_progress = _text_progress
     quiet_check = (source not in ("fixture", "hans")) if verify_quiet is None else bool(verify_quiet)
     prior_repo_entries = state.repo_entries(source)
     # Crash safety is incremental (see ``checkpoint``): the in-flight rows are

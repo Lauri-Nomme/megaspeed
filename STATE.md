@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1366** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
+Tests: **1391** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -35,6 +35,14 @@ Tests: **1366** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`)
   flash echo, scope-consistent aging counts/chart/re-plan, non-colliding percentile labels, the
   policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
   22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
+
+## v0.14.2 — scrape progress with a slow text classifier
+
+The Bitbucket/hans scrape only ticked at PR boundaries, so a 30B Ollama batch on
+the first PR (up to 180 s per text) looked like a hang. It now prints an immediate
+start line (source · repos · output · classifier mode/model/workers), a
+"classifying text" line for the first PRs, and a per-text heartbeat (first text,
+then every 10), while fixture runs stay silent. No bundle change.
 
 ## v0.14.1 — v0.14.0 QA fixes (prd/68)
 

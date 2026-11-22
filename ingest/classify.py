@@ -59,7 +59,7 @@ import json
 import re
 import threading
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Sequence
 from urllib.parse import urlsplit
 
@@ -338,6 +338,21 @@ class Classifier:
         self.last_version = self.version
         #: Counters are shared with the worker threads of a concurrent batch.
         self._lock = threading.RLock()
+        #: Optional ``(done, total)`` callback, called after each text is
+        #: classified. The scrape uses it to show progress inside one PR's
+        #: batch (a 30B model can take 30–180 s per text, and the ordinary
+        #: interval tick only fires at PR boundaries).
+        self.on_progress: Callable[[int, int], None] | None = None
+
+    def _progress(self, done: int, total: int) -> None:
+        """Report one classified text; a reporter error never kills the scrape."""
+        callback = self.on_progress
+        if callback is None:
+            return
+        try:
+            callback(done, total)
+        except Exception:  # noqa: BLE001 - progress must never abort a run
+            pass
 
     # -- to implement ----------------------------------------------------
     def classify(self, text: str, kind: str) -> dict:
@@ -350,7 +365,11 @@ class Classifier:
         deterministic mock (and any test double) is unchanged and synchronous.
         :class:`OllamaClassifier` overrides it with a bounded thread pool.
         """
-        return [(self.classify(text, kind), self.last_version) for text, kind in items]
+        out: list[tuple[dict, str]] = []
+        for index, (text, kind) in enumerate(items):
+            out.append((self.classify(text, kind), self.last_version))
+            self._progress(index + 1, len(items))
+        return out
 
     # -- shared bookkeeping ----------------------------------------------
     def _count(self, labels: dict) -> dict:
@@ -575,7 +594,11 @@ class OllamaClassifier(Classifier):
         if not prepared:
             return []
         if self.workers <= 1 or len(prepared) == 1 or self.down:
-            return [(self.classify(text, kind), self.last_version) for text, kind in prepared]
+            results = []
+            for index, (text, kind) in enumerate(prepared):
+                results.append((self.classify(text, kind), self.last_version))
+                self._progress(index + 1, len(prepared))
+            return results
         answers: list[tuple[dict, str] | None] = [None] * len(prepared)
         with ThreadPoolExecutor(
             max_workers=min(self.workers, len(prepared)),
@@ -585,10 +608,13 @@ class OllamaClassifier(Classifier):
                 pool.submit(self._classify_one, text, kind): index
                 for index, (text, kind) in enumerate(prepared)
             }
-            # Iterate in submission order: ``result()`` blocks, so the answers
-            # land in input order regardless of completion order.
-            for future, index in futures.items():
-                answers[index] = future.result()
+            # Fill by index (input order) but report completion as each worker
+            # finishes, so a slow first text still shows the run is alive.
+            done = 0
+            for future in as_completed(futures):
+                answers[futures[future]] = future.result()
+                done += 1
+                self._progress(done, len(prepared))
         results: list[tuple[dict, str]] = []
         for answer in answers:
             assert answer is not None
