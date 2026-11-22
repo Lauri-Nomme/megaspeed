@@ -176,6 +176,22 @@ export function rungLabNote(rung) {
   return String(rung.note || '').replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * The exploit rung's honesty sentence (prd/58 §Product design).
+ *
+ * prd/68 F-09: the payload sends this same sentence as the rung's `note` when
+ * the policy lab has no verdict (a Jira-only store cannot calibrate the review
+ * policies). The rung body printed it as the lab line *and* as the honesty line
+ * — two consecutive copies of one sentence. The lab line now names the missing
+ * verdict and this sentence is printed once, below.
+ */
+export const EXPLOIT_HONESTY =
+  'The model does not see the ticket-level wait, so the exploit rung is the ' +
+  'rules\' claim, not the lab\'s.';
+
+/** The lab line when no policy lab verdict covers the rung. */
+const NO_LAB_VERDICT = 'the lab has no verdict for this policy in this window';
+
 /** `−13 %` with the product's U+2212 minus, or `–` when the lab has no number. */
 export function percentText(value) {
   if (value == null || Number.isNaN(Number(value))) return '–';
@@ -231,6 +247,9 @@ function rungBody(rung, { base = '', holderText = '' } = {}) {
   const rules = rungRules(rung);
   const labs = (rung.labs || []).filter((lab) => lab.note);
   const note = rungLabNote(rung) || (labs.length ? labs.map((lab) => lab.note).join('; ') : '');
+  // prd/68 F-09: when the lab has no verdict, the payload's note on the exploit
+  // rung *is* the honesty sentence printed below — never print it twice.
+  const labNote = note && note !== EXPLOIT_HONESTY ? note : NO_LAB_VERDICT;
   const items = rung.items || [];
   return `
     <ul class="rung-rules">${rules.length
@@ -248,12 +267,10 @@ function rungBody(rung, { base = '', holderText = '' } = {}) {
     </li>`).join('')}</ul>` : ''}
     <p class="rung-lab" data-rung-lab>${labs.length
       ? `<span class="lab-tag mono">policy lab</span> ${labs.map((lab) => `<span class="rung-lab-fact" title="${esc(lab.note || '')}">${esc(labVerdictLine(lab))}</span>`).join('<span class="lab-sep" aria-hidden="true"> · </span>')}`
-      : `<span class="lab-tag mono">policy lab</span> ${esc(note || 'the lab has no verdict for this policy in this window')}`}</p>
+      : `<span class="lab-tag mono">policy lab</span> ${esc(labNote)}`}</p>
     ${rung.step === 'exploit' && holderText ? `<p class="rung-holder verdict-phone-only">holders
       <span class="mono">${esc(holderText)}</span> <span class="mono clock-tag">PR clock</span></p>` : ''}
-    ${rung.step === 'exploit' ? `<p class="rung-honesty">${esc(
-      'The model does not see the ticket-level wait, so the exploit rung is the rules\' claim, not the lab\'s.',
-    )}</p>` : ''}`;
+    ${rung.step === 'exploit' ? `<p class="rung-honesty">${esc(EXPLOIT_HONESTY)}</p>` : ''}`;
 }
 
 /** The one-line holder split, for the exploit rung on a phone. */
