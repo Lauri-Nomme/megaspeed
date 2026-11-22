@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1338** (`tests/`) + **99** (`scrape/tests`) + **498** (node `app/test`) green.
+Tests: **1361** (`tests/`) + **99** (`scrape/tests`) + **519** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -35,6 +35,16 @@ Tests: **1338** (`tests/`) + **99** (`scrape/tests`) + **498** (node `app/test`)
   flash echo, scope-consistent aging counts/chart/re-plan, non-colliding percentile labels, the
   policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
   22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
+
+## v0.14.0 — window scoping (prd/67)
+
+The first Jira-only corpus (2,320 stories, 106 sprints, 252 people, no PRs) exposed four all-time views
+in a windowed product: timeline actor lanes and the who-is-who legend listed every person ever seen
+(now window-scoped, with a hidden count); the aging table returned every open story regardless of the
+window (now active-in-window, live by default, dead rows in re-plan); and the constraint verdict named a
+station with **0 h owed** as "the constraint" because it ranked the historical tail (now owed-now first;
+when nothing is owed it says "no current queue" and lists the historical tails). The carry-over card now
+states both scopes: "7 of 36 in the 1 sprint closed in this window" beside "1,607 across 99 sprints".
 
 ## Scrape (airgapped) — full value, reliable
 
