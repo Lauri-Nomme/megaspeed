@@ -373,6 +373,24 @@ class HansTransportTests(unittest.TestCase):
         commits = list(BitbucketClient(self.transport).iter_commits("DEMO", "widget", 2))
         self.assertEqual([c["message"] for c in commits], ["chore: docs only"])
 
+    def test_the_merge_parent_lookup_does_not_walk_the_whole_history(self):
+        """One ancestry-path query (+ its parent), not one git per chain commit."""
+        transport = self.transport
+        record = transport._raw_detail(2)
+        target = transport._target(record)
+        head = transport._head(record, 2)
+        calls: list[str] = []
+        original = transport._git
+
+        def counting(*args, **kwargs):
+            calls.append(args[0])
+            return original(*args, **kwargs)
+
+        transport._git = counting
+        base = transport._merge_parent(target, head)
+        self.assertEqual(len(base), 40)
+        self.assertLessEqual(len(calls), 4, calls)
+
     def test_the_diff_base_is_stamped_on_the_detail_for_a_merged_pr(self):
         detail = self.transport.get(self.path("/pull-requests/2"))
         base = detail["megaspeedDiffBase"]

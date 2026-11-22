@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1391** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
+Tests: **1392** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -35,6 +35,15 @@ Tests: **1391** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`)
   flash echo, scope-consistent aging counts/chart/re-plan, non-colliding percentile labels, the
   policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
   22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
+
+## v0.14.3 — hans merge-base in one query
+
+`HansTransport._merge_parent()` walked the target's entire first-parent chain and
+spawned `git merge-base --is-ancestor` **per commit** to find the merge; on a
+multi-year mirror the first merged PR alone could take hours (python busy, git
+idle between spawns). It now asks
+`git rev-list --first-parent --ancestry-path <head>..<target>` once (plus
+`rev-parse <merge>^1`) and caches the chain for the old-semantics fallback.
 
 ## v0.14.2 — scrape progress with a slow text classifier
 

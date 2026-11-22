@@ -126,6 +126,10 @@ class HansTransport:
         self._activities: dict[int, list[dict]] = {}
         self._commits: dict[int, list[dict]] = {}
         self._bases: dict[int, str] = {}
+        #: target sha -> its first-parent chain (newest → oldest), shared by all
+        #: merged PRs against that target. The chain is large; recomputing it for
+        #: every PR was one of the two O(history) costs here.
+        self._chains: dict[str, list[str]] = {}
         self._list: list[dict] | None = None
         self.users = self._load_users()
         #: Requests served, for diagnostics (BitbucketClient counts its own).
@@ -436,19 +440,48 @@ class HansTransport:
     def _merge_parent(self, target: str, head: str) -> str:
         """First parent of the merge that brought ``head`` into ``target``.
 
-        Walking the target's first-parent chain from the tip, the merge is the
-        *oldest* commit that still contains the head -- i.e. the first one whose
-        own first parent does not. A plain squash/cherry-pick (head not in the
-        chain at all) yields ``""``.
+        The merge is the **oldest** commit on the target's first-parent chain
+        that still contains the head; its first parent is the target at merge
+        time. ``git rev-list --first-parent --ancestry-path <head>..<target>``
+        answers that in **one** command (the last entry). The previous code
+        spawned ``git merge-base --is-ancestor`` for every commit in the chain,
+        which is O(history) git processes per merged PR -- hours on a big
+        mirror. The chain lookup fallback keeps the exact old semantics for a
+        git that cannot run ``--ancestry-path``.
         """
-        chain = self._git("rev-list", "--first-parent", target).split()
-        for index, commit in enumerate(chain):
-            if not self._is_ancestor(commit, head):
-                continue
-            parent = chain[index + 1] if index + 1 < len(chain) else ""
-            if not parent or not self._is_ancestor(parent, head):
-                return parent
-        return ""
+        try:
+            path = self._git(
+                "rev-list", "--first-parent", "--ancestry-path", f"{head}..{target}"
+            ).split()
+        except BitbucketError:
+            path = []
+        if path:
+            parent = self._git("rev-parse", f"{path[-1]}^1", check=False).strip()
+            return parent if re.fullmatch(r"[0-9a-f]{40}", parent) else ""
+        chain = self._chain(target)
+        if not chain:
+            return ""
+        # Recent → oldest is true → false for "head is an ancestor"; binary
+        # search the boundary instead of walking every commit.
+        low, high, found = 0, len(chain) - 1, None
+        while low <= high:
+            mid = (low + high) // 2
+            if self._is_ancestor(chain[mid], head):
+                found = mid
+                high = mid - 1
+            else:
+                low = mid + 1
+        if found is None:
+            return ""
+        return chain[found + 1] if found + 1 < len(chain) else ""
+
+    def _chain(self, target: str) -> list[str]:
+        """The target's first-parent chain, cached across every merged PR."""
+        if target not in self._chains:
+            self._chains[target] = self._git(
+                "rev-list", "--first-parent", target
+            ).split()
+        return self._chains[target]
 
     def _branch_tip(self, display_id: str) -> str:
         return self._rev_parse(f"refs/heads/{display_id}") if display_id else ""
