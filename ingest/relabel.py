@@ -30,6 +30,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -37,7 +38,7 @@ from . import classify, labelpatch, llmtrace, taxonomy
 from .bundle import Bundle, BundleError, read_bundle
 from .config import load_config
 from .logs import iso
-from .progress import ProgressReporter
+from .progress import ProgressReporter, format_elapsed
 from .pseudonym import IdentityTable
 from .timeutil import iso as ts_iso
 
@@ -368,6 +369,12 @@ def relabel(
     # reuse the answer. The trace still has one record per thread, so one line
     # per call (not per row) is honest.
     answers: dict[tuple[str, str], dict] = {}
+    started = time.monotonic()
+    if reporter.enabled:
+        reporter.emit(
+            f"[relabel] {len(items)} text(s) to classify · {len(threads)} thread(s)"
+            f" · {len(prs)} PR(s) in the bundle"
+        )
     replayed = 0
     reused = 0
     rows: list[dict] = []
@@ -386,15 +393,23 @@ def relabel(
         marker = (kind, body)
         labels = answers.get(marker)
         if labels is None:
-            labels = text.classify(body, kind)
+            context = record.get("context") or None
+            labels = (
+                text.classify(body, kind, context) if context
+                else text.classify(body, kind)
+            )
             answers[marker] = labels
             replayed += 1
         else:
             reused += 1
         if reporter.enabled and ordinal % 500 == 0:
+            elapsed = max(1e-6, time.monotonic() - started)
+            rate = ordinal / elapsed
+            eta = (len(items) - ordinal) / rate if rate > 0 else 0
             reporter.emit(
                 f"[relabel] {ordinal}/{len(items)} text(s) · {replayed} call(s),"
-                f" {reused} reused · {len(rows)} row(s) so far"
+                f" {reused} reused · {len(rows)} row(s) · {rate:.2f} text/s"
+                f" · eta {format_elapsed(eta)}"
             )
 
         if context.get("role") == "description":

@@ -36,6 +36,13 @@ Tests: **1444** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`)
   policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
   22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
 
+## v0.16.5 — relabel says what it is doing
+
+The relabel run now prints a start line (`N text(s) to classify · T thread(s) ·
+P PR(s)`) and its 500-text progress line carries `text/s` and `eta`. The id
+context is passed to the classifier so per-call lines name the PR/thread instead
+of `?`. (Cosmetic: the patch already carried the ids.)
+
 ## v0.16.4 — one read per artifact
 
 The relabel capture mode read the bundle twice (once to scope the replay, once
