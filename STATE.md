@@ -41,13 +41,12 @@ Tests: **1461** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`)
 First free-exploration pass with the PR layer present: **15 findings (3 BUG, 8
 PAPERCUT, 4 POLISH)**, 0 pseudonymisation leaks over 58 API payloads, 0
 regressions across the 16 prd/68 fixes. F-01 (suffix-split identities) is fixed
-in the live store on shared-ticket evidence: `MaPa2→MaPa` (222 shared stories),
-`MaRa2→MaRa` (102), `JaKu4→JaKu` (40), `MaPo6→MaPo` (15), `AlKr2→AlKr` (6);
-persons 223→218, contract OK. `BeWo`/`BeWo2`/`BeWo3` and
-`DaHa`/`DaHa2`/`DaHa4` were **not** merged: no shared ticket keys, and a suffix
-means the BB map already had a different person with those initials.
-Backup: `/data/personal/work/demo-tlla.pre-suffix-merge.duckdb`.
-Open: F-02 (scope roster vs 40k cap), F-03 (multi-key PR attribution), F-04..F-15.
+in the live store: every numeric-suffix variant merged to its base pseudonym
+(`MaPa2→MaPa`, `MaRa2→MaRa`, `JaKu4→JaKu`, `MaPo6→MaPo`, `AlKr2→AlKr`, the
+`BeWo`/`DaHa`/`FoUs`/`CaGi` families, …), persons 329→**199**, no suffixed
+pseudonyms left, 0 orphan links, contract OK. Backups:
+`demo-tlla.pre-rekey.duckdb`, `…pre-full-suffix.duckdb`. Code fixes F-02…F-15
+are dispatched as prd/70 in file-disjoint worktrees.
 
 ## Data repair — live store rekey (2026-11-23)
 
