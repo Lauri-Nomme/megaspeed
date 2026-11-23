@@ -166,6 +166,7 @@ test('F-10: off the Timeline the preset stays pressed despite a sprint lens', ()
       state,
       $: (id) => elements[id],
       presetWindow: () => ({ start: 0, end: 1 }),
+      dataWindow: (start, end) => ({ start, end }),
       fmtRange: () => '20 Aug → 18 Nov',
       syncRangeMeta() {},
       timeline: { captureView: () => ({ start: 0, end: 1 }) },
