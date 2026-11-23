@@ -390,7 +390,12 @@ STORY_EVENT_SQL = (
     "SELECT e.event_key, e.ts, e.activity, e.actor, CAST(e.attributes AS VARCHAR) AS attrs,"
     " eo.object_id FROM events e"
     " JOIN event_objects eo ON eo.event_key = e.event_key"
-    " WHERE eo.object_type = 'STORY' ORDER BY e.ts ASC, e.event_key ASC"
+    " WHERE eo.object_type = 'STORY'"
+    # prd/76: a nested reply is PR/THREAD dialogue, never a story event; the
+    # predicate is here so a future reply that links a STORY cannot change a
+    # ticket metric either (the analysis choke point is ballcourt.EVENT_SQL).
+    " AND coalesce(json_extract_string(e.attributes, '$.reply'), 'false') <> 'true'"
+    " ORDER BY e.ts ASC, e.event_key ASC"
 )
 SPRINT_LINK_SQL = (
     "SELECT event_key, object_id FROM event_objects"

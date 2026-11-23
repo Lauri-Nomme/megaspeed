@@ -168,13 +168,21 @@ class ReducerShapeTests(unittest.TestCase):
         ])
         events = self.reduce(pr)
         comment_events = [e for e in events if e["activity"] == "comment_added"]
-        self.assertEqual(len(comment_events), 1)
-        attributes = comment_events[0]["attributes"]
+        # prd/76: the opener plus one event for the nested reply.
+        self.assertEqual(len(comment_events), 2)
+        opener = [e for e in comment_events if not e["attributes"].get("reply")]
+        reply_events = [e for e in comment_events if e["attributes"].get("reply")]
+        self.assertEqual(len(opener), 1)
+        self.assertEqual(len(reply_events), 1)
+        attributes = opener[0]["attributes"]
         self.assertEqual(attributes["anchor_class"], "file")
         self.assertEqual(attributes["thread_state"], "resolved")
         self.assertEqual(attributes["replies"], 1)
+        self.assertEqual(reply_events[0]["attributes"]["reply_index"], 1)
+        self.assertEqual(reply_events[0]["attributes"]["parent_comment_id"], 101)
         # raw comment text is never stored, not even hashed into attributes
-        self.assertNotIn("zzcanary", json.dumps(attributes))
+        for event in comment_events:
+            self.assertNotIn("zzcanary", json.dumps(event["attributes"]))
 
 
 class FixtureShapeTests(unittest.TestCase):

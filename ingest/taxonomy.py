@@ -231,6 +231,14 @@ ATTRIBUTE_SPEC: dict[str, Any] = {
     "actor_kind": ACTOR_KIND,
     "sentinel": bool,
     "stacked": bool,
+    # prd/76: a ``comment_added`` event for a nested reply, not the thread's
+    # opener. ``reply_index`` is its 1-based position in the thread and
+    # ``parent_comment_id`` is the comment it hangs under. The opener carries
+    # no ``reply`` attribute (absent reads as false), so every pre-prd/76 store
+    # keeps its exact meaning.
+    "reply": bool,
+    "reply_index": COUNT,
+    "parent_comment_id": COUNT,
     "approvals_lost": bool,
     "commits_added": int,
     "commits_removed": int,

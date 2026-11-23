@@ -912,9 +912,26 @@ def _timeline(
 
 
 
+def is_reply(event: dict) -> bool:
+    """True for a nested-reply ``comment_added`` event (prd/76).
+
+    A reply is stored (the event log is complete) but is *not* review dialogue:
+    it shares its opener's PR/THREAD objects, so every metric that meant
+    "a review comment" must exclude it or re-count every thread.
+    """
+    return bool((event.get("attributes") or {}).get("reply"))
+
+
+#: The one SQL predicate for "this event is not a reply". ``coalesce`` matters:
+#: ``json_extract_string`` is NULL when the key is absent, and ``NULL <> 'true'``
+#: is NULL (i.e. not true), which would drop every pre-prd/76 row.
+NOT_REPLY_SQL = "coalesce(json_extract_string(attributes, '$.reply'), 'false') <> 'true'"
+
 EVENT_SQL = (
     "SELECT event_key, ts, activity, actor, repo, pr_id, CAST(attributes AS VARCHAR) AS attrs"
-    " FROM events ORDER BY ts ASC, event_key ASC"
+    " FROM events"
+    f" WHERE {NOT_REPLY_SQL}"
+    " ORDER BY ts ASC, event_key ASC"
 )
 # Who an event is *about* (product review #7): ``reviewer_changed`` carries the
 # added/removed/reviewed person as a PERSON object link, not as the actor.
@@ -1091,6 +1108,10 @@ def load(
                 outcome_by_event[event_key] = outcome
     events = []
     for key, ts, activity, actor, repo, pr_id, attrs in conn.execute(EVENT_SQL).fetchall():
+        attributes = json.loads(attrs) if attrs else {}
+        if is_reply({"attributes": attributes}):
+            # Belt and braces (prd/76): the SQL predicate already dropped it.
+            continue
         events.append({
             "key": key,
             "ts": iso(ts),
@@ -1099,7 +1120,7 @@ def load(
             "actor": actor,
             "repo": repo,
             "pr_id": pr_id,
-            "attributes": json.loads(attrs) if attrs else {},
+            "attributes": attributes,
             "people": tuple(people_by_event.get(key, ())),
             "thread_outcome": outcome_by_event.get(key),
         })

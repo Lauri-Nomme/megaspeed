@@ -44,13 +44,41 @@ from urllib.parse import urlencode
 from ingest import fixtures, taxonomy
 from ingest.config import Config
 from ingest.pipeline import run
-from ingest.store import connect, summary, write_run
+from ingest.store import connect, iso, summary, write_run
 from ingest.transport import FixtureTransport
 from server import app as app_module
 from server.harness import BrowserBridge
 
 TOKEN = "test-server-token"
 TOKEN_HEADER = b"x-megaspeed-token"
+#: prd/76: ``/api/events`` hides nested replies by default; a store summary
+#: (``/api/health``) still reports the whole log. Every API total in this file
+#: is the non-reply count.
+NOT_REPLY = (
+    "coalesce(json_extract_string(attributes, '$.reply'), 'false') <> 'true'"
+)
+
+
+def api_events(db: Path) -> int:
+    con = connect(db, read_only=True)
+    try:
+        return int(
+            con.execute(f"SELECT count(*) FROM events WHERE {NOT_REPLY}").fetchone()[0]
+        )
+    finally:
+        con.close()
+
+
+def api_span(db: Path) -> tuple[datetime, datetime]:
+    con = connect(db, read_only=True)
+    try:
+        first, last = con.execute(
+            f"SELECT min(ts), max(ts) FROM events WHERE {NOT_REPLY}"
+        ).fetchone()
+        return first, last
+    finally:
+        con.close()
+
 # a 1x1 PNG: enough for the screenshot endpoint's base64 decode round-trip
 PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmM"
@@ -162,6 +190,9 @@ class ServerContractTests(unittest.TestCase):
         cls.beta = make_store(cls.dir, "beta", n=5, seed=202)
         cls.alpha_summary = summary(cls._connect(cls.alpha))
         cls.beta_summary = summary(cls._connect(cls.beta))
+        cls.alpha_api_events = api_events(cls.alpha)
+        cls.beta_api_events = api_events(cls.beta)
+        cls.alpha_span = api_span(cls.alpha)
         cls.con = cls._connect(cls.alpha)
 
         cls.patches = [
@@ -198,13 +229,13 @@ class ServerContractTests(unittest.TestCase):
 
     # -- tenant scoping (prd/12) ------------------------------------------- #
     def test_tenant_param_selects_the_store_and_defaults_to_the_first(self):
-        for name, expected in (("alpha", self.alpha_summary), ("beta", self.beta_summary)):
+        for name, expected in (("alpha", self.alpha_api_events), ("beta", self.beta_api_events)):
             with self.subTest(tenant=name):
                 reply = self.events(tenant=name)
                 self.assertEqual(reply.status, 200, reply.text)
                 self.assertEqual(reply.headers["x-tenant"], name)
-                self.assertEqual(reply.headers["x-total-count"], str(expected["events"]))
-                self.assertEqual(len(reply.json()), expected["events"])
+                self.assertEqual(reply.headers["x-total-count"], str(expected))
+                self.assertEqual(len(reply.json()), expected)
 
         # no ?tenant= (and an empty one) reads the default: first store by name
         for query in ({}, {"tenant": ""}):
@@ -213,12 +244,10 @@ class ServerContractTests(unittest.TestCase):
                 self.assertEqual(reply.status, 200, reply.text)
                 self.assertEqual(reply.headers["x-tenant"], "alpha")
                 self.assertEqual(
-                    reply.headers["x-total-count"], str(self.alpha_summary["events"])
+                    reply.headers["x-total-count"], str(self.alpha_api_events)
                 )
         # the two fixtures really differ, or scoping proves nothing
-        self.assertNotEqual(
-            self.alpha_summary["events"], self.beta_summary["events"]
-        )
+        self.assertNotEqual(self.alpha_api_events, self.beta_api_events)
 
     def test_an_unknown_tenant_is_a_404_that_lists_the_real_ones(self):
         for name in ("nope", "..", "../alpha", "alpha/../beta", "/etc/passwd", ".hidden"):
@@ -241,7 +270,8 @@ class ServerContractTests(unittest.TestCase):
         for param, (value, column) in cases.items():
             with self.subTest(param=param):
                 expected = self.count(
-                    f"SELECT count(*) FROM events WHERE {column} = ?", [value]
+                    f"SELECT count(*) FROM events WHERE {column} = ? AND {NOT_REPLY}",
+                    [value],
                 )
                 self.assertGreater(expected, 0, f"fixture has no {param}={value}")
                 reply = self.events(**{param: value})
@@ -307,7 +337,7 @@ class ServerContractTests(unittest.TestCase):
 
     # -- paging (GAP-04) ---------------------------------------------------- #
     def test_limit_offset_and_order_page_the_log_and_total_counts_every_row(self):
-        total = self.alpha_summary["events"]
+        total = self.alpha_api_events
         full = self.events()
         self.assertEqual(full.headers["x-total-count"], str(total))
         rows = full.json()
@@ -347,10 +377,10 @@ class ServerContractTests(unittest.TestCase):
         day = last.date()
         next_day = day + timedelta(days=1)
         inclusive = self.count(
-            "SELECT count(*) FROM events WHERE ts < ?", [next_day]
+            f"SELECT count(*) FROM events WHERE ts < ? AND {NOT_REPLY}", [next_day]
         )
         midnight = self.count(
-            "SELECT count(*) FROM events WHERE ts <= ?",
+            f"SELECT count(*) FROM events WHERE ts <= ? AND {NOT_REPLY}",
             [datetime.combine(day, time())],
         )
         self.assertLess(midnight, inclusive, "the last day must hold events")
@@ -377,7 +407,8 @@ class ServerContractTests(unittest.TestCase):
         ).fetchone()[0].date()
         next_day = day + timedelta(days=1)
         expected = self.count(
-            "SELECT count(*) FROM events WHERE ts >= ? AND ts < ?", [day, next_day]
+            f"SELECT count(*) FROM events WHERE ts >= ? AND ts < ? AND {NOT_REPLY}",
+            [day, next_day],
         )
         self.assertGreater(expected, 1)
 
@@ -391,7 +422,7 @@ class ServerContractTests(unittest.TestCase):
         # from == to on the last day is that day, not an empty range
         last_day = self.con.execute("SELECT max(ts) FROM events").fetchone()[0].date()
         last_day_count = self.count(
-            "SELECT count(*) FROM events WHERE ts >= ? AND ts < ?",
+            f"SELECT count(*) FROM events WHERE ts >= ? AND ts < ? AND {NOT_REPLY}",
             [last_day, last_day + timedelta(days=1)],
         )
         self.assertEqual(
@@ -405,7 +436,7 @@ class ServerContractTests(unittest.TestCase):
         reply = get("/api/events/counts")
         self.assertEqual(reply.status, 200, reply.text)
         body = reply.json()
-        total = self.alpha_summary["events"]
+        total = self.alpha_api_events
 
         self.assertEqual(body["tenant"], "alpha")
         self.assertEqual(body["granularity"], "day")
@@ -414,8 +445,8 @@ class ServerContractTests(unittest.TestCase):
         self.assertEqual(sum(bucket["count"] for bucket in body["buckets"]), total)
         self.assertEqual(sum(body["by_activity"].values()), total)
         self.assertEqual(sum(body["by_repo"].values()), total)
-        self.assertEqual(body["first_ts"], self.alpha_summary["first_ts"])
-        self.assertEqual(body["last_ts"], self.alpha_summary["last_ts"])
+        self.assertEqual(body["first_ts"], iso(self.alpha_span[0]))
+        self.assertEqual(body["last_ts"], iso(self.alpha_span[1]))
         self.assertEqual(body["activity_vocabulary"], sorted(taxonomy.ACTIVITIES))
         self.assertTrue(set(body["by_activity"]) <= set(taxonomy.ACTIVITIES))
 
@@ -437,14 +468,16 @@ class ServerContractTests(unittest.TestCase):
 
     def test_event_counts_honours_filters_and_tenants(self):
         filtered = get("/api/events/counts", repo="ENG/mobile").json()
-        expected = self.count("SELECT count(*) FROM events WHERE repo = ?", ["ENG/mobile"])
+        expected = self.count(
+            f"SELECT count(*) FROM events WHERE repo = ? AND {NOT_REPLY}", ["ENG/mobile"]
+        )
         self.assertEqual(filtered["total"], expected)
         self.assertEqual(filtered["by_repo"], {"ENG/mobile": expected})
         self.assertEqual(sum(bucket["count"] for bucket in filtered["buckets"]), expected)
 
         beta = get("/api/events/counts", tenant="beta").json()
         self.assertEqual(beta["tenant"], "beta")
-        self.assertEqual(beta["total"], self.beta_summary["events"])
+        self.assertEqual(beta["total"], self.beta_api_events)
 
         bad = get("/api/events/counts", granularity="fortnight")
         self.assertEqual(bad.status, 400)

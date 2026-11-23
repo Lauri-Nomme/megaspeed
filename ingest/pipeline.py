@@ -24,7 +24,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import Any, Callable
 
 from . import citext, classify, taxonomy
 from .bitbucket import PullRequest
@@ -152,6 +152,64 @@ def _ts(value: Any, default: datetime | None = None) -> datetime:
             raise ValueError("timestamp required")
         return default
     return to_naive_utc(value)
+
+
+def reply_events(
+    *,
+    repo: str,
+    pr_id: int,
+    parent_natural: str,
+    opener_ts: datetime,
+    parent_comment_id: int,
+    replies: list[tuple[int, dict]],
+    actor_for: Callable[[dict | None], str],
+    actor_kind_for: Callable[[str], str],
+    as_of: datetime,
+) -> list[dict]:
+    """One ``comment_added`` event per nested reply of a comment (prd/76).
+
+    The opener is already an event (``parent_natural``); a reply used to be
+    invisible after ingest. These rows make the thread's dialogue complete
+    without changing what the opener means: ``reply=true`` marks them, so every
+    reader that means "review comments written by people" can exclude them.
+
+    ``replies`` is ``(1-based index, reply)``; the backfill uses the same helper
+    and keeps the original indices for the replies it still has to insert. The
+    caller attaches the opener's object set (``[PR, *TICKET, THREAD]``), so a
+    reply joins exactly like its thread. ``actor_for`` allocates/resolves a
+    pseudonym (the reducer's cache and the backfill's identity table both
+    implement it); a missing author is the synthetic ``system`` actor, because
+    the position and timestamp are still the data. ``parent_natural`` embeds the
+    DC activity id, so the natural key (``…:act:12:reply2``) cannot collide with
+    the opener's (``…:act:12``).
+    """
+    rows: list[dict] = []
+    for index, reply in replies:
+        reply = reply or {}
+        actor = actor_for(reply.get("author") or {})
+        attributes = taxonomy.check_attributes(
+            {
+                "reply": True,
+                "reply_index": index,
+                "parent_comment_id": parent_comment_id,
+                "actor_kind": actor_kind_for(actor),
+            }
+        )
+        rows.append(
+            {
+                "event_key": f"{repo}#{pr_id}:{parent_natural}:reply{index}",
+                "ts": _ts(reply.get("createdDate"), opener_ts),
+                "activity": taxonomy.check_activity("comment_added"),
+                "actor": actor,
+                "repo": repo,
+                "pr_id": pr_id,
+                "attributes": attributes,
+                "classifier_version": taxonomy.CLASSIFIER_VERSION,
+                "content_hash": _digest(reply),
+                "as_of": as_of,
+            }
+        )
+    return rows
 
 
 @dataclass
@@ -549,6 +607,29 @@ class Reducer:
                     },
                     activity,
                 )
+                # prd/76: every nested reply is an event of its own, on the same
+                # object set as the opener. No label, no question, no change to
+                # the opener: the ``reply`` attribute is what separates them.
+                if comment.get("id") is not None:
+                    reply_objects = [pr_object_id, *ticket_objects, *thread_objects]
+                    for event in reply_events(
+                        repo=repo_label,
+                        pr_id=pr.id,
+                        parent_natural=natural,
+                        opener_ts=ts,
+                        parent_comment_id=int(comment["id"]),
+                        replies=list(
+                            enumerate(comment.get("comments") or [], start=1)
+                        ),
+                        actor_for=lambda user: self._actor(user, stats),
+                        actor_kind_for=self.actor_kind,
+                        as_of=self.as_of,
+                    ):
+                        stats.events.append(event)
+                        for oid in reply_objects:
+                            stats.relations.append(
+                                (event["event_key"], oid.split(":", 1)[0], oid)
+                            )
                 if labels and labels["question"]:
                     stats.questions_raised += 1
                     self._event(
@@ -1221,6 +1302,15 @@ def _event_order(event_key: str) -> tuple[int, str, int]:
     return (int(match.group(1)), match.group(2) or "", int(match.group(3) or 0))
 
 
+def is_reply_event(event: dict) -> bool:
+    """True for a nested-reply ``comment_added`` event (prd/76).
+
+    The marker lives in the attribute bag, so this works on a reducer event and
+    on a row read back from the store alike.
+    """
+    return bool((event.get("attributes") or {}).get("reply"))
+
+
 def derive_review_rounds(events: list[dict]) -> int:
     """Review rounds for one PR, by the ``concepts.md`` §6 definition.
 
@@ -1231,8 +1321,14 @@ def derive_review_rounds(events: list[dict]) -> int:
     its push. This is the store-side twin of
     ``ballcourt.review_round_events`` — one definition, so the store's
     ``review_rounds`` and the analysis agree (prd/36 §5).
+
+    Replies are not review rounds (prd/76): they share the opener's activity id
+    and would otherwise turn a thread's dialogue into a fake first review.
     """
-    ordered = sorted(events, key=lambda e: (e["ts"], _event_order(e["event_key"])))
+    ordered = sorted(
+        (event for event in events if not is_reply_event(event)),
+        key=lambda e: (e["ts"], _event_order(e["event_key"])),
+    )
     author = next(
         (e.get("actor") for e in ordered if e["activity"] == "pr_opened"), None
     )
@@ -1266,8 +1362,14 @@ def derive_approvals_lost(events: list[dict]) -> dict[str, bool]:
     This is the signal behind the "pure rebase lost approvals" finding
     (prd/04). It is computed from whatever the store *now* knows, so a re-run
     after the UNAPPROVED arrives converges on the right answer.
+
+    Replies are not boundaries (prd/76): a reply that lands between a push and
+    its unapproval must not make the push look innocent.
     """
-    ordered = sorted(events, key=lambda e: (e["ts"], _event_order(e["event_key"])))
+    ordered = sorted(
+        (event for event in events if not is_reply_event(event)),
+        key=lambda e: (e["ts"], _event_order(e["event_key"])),
+    )
     out: dict[str, bool] = {}
     for index, event in enumerate(ordered):
         if event["activity"] != "pr_pushed":

@@ -139,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # Two halves, two CLIs: `python3 -m ingest scrape|import ...`. The scrape
     # side is also its own artifact (scrape/build.sh -> megaspeed-scrape).
-    if argv and argv[0] in ("scrape", "import", "relabel", "rekey", "recategorize"):
+    if argv and argv[0] in ("scrape", "import", "relabel", "rekey", "recategorize", "backfill-replies"):
         command, rest = argv[0], argv[1:]
         if command == "scrape":
             from .scrape_cli import main as scrape_main
@@ -157,6 +157,10 @@ def main(argv: list[str] | None = None) -> int:
             from .recategorize import main as recategorize_main
 
             return recategorize_main(rest)
+        if command == "backfill-replies":
+            from .backfill import main as backfill_main
+
+            return backfill_main(rest)
         from .importer import main as import_main
 
         return import_main(rest)

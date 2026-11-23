@@ -93,10 +93,22 @@ def _event_where(
     activity: str | None = None,
     pr_id: int | None = None,
     ticket: str | None = None,
+    include_replies: bool = False,
 ) -> tuple[str, list]:
-    """SQL WHERE clause + bound params for the event log (alias ``e``)."""
+    """SQL WHERE clause + bound params for the event log (alias ``e``).
+
+    ``include_replies=False`` (the default) keeps every pre-prd/76 caller and
+    every API response byte-identical to a store without reply events: a nested
+    reply is stored (the log is complete) but not part of "review comments".
+    The ``coalesce`` is load-bearing -- ``json_extract_string`` is NULL for a row
+    written before the attribute existed, and ``NULL <> 'true'`` is not true.
+    """
     clauses: list[str] = []
     params: list = []
+    if not include_replies:
+        clauses.append(
+            "coalesce(json_extract_string(e.attributes, '$.reply'), 'false') <> 'true'"
+        )
     if start is not None:
         clauses.append("e.ts >= ?")
         params.append(start)
@@ -163,10 +175,15 @@ def list_events(
     limit: int | None = None,
     offset: int = 0,
     order: str = "asc",
+    include_replies: bool = False,
     **filters,
 ) -> tuple[list[dict], int]:
-    """A page of the event log plus the total number of matching rows."""
-    where, params = _event_where(start, end, **filters)
+    """A page of the event log plus the total number of matching rows.
+
+    Replies are hidden by default (prd/76): ``/api/events`` keeps its current
+    shape and count. Pass ``include_replies=True`` to read the complete log.
+    """
+    where, params = _event_where(start, end, include_replies=include_replies, **filters)
     total = int(con.execute(f"SELECT count(*) FROM events e{where}", params).fetchone()[0])
     direction = "DESC" if str(order).lower() == "desc" else "ASC"
     sql = (
@@ -290,6 +307,7 @@ def event_counts(
     start: datetime | None = None,
     end: datetime | None = None,
     granularity: str = "day",
+    include_replies: bool = False,
     **filters,
 ) -> dict:
     """Histogram of the *matching* log, computed in DuckDB (GAP-04).
@@ -298,11 +316,14 @@ def event_counts(
     can draw it without filling gaps; each bucket is UTC-aligned (hour/day) or
     Monday-aligned (week). ``by_activity`` and ``by_repo`` are window totals,
     which is what a legend or a swimlane filter list needs — no per-event rows.
+
+    Replies are excluded by default (prd/76), so the histogram agrees with
+    ``list_events`` and its totals do not move when the log gains replies.
     """
     unit = GRANULARITIES.get(str(granularity).lower())
     if unit is None:
         raise ValueError(f"granularity must be one of {sorted(GRANULARITIES)}")
-    where, params = _event_where(start, end, **filters)
+    where, params = _event_where(start, end, include_replies=include_replies, **filters)
     rows = con.execute(
         f"SELECT date_trunc('{unit}', e.ts) AS bucket, e.activity, count(*) AS n"
         f" FROM events e{where} GROUP BY 1, 2 ORDER BY 1",

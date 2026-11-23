@@ -54,7 +54,12 @@ def _person_kinds(con) -> dict[str, str]:
 
 
 def _openers(con) -> dict[str, str]:
-    """thread id -> opener actor (each thread has exactly one comment_added)."""
+    """thread id -> opener actor (each thread has exactly one opener).
+
+    prd/76: a thread now also has one ``comment_added`` event per nested reply.
+    They carry ``reply=true``; without the filter a reply (which sorts after the
+    opener in the store but could be any actor) would be read as the opener.
+    """
     return {
         tid: actor
         for tid, actor in con.execute(
@@ -63,6 +68,7 @@ def _openers(con) -> dict[str, str]:
             FROM events e
             JOIN event_objects r ON e.event_key = r.event_key
             WHERE e.activity='comment_added' AND r.object_type='THREAD'
+              AND coalesce(json_extract_string(e.attributes, '$.reply'), 'false') <> 'true'
             """
         ).fetchall()
     }

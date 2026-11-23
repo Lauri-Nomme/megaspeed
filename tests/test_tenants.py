@@ -129,6 +129,37 @@ def event_keys(path: Path) -> set[str]:
         con.close()
 
 
+#: prd/76: ``/api/events`` hides nested replies by default, so the API's total
+#: is the store's own event count *minus* them. The health/tenants summary keeps
+#: reporting the whole log (it is a store fact, not a review-comment metric).
+NOT_REPLY = (
+    "coalesce(json_extract_string(attributes, '$.reply'), 'false') <> 'true'"
+)
+
+
+def api_event_count(path: Path) -> int:
+    con = connect(path, read_only=True)
+    try:
+        return int(
+            con.execute(f"SELECT count(*) FROM events WHERE {NOT_REPLY}").fetchone()[0]
+        )
+    finally:
+        con.close()
+
+
+def api_event_keys(path: Path) -> set[str]:
+    con = connect(path, read_only=True)
+    try:
+        return {
+            row[0]
+            for row in con.execute(
+                f"SELECT event_key FROM events WHERE {NOT_REPLY}"
+            ).fetchall()
+        }
+    finally:
+        con.close()
+
+
 # --------------------------------------------------------------------------- #
 # path/name logic (server/tenants.py) — no DuckDB, no HTTP
 # --------------------------------------------------------------------------- #
@@ -331,9 +362,9 @@ class TenantApiTests(unittest.TestCase):
                 reply = get("/api/events", tenant=name)
                 self.assertEqual(reply.status, 200)
                 self.assertEqual(reply.headers["x-tenant"], name)
-                self.assertEqual(reply.headers["x-total-count"], str(expected["events"]))
+                self.assertEqual(reply.headers["x-total-count"], str(api_event_count(store)))
                 rows = reply.json()
-                self.assertEqual(len(rows), expected["events"])
+                self.assertEqual(len(rows), api_event_count(store))
                 self.assertTrue({row["key"] for row in rows} <= event_keys(store))
 
                 health = get("/api/health", tenant=name)
@@ -351,10 +382,10 @@ class TenantApiTests(unittest.TestCase):
         counts = get("/api/events/counts", tenant="fix")
         self.assertEqual(counts.status, 200)
         self.assertEqual(counts.json()["tenant"], "fix")
-        self.assertEqual(counts.json()["total"], self.fix_summary["events"])
+        self.assertEqual(counts.json()["total"], api_event_count(self.fix_store))
         self.assertEqual(
             sum(bucket["count"] for bucket in counts.json()["buckets"]),
-            self.fix_summary["events"],
+            api_event_count(self.fix_store),
         )
 
         for path in ("/api/blocking", "/api/queues", "/api/delivery", "/api/sprints"):
@@ -367,7 +398,9 @@ class TenantApiTests(unittest.TestCase):
                 reply = get("/api/events", limit=5, **query)
                 self.assertEqual(reply.status, 200)
                 self.assertEqual(reply.headers["x-tenant"], "del")
-                self.assertEqual(reply.headers["x-total-count"], str(self.del_summary["events"]))
+                self.assertEqual(
+                    reply.headers["x-total-count"], str(api_event_count(self.del_store))
+                )
 
                 health = get("/api/health", **query)
                 self.assertEqual(health.status, 200)
@@ -385,7 +418,9 @@ class TenantApiTests(unittest.TestCase):
 
             reply = get("/api/events")
             self.assertEqual(reply.headers["x-tenant"], "fix")
-            self.assertEqual(reply.headers["x-total-count"], str(self.fix_summary["events"]))
+            self.assertEqual(
+                reply.headers["x-total-count"], str(api_event_count(self.fix_store))
+            )
             self.assertEqual(get("/api/health").json()["tenant"], "fix")
 
     # -- errors are clean and never a fallback ------------------------------ #
@@ -450,7 +485,9 @@ class TenantApiTests(unittest.TestCase):
             reply = get("/api/events", tenant="zeta")
             self.assertEqual(reply.status, 200)
             self.assertEqual(reply.headers["x-tenant"], "zeta")
-            self.assertEqual(reply.headers["x-total-count"], str(store_summary(late)["events"]))
+            self.assertEqual(
+                reply.headers["x-total-count"], str(api_event_count(late))
+            )
         finally:
             late.unlink()
 
@@ -477,8 +514,8 @@ class TenantApiTests(unittest.TestCase):
 
     # -- isolation: no cache bleed between tenants -------------------------- #
     def test_interleaved_requests_never_read_another_tenant(self):
-        del_keys = event_keys(self.del_store)
-        fix_keys = event_keys(self.fix_store)
+        del_keys = api_event_keys(self.del_store)
+        fix_keys = api_event_keys(self.fix_store)
         expected = {"del": (self.del_store, del_keys), "fix": (self.fix_store, fix_keys)}
 
         for round_no in range(3):
@@ -496,7 +533,7 @@ class TenantApiTests(unittest.TestCase):
 
                 health = get("/api/health", tenant=name).json()
                 self.assertEqual(health["tenant"], name)
-                self.assertEqual(health["events"], len(keys))
+                self.assertEqual(health["events"], len(event_keys(_store)))
 
     def test_analysis_cache_is_keyed_by_tenant(self):
         """The ball-in-court build is cached per (tenant, store version)."""

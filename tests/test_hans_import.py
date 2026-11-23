@@ -114,8 +114,14 @@ def _activity(activity_id: int, action: str, minute: int, user: dict, **extra) -
     }
 
 
-def build_scrape(root: Path) -> Path:
-    """Write a minimal but real hans scrape into ``root`` and return it."""
+def build_scrape(root: Path, *, with_replies: bool = False) -> Path:
+    """Write a minimal but real hans scrape into ``root`` and return it.
+
+    ``with_replies`` plants nested replies on PR 1's comment thread (prd/76):
+    one with an author and its own timestamp, one with neither -- the position
+    and fallback timestamp are still the data. The default capture has none, so
+    every pre-prd/76 assertion keeps its count.
+    """
     work = root / "work"
     work.mkdir(parents=True)
     _git(work, "init", "-q", "-b", "main")
@@ -230,6 +236,28 @@ def build_scrape(root: Path) -> Path:
             ),
         ],
     }
+    if with_replies:
+        # prd/76: two nested replies under thread 100. The first is by ALAN at
+        # +30 s; the second has no author and no timestamp (SYSTEM_ACTOR, and
+        # the opener's ts is the fallback).
+        activities[1][1]["comment"]["comments"] = [
+            {
+                "id": 150,
+                "text": f"{CANARY} reply text",
+                "author": ALAN,
+                "createdDate": T0 + MINUTE + 30_000,
+                "severity": "NORMAL",
+                "state": "OPEN",
+                "comments": [],
+            },
+            {
+                "id": 151,
+                "text": f"{CANARY} late reply",
+                "severity": "NORMAL",
+                "state": "OPEN",
+                "comments": [],
+            },
+        ]
 
     (rest / "users.json").write_text(json.dumps([ADA, GRACE, ALAN]))
     (rest / "pull-requests_DEMO_widget.json").write_text(json.dumps([two, one]))
@@ -927,9 +955,11 @@ class Golden10Tests(unittest.TestCase):
         events = dict(self.con.execute(
             "SELECT activity, count(*) FROM events GROUP BY 1"
         ).fetchall())
+        # prd/76: the 19 openers plus 4 nested replies the capture holds. The
+        # replies are asserted separately so a change in either half is visible.
         self.assertEqual(events, {
             "pr_opened": 10,
-            "comment_added": 19,
+            "comment_added": 23,
             "reviewer_changed": 9,
             "pr_approved": 7,
             "pr_merged": 5,
@@ -938,6 +968,13 @@ class Golden10Tests(unittest.TestCase):
             "question_raised": 2,
             "pr_declined": 1,
         })
+        self.assertEqual(
+            self.con.execute(
+                "SELECT count(*) FROM events"
+                " WHERE coalesce(json_extract_string(attributes, '$.reply'), 'false') = 'true'"
+            ).fetchone()[0],
+            4,
+        )
         self.assertEqual(sum(events.values()), self.report["events"])
 
     def test_every_pr_has_its_commits_and_its_diff_size(self):
