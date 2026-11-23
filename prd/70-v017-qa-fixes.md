@@ -23,6 +23,7 @@ needs one, stop and report instead of crossing the boundary.
 | **U5 — insights honesty & payload** | F-10, F-11 | `server/app.py`, `analysis/insights.py`, `app/rules.js` |
 | **U6 — polish** | F-13, F-14 | `app/style.css`, `app/ticket.js` |
 | **U4 — verdict card** (wave 2, after U1) | F-03 (verdict side), F-05, F-06 | `analysis/verdict.py`, `app/verdict.js` |
+| **U7 — sprint labels** (wave 2, after U2/U3/U5) | F-16 | `ingest/taxonomy.py`, `ingest/jira_pipeline.py`, `analysis/jira.py`, `app/sprints.js`, `app/timeline.js`, `app/format.js`, `app/main.js` |
 
 Wave 1 runs U1/U2/U3/U5/U6 in parallel. U4 waits for U1 because it imports U1's
 canonical ticket helper (see F-03).
@@ -152,6 +153,31 @@ no horizontal overflow on phone.
 ### F-14 — Epic child stories show `open · open`
 **Fix:** render one state token (or `open · story` only when they differ).
 **Acceptance:** unit test on the formatter; the Epic page shows one state.
+
+## U7 — sprint labels (F-16)
+
+**F-16 (user-reported):** the Sprints page, Timeline strip, forecast card and
+lens render `S${sprint_id}` (`S4392`, `S18568`). The team's Jira names are
+`Sprint 352`-style, but the name is (correctly) never stored, so the number is
+gone after the scrape.
+
+**Fix, scrape side:** in `ingest/jira_pipeline.py`, parse the sprint name with a
+closed pattern — `^\s*(?:[A-Za-z0-9 _.-]*?\s*)?(?:sprint|s)\s*#?(\d+)\s*$`,
+case-insensitive — and store `sprint_no` (a non-negative int) in the SPRINT
+attributes only when it matches. Add `"sprint_no": COUNT` to
+`taxonomy.OBJECT_ATTRIBUTE_SPEC`. **Never store the name.**
+
+**Fix, read side:** `analysis/jira.py` includes `sprint_no` in each sprint row
+(fall back to `None`); `app/sprints.js`, `app/timeline.js`, `app/format.js` and
+`app/main.js` render `S<sprint_no>` when present, else `S<sprint_id>`. One shared
+`S` formatter if practical; all surfaces must agree.
+
+**Acceptance:** a fixture sprint named `Sprint 352` yields `sprint_no: 352`, the
+API row carries it, and every surface shows `S352`; a store without it still
+shows `S<id>`; `--verify` passes; no name text anywhere in bundle/store/API.
+**Operational:** populating the live store needs a Jira re-scrape **with the same
+identity map** (otherwise actor pseudonyms churn), then import. Document that in
+the unit report; do not re-scrape without the map.
 
 ## Rules for every unit
 

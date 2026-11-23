@@ -402,3 +402,16 @@ We audited the DuckDB tables (`objects`, `events`, `event_objects`, `ingest_runs
 | `12-phone-overview-dark.png` | `412×915` | Dark | Phone Overview (`1q`, Dark): `scrollWidth === 412`, responsive Verdict card, tiles, cards, `WHO IS WHO` legend, and `Done in Jira, PR open`. |
 | `13-phone-aging-light.png` | `412×915` | Light | Phone Delivery → Aging (`1q`, Light): `scrollWidth === 412`, 6 live stories + 99 re-plan items stacked cleanly. |
 | `14-phone-rules-dark.png` | `412×915` | Dark | Phone Rules (`1q`, Dark): `scrollWidth === 412`, responsive First-pass yield waterfall and rule cards. |
+
+---
+
+## Addendum — F-16 (user-reported, 2026-11-23)
+
+**POLISH · Sprint labels are Jira ids, not the team's sprint number.**
+The UI renders `S4392`, `S18568`, … from `sprint_id`. The team's Jira sprint
+names are `Sprint 352`-style; the store deliberately keeps no name text, so the
+number is unrecoverable **after** the scrape. Fix: parse a closed
+`Sprint <n>` / `S<n>` name at scrape time into a numeric `sprint_no` attribute
+(never the text), carry it in `/api/sprints`, and render `S<n>` (fallback
+`sprint_id`). Requires a Jira re-scrape with the **same identity map** to
+populate existing rows; until then the UI falls back without regressing.
