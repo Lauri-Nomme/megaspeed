@@ -30,6 +30,76 @@ deterministic pre-filter should remove before the next model pass.
 8. **AI-bot commands are labelled question.** 88/139 "review/verify/explain"
    commands to an AI reviewer; deterministic `@`-command pre-filter.
 
+## Proposed taxonomy v2 (awaiting sign-off)
+
+`comment_type` answers "what does this reviewer want from the author". CI output,
+bot commands and administrative notes have no such want, so they must not share
+the axis — mixing them is what produced 1,093 bot "nit" and 922 bot
+"optimization" in the first pass and corrupted the comment-tax denominators.
+
+**Keep `comment_type` for human review remarks only.** Add a second, entirely
+deterministic attribute on the THREAD object:
+
+| `comment_kind` | who / what | `comment_type` | actionable |
+|---|---|---|---|
+| `review` | a human review remark | one of the six | per type |
+| `ci_notice` | CI output with no action (coverage report, Qodana clean) | none | no |
+| `ci_finding` | CI output that creates work (Qodana issues, coverage below threshold, failed build) | none | yes → author |
+| `bot_request` | a human addressing a bot (`@bot review`, `@bot wdyt …`) | none | no (the reply may) |
+| `bot_answer` | the bot's reply inside such a thread | none | no |
+| `admin` | rebased / added reviewer / LGTM / fyi / emoji / bare link | none | no |
+
+- `comment_kind` is set by rules (actor kind, configured raw bot slugs, template
+  regexes, `@`-command prefix), never by the model; a bot's two templates must
+  not get two labels.
+- `ci_finding` is not prose-derived when the store already has the fact: a
+  `build_status` event (`failed`, or findings count > 0) is the signal. The
+  comment is a *view* of it; do not re-label the prose.
+- `actionable=true` on `ci_finding` is the "ball goes to the PR author" flag, so
+  the queue/blocking graph can carry it without pretending it is a `blocker`.
+- `bot_request` must be excluded from question statistics: 88/139 `@…review`
+  commands were booked as `question` (audit), which is neither a question to the
+  author nor a review remark. The substance is the bot's reply; if a human then
+  acts on it, that is a separate `review` message, not the opener.
+- `admin` replaces the "no class fits" escape hatch. No `other` value is needed
+  in `comment_type` once the kind axis exists; a human non-review note becomes
+  `comment_kind=admin` with a null type.
+
+Consequences: `comment_type=null` stops meaning "not labeled yet" and starts
+meaning "not a review remark", so the store/insights must report the
+`comment_kind` mix and compute comment-tax shares over `kind=review` only. The
+current "mixed labels" disclosure becomes "N review / M ci / K admin".
+
+## Diff context at the comment anchor
+
+The model currently sees `text` and `kind` only (`OllamaClassifier.request_body`
+puts context in the trace, not the prompt). It should also see the code the
+comment points at:
+
+- **What:** the `-U8` hunk at `commentAnchor.path:line`, from
+  `git diff <base>..<head_at(comment_ts)>` restricted to that path — i.e. the
+  code the reviewer was looking at, not the final head (which may already be the
+  fix). Pass `path`, `line`, `lineType` (ADDED/REMOVED/CONTEXT) and the language.
+- **Why:** the audit's worst classes are all code-dependent — a one-line "this
+  is always false now" is a blocker, "rename this" is a nit, "this allocates per
+  row" is optimization, "where is this defined?" is a question. Text alone cannot
+  separate them.
+- **Prompt shape:** append the hunk to the user message under an explicit
+  "context, not the claim" header; never put it in the system prompt.
+- **Cache:** the label cache key must include a hash of the hunk (and path/line
+  type), otherwise a prompt that adds a hunk silently reuses text-only labels.
+  Bump the classifier version for the first hunk-enabled pass.
+- **Cost:** roughly doubles prompt tokens; measure with the `reclassify`
+  subcommand before a full pass (0.33 texts/s is the current no-diff rate).
+- **Failure modes:** unknown head across a RESCOPED gap (fall back to text-only,
+  record `diff=absent`), minified/generated paths (skip), and the model inventing
+  defects from code (keep the rule "the text is the claim, the hunk is context").
+
+Outcome is a separate matter: the inputs (`anchor_changed`,
+`resolver_is_commenter`) already exist at scrape time and the audit's regression
+was the relabel builder discarding them (fixed in v0.19.2). The hunk is for
+`comment_type`/`question`, not for re-deriving outcomes.
+
 ## Design
 
 **Deterministic pre-filter (no model):**
