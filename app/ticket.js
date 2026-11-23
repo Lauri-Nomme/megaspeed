@@ -610,11 +610,17 @@ export function clockNote(payload) {
 export function epicMarkup(payload, { base = '', benchmark = true } = {}) {
   const epic = payload.epic || {};
   const children = epic.stories || [];
+  // prd/70 F-03: a PR can name only the epic key (no story to hang it on), so
+  // the epic page lists those PRs itself — the same table a story page uses,
+  // read from the same `prs` payload (`_pr_rows`), so a row opens the drawer
+  // and every column means what it means on a story.
+  const prs = payload.prs || [];
+  const prCount = payload.pr_count ?? prs.length;
   const rows = children.map((story) => `<tr>
       <td class="c-id" data-label="story">${ticketHref(story.key, base)
         ? `<a class="ticket-link mono" href="${esc(ticketHref(story.key, base))}" data-ticket="${esc(story.key)}">${esc(story.key)}</a>`
         : `<span class="mono">${esc(story.key)}</span>`}</td>
-      <td class="c-state" data-label="state"><span class="pill ${story.censored ? 'waiting' : 'healthy'}">${esc(story.state || 'unknown')}${story.censored ? ' · open' : ''}</span></td>
+      <td class="c-state" data-label="state"><span class="pill ${story.censored ? 'waiting' : 'healthy'}">${esc(story.state || 'unknown')}${story.censored && story.state !== 'open' ? ' · open' : ''}</span></td>
       <td class="c-dur num" data-label="points">${story.points == null ? '—' : esc(story.points)}</td>
       <td class="c-dur num" data-label="cycle">${story.cycle_hours == null ? '—' : esc(segmentHours(story.cycle_hours))}${
         benchmarkInline(story.cycle_benchmark, { enabled: benchmark, format: segmentHours })}</td>
@@ -634,7 +640,12 @@ export function epicMarkup(payload, { base = '', benchmark = true } = {}) {
           <th class="c-dur num">points</th><th class="c-dur num">cycle</th></tr></thead>
         <tbody>${rows}</tbody></table>`
     : '<p class="empty-row">No story in this store names this epic, so there is nothing to drill into.</p>'}
-    </section>`;
+    </section>${prCount ? `
+    <section class="ticket-panel" data-epic-prs="${esc(prCount)}">
+      <h2 class="policy-h">pull requests · ${esc(prCount)}</h2>
+      <p class="panel-note">the pull requests that name this epic directly — a PR that also names a child story appears on both pages</p>
+      ${prTable(payload, { benchmark })}
+    </section>` : ''}`;
 }
 
 /** The open PR's current wait + approval position, for a chip or an export. */
@@ -784,6 +795,19 @@ export function epicMarkdown(payload, base = '') {
       ]
       : ['No story in this store names this epic, so there is nothing to drill into.']),
     '',
+    // prd/70 F-03: the same PR list the page shows. An epic-only PR is a real
+    // delivery, and a copy that dropped it would read as "no code at all".
+    ...((payload.pr_count ?? (payload.prs || []).length)
+      ? [
+        `## pull requests (${payload.pr_count ?? (payload.prs || []).length})`,
+        '',
+        ...(payload.prs || []).map((pr) => `- #${pr.number} ${pr.repo} · ${pr.state}` +
+          `${pr.censored ? ' (right-censored)' : ''} · ${segmentHours(pr.cycle_hours)} · ` +
+          `${pr.review_rounds} review round${pr.review_rounds === 1 ? '' : 's'}` +
+          `${prFindingText(pr).length ? ` — ${prFindingText(pr).join('; ')}` : ''}`),
+        '',
+      ]
+      : []),
   ].join('\n');
 }
 
