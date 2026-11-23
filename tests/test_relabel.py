@@ -227,6 +227,34 @@ class LabelPatchApplyTests(unittest.TestCase):
         finally:
             con.close()
 
+    def test_a_dc_blocker_cannot_be_downgraded_by_a_patch(self):
+        con = connect(self.cfg.db_path)
+        try:
+            con.execute(
+                "UPDATE objects SET attributes = json_merge_patch(CAST(attributes AS JSON),"
+                ' \'{"severity":"mandatory"}\') WHERE object_id = ?',
+                [self.thread["object_id"]],
+            )
+        finally:
+            con.close()
+        path = self._write([{
+            "target": "thread",
+            "object_id": self.thread["object_id"],
+            "labels": {"comment_type": "suggestion", "thread_outcome": "unresolved",
+                       "classifier_version": "ollama-v1"},
+        }])
+        applied = import_path(self.cfg, path)["applied"]
+        self.assertEqual(applied["blocker_overrides"], 1)
+        con = connect(self.cfg.db_path)
+        try:
+            attributes = json.loads(con.execute(
+                "SELECT attributes FROM objects WHERE object_id = ?",
+                [self.thread["object_id"]],
+            ).fetchone()[0])
+            self.assertEqual(attributes["comment_type"], "blocker")
+        finally:
+            con.close()
+
     def test_applying_the_same_patch_twice_is_a_no_op(self):
         path = self._write([{
             "target": "thread",
@@ -357,6 +385,25 @@ class RelabelTests(unittest.TestCase):
             )
         finally:
             con.close()
+
+    def test_the_patch_builder_keeps_a_dc_blocker_blocker(self):
+        report = relabel(
+            self.cfg, trace_path=self.trace, bundle_path=self.bundle,
+            out=self.root / "labels.tgz",
+            classifier=Recording(comment_type="suggestion", intent="acted"),
+            progress=QUIET,
+        )
+        patch = labelpatch.read_patch(report["patch"])
+        mandatory = [
+            obj["object_id"] for obj in read_bundle(self.bundle).objects
+            if obj["object_type"] == "THREAD"
+            and (obj.get("attributes") or {}).get("severity") == "mandatory"
+        ]
+        self.assertTrue(mandatory, "the fixture must carry a DC BLOCKER thread")
+        rows = {r["object_id"]: r for r in patch.rows if r["target"] == "thread"}
+        for thread_id in mandatory:
+            self.assertIn(thread_id, rows, "the intent change should emit a row")
+            self.assertEqual(rows[thread_id]["labels"]["comment_type"], "blocker")
 
     def test_a_question_flip_adds_the_derived_event_and_is_idempotent(self):
         # No question_raised event exists for these threads; claiming one is a

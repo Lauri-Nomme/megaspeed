@@ -805,6 +805,10 @@ def relabel(
             continue
         attributes = thread.get("attributes") or {}
         comment_type = labels.get("comment_type") or attributes.get("comment_type")
+        # A DC BLOCKER marker outranks the model (prd/02), exactly as the reducer
+        # does it; a relabel must not turn a mandatory thread into a suggestion.
+        if attributes.get("severity") == "mandatory":
+            comment_type = "blocker"
         intent = labels.get("thread_intent") or "unclear"
         outcome = _outcome(thread, intent)
         new = {

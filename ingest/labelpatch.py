@@ -390,6 +390,9 @@ def apply_patch(con, patch: LabelPatch) -> dict:
         "questions_added": 0,
         "questions_removed": 0,
         "questions_unchanged": 0,
+        #: Threads whose DC BLOCKER marker forced ``comment_type=blocker`` even
+        #: though the model said something else (prd/02: severity outranks it).
+        "blocker_overrides": 0,
     }
     thread_rows = [row for row in patch.rows if row["target"] == "thread"]
     if thread_rows:
@@ -411,6 +414,14 @@ def apply_patch(con, patch: LabelPatch) -> dict:
                 stats["threads_missing"] += 1
                 continue
             merged = {**attributes, **row["labels"]}
+            # The reducer's deterministic rule: a DC ``BLOCKER`` severity is
+            # evidence, not a model opinion. A patch may not downgrade it.
+            if (
+                attributes.get("severity") == "mandatory"
+                and merged.get("comment_type") != "blocker"
+            ):
+                merged["comment_type"] = "blocker"
+                stats["blocker_overrides"] += 1
             if merged == attributes:
                 stats["threads_unchanged"] += 1
                 continue

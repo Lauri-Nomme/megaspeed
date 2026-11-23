@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1535** (`tests/`) + **99** (`scrape/tests`) + **626** (node `app/test`) green.
+Tests: **1537** (`tests/`) + **99** (`scrape/tests`) + **626** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -61,6 +61,14 @@ PERSON rows went 329→223 (merged plus pre-existing orphans), events unchanged 
 76,213, `--verify` OK. Backup: `/data/personal/work/demo-tlla.pre-rekey.duckdb`.
 The laptop's `identity.json` still holds the old pseudonyms: swap its `bb:`
 entries before the next scrape, or the rekeyed actors come back.
+
+## v0.19.1 — a DC BLOCKER is not a model opinion
+
+The relabel patch could downgrade a thread whose DC severity is `BLOCKER` to
+whatever the model said (449 of 565 mandatory threads in the first patch). The
+reducer's rule is "severity outranks the model" (prd/02); `relabel` now builds
+those rows as `blocker` and `labelpatch.apply_patch` forces it again at import,
+counting `blocker_overrides`. Tests cover both sides.
 
 ## v0.19.0 — rekey command + sprint metadata refresh
 

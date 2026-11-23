@@ -416,6 +416,11 @@ def _print_label_patch(r: dict) -> None:
         f" {applied['threads_unchanged']} unchanged, {applied['threads_missing']} missing"
         f" · {applied['questions']} phase update(s)"
     )
+    if applied.get("blocker_overrides"):
+        print(
+            f"blockers       {applied['blocker_overrides']} DC BLOCKER thread(s) kept"
+            " blocker by severity (the model cannot downgrade them)"
+        )
     if applied.get("questions_added") or applied.get("questions_removed"):
         print(
             f"question flips {applied['questions_added']} derived event(s) added,"
