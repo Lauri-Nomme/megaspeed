@@ -86,6 +86,19 @@ test('F-03: the object census labels a multi-key PR with its canonical story', (
   assert.equal(ticketFields(['DEMO-56715']).ticket, 'DEMO-56715');
 });
 
+test('F-03: a TICKET row cannot downgrade an EPIC (alpha object order)', () => {
+  // `/api/objects` orders by type: EPIC before TICKET. A TICKET row for the
+  // same key used to overwrite the EPIC kind, putting the epic in the story
+  // tier where its `open` state beat the done story it sits next to.
+  indexTickets([
+    { object_type: 'EPIC', object_id: 'EPIC:DEMO-56715', ticket_keys: ['DEMO-56715'], state: 'open' },
+    { object_type: 'TICKET', object_id: 'TICKET:DEMO-56715', ticket_keys: ['DEMO-56715'], state: 'open' },
+    { object_type: 'STORY', object_id: 'STORY:DEMO-57507', ticket_keys: ['DEMO-57507'], state: 'done' },
+  ]);
+  assert.equal(rowTicket({ tickets: ['DEMO-56715', 'DEMO-57507'] }), 'DEMO-57507');
+  indexTickets(OBJECTS);   // restore the shared index for the other tests
+});
+
 test('F-03: a row that was never annotated reads the same canonical key', () => {
   indexTickets(OBJECTS);
   assert.equal(rowTicket({ tickets: ['DEMO-56715', 'DEMO-57507'] }), 'DEMO-57507');

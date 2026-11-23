@@ -106,8 +106,12 @@ export function indexTickets(objects) {
       const key = String(raw || '').trim();
       if (!key) continue;
       const known = kinds.get(key);
-      // a STORY row outranks a bare TICKET key dimension for the same key
-      if (known === 'STORY' && type !== 'STORY') continue;
+      // A STORY/EPIC row outranks the bare TICKET key dimension for the same
+      // key. The API orders objects by type, and `EPIC` sorts before `TICKET`,
+      // so without this a TICKET row downgraded an EPIC to the story tier and
+      // an open epic then beat its own *done* story on state
+      // (#11030 -> DEMO-56715 instead of DEMO-57507).
+      if ((known === 'STORY' || known === EPIC_KIND) && type === 'TICKET') continue;
       kinds.set(key, type);
       if (obj.state) states.set(key, String(obj.state));
     }
