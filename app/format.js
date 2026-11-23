@@ -204,6 +204,27 @@ export function rgba(hex, alpha) {
   return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
 }
 
+/** The one sprint label every surface uses (prd/70 F-16).
+ *
+ * The store deliberately keeps no sprint **name** text (prd/02); the reducer
+ * parses the team's `Sprint 352` / `S352` name into the closed integer
+ * `sprint_no` at scrape time. So `S352` is the team's own number and
+ * `S<sprint_id>` (e.g. `S4392`) is the honest fallback for a store scraped
+ * before that attribute existed — the id is never dressed up as a number.
+ *
+ * Accepts a sprint row (`{sprint_no, sprint_id}`) or a bare id, so the strip,
+ * the canvas bands, the carry-over rows and the lens line cannot disagree.
+ */
+export function sprintLabel(sprint) {
+  const row = sprint != null && typeof sprint === 'object' ? sprint : null;
+  const no = row ? row.sprint_no : null;
+  const id = row ? row.sprint_id : sprint;
+  if (typeof no === 'number' && Number.isFinite(no) && no >= 0) {
+    return `S${Math.trunc(no)}`;
+  }
+  return id == null || id === '' ? '' : `S${id}`;
+}
+
 /** Human label for a handover endpoint id. */
 export function whoLabel(id) {
   if (id === 'review') return 'review queue';

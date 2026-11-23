@@ -16,9 +16,17 @@
  * Everything here is pure so it can be unit-tested without a browser.
  */
 
-import { fmtDay, fmtHours, esc } from './format.js';
+import { fmtDay, fmtHours, esc, sprintLabel } from './format.js';
 import { ticketLink } from './tickets.js';
 import { forecastCard } from './forecast.js';
+
+/** `sprint_id -> row`, so a label that only carries an id (`S4392` on a
+ * carry-over path) can still use the parsed number when the store has one. */
+function sprintLookup(data) {
+  const map = new Map();
+  for (const row of (data && data.sprints) || []) map.set(String(row.sprint_id), row);
+  return map;
+}
 
 /** The payload's bands as `{id, label, start, end, stories, ...}` in milliseconds. */
 export function sprintBands(data) {
@@ -26,7 +34,8 @@ export function sprintBands(data) {
   return (data.sprints || [])
     .map((sprint) => ({
       id: sprint.sprint_id,
-      label: `S${sprint.sprint_id}`,
+      // prd/70 F-16: `S352` when the scrape parsed the name, else `S4392`.
+      label: sprintLabel(sprint),
       state: sprint.state,
       open: Boolean(sprint.open),
       start: Date.parse(sprint.band_start),
@@ -86,7 +95,10 @@ export function sprintScopeLine(data) {
     `${carry.count || 0} carried over`,
   ];
   if (carry.late) bits.push(`${carry.late} finished late`);
-  if (data.active != null) bits.push(`active S${data.active}`);
+  if (data.active != null) {
+    const active = sprintLookup(data).get(String(data.active));
+    bits.push(`active ${sprintLabel(active || data.active)}`);
+  }
   return bits.join(' · ');
 }
 
@@ -218,7 +230,7 @@ export function atRiskMarkup(data, { base = '' } = {}) {
   const rows = risk.rows || [];
   const count = risk.count ?? rows.length;
   const points = risk.points_at_risk ?? 0;
-  const head = `<div class="panel-head"><h2>Sprint ${esc(risk.sprint_id)} at risk</h2>
+  const head = `<div class="panel-head"><h2>${esc(sprintLabel(risk))} at risk</h2>
       <button type="button" class="chip forecast-open" data-forecast-open="${esc(risk.sprint_id)}"
         title="the same forecast card, scoped to this sprint">Will it land?</button>
       <span class="pill ${count ? 'warning' : 'healthy'}" data-at-risk-count="${count}">${count} stor${count === 1 ? 'y' : 'ies'} · ${points} pts</span>
@@ -281,10 +293,12 @@ function carriedOver(data, base) {
   const late = carry.late || 0;
   const never = carry.rows.filter((row) => row.status === 'never').length;
   const neverRe = carry.never_reappeared || 0;
+  const byId = sprintLookup(data);
+  const labelOf = (sid) => sprintLabel(byId.get(String(sid)) || sid);
   const body = rows.map((row) => {
-    const path = (row.sprints || []).join(' → ');
+    const path = (row.sprints || []).map(labelOf).join(' → ');
     const destination = row.reappears === true
-      ? `S${row.destination_sprint}`
+      ? labelOf(row.destination_sprint)
       : row.reappears === false
         ? 'never re-committed'
         : '—';
@@ -311,7 +325,7 @@ function focusLine(data, focus) {
   const late = sprint.done_late || 0;
   const never = sprint.never_done || 0;
   return `<span class="sprint-focus" data-sprint-focus="${esc(focus)}">
-    <b>S${esc(focus)} lens</b> — ${esc(sprintOutcomeLine(sprint))}${
+    <b>${esc(sprintLabel(sprint))} lens</b> — ${esc(sprintOutcomeLine(sprint))}${
       late ? ` · ${fmtHours(sprint.late_hours || 0)} of slip` : ''} ·
     the timeline shows this sprint's stories
     <button type="button" class="chip" data-sprint-clear>clear</button></span>`;
@@ -357,8 +371,8 @@ export function sprintStrip(data, { base = '', focus = null, forecast = null,
         data-sprint-start="${Number.isFinite(start) ? start : ''}"
         data-sprint-end="${Number.isFinite(end) ? end : ''}"
         aria-pressed="${selected}"
-        title="select sprint ${esc(sprint.sprint_id)} (${esc(windowText)}): ${esc(sprintOutcomeLine(sprint))}">
-      <span class="sprint-id mono">S${esc(sprint.sprint_id)}</span>
+        title="select sprint ${esc(sprintLabel(sprint))} (${esc(windowText)}): ${esc(sprintOutcomeLine(sprint))}">
+      <span class="sprint-id mono">${esc(sprintLabel(sprint))}</span>
       <span class="sprint-state">${esc(state)}</span>
       <span class="sprint-window mono">${esc(windowText)}</span>
       <span class="sprint-days num muted">${esc(days)}</span>

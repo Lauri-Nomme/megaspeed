@@ -453,6 +453,9 @@ def load(con, court: ballcourt.BallCourt | None = None) -> JiraData:
             sprints[oid] = {
                 "object_id": oid,
                 "id": _sprint_id(oid),
+                # prd/70 F-16: the number parsed at scrape time (`Sprint 352` ->
+                # 352), absent for a store scraped before the attribute existed.
+                "sprint_no": attributes.get("sprint_no"),
                 "state": state,
                 "start": to_naive_utc(created) if created else None,
                 "end": to_naive_utc(closed) if closed else None,
@@ -2548,6 +2551,8 @@ def sprint_delivery(
                 window_carry_points += story_points
         sprint_row = {
             "sprint_id": sid,
+            # prd/70 F-16: the drill-down's `S352`, from the same attribute.
+            "sprint_no": sprint.get("sprint_no"),
             "object_id": sprint.get("object_id"),
             "state": sprint.get("state"),
             "start": iso(sprint["start"]) if sprint.get("start") else None,
@@ -2984,6 +2989,7 @@ def _at_risk(court: ballcourt.BallCourt, sid: int, band: dict,
     return {
         "available": True,
         "sprint_id": sid,
+        "sprint_no": band.get("sprint_no"),
         "planned_end": band.get("planned_end"),
         "band_end": band.get("band_end"),
         "stories": band.get("story_count") or 0,
@@ -3068,6 +3074,9 @@ def sprints(
         boundary = boundaries.get(sid) or {}
         return {
             "sprint_id": sid,
+            # prd/70 F-16: `S352` needs the number, not the id; `None` when the
+            # store was scraped before the name was parsed.
+            "sprint_no": sprint.get("sprint_no") if sprint else None,
             "object_id": sprint.get("object_id") if sprint else None,
             "state": state,
             "start": iso(start) if start else None,
@@ -3434,6 +3443,7 @@ def sprints(
         {
             "available": False,
             "sprint_id": None,
+            "sprint_no": None,
             "rows": [],
             "note": (
                 "no active sprint in this store: at-risk is a forecast for the "

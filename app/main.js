@@ -21,7 +21,7 @@ import { QueueChart } from '/queues.js';
 import { legendMarkup, responseTable } from '/queues.js';
 import {
   DAY, fmtAge, fmtBucket, fmtCalendarDuration, fmtCalendarHours, fmtCompact, fmtCount,
-  fmtDay, fmtDaySpan, fmtHours, fmtRange, fmtStamp, esc, whoLabel,
+  fmtDay, fmtDaySpan, fmtHours, fmtRange, fmtStamp, esc, sprintLabel, whoLabel,
 } from '/format.js';
 import {
   TABS, tabCounts, tabRows, deliveryTable, overviewMarkup, overviewCounts,
@@ -1383,7 +1383,7 @@ function scopeToSprint(sprint) {
     return;
   }
   if (!focusSprint(id, { start: sprint.start, end: sprint.end })) return;
-  flashStatus(`sprint ${id} lens · ${timelineStatsLine()}`, 'live');
+  flashStatus(`sprint ${sprintLabel(sprint)} lens · ${timelineStatsLine()}`, 'live');
 }
 
 function timelineStatsLine() {
@@ -1452,6 +1452,11 @@ function renderDeliveryPage() {
   // the Timeline but used to leave the rows unfiltered. Filter to the sprint's
   // stories, the same membership the timeline lens uses.
   const sprintKeys = state.page === 'delivery' ? sprintStoryKeys() : new Set();
+  // prd/70 F-16: the lens is named by the same label every other surface uses
+  // (`S352`, else `S4392`), never by a number the store did not parse.
+  const lensLabel = sprintKeys.size
+    ? sprintLabel(sprintById(state.sprint) || state.sprint)
+    : null;
   // B2: label each row with its own ticket key, not the shared epic link. The
   // API names the parent keys it excluded from impact; union with the store
   // census so the table and the impact sentence agree.
@@ -1495,7 +1500,7 @@ function renderDeliveryPage() {
         benchmark: state.benchmark,
         base: appBase(),
         rowFilter: sprintKeys.size ? (row) => rowInSprint(row, sprintKeys) : null,
-        sprintLabel: sprintKeys.size ? `S${state.sprint}` : null,
+        sprintLabel: lensLabel,
       }))
     : '<div class="empty-row">Loading the triage list…</div>';
   // prd/63 B9: the Overview's "Done in Jira, PR open →" now lands on a list
@@ -1594,7 +1599,7 @@ function renderDeliveryPage() {
       `${counts.blocked} blocked · ${counts.oldest} waiting over a week (${weekLabel(data)}) · ` +
       `${stale} stale${unobservedNote} · ` +
       `impact = dependents × current wait (≈) · ` +
-      (sprintKeys.size ? `sprint S${state.sprint} lens: ${sprintKeys.size} stories · ` : '') +
+      (sprintKeys.size ? `sprint ${lensLabel} lens: ${sprintKeys.size} stories · ` : '') +
       (filtered ? `filtered to ${scopeSuffix}` : 'whole team') +
       (benchNote ? ` · ${benchNote}` : ''),
     );

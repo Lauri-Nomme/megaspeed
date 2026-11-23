@@ -291,6 +291,11 @@ OBJECT_ATTRIBUTE_SPEC: dict[str, Any] = {
     "points": COUNT,
     # A Sprint's planned end; ``closed_at`` carries the actual completion.
     "end_date": DATE_TOKEN,
+    # prd/70 F-16: the sprint's own number, parsed from its Jira name at scrape
+    # time because the name text is never kept (prd/02). ``SPRINT:DEMO#4392``
+    # may carry ``sprint_no: 352``, so every surface can say `S352`; a store
+    # scraped before this attribute existed simply has no number.
+    "sprint_no": COUNT,
 }
 
 # Bitbucket DC activity action -> activity vocabulary (PRD 02).
