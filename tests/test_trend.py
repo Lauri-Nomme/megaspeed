@@ -39,14 +39,20 @@ MICROSECOND = timedelta(microseconds=1)
 # --------------------------------------------------------------------------- #
 # the synthetic store
 # --------------------------------------------------------------------------- #
-def three_week_fixture() -> Fixture:
-    """The hand-computed store the tests assert against (see the module doc)."""
+def three_week_fixture(numbers: dict[int, int] | None = None) -> Fixture:
+    """The hand-computed store the tests assert against (see the module doc).
+
+    ``numbers`` adds the prd/70 F-16 ``sprint_no`` the scrape would have parsed
+    from a `Sprint 352`-style name, keyed by the store's sprint id.
+    """
     fx = Fixture()
+    numbers = numbers or {}
     # sprint 1 closes 18 Jan 23:00, sprint 2 closes 1 Feb 23:00, sprint 3 is active
-    fx.sprint(1, T0, end=datetime(2026, 1, 18), closed=datetime(2026, 1, 18, 23))
+    fx.sprint(1, T0, end=datetime(2026, 1, 18), closed=datetime(2026, 1, 18, 23),
+              sprint_no=numbers.get(1))
     fx.sprint(2, datetime(2026, 1, 19), end=datetime(2026, 2, 1),
-              closed=datetime(2026, 2, 1, 23))
-    fx.sprint(3, datetime(2026, 2, 2), state="active")
+              closed=datetime(2026, 2, 1, 23), sprint_no=numbers.get(2))
+    fx.sprint(3, datetime(2026, 2, 2), state="active", sprint_no=numbers.get(3))
 
     # -- PRs: four merged in week 1 ---------------------------------------- #
     for number in (1, 2, 3, 4):
@@ -169,6 +175,47 @@ class BucketBoundaryTests(StoreCase):
         self.assertEqual([point["in_progress"] for point in payload["points"]],
                          [False, False, True])
         self.assertEqual(payload["active_sprint"]["id"], 3)
+
+
+class SprintLabelTests(StoreCase):
+    """prd/70 F-16: a sprint bucket is named by the parsed number, not the id.
+
+    The store keeps no sprint name; the scrape parses `Sprint 352` into
+    ``sprint_no``. The bucket label, the summary's in-progress list, the
+    ``active_sprint`` block and its sentence must all agree, and a store scraped
+    before the attribute existed must fall back to the id without inventing one.
+    """
+
+    def test_the_bucket_label_is_the_parsed_number(self):
+        con, court, data, window = self.load(
+            three_week_fixture({1: 350, 2: 351, 3: 352})
+        )
+        try:
+            payload = trend.trend(
+                court, data, window, metric="on_time", bucket="sprint",
+            )
+        finally:
+            con.close()
+        self.assertEqual([point["label"] for point in payload["points"]],
+                         ["S350", "S351", "S352"])
+        self.assertEqual(payload["summary"]["in_progress"], ["S352"])
+        self.assertEqual(payload["active_sprint"]["id"], 3)
+        self.assertEqual(payload["active_sprint"]["sprint_no"], 352)
+        self.assertEqual(payload["active_sprint"]["sprint_label"], "S352")
+        self.assertEqual(payload["active_sprint_note"], "S352 in progress")
+
+    def test_a_store_without_the_number_falls_back_to_the_id(self):
+        con, court, data, window = self.load()
+        try:
+            payload = trend.trend(
+                court, data, window, metric="on_time", bucket="sprint",
+            )
+        finally:
+            con.close()
+        self.assertEqual([point["label"] for point in payload["points"]],
+                         ["S1", "S2", "S3"])
+        self.assertIsNone(payload["active_sprint"]["sprint_no"])
+        self.assertEqual(payload["active_sprint_note"], "S3 in progress")
 
 
 # --------------------------------------------------------------------------- #

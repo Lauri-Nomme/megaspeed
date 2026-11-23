@@ -217,7 +217,8 @@ test('PR rows carry censoring, review rounds and push classes', () => {
 
 test('the sprint strip and the worklog block state their own facts', () => {
   const sprints = sprintStrip(payload());
-  assert.match(sprints, /#3/);
+  // prd/70 F-16: the chip is the sprint label, not the store's id
+  assert.match(sprints, /<b class="mono">S3<\/b>/);
   assert.match(sprints, /active/);
   assert.match(sprints, /added 13 Oct 12:22/);
   const worklog = worklogBlock(payload());

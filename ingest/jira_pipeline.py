@@ -121,6 +121,27 @@ def classify_summary(text: Any) -> str:
     return "other"
 
 
+#: prd/70 F-16: the team's sprints are named `Sprint 352` / `S352` (sometimes
+#: with a board prefix, `DEMO Sprint 352`). The name itself is never stored
+#: (prd/02), so the *number* is parsed here and kept as the closed integer
+#: ``sprint_no``; a name that does not match is simply not interpreted.
+_SPRINT_NAME = re.compile(
+    r"^\s*(?:[A-Za-z0-9 _.-]*?\s*)?(?:sprint|s)\s*#?(\d+)\s*$", re.I
+)
+
+
+def sprint_number(name: Any) -> int | None:
+    """`Sprint 352` / `S352` / `DEMO Sprint 352` -> ``352``; else ``None``.
+
+    The whole name must match, so ``Sprint 352 - hardening`` is not a number
+    and is stored as nothing rather than guessed at.
+    """
+    match = _SPRINT_NAME.match(str(name or ""))
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
 def resolution_class(name: Any) -> str | None:
     """Resolution name -> closed label, or ``None`` for "unresolved"."""
     value = str(name or "").strip()
@@ -417,6 +438,10 @@ class JiraReducer:
         attributes: dict[str, Any] = {"goal_class": classify_summary(sprint.get("goal"))}
         if end is not None:
             attributes["end_date"] = end.strftime("%Y-%m-%d")
+        # prd/70 F-16: the team's `Sprint 352` number, never the name text.
+        number = sprint_number(sprint.get("name"))
+        if number is not None:
+            attributes["sprint_no"] = number
         stats.objects.append(
             _object(
                 "SPRINT",

@@ -6,7 +6,7 @@
  * as inline mono facts. Sentence case throughout (prd/10 §8).
  */
 
-import { fmtHours, esc } from './format.js';
+import { fmtHours, esc, sprintLabel } from './format.js';
 import { prSizePanel } from './prsize.js';
 import { linkifyTickets, markdownLinkTickets, ticketHref } from './tickets.js';
 import { reworkMarkdown, reworkPanel } from './rework.js';
@@ -327,8 +327,14 @@ function drillItem(row, suggestion, base = '') {
     value = hours == null ? 'not measured' : fmtHours(hours);
     detail = `cycle ${fmtHours(row.cycle_hours)}`;
   } else if (metric === 'carry_over') {
-    value = (row.sprints || []).length
-      ? `sprints ${row.sprints.join(' → ')}` : 'no sprint';
+    // prd/70 F-16: the row carries the ids and their parsed numbers in
+    // parallel, so the path reads `S352 → S353`, not the store's ids.
+    const path = (row.sprints || [])
+      .map((sid, index) => sprintLabel({
+        sprint_id: sid, sprint_no: (row.sprint_nos || [])[index],
+      }))
+      .join(' → ');
+    value = path ? `sprints ${path}` : 'no sprint';
     detail = [
       row.status ? `${row.status}${row.done_at ? ` · done ${row.done_at.slice(0, 10)}` : ''}` : '',
       row.points == null ? '' : `${row.points} points`,
@@ -337,7 +343,7 @@ function drillItem(row, suggestion, base = '') {
     value = row.status === 'late'
       ? fmtHours(row.slip_hours)
       : 'still open';
-    detail = `S${row.sprint_id} · ${row.status}${row.points == null ? '' : ` · ${row.points} points`}`;
+    detail = `${sprintLabel(row)} · ${row.status}${row.points == null ? '' : ` · ${row.points} points`}`;
   } else if (metric === 'sentinel_tail') {
     value = fmtHours(row.hours);
     detail = `only ${row.person || 'sentinel'} · since ${String(row.waiting_since || '').slice(0, 10)}`;

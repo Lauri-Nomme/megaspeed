@@ -17,7 +17,7 @@
 
 import {
   MINUTE, HOUR, DAY, fmtDay, fmtClock, fmtStamp, fmtCalendarDuration, fmtHours,
-  fmtTick, fmtCompact, esc, rgba,
+  fmtTick, fmtCompact, esc, rgba, sprintLabel,
 } from './format.js';
 import { epicKeySet, epicTicket, ownTicket, ticketKey } from './tickets.js';
 // prd/70 F-03: the canonical ticket pick lives in `app/tickets.js` (U1). This
@@ -740,6 +740,9 @@ export class Timeline {
         const end = Date.parse(sprint.band_end);
         return {
           id: sprint.sprint_id,
+          // prd/70 F-16: the band's label is the parsed number (`S352`), the
+          // same string the strip and the lens line print.
+          label: sprintLabel(sprint),
           state: sprint.state,
           open: Boolean(sprint.open),
           // an active sprint is one the store says is active (or an old row with
@@ -1783,7 +1786,8 @@ export class Timeline {
         ctx.restore();
       }
       if (right - left >= 30) {
-        const key = `S${sprint.id}`;
+        // prd/70 F-16: `label` is the shared `S352`-or-`S4392` string
+        const key = sprint.label || `S${sprint.id}`;
         const lens = focused ? ' · lens' : '';
         labels.push({
           left,
@@ -2425,8 +2429,8 @@ export class Timeline {
     } else if (hit.kind === 'sprint') {
       const sprint = hit.sprint;
       this.tip.innerHTML = `
-        <div class="row"><span class="act">Sprint ${esc(sprint.id)}</span>
-          <span class="muted">${esc(sprint.state || (sprint.active ? 'active' : 'closed'))}</span></div>
+        <div class="row"><span class="act">${esc(sprint.label || `S${sprint.id}`)}</span>
+          <span class="muted">sprint · ${esc(sprint.state || (sprint.active ? 'active' : 'closed'))}</span></div>
         <div class="row"><span class="k">band</span><span class="v">${esc(fmtStamp(sprint.start))}<br>${esc(fmtStamp(sprint.end))}${sprint.open ? ' · at the snapshot' : ''}</span></div>
         ${sprint.active && Number.isFinite(sprint.plannedEnd)
           ? `<div class="row"><span class="k">plan</span><span class="v">ends ${esc(fmtStamp(sprint.plannedEnd))} — dashed line, not measured</span></div>` : ''}

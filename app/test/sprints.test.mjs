@@ -148,7 +148,8 @@ test('carry-over is marked on the sprint and listed with links', () => {
   assert.match(html, /<details class="sprint-carry-summary"/);
   assert.match(html, /<table class="table compact sprint-carry-table">/);
   assert.match(html, /href="http:\/\/x\/#ticket\/DEL-101"/);
-  assert.match(html, /1 → 2/);
+  // prd/70 F-16: the path is the same labels the strip rows print
+  assert.match(html, /S1 → S2/);
 });
 
 test('no carry-over means no mark and no legend', () => {
@@ -213,7 +214,8 @@ function atRisk(overrides = {}) {
 test('at-risk names each open story, why, and who owes it', () => {
   const html = atRiskMarkup({ at_risk: atRisk() }, { base: '' });
   assert.match(html, /id="sprint-at-risk"/);
-  assert.match(html, /Sprint 3 at risk/);
+  // prd/70 F-16: the heading uses the shared sprint label
+  assert.match(html, /S3 at risk/);
   assert.match(html, /3 stor(?:y|ies) · 15 pts/);
   assert.match(html, /25 of 30 delivered by the snapshot/);
   assert.match(html, /plan ends 2026-11-27/);

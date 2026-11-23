@@ -670,6 +670,9 @@ def _sprint_rows(court, data: jira.JiraData, story: jira.Story | None) -> dict:
                 slip = round(court.business_hours(story.actor, boundary, done), 2)
             rows[sid] = {
                 "sprint_id": sid,
+                # prd/70 F-16: the chip prints `S352`, the same label as the
+                # sprint strip; `None` on a store scraped before the parse.
+                "sprint_no": meta.get("sprint_no"),
                 "object_id": meta.get("object_id"),
                 "state": meta.get("state"),
                 "start": _iso(meta.get("start")),
