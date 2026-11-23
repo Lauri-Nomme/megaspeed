@@ -91,7 +91,17 @@ def _jira_transport(cfg: Config, args) -> tuple[object, str, int | None, object 
     from .transport import FixtureJiraTransport
 
     tempo = _tempo(cfg, args)
-    if args.live or args.probe:
+    # prd/72: a sprint refresh reads the configured installation directly, so it
+    # counts as a live read unless a fixture source was named.
+    live = bool(
+        args.live
+        or args.probe
+        or (
+            getattr(args, "sprints_only", False)
+            and not (args.fixture or args.fixture_file or args.hans_scrape)
+        )
+    )
+    if live:
         if args.jira_cloud:
             # prd/24: the Cloud shape -- v3, Bearer PAT, cursor search, Cloud
             # field ids. Point the base URL at a real site in production, or at
@@ -367,6 +377,26 @@ def _print_jira_scrape(r: dict) -> None:
           f"   (overlap {r['overlap_hours']}h{', full' if r['full'] else ''})")
 
 
+def _print_sprint_refresh(r: dict) -> None:
+    """The sprint-only report (prd/72): a tiny tgz, no events, no cursor."""
+    print(f"source         {r['source']}  (sprint metadata only)")
+    print(f"bundle         {r['bundle']}  ({r['bundle_bytes']} bytes)")
+    print(f"sha256         {r['bundle_sha256']}")
+    print(f"projects       {', '.join(r['projects'])}")
+    boards = ", ".join(f"{k}={v}" for k, v in r["boards"].items())
+    print(f"boards         {boards or '—'}")
+    print(
+        f"sprints        {r['sprints']}  ({r['sprints_numbered']} numbered,"
+        f" {r['sprints_unnumbered']} without a parseable number)"
+    )
+    print(f"objects        {r['objects']} SPRINT row(s)")
+    print(f"events         {r['events']}  (a metadata refresh emits none)")
+    by_kind = ", ".join(f"{k}={v}" for k, v in r["requests_by_kind"].items())
+    print(f"requests       {r['requests']}" + (f"  ({by_kind})" if by_kind else ""))
+    print("watermark      untouched (no ingest run, no issue read)")
+    print("state          untouched (no identity map, no issue/sprint cursor)")
+
+
 def _print_scrape(r: dict) -> None:
     print(f"source         {r['source']} (run {r['run_id']})")
     hans = r.get("hans_scrape") or {}
@@ -490,6 +520,10 @@ def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
     ap.add_argument("--tempo", action="store_true",
                     help="read worklogs through the Tempo add-on instead of Jira's native"
                          " worklog (prd/30); implies --jira, and applies to --jira-cloud too")
+    ap.add_argument("--sprints-only", dest="sprints_only", action="store_true",
+                    help="--jira: refresh sprint metadata only -- each configured board's"
+                         " sprints as SPRINT objects in a tiny bundle with no events and no"
+                         " watermark move (prd/72); implies --jira")
     ap.add_argument("--keys-only", action="store_true",
                     help="hans only: keep only PRs carrying a ticket key from"
                          " MEGASPEED_TICKET_KEYS / MEGASPEED_TICKET_KEYS_FILE; drop"
@@ -582,15 +616,22 @@ def main(argv: list[str] | None = None) -> int:
     # prd/31: the offline Bitbucket source can come from the environment, the
     # same way credentials and the repo list do (the airgapped artifact ships
     # no config file). An explicit source flag always wins over the default.
-    if not (args.hans_scrape or args.live or args.fixture or args.fixture_file or args.probe):
+    if not (
+        args.hans_scrape or args.live or args.fixture or args.fixture_file
+        or args.probe or args.sprints_only
+    ):
         args.hans_scrape = os.environ.get(HANS_ENV, "").strip() or None
 
-    if not (args.live or args.fixture or args.fixture_file or args.probe or args.hans_scrape):
+    if not (
+        args.live or args.fixture or args.fixture_file or args.probe
+        or args.hans_scrape or args.sprints_only
+    ):
         # No default: a scraper that silently generated synthetic data would be
         # a nasty surprise in an airgapped run.
         ap.error(
-            "choose a source: --live, --fixture, --fixture-file PATH or"
-            f" --hans-scrape DIR ({HANS_ENV})"
+            "choose a source: --live, --fixture, --fixture-file PATH,"
+            f" --hans-scrape DIR ({HANS_ENV}) or --jira/--jira-cloud (optionally"
+            " --sprints-only)"
         )
     if args.n is not None and args.n < 1:
         print(f"--n must be at least 1 (got {args.n})", file=sys.stderr)
@@ -607,6 +648,18 @@ def main(argv: list[str] | None = None) -> int:
     if args.checkpoint_every < 0:
         print("--checkpoint-every must be >= 0 (0 disables)", file=sys.stderr)
         return 2
+    if args.sprints_only:
+        # prd/72: a sprint-only refresh is a Jira read (DC or Cloud). Promote it
+        # before any source setup below, so `--sprints-only` alone never falls
+        # through to the fixture branch (or builds a hans transport it will not
+        # use).
+        args.jira = True
+        if args.probe:
+            print("--probe and --sprints-only are different reads: pick one", file=sys.stderr)
+            return 2
+        if args.tempo:
+            print("--sprints-only reads no worklogs, so --tempo does nothing", file=sys.stderr)
+            return 2
 
     try:
         cfg = load_config(args.config)
@@ -719,6 +772,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.jira:
         from .jira import JiraError
         from .scrape_jira import scrape as scrape_jira
+        from .scrape_jira import scrape_sprints
 
         projects = None
         if args.project:
@@ -736,21 +790,34 @@ def main(argv: list[str] | None = None) -> int:
                     cfg, transport, args.json, client=client, projects=projects
                 )
             transport, source, limit, client = _jira_transport(cfg, args)
-            report = scrape_jira(
-                cfg,
-                transport,
-                source,
-                out=out,
-                state_dir=state_dir,
-                limit=limit,
-                overlap_hours=args.overlap_hours,
-                full=args.full,
-                identity_path=args.identity,
-                progress=progress,
-                projects=projects,
-                checkpoint_every=args.checkpoint_every,
-                client=client,
-            )
+            if args.sprints_only:
+                # prd/72: no watermark, no issue state, no identity save -- a
+                # metadata refresh writes one small tgz and nothing else.
+                report = scrape_sprints(
+                    cfg,
+                    transport,
+                    source,
+                    out=out,
+                    projects=projects,
+                    progress=progress,
+                    client=client,
+                )
+            else:
+                report = scrape_jira(
+                    cfg,
+                    transport,
+                    source,
+                    out=out,
+                    state_dir=state_dir,
+                    limit=limit,
+                    overlap_hours=args.overlap_hours,
+                    full=args.full,
+                    identity_path=args.identity,
+                    progress=progress,
+                    projects=projects,
+                    checkpoint_every=args.checkpoint_every,
+                    client=client,
+                )
         except (JiraError, BitbucketError) as exc:
             print(f"jira error: {exc}", file=sys.stderr)
             return 2
@@ -760,7 +827,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps(report, indent=2, default=str))
         else:
-            _print_jira_scrape(report)
+            if report.get("mode") == "sprint-refresh":
+                _print_sprint_refresh(report)
+            else:
+                _print_jira_scrape(report)
             print(f"\nnext           python3 -m ingest import {report['bundle']}")
         return 0
 

@@ -9,6 +9,11 @@ a bundle (or an overlapping incremental one) is safe.
 Order of operations is the contract (prd/11 §6): checksum + schema + classifier
 + watermark monotonicity are checked *before* the store is opened for writing,
 and a bundle that fails is rejected, not merged.
+
+One shape is deliberately **not** an ingest: a sprint-only bundle
+(``manifest.sprint_refresh``, prd/72) refreshes SPRINT metadata. It carries no
+events and no cursor, so it upserts objects, runs the same ``verify`` and
+commits -- but never writes an ``ingest_runs`` row and never moves the watermark.
 """
 
 from __future__ import annotations
@@ -81,6 +86,11 @@ def validate_bundle(
     problems: list[str] = []
     key_set = tuple(sorted({str(k).strip().upper() for k in ticket_keys or () if str(k).strip()}))
     projects = tuple(str(p).upper() for p in ticket_projects or ())
+    # prd/72: a sprint-only bundle is a metadata refresh, not an ingest. It may
+    # carry nothing but SPRINT objects and no events at all -- assert that here,
+    # so a bundle that claims the flag and then tries to smuggle rows through is
+    # rejected before the store opens.
+    sprint_refresh = bool(bundle.manifest.get("sprint_refresh"))
     # prd/31: a repo-scoped capture (a hans scrape) imports PRs that reference no
     # ticket key -- the capture is the scope. Every other source keeps the guard.
     repo_scoped = bundle.source in REPO_SCOPED_SOURCES
@@ -95,6 +105,18 @@ def validate_bundle(
 
     if bundle.source not in ALLOWED_SOURCES:
         problems.append(f"source {bundle.source!r} is not one of {ALLOWED_SOURCES}")
+    if sprint_refresh:
+        if bundle.events:
+            problems.append(
+                f"sprint_refresh bundle carries {len(bundle.events)} event(s);"
+                " a metadata refresh must carry none"
+            )
+        for obj in bundle.objects:
+            if obj["object_type"] != "SPRINT":
+                problems.append(
+                    f"sprint_refresh bundle carries a {obj['object_type']} object"
+                    f" ({obj['object_id']}); only SPRINT objects belong in one"
+                )
     run_info = bundle.manifest.get("run") or {}
     run_id = run_info.get("run_id")
     if run_id is not None and not _matches(RUN_ID_RE, str(run_id)):
@@ -195,6 +217,9 @@ def import_bundle(cfg: Config, path: str | Path, *, verify_contract: bool = True
     imported_at = utcnow()
     run_info = dict(bundle.manifest.get("run") or {})
     source = bundle.source
+    # prd/72: a sprint-only tgz refreshes SPRINT metadata. It is not an ingest
+    # run: no `write_run`, no watermark move, no events.
+    sprint_refresh = bool(bundle.manifest.get("sprint_refresh"))
     run_id = str(run_info.get("run_id") or f"import-{imported_at.strftime('%Y%m%dT%H%M%S')}")
     as_of = run_info.get("as_of") or bundle.manifest.get("created_at") or imported_at
     projects = bundle.ticket_projects or cfg.ticket_projects
@@ -210,7 +235,11 @@ def import_bundle(cfg: Config, path: str | Path, *, verify_contract: bool = True
     con = connect(cfg.db_path)
     try:
         ensure_schema(con)
-        check_watermark(con, bundle)
+        if not sprint_refresh:
+            check_watermark(con, bundle)
+        # A sprint-only bundle carries no scope of its own, so verify the store
+        # against the scope its imports agreed on (like a label patch does).
+        verify_keys = keys or (imported_scope(con) if sprint_refresh else ())
         before = con.execute("SELECT count(*) FROM events").fetchone()[0]
         report = None
         con.execute("BEGIN")
@@ -223,28 +252,29 @@ def import_bundle(cfg: Config, path: str | Path, *, verify_contract: bool = True
             derived = recompute_derived(
                 con, {(e["repo"], e["pr_id"]) for e in bundle.events if e.get("repo")}
             )
-            write_run(
-                con,
-                {
-                    "run_id": run_id,
-                    "source": source,
-                    "as_of": as_of,
-                    "source_watermark": bundle.watermark,
-                    "classifier_version": bundle.classifier_version,
-                    # prd/27: the resolved scope the bundle was scraped with, so
-                    # ``--verify`` can enforce the same set on the store.
-                    "ticket_keys": list(keys),
-                    "prs_seen": int(run_info.get("prs_seen") or 0),
-                    "prs_kept": int(run_info.get("prs_kept") or 0),
-                    "prs_dropped": int(run_info.get("prs_dropped") or 0),
-                    "issues_seen": int(run_info.get("issues_seen") or 0),
-                    "issues_kept": int(run_info.get("issues_kept") or 0),
-                    "issues_skipped": int(run_info.get("issues_skipped") or 0),
-                    "events_written": written,
-                    "events_skipped": len(bundle.events) - written,
-                },
-            )
-            report = verify(con, cfg.key_shape, projects, keys) if verify_contract else None
+            if not sprint_refresh:
+                write_run(
+                    con,
+                    {
+                        "run_id": run_id,
+                        "source": source,
+                        "as_of": as_of,
+                        "source_watermark": bundle.watermark,
+                        "classifier_version": bundle.classifier_version,
+                        # prd/27: the resolved scope the bundle was scraped with, so
+                        # ``--verify`` can enforce the same set on the store.
+                        "ticket_keys": list(keys),
+                        "prs_seen": int(run_info.get("prs_seen") or 0),
+                        "prs_kept": int(run_info.get("prs_kept") or 0),
+                        "prs_dropped": int(run_info.get("prs_dropped") or 0),
+                        "issues_seen": int(run_info.get("issues_seen") or 0),
+                        "issues_kept": int(run_info.get("issues_kept") or 0),
+                        "issues_skipped": int(run_info.get("issues_skipped") or 0),
+                        "events_written": written,
+                        "events_skipped": len(bundle.events) - written,
+                    },
+                )
+            report = verify(con, cfg.key_shape, projects, verify_keys) if verify_contract else None
             if report is not None and not report["ok"]:
                 raise ImportRejected(
                     "bundle merged but the store failed the pseudonymisation"
@@ -264,11 +294,12 @@ def import_bundle(cfg: Config, path: str | Path, *, verify_contract: bool = True
         con.close()
 
     return {
-        "mode": "import",
+        "mode": "sprint-refresh" if sprint_refresh else "import",
         "bundle": str(bundle.path),
         "bundle_sha256": bundle.sha256,
         "source": source,
-        "run_id": run_id,
+        "run_id": None if sprint_refresh else run_id,
+        "run_recorded": not sprint_refresh,
         "as_of": as_of,
         "db": str(cfg.db_path),
         "classifier_version": bundle.classifier_version,
@@ -405,6 +436,11 @@ def _print_label_patch(r: dict) -> None:
 
 
 def _print_import(r: dict) -> None:
+    if r.get("mode") == "sprint-refresh":
+        # prd/72: the legacy ``python -m ingest --import`` shortcut prints through
+        # this function too; a metadata refresh has no run/watermark to show.
+        _print_sprint_refresh(r)
+        return
     print(f"bundle         {r['bundle']}  sha256 {r['bundle_sha256'][:16]}…")
     print(f"source         {r['source']} (run {r['run_id']})")
     print(f"schema         v{r['schema_version']} · classifier {r['classifier_version']}"
@@ -426,6 +462,26 @@ def _print_import(r: dict) -> None:
             f"ticket layer   {s.get('epics', 0)} epics, {s.get('stories', 0)} stories,"
             f" {s.get('sprints', 0)} sprints"
         )
+    if r["verified"] is None:
+        print("contract       skipped (--no-verify)")
+    else:
+        print(f"contract       {'OK — no free text, no canaries' if r['verified'] else 'VIOLATED'}")
+
+
+def _print_sprint_refresh(r: dict) -> None:
+    """Report for a sprint-only tgz (prd/72): objects updated, no ingest run."""
+    print(f"sprint refresh {r['bundle']}  sha256 {r['bundle_sha256'][:16]}…")
+    print(f"source         {r['source']} · {r['db']}")
+    print(f"objects        {r['objects']} SPRINT row(s) upserted")
+    print(
+        "ingest run     none — a metadata refresh leaves ingest_runs and the"
+        " source watermark untouched"
+    )
+    s = r["summary"]
+    print(
+        f"store now      {s['events']} events, {s['prs']} PRs,"
+        f" {s.get('sprints', 0)} sprints, as_of {s['as_of']}"
+    )
     if r["verified"] is None:
         print("contract       skipped (--no-verify)")
     else:
@@ -465,6 +521,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(report, indent=2, default=str))
     elif report.get("mode") == "label-patch":
         _print_label_patch(report)
+    elif report.get("mode") == "sprint-refresh":
+        _print_sprint_refresh(report)
     else:
         _print_import(report)
     if report["verified"] is False:

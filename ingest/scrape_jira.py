@@ -711,6 +711,30 @@ def intersect_team_keys(
     return keys
 
 
+def _client_for(
+    cfg: Config, transport, source: str, client: JiraClient | None = None
+) -> JiraClient:
+    """The Jira client for this source, shared by the full walk and the sprint read.
+
+    ``client`` is the shape adapter the caller already built (the Cloud one under
+    ``--jira-cloud``); otherwise a DC client is built over ``transport``. A
+    fixture source never sleeps between requests and Tempo follows the config
+    (prd/30), so ``--jira --sprints-only`` talks to the surface exactly like a
+    full scrape would (prd/24, prd/72).
+    """
+    if client is not None:
+        return client
+    return JiraClient(
+        transport,
+        page_limit=cfg.jira_page_limit,
+        min_interval=(
+            0.0 if source.startswith(("fixture", "jira-fixture")) else cfg.jira_min_interval
+        ),
+        # prd/30: a caller that builds the client from config (the dev shortcut
+        # in ``ingest.live``) still reads Tempo when it is configured.
+        tempo=cfg.jira_tempo,
+    )
+
 
 def collect(
     cfg: Config,
@@ -762,16 +786,7 @@ def collect(
     as_of = utcnow()
     run_id = f"{source}-{as_of.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:6]}"
     ident = identity or IdentityTable(cfg.identity_path)
-    client = client or JiraClient(
-        transport,
-        page_limit=cfg.jira_page_limit,
-        min_interval=(
-            0.0 if source.startswith(("fixture", "jira-fixture")) else cfg.jira_min_interval
-        ),
-        # prd/30: a caller that builds the client from config (the dev shortcut
-        # in ``ingest.live``) still reads Tempo when it is configured.
-        tempo=cfg.jira_tempo,
-    )
+    client = _client_for(cfg, transport, source, client)
     # -- scope: keys/epics/projects, then teams AND-ed in (prd/18, 27, 66) --
     # A key or epic set is resolved here, once, to an explicit key set. Teams
     # are an independent criterion: when configured they are AND-ed with that
@@ -1268,10 +1283,16 @@ def _complete_worklogs(client: JiraClient, issue: dict) -> None:
 # --------------------------------------------------------------------------- #
 def build_manifest(collected: JiraCollected, *, previous: datetime | None,
                    watermark: datetime | None, overlap_hours: int, full: bool,
-                   checkpoint: bool = False, truncated: bool = False) -> dict:
-    """The bundle's manifest: provenance + counts, and nothing raw (prd/11 §2)."""
+                   checkpoint: bool = False, truncated: bool = False,
+                   sprint_refresh: bool = False) -> dict:
+    """The bundle's manifest: provenance + counts, and nothing raw (prd/11 §2).
+
+    ``sprint_refresh`` marks a metadata-only bundle (prd/72): it carries SPRINT
+    objects, no events and **no cursor**, so import must not treat it as an
+    ingest. The flag is absent on a normal bundle, so its manifest is unchanged.
+    """
     counts = _bundle_counts(collected)
-    return {
+    manifest = {
         "schema_version": bundle_mod.SCHEMA_VERSION,
         "generator": {"name": "megaspeed-scrape", "version": _version()},
         "created_at": iso(collected.as_of),
@@ -1342,6 +1363,11 @@ def build_manifest(collected: JiraCollected, *, previous: datetime | None,
         "requests_by_kind": dict(collected.requests_by_kind),
         "activities_by_activity": dict(sorted(collected.stats.activities.items())),
     }
+    if sprint_refresh:
+        # prd/72: a metadata-only bundle. Explicit and additive: a full bundle's
+        # manifest keeps exactly the keys it had before this feature.
+        manifest["sprint_refresh"] = True
+    return manifest
 
 
 def _version() -> str:
@@ -1369,6 +1395,149 @@ def _bundle_counts(collected: JiraCollected) -> dict:
         1 for event in collected.events if event.get("activity") == "worklogged"
     )
     return counts
+
+
+def scrape_sprints(
+    cfg: Config,
+    transport,
+    source: str,
+    *,
+    out: str | Path,
+    projects: tuple[str, ...] | None = None,
+    progress: ProgressReporter | None = None,
+    client: JiraClient | None = None,
+) -> dict:
+    """Refresh **sprint metadata only** and write a tiny tgz (prd/72).
+
+    This is the cheap path to the team's ``S352`` labels: the board's sprint list
+    is two requests per project on top of the surface a full scrape already
+    reads, while a full re-scrape would re-read every issue, worklog and
+    changelog just to recompute the same SPRINT rows.
+
+    The sprints are reduced through the *same* :meth:`JiraReducer.reduce_sprint`
+    as a full scrape, so the SPRINT objects (and the ``sprint_no`` parsed from a
+    name like ``Sprint 352``) are byte-for-byte the rows a full scrape emits.
+    Nothing else is read and nothing is created:
+
+    * no issues, worklogs, changelogs or events;
+    * no identity map or pepper -- a SPRINT object carries no actor, so the
+      person identity state is neither read for allocation nor saved;
+    * no cursor: the bundle's ``watermark_ts`` is ``null`` and no
+      ``watermark.json`` / ``jira_issues.json`` is written, because a metadata
+      refresh is not an ingest run.
+
+    The caller imports the tgz with the ordinary ``ingest import``; the manifest
+    flag ``sprint_refresh`` tells the importer to upsert the objects without
+    writing a run row or moving the source watermark.
+    """
+    out = Path(out).expanduser()
+    as_of = utcnow()
+    run_id = f"{source}-{as_of.strftime('%Y%m%dT%H%M%S')}-{uuid.uuid4().hex[:6]}"
+    reporter = progress if progress is not None else ProgressReporter(
+        interval=DEFAULT_PROGRESS_INTERVAL
+    )
+    client = _client_for(cfg, transport, source, client)
+    project_list = tuple(projects or cfg.jira_projects or cfg.ticket_projects)
+    if not project_list:
+        raise SystemExit(
+            "a sprint refresh needs a project: set MEGASPEED_JIRA_PROJECTS or"
+            " MEGASPEED_TICKET_PROJECTS, or pass --project"
+        )
+    if reporter.enabled:
+        reporter.emit(
+            f"[scrape] {source} · sprint metadata only · projects"
+            f" {','.join(project_list)} · writing {out}"
+        )
+
+    collected = JiraCollected(
+        source=source,
+        as_of=as_of,
+        run_id=run_id,
+        projects=project_list,
+        ticket_regex=cfg.ticket_regex,
+        ticket_projects=cfg.ticket_projects,
+        sprint_membership=cfg.jira_sprint_membership,
+    )
+    # The reducer is the shared path: same object shape, same closed attributes
+    # and the same `sprint_no` parser as a full scrape (prd/70 F-16). Its identity
+    # table is read-only here (no actor is ever resolved) and is never saved.
+    reducer = JiraReducer(
+        cfg,
+        IdentityTable(cfg.identity_path),
+        as_of,
+        stage_map=cfg.jira_status_map,
+    )
+    sprints: list[tuple[str, dict]] = []
+    for project in project_list:
+        board = cfg.jira_board or client.scrum_board(project)
+        if board is None:
+            if reporter.enabled:
+                reporter.emit(f"[scrape] {project}: no scrum board · no sprint(s)")
+            continue
+        collected.boards[project] = board
+        board_sprints = list(client.sprints(board))
+        sprints.extend((project, sprint) for sprint in board_sprints)
+        if reporter.enabled:
+            reporter.emit(
+                f"[scrape] {project}: board {board} · {len(board_sprints)} sprint(s)"
+            )
+    reducer.prime([], sprints)
+    for project, sprint in sprints:
+        reducer.reduce_sprint(sprint, project, collected.stats)
+    collected.sprint_count = len(sprints)
+    # No events by construction: the objects are the whole bundle.
+    collected.events = []
+    collected.objects = list(collected.stats.objects)
+    collected.relations = []
+    collected.requests = client.requests
+    collected.requests_by_kind = dict(sorted(client.requests_by_kind.items()))
+
+    manifest = build_manifest(
+        collected,
+        # A metadata refresh has no cursor on either side: it must not move the
+        # store's watermark (prd/72).
+        previous=None,
+        watermark=None,
+        overlap_hours=0,
+        full=False,
+        sprint_refresh=True,
+    )
+    written = _write_bundle_atomic(
+        out, manifest=manifest, events=[], objects=collected.objects, relations=[]
+    )
+
+    numbered = sum(
+        1
+        for obj in collected.objects
+        if (obj.get("attributes") or {}).get("sprint_no") is not None
+    )
+    if reporter.enabled:
+        reporter.emit(
+            f"[scrape] sprint refresh: {len(collected.objects)} SPRINT object(s)"
+            f" · {numbered} numbered · 0 event(s)"
+        )
+    return {
+        "mode": "sprint-refresh",
+        "source": source,
+        "run_id": run_id,
+        "as_of": as_of,
+        "bundle": str(out),
+        "bundle_bytes": written["bytes"],
+        "bundle_sha256": written["sha256"],
+        "projects": list(project_list),
+        "boards": dict(sorted(collected.boards.items())),
+        "sprints": collected.sprint_count,
+        "sprints_numbered": numbered,
+        "sprints_unnumbered": len(collected.objects) - numbered,
+        "watermark": None,
+        "previous_watermark": None,
+        "events": 0,
+        "objects": len(collected.objects),
+        "counts": manifest["counts"],
+        "requests": collected.requests,
+        "requests_by_kind": dict(collected.requests_by_kind),
+        "failures": list(collected.failures),
+    }
 
 
 def scrape(
@@ -1661,5 +1830,6 @@ __all__ = [
     "resolve_epic_keys",
     "resolve_team_keys",
     "scrape",
+    "scrape_sprints",
     "team_field_ref",
 ]
