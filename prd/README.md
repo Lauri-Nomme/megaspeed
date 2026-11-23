@@ -125,3 +125,7 @@ Draft. Iterating in committed slices. **No implementation yet.**
 | `68-v014-qa-fixes.md` | v0.14.0 QA fixes (F-01 … F-16) |
 | `69-llm-trace-and-relabel.md` | Raw-zone LLM trace and label-only re-classification |
 | `70-v017-qa-fixes.md` | v0.17.3 combined-corpus QA fixes (F-01 … F-15) |
+| `71-identity-rekey.md` | Identity maintenance: one `rekey` command |
+| `72-sprint-refresh.md` | Sprint metadata refresh |
+| `73-performance-v2.md` | Performance long-tail v2 (draft; measure before dispatch) |
+| `74-scrape-classification-cache.md` | Scrape classification cache (draft; after the relabel workflow settles) |
