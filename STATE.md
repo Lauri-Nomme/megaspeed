@@ -62,6 +62,16 @@ PERSON rows went 329→223 (merged plus pre-existing orphans), events unchanged 
 The laptop's `identity.json` still holds the old pseudonyms: swap its `bb:`
 entries before the next scrape, or the rekeyed actors come back.
 
+## v0.20.4 — pytest for the dev loop
+
+- `requirements-dev.txt` (pytest, pytest-xdist), `pytest.ini`, `.pytest_cache/`
+  ignored. Runtime and the scraper artifact are unchanged.
+- `python -m pytest tests -q -n 8 --dist loadfile` → **1,543 passed, 21 skipped,
+  225 subtests in 14.2 s** (16 workers; 18.7 s at 8). `--dist loadfile` keeps a
+  module in one worker because `test_relabel` shares one scrape per process.
+- `tests/run_parallel.py` stays as the stdlib fallback for a box without the
+  dev deps; both report the same 3 Jira-lab class skips.
+
 ## v0.20.3 — the test suite runs in parallel
 
 - `tests/run_parallel.py` (stdlib only) spreads the suite over worker processes

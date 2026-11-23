@@ -15,6 +15,7 @@ var/
 node_modules/
 dist/
 build/
+.pytest_cache/
 .playwright/
 *.log
 # transfer bundles written by the scrape side (--out default)

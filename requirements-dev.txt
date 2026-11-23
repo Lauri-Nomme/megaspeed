@@ -1,0 +1,5 @@
+# Test-only dependencies. Runtime deps live in requirements.txt; the scraper
+# artifact stays stdlib + DuckDB (scrape/requirements-build.txt) and never sees
+# these. Both are widely used and pinned to a major range.
+pytest>=8,<10
+pytest-xdist>=3.6,<4

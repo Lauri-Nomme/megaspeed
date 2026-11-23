@@ -290,16 +290,24 @@ comment body, diff or free-text summary. `attributes` holds only keys from
    if one appears anywhere in the store, ingest fails.
 
 ```bash
-.venv/bin/python -m ingest --verify     # exit 1 + the offending column if broken
+.venv/bin/pip install -r requirements-dev.txt   # pytest + xdist (test-only)
+.venv/bin/python -m ingest --verify             # exit 1 + the offending column if broken
+
+# full suite (dev loop + CI)
+.venv/bin/python -m pytest tests -q -n 8 --dist loadfile
+
+# no-deps fallback (airgapped box, stdlib only)
+.venv/bin/python tests/run_parallel.py -j 8
+
+# one failing test / reference semantics
 .venv/bin/python -m unittest discover -s tests -v
-.venv/bin/python tests/run_parallel.py -j 8   # same suite, one process per worker
 ```
 
-The suite is CPU-bound (DuckDB, JSON, small simulations), so the parallel runner
-is the default for a full check; `unittest discover` stays the reference for a
-single failing test. `tests/run_parallel.py --list` prints the ids, and
-`--times <json>` (a `[[seconds, test_id], …]` timing run) makes the scheduler
-pack the slow tests first.
+The suite is CPU-bound (DuckDB, JSON, small simulations) and module fixtures are
+expensive: `test_relabel` shares one live-shaped scrape per process. That is why
+`--dist loadfile` is the documented mode — it keeps a whole module in one worker.
+`pytest -q --durations=10` finds the next hotspot; `tests/run_parallel.py --list`
+prints ids and `--times <json>` packs the slow tests first.
 
 `tests/test_contract.py` covers the pseudonym scheme, collision suffixes, the
 filter's second gate, message classification, idempotency and the canary.
