@@ -61,14 +61,29 @@ deterministic attribute on the THREAD object:
   template**, deterministically:
   - identify the family by bot actor + template regex (coverage percentages;
     `Qodana: …`);
-  - Qodana: "no new issues found" → `ci_notice`; an issue list / count / failed
-    run → `ci_finding`;
-  - coverage: parse `instruction|line|branch coverage is N%` and compare to the
-    configured threshold per metric (below → `ci_finding`), or to the previous
-    coverage comment on the same PR (a drop → `ci_finding`); a first report with
-    no threshold is a `ci_notice`;
+  - **coverage = `ci_notice`, always.** The trace shows 2,247 coverage comments
+    from one account (21% of all openers) in 8 template variants — percentages,
+    covered ratios, one- and two-metric subsets, a header-only form, and an
+    emoji form (`:100: % coverage :+1:` = 💯%). None carries a pass/fail token,
+    none states a threshold, and all say "for the first build", so there is no
+    earlier report on the same PR to diff against. There is no deterministic
+    basis for a finding, so the rule must not invent one: store the parsed
+    metrics (`coverage.instruction|line|branch`, percent) and `metrics_zero`
+    when every parsed metric is 0 (the diff report found nothing to score, not
+    a failure). This alone removes the 1,093 `nit` + 922 `optimization` + 156
+    `out_of_scope` + 77 `blocker` labels the first pass put on a bot.
+  - **Qodana has exactly two templates** (29 comments, all from the bot):
+    `#### ⚠️ Qodana detected N new issue(s) … Please do not merge without
+    solving/suppressing` → `ci_finding`, `issues=N`, `actionable=true`,
+    `blocking=true` (the bot states the merge rule itself); `#### ✅ Qodana: no
+    new issues found.` → `ci_notice`, `issues=0`.
   - a bot comment that matches **no** known template is `ci_notice` with
     `template=unknown`, counted so a missing rule is visible — never a guess.
+- **Human boilerplate is `admin`, deterministically**: `rebased` / `rebase` /
+  `[rebased]` / `Rebased & resolved conflicts` / `Rebased & solved conflicts`,
+  `same as` / `same` / `same here`, `depends on`, `related to`, a bare URL, an
+  image attachment. These are ~120 openers that currently receive a review
+  type from the model; they are status notes, not remarks.
   If a real `build_status` exists in some future source it is corroboration, not
   the source; it must not be the only path, because this corpus proves that path
   is empty.
