@@ -108,3 +108,49 @@ test('prd/70 F-14: the Epic page and its Markdown export say the same state', ()
   assert.match(md, /\| \[DEMO-58516\]\([^)]*\) \| open \|/);
   assert.match(md, /\| \[DEMO-58515\]\([^)]*\) \| done · open \|/);
 });
+
+/* ------------------------------------------------- F-03: epic-only PRs */
+
+/** One PR that names the epic key and no story — the dead end QA found. */
+const EPIC_PR = {
+  object_id: 'PR:11030', number: 11030, repo: 'DEMO/widget', state: 'open',
+  author: 'DmMa', ticket_keys: ['DEMO-56715'], opened: '2026-11-01T09:00:00Z',
+  closed: null, censored: true, commit_count: 3, cycle_hours: 130,
+  review_rounds: 2, push_classes: { initial: 1 }, intervals: [],
+  opened_after_close: false, approved_unmerged: null,
+};
+
+test('prd/70 F-03: an epic lists the PRs that name it, in the story page\'s table', () => {
+  const payload = {
+    ...epic([OPEN_CHILD, DONE_CHILD]),
+    prs: [EPIC_PR], pr_count: 1,
+  };
+  const html = epicMarkup(payload);
+  // the section and its clickable rows: the same `.ticket-prs` table a story
+  // page renders, so the row opens the PR drawer and the columns mean the same
+  assert.match(html, /data-epic-prs="1"/);
+  assert.match(html, /pull requests · 1/);
+  assert.match(html, /<table class="table ticket-prs">/);
+  assert.match(html, /<tr class="pr-row" data-pr="PR:11030"/);
+  assert.match(html, /<span class="mono id">#11030<\/span>/);
+  assert.match(html, /<span class="repo">widget<\/span>/);
+  // the child stories keep their own (single) state token
+  assert.doesNotMatch(html, /open · open/);
+  assert.match(html, /<span class="pill waiting">open<\/span>/);
+});
+
+test('prd/70 F-03: an epic with no PR of its own does not render an empty section', () => {
+  const html = epicMarkup({ ...epic([OPEN_CHILD]), prs: [], pr_count: 0 });
+  assert.doesNotMatch(html, /data-epic-prs/);
+  assert.doesNotMatch(html, /ticket-prs/);
+  assert.doesNotMatch(html, /pull requests/);
+});
+
+test('prd/70 F-03: the Epic Markdown export lists the same PRs as the page', () => {
+  const md = epicMarkdown({
+    ...epic([OPEN_CHILD, DONE_CHILD]), prs: [EPIC_PR], pr_count: 1,
+  }, '');
+  assert.match(md, /## pull requests \(1\)/);
+  assert.match(md, /- #11030 DEMO\/widget · open \(right-censored\) · 16 d 2 h · 2 review rounds/);
+  assert.doesNotMatch(epicMarkdown(epic([OPEN_CHILD]), ''), /## pull requests/);
+});
