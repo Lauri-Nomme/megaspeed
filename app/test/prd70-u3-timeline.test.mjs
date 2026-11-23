@@ -18,7 +18,11 @@ import assert from 'node:assert/strict';
 
 import {
   Timeline, makeBusinessClock, parseWorkingWindow, placeSprintLabels,
+  localCanonicalTicket, ticketKindIndex, shippedTicketPicker,
 } from '../timeline.js';
+import { keyListsOf, ownTicket } from '../tickets.js';
+// the namespace form, so a branch that predates U1's exports still loads
+import * as ticketsModule from '../tickets.js';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -331,4 +335,162 @@ test('prd/70 F-12: at `All` no sprint label is truncated and none overlaps anoth
   // no early `S55…` at this zoom: the band is narrower than the id
   assert.ok(!labels.some((label) => label.text.startsWith('S55')));
   assert.ok(labels.some((label) => label.text.startsWith('S5800')));
+});
+
+/* ---- the canonical ticket (prd/70 F-03, timeline side) ------------------
+ *
+ * Aging, Tickets and Delivery pick a multi-key PR's ticket with one rule: a
+ * STORY/TICKET over an EPIC, a live story over a closed one, then the newest
+ * story. The Timeline labelled with the census rule (`ownTicket`: the last key
+ * that is not a shared epic), so `#11096` drew the story closed in 2023 while
+ * its ticket page showed the open one, and a PR whose epic was listed last drew
+ * the epic.
+ */
+
+const TICKET_KINDS = new Map([
+  ['DEMO-56715', 'EPIC'],
+  ['DEMO-57507', 'STORY'],
+  ['DEMO-60130', 'STORY'],
+  ['DEMO-9714', 'STORY'],
+]);
+const TICKET_STATES = new Map([
+  ['DEMO-57507', 'done'],
+  ['DEMO-60130', 'open'],
+  ['DEMO-9714', 'done'],
+]);
+
+test('prd/70 F-03: the local rule prefers the story over the epic, the live story over the closed', () => {
+  const pick = (keys) => localCanonicalTicket(keys, {
+    kindByKey: TICKET_KINDS, stateByKey: TICKET_STATES,
+  });
+  // epic + story, epic first and epic last: the story either way
+  assert.equal(pick(['DEMO-56715', 'DEMO-57507']), 'DEMO-57507');
+  assert.equal(pick(['DEMO-57507', 'DEMO-56715']), 'DEMO-57507');
+  // open story + 2023-done story: the live one, whichever order carries it
+  assert.equal(pick(['DEMO-60130', 'DEMO-9714']), 'DEMO-60130');
+  assert.equal(pick(['DEMO-9714', 'DEMO-60130']), 'DEMO-60130');
+  // both live: the newest story
+  assert.equal(pick(['DEMO-57507', 'DEMO-60130']), 'DEMO-60130');
+  // a single key is never dropped, and an empty list is empty
+  assert.equal(pick(['DEMO-57507']), 'DEMO-57507');
+  assert.equal(pick([]), '');
+});
+
+test('prd/70 F-03: with no kind/state index the census rule still answers', () => {
+  // a PR-only store has nothing to rank on: the census keeps its long-standing
+  // label (the most specific key), never a numeric guess between two epics
+  assert.equal(localCanonicalTicket(['DEL-1', 'DEL-167'], {}), 'DEL-167');
+  assert.equal(localCanonicalTicket(['ENG-7']), 'ENG-7');
+});
+
+test('prd/70 F-03: the objects page builds the fallback index', () => {
+  const objects = [
+    { object_id: 'EPIC:DEMO-56715', object_type: 'EPIC', state: 'open' },
+    { object_id: 'STORY:DEMO-60130', object_type: 'STORY', state: 'open' },
+    { object_id: 'TICKET:DEMO-9714', object_type: 'TICKET', state: 'done' },
+    { object_id: 'PR:ENG/platform#1', object_type: 'PR', ticket_keys: ['DEMO-60130'] },
+  ];
+  const { kinds, states } = ticketKindIndex(objects);
+  assert.equal(kinds.get('DEMO-56715'), 'EPIC');      // from the object id
+  assert.equal(kinds.get('DEMO-60130'), 'STORY');
+  assert.equal(kinds.get('DEMO-9714'), 'TICKET');
+  assert.equal(states.get('DEMO-60130'), 'open');
+  assert.equal(kinds.has('PR:ENG/platform#1'), false); // PRs are not tickets
+});
+
+/* ---- the timeline labels the PR with that key --------------------------- */
+
+/** Two PRs of the QA finding plus one whose epic is listed last. */
+function ticketStore() {
+  const at = '2026-11-23T09:00:00Z';
+  const objects = [
+    { object_id: 'EPIC:DEMO-56715', object_type: 'EPIC', state: 'open' },
+    { object_id: 'STORY:DEMO-57507', object_type: 'STORY', state: 'done' },
+    { object_id: 'STORY:DEMO-60130', object_type: 'STORY', state: 'open' },
+    { object_id: 'STORY:DEMO-9714', object_type: 'STORY', state: 'done' },
+  ];
+  const events = [];
+  const pr = (number, keys) => {
+    objects.push({
+      object_id: `PR:ENG/platform#${number}`,
+      object_type: 'PR',
+      pr_id: number,
+      repo: 'ENG/platform',
+      ticket_keys: keys,
+      created_at: at,
+      closed_at: null,
+      state: 'open',
+      actor: 'AuAu',
+    });
+    events.push({
+      key: `e${number}`, ts: at, activity: 'pr_opened', actor: 'AuAu',
+      repo: 'ENG/platform', pr_id: number, objects: [`PR:ENG/platform#${number}`],
+      attributes: {},
+    });
+  };
+  pr(11030, ['DEMO-56715', 'DEMO-57507']);   // epic first, story last
+  pr(11096, ['DEMO-60130', 'DEMO-9714']);    // open story, then a 2023-done one
+  pr(11099, ['DEMO-57507', 'DEMO-56715']);   // epic listed last
+  return { objects, events };
+}
+
+test('prd/70 F-03: the timeline labels a multi-key PR with the canonical ticket', () => {
+  const { objects, events } = ticketStore();
+  // what the page does before rendering: the object census feeds the ticket
+  // index (U1's `keyListsOf`, which is also the shipped index's one feeder)
+  keyListsOf(objects);
+  // the census rule alone would disagree on two of the three PRs
+  assert.equal(ownTicket(['DEMO-60130', 'DEMO-9714'], null), 'DEMO-9714');
+  assert.equal(ownTicket(['DEMO-57507', 'DEMO-56715'], null), 'DEMO-56715');
+
+  const { timeline } = stubTimeline();
+  timeline.setData(events, objects, { as_of: '2026-11-23T10:00:00Z' });
+  const ticket = (number) => timeline.prs.find((pull) => pull.number === number).ticket;
+  assert.equal(ticket(11030), 'DEMO-57507');
+  assert.equal(ticket(11096), 'DEMO-60130');
+  assert.equal(ticket(11099), 'DEMO-57507');
+});
+
+test('prd/70 F-03: the local fallback ranks the setData index the same way', () => {
+  const { objects, events } = ticketStore();
+  const { timeline } = stubTimeline();
+  timeline.setData(events, objects, { as_of: '2026-11-23T10:00:00Z' });
+  // whatever this branch ships, force the fallback seam and check its answers
+  timeline.ticketPicker = null;
+  assert.equal(timeline.ticketFor(['DEMO-56715', 'DEMO-57507']), 'DEMO-57507');
+  assert.equal(timeline.ticketFor(['DEMO-60130', 'DEMO-9714']), 'DEMO-60130');
+  assert.equal(timeline.ticketFor(['DEMO-57507', 'DEMO-56715']), 'DEMO-57507');
+});
+
+test('prd/70 F-03: a pick published on window is preferred and gets the PR keys', () => {
+  const { objects, events } = ticketStore();
+  const { timeline } = stubTimeline();
+  const calls = [];
+  window.canonicalTicket = (keys) => { calls.push([...keys]); return 'DEMO-60130'; };
+  try {
+    timeline.setData(events, objects, { as_of: '2026-11-23T10:00:00Z' });
+  } finally {
+    delete window.canonicalTicket;
+  }
+  assert.deepEqual(calls[0], ['DEMO-56715', 'DEMO-57507']);
+  assert.ok(timeline.prs.every((pull) => pull.ticket === 'DEMO-60130'));
+});
+
+test('prd/70 F-03: the published canonical pick wins over a primary one, and a primary one is called with keys only', () => {
+  // the page's handle is preferred; `canonicalTicket` beats `primaryTicket`
+  const both = shippedTicketPicker({
+    canonicalTicket: () => 'DEMO-60130',
+    primaryTicket: () => 'DEMO-9714',
+  });
+  assert.equal(both(['DEMO-60130', 'DEMO-9714'], null), 'DEMO-60130');
+  // `primaryTicket` takes an options object, so the wrapper hands it the keys
+  // alone — an epic Set as its second argument would throw inside the merge
+  const onlyPrimary = shippedTicketPicker({ primaryTicket: (keys) => `P:${keys[0]}` });
+  assert.equal(onlyPrimary(['DEMO-57507'], null), 'P:DEMO-57507');
+  // with no page handle the merged module is used exactly when it exports one,
+  // and otherwise the caller falls back to `localCanonicalTicket`
+  const fromModule = shippedTicketPicker({});
+  const exported = typeof ticketsModule.canonicalTicket === 'function'
+    || typeof ticketsModule.primaryTicket === 'function';
+  assert.equal(typeof fromModule === 'function', exported);
 });

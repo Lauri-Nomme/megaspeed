@@ -20,6 +20,12 @@ import {
   fmtTick, fmtCompact, esc, rgba,
 } from './format.js';
 import { epicKeySet, epicTicket, ownTicket, ticketKey } from './tickets.js';
+// prd/70 F-03: the canonical ticket pick lives in `app/tickets.js` (U1). This
+// branch may land before that unit, so the module is read through a namespace
+// and the export is feature-detected — a *static named* import of an export that
+// does not exist yet would break the whole module graph. The namespace read is
+// `undefined` before the merge and the shipped helper after it.
+import * as ticketHelpers from './tickets.js';
 import { touchAxis } from './mobile.js';
 import { color, onPalette } from './theme.js';
 
@@ -329,6 +335,124 @@ function fit(ctx, text, maxWidth) {
   return `${value}…`;
 }
 
+/* ------------------------------------------------- canonical ticket (F-03) */
+/** `DEMO-60130` → `60130`; `-1` when the key carries no number.
+ *
+ * The "newest story" tie-break: analysis/ballcourt.py's `primary_ticket` and
+ * app/tickets.js's `primaryTicket` both order by the key's number. */
+function ticketOrdinal(key) {
+  const text = String(key == null ? '' : key);
+  const suffix = text.slice(text.lastIndexOf('-') + 1);
+  return /^\d+$/.test(suffix) ? Number(suffix) : -1;
+}
+
+function tableSize(table) {
+  if (!table) return 0;
+  return table instanceof Map ? table.size : Object.keys(table).length;
+}
+
+function tableGet(table, key) {
+  if (!table) return undefined;
+  return table instanceof Map ? table.get(key) : table[key];
+}
+
+/**
+ * The local fallback of the one canonical ticket rule (prd/70 F-03).
+ *
+ * Aging, Tickets and Delivery pick a multi-key PR's ticket with U1's
+ * `app/tickets.js` (`analysis.ballcourt.primary_ticket` on the server): a
+ * `STORY`/`TICKET` key over an `EPIC`, a live (`open`) story over a closed one,
+ * then the newest story. The timeline used to label a PR with the census rule
+ * (`ownTicket`: the last key that is not a shared epic), so `#11096` drew
+ * `DEMO-9714` (closed in 2023) while its ticket page said `DEMO-60130`, and a
+ * PR whose epic was listed last drew the epic. This mirrors that preference
+ * exactly for the branches that do not ship the helper yet.
+ *
+ * With no kind/state index at all there is nothing to rank on, so the census
+ * rule answers — a PR-only store keeps its long-standing label instead of being
+ * ranked on numbers alone.
+ */
+export function localCanonicalTicket(keys, { kindByKey = null, stateByKey = null, epics = null } = {}) {
+  const list = (keys || []).filter(Boolean);
+  if (!list.length) return '';
+  if (!tableSize(kindByKey) && !tableSize(stateByKey)) return ownTicket(list, epics);
+  const rank = (key) => {
+    const kind = String(tableGet(kindByKey, key) || '').toUpperCase();
+    const state = String(tableGet(stateByKey, key) || '').trim().toLowerCase();
+    return [
+      kind === 'STORY' || kind === 'TICKET' ? 0 : (kind === 'EPIC' ? 2 : 1),
+      state === 'open' ? 0 : (state ? 2 : 1),
+      -ticketOrdinal(key),
+    ];
+  };
+  return list.reduce((best, key) => {
+    const a = rank(key);
+    const b = rank(best);
+    return (a[0] - b[0] || a[1] - b[1] || a[2] - b[2]) < 0 ? key : best;
+  });
+}
+
+/**
+ * key → kind and key → state from the store's `STORY`/`TICKET`/`EPIC` rows.
+ *
+ * The fallback's index, built from the same `/api/objects` page `setData`
+ * receives. The shipped tickets module keeps the store-wide index itself
+ * (`indexTickets`, fed once by `keyListsOf` from the page), so this one is read
+ * only while that helper is absent.
+ */
+export function ticketKindIndex(objects) {
+  const kinds = new Map();
+  const states = new Map();
+  for (const obj of objects || []) {
+    if (!obj) continue;
+    const type = String(obj.object_type || '').toUpperCase();
+    if (type !== 'STORY' && type !== 'TICKET' && type !== 'EPIC') continue;
+    let keys = (obj.ticket_keys || []).filter(Boolean);
+    if (!keys.length) {
+      const id = String(obj.object_id || '');
+      if (id.includes(':')) keys = [id.slice(id.indexOf(':') + 1)];
+    }
+    for (const raw of keys) {
+      const key = String(raw || '').trim();
+      if (!key) continue;
+      // a STORY row outranks the bare TICKET key dimension for the same key
+      if (kinds.get(key) === 'STORY' && type !== 'STORY') continue;
+      kinds.set(key, type);
+      if (obj.state) states.set(key, String(obj.state));
+    }
+  }
+  return { kinds, states };
+}
+
+/**
+ * The shipped canonical pick, when this branch has it (prd/70 F-03).
+ *
+ * `app/tickets.js` owns the rule; whether its `canonicalTicket`/`primaryTicket`
+ * exists depends on whether U1 has merged here, so the lookup is feature-
+ * detected. A page that publishes the pick on `window` wins (that is how a
+ * harness or a host page can hand the one rule in), then the merged module, and
+ * `null` means the caller uses `localCanonicalTicket`.
+ *
+ * The returned picker always takes `(keys, epics)`; `primaryTicket`'s second
+ * argument is an options object, so it is called with the keys alone rather than
+ * handed an epic `Set` it would try to destructure.
+ */
+export function shippedTicketPicker(scope = (typeof window === 'undefined' ? null : window)) {
+  // the page handle first (a host page or harness can publish the one rule),
+  // then the merged module; within a source, `canonicalTicket` (which already
+  // knows the epic census) before the bare `primaryTicket`
+  for (const source of [scope, ticketHelpers]) {
+    if (!source) continue;
+    if (typeof source.canonicalTicket === 'function') {
+      return (keys, epics) => source.canonicalTicket(keys, epics);
+    }
+    if (typeof source.primaryTicket === 'function') {
+      return (keys) => source.primaryTicket(keys);
+    }
+  }
+  return null;
+}
+
 /**
  * Which sprint band labels fit on the header row, and where (prd/70 F-12).
  *
@@ -549,6 +673,12 @@ export class Timeline {
     this.events = [];
     this.prs = [];
     this.commitsByPr = new Map();
+    // prd/70 F-03: the canonical ticket pick (shipped helper preferred), the
+    // local kind/state index the fallback ranks on, and the epic census.
+    this.ticketPicker = null;
+    this.ticketKinds = null;
+    this.ticketStates = null;
+    this.epics = null;
     // prd/26 P6: the sprint bands and the per-story membership (carry-over).
     this.sprints = [];
     this.sprintStory = new Map();
@@ -723,13 +853,18 @@ export class Timeline {
     }
     for (const pr of prs.values()) pr.commits = this.commitsByPr.get(`${pr.repoFull}#${pr.number}`) || [];
     this.prs = [...prs.values()].sort((a, b) => (a.repoFull || '').localeCompare(b.repoFull || '') || a.number - b.number);
-    // One label key per PR: its own story ticket, not the shared epic link (B2).
+    // One label key per PR: its own story ticket, not the shared epic link (B2),
+    // and the same canonical pick Aging / Tickets / Delivery use (prd/70 F-03).
     const epics = this.epicKeys || epicKeySet(this.prs.map((pr) => pr.keys));
+    this.epics = epics;
+    this.ticketPicker = shippedTicketPicker();
+    const index = ticketKindIndex(objects);
+    this.ticketKinds = index.kinds;
+    this.ticketStates = index.states;
     for (const pr of this.prs) {
-      pr.ticket = ownTicket(pr.keys, epics);
+      pr.ticket = this.ticketFor(pr.keys, epics);
       pr.epic = epicTicket(pr.keys, epics);
     }
-    this.epics = epics;
     this.sentinels = new Set(meta.sentinels || []);
     // prd/70 F-07: price the queue lanes on the tenant's business-hours clock
     // (the legend right above the canvas), not on raw 24/7 elapsed time.
@@ -761,6 +896,22 @@ export class Timeline {
     this._initialised = true;
     this.clearHover();
     this.schedule();
+  }
+
+  /** The canonical ticket for one PR's key list (prd/70 F-03).
+   *
+   * The shipped pick wins when `app/tickets.js` exports it (or a page publishes
+   * it on `window`); otherwise the identical local rule answers, so a
+   * multi-key PR opens the same ticket here as on Aging and the ticket page.
+   */
+  ticketFor(keys, epics = this.epics) {
+    const picked = this.ticketPicker ? this.ticketPicker(keys, epics) : '';
+    if (picked) return String(picked);
+    return localCanonicalTicket(keys, {
+      kindByKey: this.ticketKinds,
+      stateByKey: this.ticketStates,
+      epics,
+    });
   }
 
   setDensity(d) {
