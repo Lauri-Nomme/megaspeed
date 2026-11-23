@@ -277,3 +277,119 @@ test('prd/46 §3: a contradicted rule says so; the best scenario is tagged', () 
   assert.match(best, /−13 % cycle/);
   assert.equal(labNote({}), '');
 });
+
+/* prd/70 F-11: the payload caps the drill arrays to the rows the page renders
+ * (200) and states the metric's own counts. The header must quote those totals,
+ * never the capped page's length, or "200 items" would replace "11,885". */
+test('prd/70 F-11: a capped drill-down states the metric total, not the page', () => {
+  const rows = Array.from({ length: DRILL_LIMIT }, (_, index) => ({
+    kind: 'thread', object_id: `THREAD:web#1:${index}`, id: `web#1`,
+    tickets: ['DEL-1'], comment_type: 'nit', outcome: 'rejected',
+    wasted: true, affected: true,
+  }));
+  const data = {
+    level: 'team', sample: { prs: 1, days: 1882 }, hours_mode: 'business',
+    as_of: '2026-11-17T00:00:00Z', note: '',
+    metrics: {
+      comment_tax: {
+        available: true, classified: 11885, rows,
+        rows_total: 11885, rows_affected: 4021,
+      },
+    },
+    suggestions: [suggestion({ id: 'comment-tax', metric: 'comment_tax', evidence: {} })],
+  };
+  const html = rulesMarkup(data, { base: '' });
+  // the header count is the metric's, and the cap states both sides honestly
+  assert.match(html, /<summary><span>11885 items<\/span>/);
+  assert.match(html, /4021 affected/);
+  assert.match(html, /showing the first 200 of 11885 items/);
+  // only the shipped rows render — the page never drew more than that
+  assert.equal((html.match(/data-drill-item=/g) || []).length, DRILL_LIMIT);
+  // the export quotes the total too, and carries the first 25 links
+  const markdown = rulesMarkdown(data, '');
+  assert.match(markdown, /- items \(11885, first 25\)/);
+});
+
+test('prd/70 F-11: a scoped rule quotes its own total, not the team total', () => {
+  const metric = {
+    rows: [
+      { kind: 'pr', id: 'web#1', tickets: ['DEL-1'], person: 'XxXx', hours: 55, waits: 2, affected: true },
+    ],
+    rows_total: 7440, rows_affected: 900,
+    rows_scopes: { 'person:XxXx': { total: 108, affected: 40 } },
+  };
+  const data = {
+    level: 'person', sample: { prs: 1, days: 30 }, hours_mode: 'business',
+    as_of: '2026-11-17T00:00:00Z', note: '',
+    metrics: { reviewer_responsiveness: metric },
+    suggestions: [suggestion({
+      id: 'reviewer-XxXx', metric: 'reviewer_responsiveness',
+      scope: { kind: 'person', person: 'XxXx' }, evidence: {},
+    })],
+  };
+  const html = rulesMarkup(data, { base: '' });
+  assert.match(html, /<summary><span>108 items<\/span>/);
+  assert.match(html, /40 affected/);
+  assert.match(html, /showing the first 1 of 108 items/);
+});
+
+/* prd/70 F-10: the thread-derived cards are only as good as the classifier that
+ * labelled the threads; the page must say when the labels are the deterministic
+ * mock, and name a real model tag when one is present. */
+const MOCK_LABELS = {
+  available: true, total: 11885, version: 'mock-v1', share: 1.0, kind: 'mock',
+  mock: true, versions: { 'mock-v1': 11885 },
+  note: 'labels: deterministic mock (mock-v1) — all 11,885 classified threads ' +
+    'carry placeholder labels; a model relabel is pending',
+};
+
+test('prd/70 F-10: the Rules page discloses the mock classifier', () => {
+  const data = {
+    level: 'team', sample: { prs: 1, days: 1882 }, hours_mode: 'business',
+    as_of: '2026-11-17T00:00:00Z', note: '', thread_labels: MOCK_LABELS,
+    metrics: {
+      comment_tax: {
+        available: true, classified: 11885, classifier: MOCK_LABELS,
+        rows: [{ kind: 'thread', object_id: 'THREAD:web#1:0', id: 'web#1',
+          tickets: ['DEL-1'], comment_type: 'nit', outcome: 'rejected',
+          wasted: true, affected: true }],
+        rows_total: 1, rows_affected: 1,
+        outcome_note: 'acted_on means a deterministic signal',
+      },
+    },
+    suggestions: [suggestion({ id: 'comment-tax', metric: 'comment_tax', evidence: {} })],
+  };
+  const html = rulesMarkup(data, { base: '' });
+  // a page-level disclosure, and the same sentence on the comment-tax card
+  assert.match(html, /data-thread-labels="mock"/);
+  assert.match(html, /deterministic mock \(mock-v1\)/);
+  assert.match(html, /a model relabel is pending/);
+  assert.equal((html.match(/data-thread-labels/g) || []).length, 2);
+  // the export carries it too
+  assert.match(rulesMarkdown(data, ''), /deterministic mock \(mock-v1\)/);
+});
+
+test('prd/70 F-10: a model relabel is named, and no mock badge is invented', () => {
+  const model = {
+    available: true, total: 11885, version: 'ollama-v1', share: 1.0,
+    kind: 'model', mock: false, versions: { 'ollama-v1': 11885 },
+    note: 'labels: model (ollama-v1) — 11,885 classified threads carry model labels',
+  };
+  const html = rulesMarkup({
+    level: 'team', sample: { prs: 1, days: 30 }, hours_mode: 'business',
+    as_of: '2026-11-17T00:00:00Z', note: '', thread_labels: model,
+    metrics: {}, suggestions: [],
+  });
+  assert.match(html, /data-thread-labels="model"/);
+  assert.match(html, /ollama-v1/);
+  assert.doesNotMatch(html, /deterministic mock/);
+});
+
+test('prd/70 F-10: a store with no thread labels makes no classifier claim', () => {
+  const html = rulesMarkup({
+    level: 'team', sample: { prs: 1, days: 30 }, hours_mode: 'business',
+    as_of: '2026-11-17T00:00:00Z', note: '',
+    metrics: { comment_tax: { available: false, rows: [] } }, suggestions: [],
+  });
+  assert.doesNotMatch(html, /data-thread-labels/);
+});

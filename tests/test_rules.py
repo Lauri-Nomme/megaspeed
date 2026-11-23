@@ -114,11 +114,16 @@ class Fixture:
     # -- objects ------------------------------------------------------------ #
     def thread(self, number: int, index: int, comment_type: str | None = None,
                outcome: str | None = None, created: datetime | None = None,
-               state: str = "resolved") -> "Fixture":
+               state: str = "resolved",
+               classifier_version: str | None = None) -> "Fixture":
         attributes = {"severity": "suggestion", "anchor_class": "general"}
         if comment_type:
             attributes["comment_type"] = comment_type
             attributes["thread_outcome"] = outcome or "unresolved"
+            # prd/70 F-10: which classifier produced the label (mock-v1 vs a
+            # model tag); absent on a pre-versioning store.
+            if classifier_version:
+                attributes["classifier_version"] = classifier_version
         self.objects.append({
             "object_type": "THREAD",
             "object_id": f"THREAD:{REPO}#{number}:{index}",
@@ -2103,6 +2108,203 @@ class InsightsApiTests(unittest.TestCase):
         reply = get("/api/insights", tenant="del", metric="rebase")
         self.assertEqual(reply.status, 400)
         self.assertIn("metric", reply.json()["error"])
+
+    def test_the_endpoint_carries_the_thread_label_disclosure(self):
+        """prd/70 F-10: the Rules API says which classifier labelled the threads.
+
+        The page reads this block next to the comment-tax / questions numbers,
+        so the endpoint (not only the analysis function) must carry it — and the
+        metric's own block must be the same disclosure, not a second opinion.
+        """
+        body = get("/api/insights", tenant="del").json()
+        labels = body["thread_labels"]
+        self.assertTrue(labels["available"])
+        self.assertEqual(labels["total"], 4)
+        self.assertEqual(labels["kind"], "unknown")   # the fixture records no version
+        self.assertIn("labels:", labels["note"])
+        self.assertEqual(body["metrics"]["comment_tax"]["classifier"], labels)
+        self.assertEqual(len(body["metrics"]["comment_tax"]["rows"]), 4)
+        self.assertEqual(body["metrics"]["comment_tax"]["rows_total"], 4)
+
+
+# --------------------------------------------------------------------------- #
+# prd/70 F-10: the thread labels disclose their classifier
+# --------------------------------------------------------------------------- #
+class ThreadLabelDisclosureTests(StoreCase):
+    """The Rules page printed "N classified threads" as if a model had read them.
+
+    Every label in the live ``demo-tlla`` store came from the deterministic
+    ``mock-v1`` placeholder classifier (11,885 threads). The payload must say so
+    — and name a real model tag when a relabel imported one — instead of letting
+    the page imply a model read.
+    """
+
+    def fixture(self, version: str | None = "mock-v1", threads: int = 6) -> Fixture:
+        fx = Fixture()
+        fx.pr(1, "AaAa", state="merged", closed=T0 + timedelta(hours=20),
+              tickets=("ENG-1",))
+        fx.event(1, "comment_added", "RrRr", 5)
+        fx.event(1, "pr_approved", "RrRr", 10)
+        fx.event(1, "pr_merged", "RrRr", 20)
+        for index in range(threads):
+            fx.thread(1, index, "nit",
+                      "rejected" if index % 2 else "acted_on",
+                      classifier_version=version)
+        return fx
+
+    def test_the_payload_discloses_the_mock_classifier(self):
+        payload = self.insights(self.fixture("mock-v1"))
+        labels = payload["thread_labels"]
+        self.assertTrue(labels["available"])
+        self.assertEqual(labels["kind"], "mock")
+        self.assertEqual(labels["version"], "mock-v1")
+        self.assertEqual(labels["share"], 1.0)
+        self.assertEqual(labels["versions"], {"mock-v1": 6})
+        self.assertIn("deterministic mock", labels["note"])
+        self.assertIn("model relabel is pending", labels["note"])
+        # the metric carries the same block, next to the comment-tax card
+        tax = payload["metrics"]["comment_tax"]
+        self.assertEqual(tax["classifier"], labels)
+        # and the API note no longer calls a mock label "a definite classifier read"
+        self.assertIn("not a model read", tax["outcome_note"])
+        self.assertIn("mock-v1", tax["outcome_note"])
+
+    def test_a_model_relabel_is_named_never_guessed(self):
+        payload = self.insights(self.fixture("ollama-v1"))
+        labels = payload["thread_labels"]
+        self.assertEqual(labels["kind"], "model")
+        self.assertEqual(labels["version"], "ollama-v1")
+        self.assertFalse(labels["mock"])
+        self.assertIn("ollama-v1", labels["note"])
+        self.assertNotIn("mock", labels["note"])
+        self.assertNotIn("not a model read",
+                         payload["metrics"]["comment_tax"]["outcome_note"])
+
+    def test_a_store_without_a_recorded_version_says_so(self):
+        labels = self.insights(self.fixture(None))["thread_labels"]
+        self.assertEqual(labels["kind"], "unknown")
+        self.assertIsNone(labels["version"])
+        self.assertFalse(labels["mock"])
+        self.assertIn("version not recorded", labels["note"])
+
+    def test_a_partial_relabel_reports_both_sides(self):
+        labels = rules.thread_label_disclosure({"mock-v1": 900, "ollama-v1": 100})
+        self.assertEqual(labels["kind"], "mixed")
+        self.assertIsNone(labels["version"])          # no single version to name
+        self.assertTrue(labels["mock"])
+        self.assertEqual(labels["versions"],
+                         {"mock-v1": 900, "ollama-v1": 100})
+        self.assertIn("mock-v1", labels["note"])
+        self.assertIn("ollama-v1", labels["note"])
+        self.assertIn("relabel is pending", labels["note"])
+
+    def test_no_classified_threads_is_stated_not_guessed(self):
+        labels = rules.thread_label_disclosure({})
+        self.assertFalse(labels["available"])
+        self.assertEqual(labels["total"], 0)
+        self.assertIn("no classified threads", labels["note"])
+
+
+# --------------------------------------------------------------------------- #
+# prd/70 F-11: the payload ships the rows the page renders, not all of them
+# --------------------------------------------------------------------------- #
+class InsightPayloadCapTests(StoreCase):
+    """``days=1882`` was 12.2 MB because every drill array shipped whole.
+
+    ``app/rules.js`` renders at most ``DRILL_LIMIT`` rows per rule; the payload
+    now carries those rows, in the page's own order, plus the metric's honest
+    totals. These tests pin the cap, the totals and the bytes.
+    """
+
+    def wide_fixture(self, threads: int, prs: int = 1) -> Fixture:
+        fx = Fixture()
+        for number in range(1, prs + 1):
+            fx.pr(number, "AaAa", state="merged",
+                  closed=T0 + timedelta(hours=20), tickets=(f"ENG-{number}",))
+            fx.event(number, "comment_added", "RrRr", 5)
+            fx.event(number, "pr_approved", "RrRr", 10)
+            fx.event(number, "pr_merged", "RrRr", 20)
+        for index in range(threads):
+            fx.thread(1, index, "nit",
+                      "rejected" if index % 2 else "acted_on",
+                      classifier_version="mock-v1")
+        return fx
+
+    def test_the_drill_rows_are_capped_and_every_total_is_honest(self):
+        total = rules.DRILL_CAP + 37
+        fx = self.wide_fixture(total)
+        payload = self.insights(fx)
+        tax = payload["metrics"]["comment_tax"]
+        suggestion = by_id(payload, "comment-tax")
+        self.assertIsNotNone(suggestion)
+        # the rows the page renders are present, and no more
+        self.assertEqual(len(tax["rows"]), rules.DRILL_CAP)
+        # the honest totals are the metric's, not the page's
+        self.assertEqual(tax["rows_total"], total)
+        self.assertEqual(tax["rows_affected"], total // 2)
+        self.assertEqual(tax["classified"], total)
+        self.assertEqual(suggestion["evidence"]["share"], 0.5)
+        # the shipped rows are exactly the page's first `DRILL_CAP` rows
+        full = self.metric(fx, "comment_tax")
+        self.assertEqual(len(full["rows"]), total)
+        page_order = sorted(
+            full["rows"],
+            key=lambda row: (not row["affected"], -float(row["wasted"])),
+        )
+        expected = [row["object_id"] for row in page_order[:rules.DRILL_CAP]]
+        # the wire keeps the metric's own order, and the page's sort of the
+        # shipped rows is the same prefix it would have drawn from the full list
+        self.assertEqual(
+            [row["object_id"] for row in sorted(
+                tax["rows"],
+                key=lambda row: (not row["affected"], -float(row["wasted"])),
+            )],
+            expected,
+        )
+        self.assertEqual({row["object_id"] for row in tax["rows"]}, set(expected))
+        # the worst item still leads: the cap never buries the evidence
+        self.assertEqual(page_order[0]["object_id"], expected[0])
+        self.assertTrue(page_order[0]["affected"])
+
+    def test_an_unused_metric_is_capped_too_with_its_total_intact(self):
+        # 250 fast PRs: no first-review rule fires, but the metric's rows are
+        # still capped — the page never draws them, and 250 rows per block ×
+        # every metric block is what made the old payload 12.2 MB.
+        payload = self.insights(self.wide_fixture(4, prs=250))
+        self.assertIsNone(by_id(payload, "review-sla"))
+        metric = payload["metrics"]["time_to_first_review"]
+        self.assertEqual(len(metric["rows"]), rules.DRILL_CAP)
+        self.assertEqual(metric["rows_total"], 250)
+        self.assertEqual(metric["median_hours"], 5.0)
+        # flow efficiency carries its per-PR list under `prs`; same contract
+        flow = payload["metrics"]["flow_efficiency"]
+        self.assertEqual(len(flow["prs"]), rules.DRILL_CAP)
+        self.assertEqual(flow["prs_total"], 250)
+        self.assertEqual(payload["metrics"]["comment_tax"]["rows_total"], 4)
+
+    def test_the_default_payload_json_stays_under_two_megabytes(self):
+        # a wide synthetic store: 800 PRs × 12 classified threads. Without the
+        # cap this shipped every PR row in ~15 metric blocks and all 9,600
+        # threads (~4 MB) — the shape of the live 12.2 MB answer — so this
+        # bound fails with the cap removed.
+        fx = Fixture()
+        for number in range(1, 801):
+            fx.pr(number, "AaAa", state="merged",
+                  closed=T0 + timedelta(hours=20), tickets=(f"ENG-{number}",))
+            fx.event(number, "comment_added", "RrRr", 5)
+            fx.event(number, "pr_approved", "RrRr", 10)
+            fx.event(number, "pr_merged", "RrRr", 20)
+            for index in range(12):
+                fx.thread(number, index, "nit",
+                          "rejected" if index % 3 == 0 else "acted_on",
+                          classifier_version="mock-v1")
+        payload = self.insights(fx)
+        size = len(json.dumps(payload))
+        self.assertEqual(payload["metrics"]["comment_tax"]["rows_total"], 9600)
+        self.assertLess(size, 2_000_000, f"{size} bytes")
+        # and it is not small because the answer is empty
+        self.assertGreater(len(payload["suggestions"]), 0)
+        self.assertGreater(payload["metrics"]["comment_tax"]["classified"], 0)
 
 
 if __name__ == "__main__":
