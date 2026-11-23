@@ -62,6 +62,24 @@ PERSON rows went 329→223 (merged plus pre-existing orphans), events unchanged 
 The laptop's `identity.json` still holds the old pseudonyms: swap its `bb:`
 entries before the next scrape, or the rekeyed actors come back.
 
+## Label subset — audit-driven (2026-11-23)
+
+The independent audit of the relabel patch (`relabel-audit-report.md`, local)
+found the model **clearly better on comment_type** (83% of decisive human
+samples), **mostly better on questions**, but a **regression on outcomes** and
+heavy bot/no-fit noise. Actions taken:
+- v0.19.2 keeps diff-derived outcomes when a bundle predates `anchor_changed`.
+- The coverage bot `GiCa41` (2,933 events) had been merged with the human
+  `GiCa14` by the suffix rekey; split into `CaGi41` (`actor_kind=bot`) and
+  `CaGi` (human) — 200 people, contract OK.
+- Imported a **subset patch**: 8,952 non-bot threads get `ollama-v1`
+  comment_type, 449 DC-BLOCKER overrides, **no outcome changes** (distribution
+  identical), thread question deletes + non-bot adds, PR deletes only; 2,933
+  bot threads keep mock labels (25% placeholders). Question events 3,014→2,459;
+  events 76,213→75,537; insights 1.12 MB. Live v0.19.2.
+- Residuals: 88 AI-bot-command question adds, 1,343 untraced (cache) rows, and
+  bot/no-fit labels still mock. `prd/75-label-prompt-v2.md` is the next pass.
+
 ## v0.19.2 — keep diff-derived outcomes in a relabel
 
 The 2026-11-23 audit found 1,582 outcome changes were a **builder regression**:
