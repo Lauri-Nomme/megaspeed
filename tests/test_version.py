@@ -167,6 +167,17 @@ class GitResolutionTests(unittest.TestCase):
         self.assertTrue(info["build_time"], info)
 
 
+class PackageVersionTests(unittest.TestCase):
+    def test_ingest_version_matches_the_version_file(self):
+        """The scrape side and the server must report the same release number."""
+        from ingest import __version__
+
+        baked = (Path(version_module.REPO_ROOT) / "VERSION").read_text(
+            encoding="utf-8"
+        ).strip()
+        self.assertEqual(__version__, baked.removeprefix("v"))
+
+
 class VersionFileFallbackTests(unittest.TestCase):
     """No ``.git`` at all — the packaged build's case."""
 

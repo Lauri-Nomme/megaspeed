@@ -65,3 +65,63 @@ couldn't account for tens of thousands of GPUs.
 ## Status
 
 Draft. Iterating in committed slices. **No implementation yet.**
+| `10-ux-look-feel.md` | Design language & UX spec |
+| `11-airgap-ingest.md` | Airgapped ingest (scrape → transfer → import) |
+| `12-tenant.md` | Tenants (parallel datasets) |
+| `13-scraper-build-ci.md` | Scraper build & CI |
+| `14-scrape-optimization.md` | Scrape optimization (huge projects) |
+| `15-analysis-questions.md` | Analysis questions → metrics → suggestions |
+| `16-scrape-classification.md` | Scrape-side classification: `push_class` + local LLM |
+| `17-analysis-rules.md` | Analysis → suggested rules |
+| `18-ticket-set-scope.md` | Ticket-set scoping |
+| `19-business-hours.md` | Business-hours calendar |
+| `21-jira-analysis.md` | Jira-layer analysis |
+| `22-stacked-cascade.md` | Stacked-PR cascade |
+| `23-simulation.md` | Simulation / policy lab |
+| `24-cloud-jira.md` | Cloud Jira scrape (via a DC→Cloud emulation proxy) |
+| `25-ticket-view.md` | Ticket-centric view |
+| `26-review-backlog.md` | Mined-but-unimplemented insights (review backlog) |
+| `27-epic-scope.md` | Epic scoping |
+| `28-mobile.md` | Responsive design (desktop + phone) |
+| `29-status-stages.md` | Configurable workflow stages (real support for the install's statuses) |
+| `30-tempo.md` | Tempo worklogs (DC + Cloud) |
+| `31-hans-import.md` | Bitbucket import from a hans scrape |
+| `32-versioning.md` | App versioning (tag + short SHA in the UI) |
+| `33-performance.md` | Performance hardening (from the adversarial review) |
+| `34-actor-constraint.md` | Actor & constraint correctness (bots, sentinel, scope) |
+| `35-time-unit.md` | One time unit: one "d", one clock |
+| `36-lifecycle-honesty.md` | Ticket lifecycle honesty & labels |
+| `37-sprint-rules-policy.md` | Sprint, rules & policy-lab consistency |
+| `38-navigation-papercuts.md` | Navigation & papercuts |
+| `39-pr-size-calibration.md` | PR-size calibration (distribution + sliders) |
+| `40-review-model.md` | Review model: participant-status vector + author debt + `ready` (the middle ground) |
+| `41-second-order-correctness.md` | Second-order correctness (the numbers that are still wrong) |
+| `42-second-order-features.md` | Second-order features & presentation (the gaps the fresh pass still hit) |
+| `43-reconcile-advice.md` | Reconcile the Rules and Policy-lab advice (and close the last gaps) |
+| `44-cross-qa-reconciliation.md` | Cross-QA reconciliation: the still-unfixed, still-un-PRDd findings |
+| `45-concepts-conformance.md` | Concepts conformance: reconcile the implementation against the glossary |
+| `46-final-qa-reconciliation.md` | Final-QA reconciliation (segments, diagnosis consistency, rework/worklog) |
+| `47-complete-final-qa.md` | Complete the final-QA backlog (index) |
+| `48-navigation-back.md` | Navigation history & back |
+| `49-repo-scope.md` | Repo scope dimension |
+| `50-trend.md` | Trend / time-series view |
+| `51-story-rework.md` | Story-level rework view |
+| `52-sprint-at-risk.md` | Sprint-at-risk forecast |
+| `53-worklog-legend.md` | Worklog-vs-points honesty + pseudonym legend |
+| `54-review-sla-chase.md` | Review SLA / chase action surface |
+| `55-diagnosis-consistency.md` | Diagnosis consistency & honesty fixes |
+| `56-ui-papercuts.md` | UI papercuts (layout + interaction) |
+| `57-benchmark-contrast.md` | Benchmark contrast: every specific number next to its cohort median |
+| `58-constraint-verdict.md` | The constraint verdict and the exploit→elevate ladder ("one answer") |
+| `59-aging-wip.md` | Aging WIP against the team's own percentiles ("age vs your own p85") |
+| `60-throughput-forecast.md` | Probabilistic throughput forecast ("how many, by when") |
+| `61-intervention-trend.md` | Intervention-aware trend ("did the change work — or can't we tell?") |
+| `62-first-pass-yield.md` | Rolled first-pass yield and a guardrail beside every speed lever |
+| `63-v010-qa-fixes.md` | v0.10.0 QA fixes — COMPLETE checklist (every finding from both passes) |
+| `64-v011-explore-fixes.md` | v0.11.1 free-exploring QA fixes — COMPLETE checklist (all 22 findings) |
+| `65-v012-final-qa.md` | v0.12.0 final-QA fixes (N-01 … N-10) |
+| `66-jira-team-scope.md` | Team-scoped Jira import (the team field) |
+| `67-window-scoping.md` | window scoping for people, lanes, aging and the constraint verdict |
+| `68-v014-qa-fixes.md` | v0.14.0 QA fixes (F-01 … F-16) |
+| `69-llm-trace-and-relabel.md` | Raw-zone LLM trace and label-only re-classification |
+| `70-v017-qa-fixes.md` | v0.17.3 combined-corpus QA fixes (F-01 … F-15) |

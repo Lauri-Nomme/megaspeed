@@ -23,7 +23,25 @@ importable without DuckDB -- that is what makes the ``megaspeed-scrape``
 artifact stdlib-sized (prd/13).
 """
 
-__version__ = "0.2.0"
+from pathlib import Path
+
+
+def _version() -> str:
+    """The release version: the repo's ``VERSION`` file, or the baked fallback.
+
+    A source checkout (and the scrape artifact) must report the same version the
+    server and the bundle manifest use. The hardcoded value is the last resort
+    for a build that ships without ``VERSION`` (a PyInstaller onefile), and is
+    kept in sync by ``tests/test_version.py``.
+    """
+    try:
+        baked = (Path(__file__).resolve().parent.parent / "VERSION").read_text().strip()
+    except OSError:
+        return "0.18.1"
+    return baked[1:] if baked.startswith("v") else baked
+
+
+__version__ = _version()
 
 __all__ = [
     "config", "taxonomy", "timeutil", "pseudonym", "fixtures", "bitbucket",

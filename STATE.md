@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1486** (`tests/`) + **99** (`scrape/tests`) + **626** (node `app/test`) green.
+Tests: **1487** (`tests/`) + **99** (`scrape/tests`) + **626** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -61,6 +61,13 @@ PERSON rows went 329→223 (merged plus pre-existing orphans), events unchanged 
 76,213, `--verify` OK. Backup: `/data/personal/work/demo-tlla.pre-rekey.duckdb`.
 The laptop's `identity.json` still holds the old pseudonyms: swap its `bb:`
 entries before the next scrape, or the rekeyed actors come back.
+
+## v0.18.1 — one version number, one PRD index
+
+`ingest.__version__` read the stale hardcoded `0.2.0` (bundle generator and
+`scrape --version`), while `VERSION`/server were `0.18.0`; it now derives from
+`VERSION` (leading `v` stripped) and a test pins the two together. `prd/README`
+now indexes 01–70 instead of stopping at 09.
 
 ## v0.18.0 — prd/70 combined-corpus QA fixes
 
