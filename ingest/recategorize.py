@@ -33,7 +33,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import citext
+from . import citext, taxonomy
 from .config import Config, load_config
 from .llmtrace import read_trace
 from .store import connect, imported_scope, verify
@@ -153,6 +153,7 @@ def recategorize(
                     if key in new:
                         removed_types[f"{kind}:{key}"] += 1
                         del new[key]
+            new = taxonomy.check_object_attributes(new)
             if new != attributes:
                 changed += 1
                 updates.append(

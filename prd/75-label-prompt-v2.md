@@ -162,6 +162,14 @@ Outcome is a separate matter: the inputs (`anchor_changed`,
 was the relabel builder discarding them (fixed in v0.19.2). The hunk is for
 `comment_type`/`question`, not for re-deriving outcomes.
 
+**Measured before adopting it (2026-11-23):** an A/B on 21 openers that had a
+hunk changed **3** labels, two of them reciprocal (`nit`↔`out_of_scope`) and one
+`question`→`suggestion`; no blocker or optimization correction. That is
+instability, not signal, and the cost is real (2× prompt tokens, a context hash
+in the label cache, a hunk in the trace). **Decision: the diff is not an input
+in v2.** Keep `audit_hypotheses.py reclassify` for a targeted test of the one
+weak class (mild-defect blocker recall) rather than a corpus-wide pass.
+
 ## Design
 
 **Deterministic pre-filter (no model):**

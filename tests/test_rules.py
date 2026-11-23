@@ -866,6 +866,12 @@ class CommentTaxTests(StoreCase):
         self.assertEqual(metric["matrix"]["nit"], {"acted_on": 3, "rejected": 2})
         self.assertEqual(metric["by_type"]["out_of_scope"], {"threads": 1, "wasted": 1})
 
+    def test_reports_the_comment_kind_mix(self):
+        # prd/75: a thread from before the taxonomy has no kind and reads as
+        # "review"; the mix must still add up to every considered thread.
+        metric = self.metric(self.fixture(), "comment_tax")
+        self.assertEqual(metric["kinds"], {"review": metric["threads"]})
+
     def test_emits_a_move_nits_to_the_ticket_rule(self):
         suggestion = by_id(self.insights(self.fixture()), "comment-tax")
         self.assertIsNotNone(suggestion)

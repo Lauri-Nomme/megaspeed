@@ -728,6 +728,10 @@ def load_threads(con) -> list[dict]:
             # must be able to disclose the difference instead of calling both
             # "a definite classifier read" (prd/16, data lifecycle).
             "classifier_version": attributes.get("classifier_version"),
+            # prd/75: review / ci_notice / ci_finding / bot / bot_request /
+            # admin. A store from before the taxonomy has no attribute, and the
+            # safe reading is "review" (what every thread was assumed to be).
+            "comment_kind": attributes.get("comment_kind") or "review",
             "severity": attributes.get("severity"),
             "anchor_class": attributes.get("anchor_class"),
         })
@@ -1689,6 +1693,7 @@ def comment_tax(court: ballcourt.BallCourt, threads: list[dict], window) -> dict
     by_type: dict[str, dict] = defaultdict(lambda: {"threads": 0, "wasted": 0})
     outcomes: dict[str, int] = defaultdict(int)
     versions: dict[str, int] = defaultdict(int)
+    kinds: dict[str, int] = defaultdict(int)
     considered = 0
     classified = 0
     wasted = 0
@@ -1703,6 +1708,7 @@ def comment_tax(court: ballcourt.BallCourt, threads: list[dict], window) -> dict
             if created is None or not (start <= created <= end):
                 continue
         considered += 1
+        kinds[thread.get("comment_kind") or "review"] += 1
         comment_type = thread.get("comment_type")
         outcome = thread.get("thread_outcome")
         if not comment_type:
@@ -1756,6 +1762,7 @@ def comment_tax(court: ballcourt.BallCourt, threads: list[dict], window) -> dict
         "available": classified > 0,
         "threads": considered,
         "classified": classified,
+        "kinds": dict(sorted(kinds.items(), key=lambda item: (-item[1], item[0]))),
         "wasted": wasted,
         "wasted_share": round(wasted / classified, 2) if classified else 0.0,
         "rejected": outcomes.get("rejected", 0),

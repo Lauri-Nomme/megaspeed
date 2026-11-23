@@ -129,3 +129,5 @@ Draft. Iterating in committed slices. **No implementation yet.**
 | `72-sprint-refresh.md` | Sprint metadata refresh |
 | `73-performance-v2.md` | Performance long-tail v2 (draft; measure before dispatch) |
 | `74-scrape-classification-cache.md` | Scrape classification cache (draft; after the relabel workflow settles) |
+| `75-label-prompt-v2.md` | Label prompt v2, CI/admin taxonomy and the anchor-diff verdict |
+| `76-reply-events.md` | Replies as first-class events (v0.21 design; draft) |

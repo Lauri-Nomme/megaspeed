@@ -62,6 +62,18 @@ PERSON rows went 329→223 (merged plus pre-existing orphans), events unchanged 
 The laptop's `identity.json` still holds the old pseudonyms: swap its `bb:`
 entries before the next scrape, or the rekeyed actors come back.
 
+## v0.20.2 — comment-kind mix in the metrics; the diff verdict
+
+- `comment_tax` reports `kinds` (`review` / `ci_notice` / `ci_finding` / `bot` /
+  `bot_request` / `admin`), so a store whose CI threads were re-categorised no
+  longer looks like it lost labels: `threads` still counts every thread,
+  `classified` counts the review ones.
+- The anchor-diff A/B (21 openers with a hunk) changed 3 labels, two reciprocal
+  (`nit`↔`out_of_scope`): **the diff is not an input in v2.** `prd/75` records
+  the measurement.
+- `prd/76` is the v0.21 design for replies as events (5,832 replies / 5,311
+  threads are invisible today).
+
 ## v0.20.1 — comment_kind at ingest + recategorize
 
 - The reducer sets ``comment_kind`` on every THREAD from the author kind and the
