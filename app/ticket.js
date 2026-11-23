@@ -614,7 +614,7 @@ export function epicMarkup(payload, { base = '', benchmark = true } = {}) {
       <td class="c-id" data-label="story">${ticketHref(story.key, base)
         ? `<a class="ticket-link mono" href="${esc(ticketHref(story.key, base))}" data-ticket="${esc(story.key)}">${esc(story.key)}</a>`
         : `<span class="mono">${esc(story.key)}</span>`}</td>
-      <td class="c-state" data-label="state"><span class="pill ${story.censored ? 'waiting' : 'healthy'}">${esc(story.state || 'unknown')}${story.censored ? ' · open' : ''}</span></td>
+      <td class="c-state" data-label="state"><span class="pill ${story.censored ? 'waiting' : 'healthy'}">${esc(story.state || 'unknown')}${story.censored && story.state !== 'open' ? ' · open' : ''}</span></td>
       <td class="c-dur num" data-label="points">${story.points == null ? '—' : esc(story.points)}</td>
       <td class="c-dur num" data-label="cycle">${story.cycle_hours == null ? '—' : esc(segmentHours(story.cycle_hours))}${
         benchmarkInline(story.cycle_benchmark, { enabled: benchmark, format: segmentHours })}</td>

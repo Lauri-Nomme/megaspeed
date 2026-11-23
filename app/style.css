@@ -2740,22 +2740,37 @@ tr.response-row:hover td, tr.response-row:focus-visible td { background: var(--b
 }
 .aging-insufficient p { margin: 0 0 4px; }
 .aging-insufficient p:last-child { margin-bottom: 0; }
-.aging .c-band { width: 124px; }
+.aging .c-band { width: 112px; }
 /* prd/65 N-08: 58 px clipped `story` to `sto…` (scrollWidth 59 > clientWidth
  * 58) and 170 px clipped `64 d 4 h · 91 calendar days`; the columns now fit
  * their content instead of truncating it. */
 .aging .c-kind { width: 68px; }
-.aging .c-id { width: 144px; }
+/* prd/70 F-13: 144 px clipped every PR row to `DEMO-58511 #1…`. A PR row is
+ * the key + a 5-digit PR number + the repo badge — `DEMO-58511 #11021 widget`
+ * is 182 px of monospace at `--row-font` — so the cell went from 144 to 200 px
+ * (184 px of content). The key and the number come first, so a longer repo
+ * name ellipsises last, never the id. The columns around it handed back their
+ * slack, and the 8 px padding below buys 32 px across the eight columns; the
+ * widths still total ≤ 1048 px, the 1600×1000 delivery panel, so the table does
+ * not scroll sideways. */
+.aging .c-id { width: 200px; }
 /* prd/68 F-14: the Jira-only store has multi-year ages and long stage names.
  * `in_verification` → `in verification` (G1) and `420 d 6 h 610 calendar days`
  * clipped at 100/195 px; `unobserved`/`very old` pills clipped at 120 px. The
  * widths below fit every cell and still total ≤ 1048 px (the 1600×1000
  * delivery panel), so the aging table does not scroll. */
-.aging .c-stage { width: 140px; }
-.aging .c-age { width: 232px; }
-.aging .c-mult { width: 60px; }
-.aging .c-holder { width: 130px; white-space: normal; }
-.aging .c-live { width: 146px; white-space: normal; }
+.aging .c-stage { width: 135px; }
+.aging .c-age { width: 212px; }
+.aging .c-mult { width: 56px; }
+.aging .c-holder { width: 114px; white-space: normal; }
+.aging .c-live { width: 150px; white-space: normal; }
+/* prd/70 F-13: this table is not inside a `.panel`, so it inherited the
+ * full-width table's 10 px cell padding. 8 px matches the panel tables and is
+ * where the id column's extra width comes from. Desktop only — a phone card
+ * sets its own vertical padding and the widths above are reset below. */
+@media (min-width: 641px) {
+  .aging th, .aging td { padding: 0 8px; }
+}
 .aging td.c-age .calendar { color: var(--text-tertiary); font-size: 10px; margin-left: 5px; }
 /* prd/59 phone: the second line of a row says the age in working days. */
 .aging td.c-age .working { display: none; }
