@@ -109,14 +109,17 @@ deterministic attribute on the THREAD object:
   author nor a review remark. Its size is small: 112 openers mention the AI
   reviewer in prose (the other 37 `@` hits in the trace are Java annotations such
   as `@Override`/`@Nullable`, which is why a slug list is required).
-  **The bot does not answer in the comment stream.** In the 2026-11-22 capture,
-  50 of the 112 openers were found; none had a reply from an account that is a
-  bot or named like the mention, 20 had a nested *human* reply, 30 had none, and
-  in all 50 the next comment on the PR was human. So a `bot_request` opener is
-  followed by a human remark or by nothing — the label must not assume a bot
-  answer, and the human follow-up (when present) is the review remark that can
-  carry a `comment_type`. If the responder turns out to be a differently named
-  account, it must be added to the bot slug list, not inferred from the alias.
+  **The bot answers as *its own* comment, and the first `replies` sample was
+  too old.** 50 of the 112 openers were sampled in trace order — PRs #1556–#1863,
+  long before the reviewer bot existed — so 0 answered there. The store has a bot
+  pseudonym (`AgJu`) with 1,049 `comment_added` events, **1,025 of them on PRs
+  ≥10000**, from 2026-06-29 onward, and it answers questions too. So a
+  `bot_request` opener can be followed by a bot comment that is a *new thread*,
+  not a nested reply: count it by **actor** and PR timeline, never by the
+  mention's reply list. And the `@alias` in the text is not the account name —
+  classify the author with the product's `classify_actor` (SERVICE type,
+  configured slugs, service-shaped names) instead of the handle. Sample by PR
+  range or shuffle; trace order is oldest-first.
 - `admin` replaces the "no class fits" escape hatch. No `other` value is needed
   in `comment_type` once the kind axis exists; a human non-review note becomes
   `comment_kind=admin` with a null type.
