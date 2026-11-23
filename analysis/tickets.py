@@ -240,7 +240,7 @@ def _pr_rows(court: ballcourt.BallCourt, states: list,
         # the PR's last event, so "waiting on author / CI / rebasing" is never a
         # dash when the store knows the answer.
         latest = state.intervals[-1] if state.intervals else None
-        waiting_on = sorted(
+        pending = sorted(
             set(latest.pending_all if latest is not None else ())
             | (
                 {pr["actor"]}
@@ -248,6 +248,16 @@ def _pr_rows(court: ballcourt.BallCourt, states: list,
                 and pr["actor"] not in court.bots else set()
             )
         )
+        # prd/70 F-09: the same attribution Aging and Delivery read. With no
+        # human holder the item waits on the live queue, which this list names
+        # instead of leaving it empty (the page used to print "on nobody").
+        attribution = ballcourt.holder_attribution(
+            latest,
+            author=pr["actor"],
+            sentinels=court.sentinels,
+            bots=court.bots,
+        )
+        waiting_on = pending or [attribution["label"]]
         # prd/55 §1/§7: the drawer and the headline must be able to state the
         # *current* wait, not only the measured phases. The wait opens when the
         # last interval handed the ball over and ends at the snapshot while the
@@ -333,6 +343,12 @@ def _pr_rows(court: ballcourt.BallCourt, states: list,
             "reviewers_pending": len(latest.pending_all if latest is not None else ()),
             "approved": list(latest.approved if latest is not None else ()),
             "waiting_on": waiting_on,
+            # prd/70 F-09: the queue fallback (``review queue`` / ``ready to
+            # merge``) and its role, so the page can label the holder with the
+            # same words Delivery and Aging use.
+            "holder_label": attribution["label"],
+            "holder_role": attribution["role"],
+            "holder_queue": bool(attribution["queue"]),
             "waiting_since": _iso(waiting_since),
             "waiting_hours": waiting_hours,
             "author_open": bool(latest.author_open if latest is not None else False),
@@ -1000,6 +1016,11 @@ def done_but_open(court: ballcourt.BallCourt, data: jira.JiraData,
     """
     done = jira.done_keys(data)
     by_key = {story.key: story for story in data.stories}
+    # prd/70 F-03: one canonical ticket per PR. A PR that names an old done
+    # story next to the one it is actually working (#11096) is not "Done in
+    # Jira, PR open" — that is the *open* story's PR; listing it here also made
+    # the panel label it with the key Aging did not use.
+    kind_by_key, state_by_key = ballcourt.ticket_maps(data)
     rows_by_id = {
         row["object_id"]: row for row in ((delivery or {}).get("rows") or [])
     }
@@ -1008,9 +1029,14 @@ def done_but_open(court: ballcourt.BallCourt, data: jira.JiraData,
         pr = state.pr
         if pr["closed_ts"] is not None:
             continue
+        canonical = ballcourt.primary_ticket(
+            pr.get("ticket_keys") or (),
+            kind_by_key=kind_by_key,
+            state_by_key=state_by_key,
+        )
         for key in pr.get("ticket_keys") or ():
             story = by_key.get(key)
-            if key not in done or story is None:
+            if key != canonical or key not in done or story is None:
                 continue
             closed = jira._cycle(story).boundaries.get("done")
             opened = pr["created_ts"]
@@ -1033,6 +1059,14 @@ def done_but_open(court: ballcourt.BallCourt, data: jira.JiraData,
                     if after else 0.0
                 ),
                 "waiting_on": list(row.get("waiting_on") or ()),
+                # prd/70 F-09: the same queue attribution Aging and the ticket
+                # page print; without it this panel's "who owes" fell back to a
+                # dash on a row Delivery labels "review queue".
+                "holder_label": row.get("holder_label"),
+                "holder_role": row.get("holder_role"),
+                "ball_label": row.get("ball_label"),
+                "ball": row.get("ball"),
+                "waiting_roles": dict(row.get("waiting_roles") or {}),
                 "waiting_hours": row.get("waiting_hours"),
                 "age_hours": row.get("age_hours"),
                 "stale_reasons": list(row.get("stale_reasons") or ()),
@@ -1129,6 +1163,12 @@ def _epic(court: ballcourt.BallCourt, data: jira.JiraData,
     child_rows.sort(key=lambda row: (row["cycle_hours"] is None, row["cycle_hours"] or 0, row["key"]))
     story_count = len(child_rows)
     open_count = sum(1 for row in child_rows if row["censored"])
+    # prd/70 F-03: a PR that names *only* an epic key has no story page to
+    # link to, so its key is the epic's — and the epic page must then list it
+    # instead of being the dead end the QA run found (0 PRs for DEMO-56715
+    # while #10865 and #10803 named it). The join is the store's own
+    # (`PR.ticket_keys`), the same one a story page uses.
+    prs = _pr_rows(court, _pr_states(court, key))
     return {
         "ok": True,
         "key": key,
@@ -1155,8 +1195,8 @@ def _epic(court: ballcourt.BallCourt, data: jira.JiraData,
         "reopened": False,
         "reopen_count": 0,
         "segments": {"rows": [], "boundaries": {}, "measured": 0, "missing": []},
-        "prs": [],
-        "pr_count": 0,
+        "prs": prs,
+        "pr_count": len(prs),
         "sprints": {"memberships": []},
         "worklogs": [],
         "worklog": {},
@@ -1167,6 +1207,11 @@ def _epic(court: ballcourt.BallCourt, data: jira.JiraData,
             f"stor{'y' if story_count == 1 else 'ies'}, not a story. It has no "
             "created → done cycle of its own; open a child story for the cycle, "
             "or read the children below."
+            + (
+                f" {len(prs)} pull request{' names' if len(prs) == 1 else 's name'}"
+                f" this epic directly."
+                if prs else ""
+            )
         ),
         "answer_kind": "epic",
         "note": (
@@ -1245,7 +1290,11 @@ def _open_pr_state(open_prs: list[dict]) -> str:
         if total:
             bits.append(f"{approved or 0}/{total} approved")
         if pr.get("waiting_hours") is not None:
-            who = " + ".join(pr.get("waiting_on") or []) or "nobody"
+            who = (
+                " + ".join(pr.get("waiting_on") or [])
+                or pr.get("holder_label")
+                or ballcourt.REVIEW_QUEUE
+            )
             bits.append(
                 f"waiting {jira.human_hours(pr['waiting_hours'])} on {who}"
             )
@@ -1600,6 +1649,11 @@ def ticket(
             # prd/55 §1/§11: the ticket headline and its Markdown export state
             # the open PR's wait and approval position, not only that it exists.
             "waiting_on": list(pr.get("waiting_on") or ()),
+            # prd/70 F-09: the shared holder attribution ("review queue" /
+            # "ready to merge" when no human holds the ball).
+            "holder_label": pr.get("holder_label"),
+            "holder_role": pr.get("holder_role"),
+            "holder_queue": pr.get("holder_queue"),
             "waiting_since": pr.get("waiting_since"),
             "waiting_hours": pr.get("waiting_hours"),
             "reviewers_approved": pr.get("reviewers_approved"),

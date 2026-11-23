@@ -473,21 +473,34 @@ def _holder_block(court: ballcourt.BallCourt, states, hours: float | None,
     Holder hours are the item's age while it waited on that person; several
     holders **share** the same hours (concepts.md §2 person-hours) and are never
     summed into a total.
+
+    prd/70 F-09: the attribution is ``ballcourt.holder_attribution``, the same
+    one the delivery row and the ticket page read. With no human holder the row
+    names the live queue — ``review queue`` or ``ready to merge`` — instead of an
+    empty list that rendered as ``—`` while Delivery said ``review queue``.
     """
     people: dict[str, str] = {}
+    queue: dict | None = None
     for state in states:
         latest = state.intervals[-1] if state.intervals else None
-        if latest is None:
-            continue
-        for person in latest.person_holders:
-            if person == state.pr.get("actor"):
-                people[person] = "author"
-            elif person in court.sentinels:
-                people[person] = "sentinel"
-            else:
-                people[person] = "review"
+        attribution = ballcourt.holder_attribution(
+            latest,
+            author=state.pr.get("actor"),
+            sentinels=court.sentinels,
+            bots=court.bots,
+        )
+        for entry in attribution["people"]:
+            people[entry["person"]] = entry["role"]
+        if attribution["queue"] and queue is None:
+            queue = attribution
     if not people and story is not None and story.actor:
         people[story.actor] = "owner"
+    if not people and queue is not None:
+        # A queue is not a person: the role stays empty so the cell prints the
+        # live queue's own words ("review queue"), exactly as Delivery does.
+        return [{
+            "person": queue["label"], "role": "", "hours": hours, "queue": True,
+        }]
     return [
         {"person": person, "role": role, "hours": hours}
         for person, role in sorted(people.items())
@@ -585,6 +598,11 @@ def _pr_rows(court: ballcourt.BallCourt, data: jira.JiraData | None,
              stage: str | None) -> list[dict]:
     done = jira.done_keys(data) if data is not None else set()
     stories = {story.key: story for story in data.stories} if data is not None else {}
+    # prd/70 F-03: one canonical ticket per PR — the story, not the epic link,
+    # and the story that is still open when a PR names two. The same helper
+    # labels the Delivery row and the ticket page, so the drill-down cannot
+    # point at a different key than the label.
+    kind_by_key, state_by_key = ballcourt.ticket_maps(data)
     delivery = ballcourt.delivery_list(
         court, done_tickets=done,
     )
@@ -608,7 +626,11 @@ def _pr_rows(court: ballcourt.BallCourt, data: jira.JiraData | None,
         if entered is None or entered > court.snapshot:
             continue
         meta = by_id.get(pr["object_id"]) or {}
-        ticket = (meta.get("story_tickets") or [None])[0]
+        ticket = ballcourt.primary_ticket(
+            pr.get("ticket_keys") or (),
+            kind_by_key=kind_by_key,
+            state_by_key=state_by_key,
+        )
         story = stories.get(ticket) if ticket else None
         status = (
             liveness(court, story, done=bool(story and story.key in done))

@@ -47,11 +47,27 @@ export function tabRows(data, tab) {
 }
 
 /**
+ * The live queue a row waits in when no human holds it (prd/70 F-09).
+ *
+ * `holder_label` is the server's one attribution (`analysis.ballcourt.
+ * holder_attribution`), the same string Aging's holder cell and the ticket
+ * page print — `review queue` for an unassigned PR, `ready to merge` once every
+ * reviewer answered. The ball label is the fallback for an older payload, so a
+ * queue is never rendered as an em dash or as "nobody".
+ */
+export function holderWords(row) {
+  if (!row) return '—';
+  if (row.holder_label) return row.holder_label;
+  return whoLabel(row.ball_label || row.ball || '') || '—';
+}
+
+/**
  * Who a row waits on, in words (prd/41 B6).
  *
  * When several people hold the ball the API keeps the role label (`review`) but
  * names every holder in `waiting_on`; naming them beats "review queue" — #53's
- * "waiting on CaOs" hid that the sentinel owed a verdict too.
+ * "waiting on CaOs" hid that the sentinel owed a verdict too. With no human
+ * holder the row names the live queue (`holderWords`, prd/70 F-09).
  */
 export function waitingLabel(row) {
   if (!row) return '';
@@ -61,7 +77,7 @@ export function waitingLabel(row) {
   // the other. Name every holder, with its role.
   const people = (row.waiting_on || []).filter(Boolean);
   if (people.length) return whoOwes(row);
-  return whoLabel(row.ball_label || row.ball);
+  return holderWords(row);
 }
 
 /**
@@ -332,7 +348,7 @@ export function whoOwes(row) {
   if (!row) return '—';
   const roles = row.waiting_roles || {};
   const people = (row.waiting_on || []).filter(Boolean);
-  if (!people.length) return row.ball_label || row.ball || '—';
+  if (!people.length) return holderWords(row);
   return people
     .map((person) => `${person}${roles[person] ? ` (${roles[person]})` : ''}`)
     .join(' + ');

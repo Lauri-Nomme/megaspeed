@@ -159,6 +159,16 @@ TERMINAL = {"pr_merged", "pr_declined"}
 PARENT_KEY_SHARE = 0.25
 PARENT_KEY_MIN_PRS = 3
 
+#: prd/70 F-03: the ticket kinds that are work items. ``TICKET`` is the key
+#: dimension (``ingest.pipeline``), ``STORY`` the Jira issue; both beat an
+#: ``EPIC``, which is a parent grouping and lists no PR of its own.
+STORY_KINDS = frozenset({"STORY", "TICKET"})
+EPIC_KIND = "EPIC"
+#: The one live story state the store writes (``ingest.jira_pipeline``:
+#: ``resolution_class(resolution) or "open"``). Every other state is a closed
+#: resolution, so a story still ``open`` is the one that is still being worked.
+LIVE_TICKET_STATE = "open"
+
 #: concepts.md §1: a business day is 8 business hours. The stale-PR signal
 #: (prd/34 §5) is "open longer than this many *business* days", never calendar
 #: days.
@@ -2231,6 +2241,164 @@ def _parent_keys(prs: dict[str, dict]) -> set[str]:
     return {key for key, count in counts.items() if count >= threshold}
 
 
+def _ticket_number(key: str) -> int:
+    """``DEMO-60130`` -> ``60130``; ``-1`` when the key carries no number.
+
+    Jira's numbering is monotonic per project, so within one project a higher
+    number is a *newer* ticket — the store's only recency signal that travels in
+    a key. Across projects it is a stable (if arbitrary) order, which is all a
+    tie-break needs.
+    """
+    suffix = str(key or "").rpartition("-")[2]
+    return int(suffix) if suffix.isdigit() else -1
+
+
+def primary_ticket(
+    keys,
+    *,
+    kind_by_key: dict[str, str] | None = None,
+    state_by_key: dict[str, str] | None = None,
+) -> str | None:
+    """The one canonical ticket key for a PR (prd/70 F-03).
+
+    A store can attach several keys to one PR: an epic link next to the story
+    (``#11030`` = EPIC ``DEMO-56715`` + STORY ``DEMO-57507``), or an old
+    closed story mentioned in the description (``#11096`` = open
+    ``DEMO-60130`` + 2023-done ``DEMO-9714``). Every surface that picks one
+    key for display or drill-down calls this function, so the label and the
+    ticket page it links to cannot disagree.
+
+    Rules, first match wins (the sort key is the preference order):
+
+    1. a ``STORY``/``TICKET`` key over an ``EPIC`` key — an epic page is a
+       parent grouping, not the PR's work item;
+    2. among those, a live (``open``) story over a closed one — a new PR under
+       a year-old ticket is about the story that is still open;
+    3. among ties, the most recent story (the higher ticket number, which is
+       how Jira numbers a project).
+
+    ``kind_by_key``/``state_by_key`` come from the store's own objects
+    (``ticket_maps``); without them the rule degrades to rule 3 alone, which is
+    still the same answer on every surface. ``None`` only when the PR names no
+    key at all — a key the store does not know is still the best evidence a PR
+    carries, so it is never dropped.
+    """
+    usable = [str(key).strip() for key in (keys or ()) if str(key or "").strip()]
+    if not usable:
+        return None
+    kinds = kind_by_key or {}
+    states = state_by_key or {}
+
+    def rank(key: str) -> tuple[int, int, int]:
+        kind = str(kinds.get(key) or "").upper()
+        state = str(states.get(key) or "").strip().lower()
+        kind_rank = 0 if kind in STORY_KINDS else (2 if kind == EPIC_KIND else 1)
+        live_rank = 0 if state == LIVE_TICKET_STATE else (1 if not state else 2)
+        # ``min`` + a negated number = the newest story wins the tie.
+        return (kind_rank, live_rank, -_ticket_number(key))
+
+    return min(usable, key=rank)
+
+
+def ticket_maps(data) -> tuple[dict[str, str], dict[str, str]]:
+    """``(kind_by_key, state_by_key)`` from a ``jira.JiraData``-shaped object.
+
+    Duck-typed on purpose: ``analysis.jira`` imports this module, so this module
+    cannot import it back. The two fields it reads (``stories`` and
+    ``epic_objects``) are the Jira layer's public shape.
+    """
+    kinds: dict[str, str] = {}
+    states: dict[str, str] = {}
+    for story in getattr(data, "stories", None) or ():
+        key = getattr(story, "key", None)
+        if not key:
+            continue
+        kinds[str(key)] = "STORY"
+        state = getattr(story, "state", None)
+        if state:
+            states[str(key)] = str(state)
+    for key, epic in (getattr(data, "epic_objects", None) or {}).items():
+        kinds.setdefault(str(key), EPIC_KIND)
+        state = (epic or {}).get("state")
+        if state and str(key) not in states:
+            states[str(key)] = str(state)
+    return kinds, states
+
+
+#: The two words a live queue is called when no human holds the item (prd/70
+#: F-09). They are the labels Delivery has always printed, so Aging and the
+#: ticket page quote the same words instead of "nobody" or an em dash.
+REVIEW_QUEUE = "review queue"
+READY_TO_MERGE = "ready to merge"
+
+
+def holder_attribution(
+    latest: "Interval | None",
+    *,
+    author: str | None = None,
+    sentinels: set[str] | frozenset[str] = frozenset(),
+    bots: set[str] | frozenset[str] = frozenset(),
+) -> dict:
+    """Who holds an open item now — one answer for every surface (prd/70 F-09).
+
+    ``latest`` is the PR's last interval (``None`` when the store holds no
+    events). Named humans win (concepts.md §2: a single holder is *named*);
+    with no human holder the answer is the live queue the ball sits in, never
+    "nobody" and never an em dash:
+
+    * every reviewer answered, nothing merged — :data:`READY_TO_MERGE`;
+    * otherwise (an unassigned PR, or only a queue responder) —
+      :data:`REVIEW_QUEUE`.
+
+    Returns ``{"people": [{"person", "role"}], "label", "role", "queue"}``:
+    ``people`` is the named holders with their roles, ``label`` is the one
+    string a queue-level cell prints, and ``queue`` says whether the label is a
+    live queue rather than a person (so a client never offers it as a scope).
+    """
+    people: dict[str, str] = {}
+    if latest is not None:
+        for person in latest.person_holders:
+            if not person or person in bots:
+                continue
+            if author and person == author:
+                people[person] = "author"
+            elif person in sentinels:
+                people[person] = "sentinel"
+            else:
+                people[person] = "review"
+        if author and latest.author_open and author not in bots:
+            people[author] = "author"
+    named = [
+        {"person": person, "role": role}
+        for person, role in sorted(people.items())
+    ]
+    if named:
+        return {
+            "people": named,
+            "label": " + ".join(entry["person"] for entry in named),
+            "role": named[0]["role"] if len(named) == 1 else "",
+            "queue": False,
+        }
+    ready = bool(
+        latest is not None
+        and (latest.ball == READY or latest.ready)
+        and not latest.author_open
+    )
+    if ready:
+        return {
+            "people": [],
+            "label": READY_TO_MERGE,
+            "role": "merge",
+            "queue": True,
+        }
+    return {
+        "people": [],
+        "label": REVIEW_QUEUE,
+        "role": REVIEW,
+        "queue": True,
+    }
+
+
 def delivery_list(
     bc: BallCourt,
     window: tuple[datetime, datetime] | None = None,
@@ -2363,6 +2531,16 @@ def delivery_list(
             or (current.ball_label if current else None)
             or role_label
         )
+        # prd/70 F-09: the one holder attribution, so Delivery, Aging and the
+        # ticket page print the same words. ``waiting_on`` stays the truth (the
+        # named humans); this is the fallback a queue-level cell shows — the
+        # live queue, never "nobody".
+        holder = holder_attribution(
+            latest,
+            author=pr["actor"],
+            sentinels=bc.sentinels,
+            bots=bc.bots,
+        )
         waiting_hours = _hours(
             bc.business_hours(waiting_for, waiting_since, bc.snapshot) * 3600.0
         )
@@ -2424,6 +2602,11 @@ def delivery_list(
             "waiting_on": waiting_on,
             "waiting_roles": waiting_roles,
             "ball_label": ball_label,
+            # prd/70 F-09: the queue fallback (``review queue`` / ``ready to
+            # merge``) when no human holder exists; the same string Aging and
+            # the ticket page print.
+            "holder_label": holder["label"],
+            "holder_role": holder["role"],
             "stale": bool(stale_reasons),
             "stale_reasons": stale_reasons,
             "stale_business_days": stale_business_days,
