@@ -582,6 +582,12 @@ def build_parser(prog: str = "megaspeed-scrape") -> argparse.ArgumentParser:
     ap.add_argument("--no-llm-trace", action="store_true",
                     help="do not write <state-dir>/classify-trace.jsonl (the raw-zone"
                          " record of every model call that `ingest relabel` replays)")
+    ap.add_argument("--classify-cache", default=None, metavar="PATH",
+                    help="digest-keyed label cache shared with `ingest relabel`"
+                         " (default <state-dir>/classify-cache.jsonl); a hit costs no"
+                         " model call and is still written to the trace (prd/74)")
+    ap.add_argument("--no-classify-cache", action="store_true",
+                    help="do not read or write the label cache")
     ap.add_argument("--progress-interval", type=float, default=None, metavar="SECONDS",
                     help="progress line on stderr every N seconds; 0 disables"
                          f" (default {DEFAULT_PROGRESS_INTERVAL:g})")
@@ -901,6 +907,8 @@ def main(argv: list[str] | None = None) -> int:
                 if hans is not None and cfg.push_class
                 else None
             ),
+            classify_cache=args.classify_cache,
+            use_classify_cache=not args.no_classify_cache,
             checkpoint_every=args.checkpoint_every,
             verify_quiet=False if (args.no_source_check or hans is not None) else None,
         )

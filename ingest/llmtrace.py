@@ -225,6 +225,13 @@ def call_line(record: dict) -> str:
     error = str(record.get("error") or "")
     if error:
         return f"{head} · FAIL {record.get('label_version') or backend} · {error}"
+    if record.get("cached"):
+        # prd/74: a digest-keyed cache hit costs no request, so the line says so
+        # instead of pretending a model call happened (or that one was skipped).
+        return (
+            f"{head} · cached · {record.get('label_version') or backend}"
+            f" · {_labels(record.get('labels') or {})}"
+        )
     if record.get("sent") is False and backend != "mock":
         return f"{head} · SKIPPED · {record.get('label_version') or backend}"
     return f"{head} · ok · {_labels(record.get('labels') or {})}"

@@ -112,7 +112,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import bundle as bundle_mod
-from . import classify, gitclass, llmtrace, pepper as pepper_mod, taxonomy
+from . import classify, gitclass, labelcache, llmtrace, pepper as pepper_mod, taxonomy
 from .bitbucket import BitbucketClient, PullRequest
 from .config import Config
 from .pipeline import KeyFilter, Reducer, Stats, _object
@@ -1111,6 +1111,8 @@ def scrape(
     progress: ProgressReporter | None = None,
     push_classifier: gitclass.PushClassifier | None = None,
     text_classifier: classify.Classifier | None = None,
+    classify_cache: str | Path | None = None,
+    use_classify_cache: bool = True,
     checkpoint_every: int = DEFAULT_CHECKPOINT_EVERY,
     verify_quiet: bool | None = None,
 ) -> dict:
@@ -1136,6 +1138,14 @@ def scrape(
     what the config/source imply: the deterministic mock for ``--fixture``, the
     local Ollama box for a live run, ``None`` when ``cfg.text_classify`` is off.
     Raw text never crosses into the bundle -- only the labels do.
+
+    ``classify_cache`` is the digest-keyed label cache (prd/74) shared with
+    ``ingest relabel``: a text that was already labelled by the same model /
+    think flag / classifier version is served from it without a request, and the
+    hit is still traced. It defaults to ``<state-dir>/classify-cache.jsonl`` and
+    is used only for a real backend on a non-fixture source;
+    ``use_classify_cache=False`` disables both the read and the write. The file
+    holds labels and a text digest, never prose.
 
     **Crash safety.** The identity map, the rows added since the last checkpoint
     and both cursors are checkpointed every ``checkpoint_every`` kept PRs and at
@@ -1195,6 +1205,32 @@ def scrape(
         if text_classifier is not None
         else classify.for_scrape(cfg, source)
     )
+    # prd/74: a digest-keyed label cache makes a re-scrape (or an incremental run
+    # that re-reads a changed PR) free for texts whose label cannot have changed.
+    # It is shared with the relabel, carries no prose, and is keyed by the inner
+    # classifier's model / think flag / version, so a changed model is a miss
+    # rather than a silent mix. A mock or fixture run never uses it: the
+    # deterministic labels are not worth a file, and fixture tests pin no state.
+    cache_path: Path | None = None
+    label_cache: labelcache.LabelCache | None = None
+    if (
+        use_classify_cache
+        and text is not None
+        and getattr(text, "backend", "mock") != "mock"
+        and source != "fixture"
+    ):
+        cache_path = (
+            Path(classify_cache).expanduser()
+            if classify_cache
+            else state_dir / labelcache.CACHE_FILE
+        )
+        label_cache = labelcache.LabelCache(
+            cache_path,
+            model=getattr(text, "model", None) or "",
+            think=bool(getattr(text, "think", False)),
+            version=text.version,
+        )
+        text = labelcache.CachedClassifier(text, label_cache)
     if reporter.enabled and source != "fixture":
         # Say what is about to happen *before* the first request: a text
         # classifier's first batch can take minutes on a CPU-only box, and the
@@ -1217,9 +1253,10 @@ def scrape(
         trace_label = ""
         if text is not None and source != "fixture" and getattr(cfg, "classify_trace", True):
             trace_label = f" · trace {state_dir / llmtrace.TRACE_FILE}"
+        cache_label = f" · cache {cache_path}" if cache_path is not None else ""
         reporter.emit(
             f"[scrape] {source} · {repos_label} · writing {out}"
-            f"{key_scope} · {text_label}{trace_label}"
+            f"{key_scope} · {text_label}{trace_label}{cache_label}"
         )
         if text is not None:
             labeled = {"n": 0}
@@ -1407,6 +1444,10 @@ def scrape(
     finally:
         if text_trace is not None:
             text_trace.close()
+        if label_cache is not None:
+            # Flush/close the cache checkpoint even when the walk raised: every
+            # label stored so far is paid for and reusable by the next run.
+            label_cache.close()
 
     events = _emitted_events(collected)
     emitted = max((e["ts"] for e in events), default=None)

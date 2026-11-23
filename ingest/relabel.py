@@ -38,6 +38,7 @@ from pathlib import Path
 from . import citext, classify, labelpatch, llmtrace, taxonomy
 from .bundle import Bundle, BundleError, read_bundle
 from .config import load_config
+from .labelcache import LabelCache
 from .logs import iso
 from .progress import ProgressReporter, format_elapsed
 from .pseudonym import IdentityTable
@@ -345,123 +346,6 @@ def _records_from_hans(
                 },
             })
     return records
-
-
-class LabelCache:
-    """Append-only, raw-text-free label cache: the resume checkpoint.
-
-    One JSON line per classified text::
-
-        {"kind": "comment", "digest": "…", "labels": {…},
-         "model": "qwen3:30b-a3b", "think": true, "version": "ollama-v1"}
-
-    The digest is :func:`ingest.classify.digest` (a blake2b of the text), so the
-    cache carries **no prose** -- only labels and the model identity that
-    produced them. A resumed run (or a re-run after a model change) reuses an
-    entry only when model, think flag and classifier version all match; anything
-    else is re-classified and appended.
-
-    A torn last line is skipped, exactly like the trace reader.
-    """
-
-    def __init__(self, path: str | Path, *, model: str, think: bool, version: str):
-        self.path = Path(path)
-        self.model = str(model or "")
-        self.think = bool(think)
-        self.version = str(version or "")
-        self.labels: dict[tuple[str, str], dict] = {}
-        self.read = 0
-        self.bad = 0
-        self._handle = None
-        if self.path.is_file():
-            self._load()
-
-    def _key(self, kind: str, text: str) -> tuple[str, str]:
-        return str(kind), classify.digest(str(text)).hex()
-
-    @staticmethod
-    def _project(kind: str, labels: dict) -> dict:
-        """Only the keys that kind actually has (a description has no comment_type)."""
-        return {
-            key: labels[key] for key in classify.labels_for(kind) if key in labels
-        }
-
-    def _matches(self, entry: dict) -> bool:
-        return (
-            str(entry.get("model") or "") == self.model
-            and bool(entry.get("think", False)) == self.think
-            and str(entry.get("version") or "") == self.version
-        )
-
-    def _load(self) -> None:
-        with self.path.open("r", encoding="utf-8", errors="replace") as stream:
-            for line in stream:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    self.bad += 1
-                    continue
-                if not isinstance(entry, dict) or not isinstance(entry.get("labels"), dict):
-                    self.bad += 1
-                    continue
-                kind = str(entry.get("kind") or "")
-                digest = str(entry.get("digest") or "")
-                if not kind or not digest or not self._matches(entry):
-                    continue
-                try:
-                    labels = classify.parse_labels(
-                        kind, self._project(kind, entry["labels"])
-                    )
-                except (classify.ClassifyError, ValueError):
-                    # A hand-edited or truncated label bag must never become a
-                    # patch row: re-classify instead.
-                    self.bad += 1
-                    continue
-                self.labels[(kind, digest)] = labels
-                self.read += 1
-
-    def get(self, kind: str, text: str) -> dict | None:
-        return self.labels.get(self._key(kind, text))
-
-    def put(self, kind: str, text: str, labels: dict) -> None:
-        key = self._key(kind, text)
-        if key in self.labels:
-            return
-        labels = self._project(kind, labels)
-        self.labels[key] = labels
-        if self._handle is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self._handle = self.path.open("a", encoding="utf-8")
-        entry = {
-            "kind": key[0],
-            "digest": key[1],
-            "labels": labels,
-            "model": self.model,
-            "think": self.think,
-            "version": self.version,
-        }
-        self._handle.write(json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n")
-
-    def flush(self) -> None:
-        if self._handle is not None:
-            self._handle.flush()
-
-    def close(self) -> None:
-        if self._handle is not None:
-            self._handle.close()
-            self._handle = None
-
-    def __del__(self):  # pragma: no cover - a safety net for an error path
-        try:
-            self.close()
-        except Exception:  # noqa: BLE001 - interpreter shutdown
-            pass
-
-    def __len__(self) -> int:
-        return len(self.labels)
 
 
 def _stop_requested(path: Path) -> bool:
