@@ -44,7 +44,7 @@ deterministic attribute on the THREAD object:
 |---|---|---|---|
 | `review` | a human review remark | one of the six | per type |
 | `ci_notice` | CI output with no action (coverage report, Qodana clean) | none | no |
-| `ci_finding` | CI output that creates work (Qodana issues, coverage below threshold, failed build) | none | yes → author |
+| `ci_finding` | CI output that creates work (Qodana issues, coverage below threshold) | none | yes → author |
 | `bot_request` | a human addressing a bot (`@bot review`, `@bot wdyt …`) | none | no (the reply may) |
 | `bot_answer` | the bot's reply inside such a thread | none | no |
 | `admin` | rebased / added reviewer / LGTM / fyi / emoji / bare link | none | no |
@@ -52,9 +52,32 @@ deterministic attribute on the THREAD object:
 - `comment_kind` is set by rules (actor kind, configured raw bot slugs, template
   regexes, `@`-command prefix), never by the model; a bot's two templates must
   not get two labels.
-- `ci_finding` is not prose-derived when the store already has the fact: a
-  `build_status` event (`failed`, or findings count > 0) is the signal. The
-  comment is a *view* of it; do not re-label the prose.
+- `ci_finding` vs `ci_notice` **cannot come from `build_status`.** This corpus
+  has **0 `build_status` events**: the scrape reads
+  `BUILD_STATUS_API/commits/{id}` (`bitbucket.py:205`), which is real build
+  servers only; the coverage and Qodana bots post ordinary `comment_added`
+  events and never write a build status. There is no structured CI result to
+  join against, so the distinction must be parsed from the bot's **own
+  template**, deterministically:
+  - identify the family by bot actor + template regex (coverage percentages;
+    `Qodana: …`);
+  - Qodana: "no new issues found" → `ci_notice`; an issue list / count / failed
+    run → `ci_finding`;
+  - coverage: parse `instruction|line|branch coverage is N%` and compare to the
+    configured threshold per metric (below → `ci_finding`), or to the previous
+    coverage comment on the same PR (a drop → `ci_finding`); a first report with
+    no threshold is a `ci_notice`;
+  - a bot comment that matches **no** known template is `ci_notice` with
+    `template=unknown`, counted so a missing rule is visible — never a guess.
+  If a real `build_status` exists in some future source it is corroboration, not
+  the source; it must not be the only path, because this corpus proves that path
+  is empty.
+- The bot filter itself is a config gap, not a missing design: `pipeline.py:849`
+  already skips `actor_kind=bot` before the model, but the scrape's
+  `MEGASPEED_BOT_SLUGS` did not hold the coverage/Qodana account, so the raw
+  user record classified as human and 2,277 openers went to the model. Their
+  `comment_added` events still say `"actor_kind":"human"`; the PERSON row was
+  corrected to `bot` only during the 2026-11-23 split. Add the raw slugs.
 - `actionable=true` on `ci_finding` is the "ball goes to the PR author" flag, so
   the queue/blocking graph can carry it without pretending it is a `blocker`.
 - `bot_request` must be excluded from question statistics: 88/139 `@…review`
