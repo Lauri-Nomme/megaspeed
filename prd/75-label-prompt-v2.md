@@ -109,17 +109,20 @@ deterministic attribute on the THREAD object:
   author nor a review remark. Its size is small: 112 openers mention the AI
   reviewer in prose (the other 37 `@` hits in the trace are Java annotations such
   as `@Override`/`@Nullable`, which is why a slug list is required).
-  **The bot answers as *its own* comment, and the first `replies` sample was
-  too old.** 50 of the 112 openers were sampled in trace order — PRs #1556–#1863,
-  long before the reviewer bot existed — so 0 answered there. The store has a bot
-  pseudonym (`AgJu`) with 1,049 `comment_added` events, **1,025 of them on PRs
-  ≥10000**, from 2026-06-29 onward, and it answers questions too. So a
-  `bot_request` opener can be followed by a bot comment that is a *new thread*,
-  not a nested reply: count it by **actor** and PR timeline, never by the
-  mention's reply list. And the `@alias` in the text is not the account name —
-  classify the author with the product's `classify_actor` (SERVICE type,
-  configured slugs, service-shaped names) instead of the handle. Sample by PR
-  range or shuffle; trace order is oldest-first.
+  **Measured shape (108 recent openers, PRs ≥10000 of 112 total):** 61% have a
+  nested reply (56% of those the bot's), the bot answers somewhere in **97%** —
+  in-thread 56%, as its own new thread the rest — and **81% get a human
+  follow-up after the bot**. So the `@…` command is tool-directed, but the
+  thread is a real review exchange: the human follow-up is the remark to label,
+  not the command. The model currently books 81 of the 112 as `question` (72%),
+  which is the artefact this reclassification removes.
+  **The store has no reply events at all.** The source holds 5,832 nested
+  replies across 5,311 threads; the log has `comment_added` for openers only
+  (plus 156 `question_answered`), because a reply inside a comment is not an
+  activity. A human reply inside a bot thread is therefore invisible and
+  unlabelable today. Emitting reply events (same THREAD, reply ts/actor) is a
+  prerequisite for the "first human remark" rule — and it fixes the other
+  5,311 threads whose replies are likewise unmeasured.
 - `admin` replaces the "no class fits" escape hatch. No `other` value is needed
   in `comment_type` once the kind axis exists; a human non-review note becomes
   `comment_kind=admin` with a null type.
