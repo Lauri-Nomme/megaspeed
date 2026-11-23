@@ -1547,6 +1547,18 @@ def insights(request: Request):
     verification, review bounces and approved-but-never-merged PRs, each row a
     ticket key with its count and hours (derived from the status history and the
     PR status vectors, over the whole store).
+
+    prd/70 F-10: ``thread_labels`` discloses which classifier produced the
+    review-thread labels the comment-tax / questions metrics read — the version,
+    its share of the classified threads, and a sentence the page renders. A
+    ``mock-v1`` store says its labels are deterministic placeholders awaiting a
+    model relabel; a real model tag is named, never guessed.
+
+    prd/70 F-11: the payload ships only the drill-down rows the Rules page can
+    render (the top ``DRILL_CAP`` in the page's own order) with the metric's
+    honest ``rows_total`` / ``rows_affected`` / ``rows_scopes`` counts. At
+    ``days=1882`` that is ~1 MB instead of the old 12.2 MB, and every visible
+    row and count still reconciles.
     """
     unknown = _unknown_params(request, _params(ANALYSIS_PARAMS["insights"]))
     if unknown is not None:

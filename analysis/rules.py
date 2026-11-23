@@ -135,6 +135,14 @@ SIZE_HISTOGRAM_BUCKETS = 18
 # Confidence ramps from 0 to 1 over this many observations (prd/17 ranking).
 CONFIDENCE_SAMPLE = 20
 DEFAULT_ROUND_HOURS = 24.0
+# prd/70 F-11: the Rules page renders at most this many drill-down rows per rule
+# (``app/rules.js`` DRILL_LIMIT). The API used to ship every item — 11,885
+# threads and thousands of PR/story rows at ``days=1882``, a 12.2 MB response —
+# so the payload now carries the first `DRILL_CAP` rows in the *rendered* order
+# plus the honest ``rows_total`` / ``rows_affected`` / ``rows_scopes`` counts.
+# The two constants must agree; a larger render limit would need a larger cap,
+# never a silent truncation.
+DRILL_CAP = 200
 
 SEVERITY_RANK = {"critical": 0, "warning": 1, "info": 2}
 
@@ -418,6 +426,150 @@ def _drill_order(rows: list[dict]) -> list[dict]:
     return rows
 
 
+#: prd/70 F-11: the number a drill-down row carries, per metric, in the order
+#: ``app/rules.js`` reads it (``impactOf``). The cap must keep the rows the page
+#: renders, so it sorts with the page's own key, not the API's default order.
+_DRILL_IMPACT_KEYS = {
+    "time_to_first_review": ("first_review_hours",),
+    "cycle_time": ("hours",),
+    "survival": ("hours",),
+    "flow_efficiency": ("waiting_hours", "elapsed_hours"),
+    "reviewer_responsiveness": ("hours",),
+    "sentinel_queue": ("hours",),
+    "sentinel_tail": ("hours",),
+    "vacation_blocking": ("hours",),
+    "stale_prs": ("hours", "age_hours"),
+    "rework_loops": ("rounds",),
+    "rebase_waste": ("unapprovals",),
+    "conformance": ("rounds",),
+    "comment_tax": ("wasted", "rounds"),
+    "pr_size": ("commits",),
+    "stacked_cascade": ("re_review_hours",),
+    "waiting_time_decomposition": ("largest_hours",),
+    "carry_over": ("wait_hours", "slip_hours"),
+    "sprint_delivery": ("slip_hours",),
+    "point_churn": ("events",),
+    "worklog_cross_check": ("logged_hours",),
+}
+_GENERIC_IMPACT_KEYS = (
+    "hours", "wait_hours", "slip_hours", "age_hours", "first_review_hours",
+)
+
+
+def _drill_impact(row: dict, metric: str) -> float:
+    """The impact number the page sorts a drill-down row by (``impactOf``)."""
+    keys = _DRILL_IMPACT_KEYS.get(metric, _GENERIC_IMPACT_KEYS)
+    for key in keys:
+        if key not in row:
+            continue
+        value = row[key]
+        if isinstance(value, bool) or isinstance(value, (int, float)):
+            return float(value)
+        if value is None:
+            # the page's ``Number(null)`` is 0: an explicit null measures
+            # nothing and sorts with the zeros
+            return 0.0
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def _render_order(rows: list[dict], metric: str) -> list[dict]:
+    """The page's drill order: affected first, then the impact it carries.
+
+    ``app/rules.js`` (prd/64 F-06a) sorts by ``affected`` first and the metric's
+    own impact second, stable within ties. The cap uses the same key so the rows
+    that survive the cap are exactly the rows the page would have shown.
+    """
+    return sorted(
+        rows,
+        key=lambda row: (not row.get("affected", False), -_drill_impact(row, metric)),
+    )
+
+
+def cap_drill_down(computed: dict, suggestions: list[dict],
+                   cap: int = DRILL_CAP) -> dict:
+    """prd/70 F-11: ship the rows the Rules page renders, and count the rest.
+
+    At ``days=1882`` the payload embedded all 11,885 threads, 2,574 PRs per
+    metric block and thousands of story rows — 12.2 MB the page could never
+    render, because ``app/rules.js`` draws at most ``DRILL_LIMIT`` rows per
+    rule. Each ``rows``/``prs`` drill array is now the top ``cap`` rows in the
+    page's own order (affected first, then impact), plus honest counts:
+
+    * ``rows_total`` — every row the metric measured (the number the drill-down
+      states, and the denominator of "showing the first N of M");
+    * ``rows_affected`` — how many of those the rule flags, so the drill-down's
+      "N affected" is the metric's count too, not the shipped page's;
+    * ``rows_scopes`` — both counts per person/sprint scope a rule drills into,
+      so a `person:X` rule's count is that person's, not the team's.
+
+    The array keeps the metric's own order (``_drill_order``), so the wire
+    contract does not change: only the unrenderable tail is dropped. The page's
+    own sort of the surviving rows yields the same first ``cap`` rows it would
+    have drawn from the full list, because the survivor set *is* that prefix in
+    the page's order. The metric's numbers (medians, shares, evidence counts)
+    are computed before this runs, so nothing visible changes.
+    """
+    scopes: dict[str, set[tuple[str, str]]] = defaultdict(set)
+    for suggestion in suggestions or ():
+        scope = suggestion.get("scope") or {}
+        kind = scope.get("kind")
+        if kind == "person" and scope.get("person"):
+            scopes[suggestion["metric"]].add(("person", str(scope["person"])))
+        elif kind == "sprint" and scope.get("sprint") is not None:
+            scopes[suggestion["metric"]].add(("sprint", str(scope["sprint"])))
+    for metric, block in computed.items():
+        if not isinstance(block, dict):
+            continue
+        for key in ("rows", "prs"):
+            rows = block.get(key)
+            if not isinstance(rows, list) or not rows:
+                continue
+            if not isinstance(rows[0], dict):
+                continue
+            block[f"{key}_total"] = len(rows)
+            block[f"{key}_affected"] = sum(
+                1 for row in rows if row.get("affected")
+            )
+            kept: list[dict] = []
+            seen: set[int] = set()
+            position = {id(row): index for index, row in enumerate(rows)}
+
+            def keep(row: dict) -> None:
+                if id(row) not in seen:
+                    seen.add(id(row))
+                    kept.append(row)
+
+            for row in _render_order(rows, metric)[:cap]:
+                keep(row)
+            scope_totals: dict[str, dict] = {}
+            for kind, value in sorted(scopes.get(metric) or ()):
+                if kind == "person":
+                    matches = [row for row in rows if row.get("person") == value]
+                else:
+                    matches = [
+                        row for row in rows if str(row.get("sprint_id")) == value
+                    ]
+                if not matches:
+                    continue
+                scope_totals[f"{kind}:{value}"] = {
+                    "total": len(matches),
+                    "affected": sum(1 for row in matches if row.get("affected")),
+                }
+                for row in _render_order(matches, metric)[:cap]:
+                    keep(row)
+            # keep the metric's own wire order (tests and clients pin it); the
+            # page re-sorts with the same key, so the visible prefix is identical
+            kept.sort(key=lambda row: position[id(row)])
+            block[key] = kept
+            if scope_totals:
+                block[f"{key}_scopes"] = scope_totals
+    return computed
+
+
 def _first_review(state) -> dict | None:
     """The first reviewer action on a PR: comment or approval, never the author."""
     pr = state.pr
@@ -570,6 +722,12 @@ def load_threads(con) -> list[dict]:
             "closed_at": to_naive_utc(closed) if closed else None,
             "comment_type": attributes.get("comment_type"),
             "thread_outcome": attributes.get("thread_outcome"),
+            # prd/70 F-10: *which* classifier produced those labels. The store
+            # can carry ``mock-v1`` placeholder labels (deterministic hashes)
+            # and later an imported model relabel (``ollama-v1``); the metric
+            # must be able to disclose the difference instead of calling both
+            # "a definite classifier read" (prd/16, data lifecycle).
+            "classifier_version": attributes.get("classifier_version"),
             "severity": attributes.get("severity"),
             "anchor_class": attributes.get("anchor_class"),
         })
@@ -1416,6 +1574,97 @@ def rebase_waste(court: ballcourt.BallCourt, window) -> dict:
     }
 
 
+def _classifier_kind(version: str) -> str:
+    """``mock`` for a placeholder classifier, ``model`` for a real read.
+
+    prd/16: ``classifier_version`` is a closed token on the THREAD; the store's
+    deterministic stand-in is ``mock-v1`` (hash labels), and a relabel patch
+    stamps the model tag it used (``ollama-v1``). Anything not recorded is
+    ``unknown`` — never guessed as a model.
+    """
+    return "mock" if version.startswith("mock") else "model"
+
+
+def thread_label_disclosure(versions: dict[str, int]) -> dict:
+    """prd/70 F-10: who labelled the review threads, and how much of the store.
+
+    ``versions`` is ``{classifier_version: classified_threads}`` for the threads
+    the metric could classify; a thread without a label is not counted. The
+    Rules page printed "1837 classified threads" as if a model had read them,
+    while every label in the store came from the deterministic ``mock-v1``
+    placeholder classifier. This block is the disclosure: the version, its
+    share, and a sentence the page can render verbatim. A real model relabel
+    (``ollama-v1``) changes the sentence; no version is ever invented.
+    """
+    counts = {
+        (str(version) if version else "unknown"): int(count)
+        for version, count in (versions or {}).items()
+        if count
+    }
+    total = sum(counts.values())
+    if not total:
+        return {
+            "available": False,
+            "total": 0,
+            "version": None,
+            "share": 0.0,
+            "kind": "none",
+            "mock": False,
+            "versions": {},
+            "note": "no classified threads in this window",
+        }
+    ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    mock = {v: n for v, n in counts.items() if v != "unknown" and _classifier_kind(v) == "mock"}
+    model = {v: n for v, n in counts.items() if v != "unknown" and _classifier_kind(v) == "model"}
+    unknown = sum(n for v, n in counts.items() if v == "unknown")
+    mock_total = sum(mock.values())
+    model_total = sum(model.values())
+    version, dominant = ordered[0]
+    single = version if len(counts) == 1 and version != "unknown" else None
+    if not mock and not model:
+        kind = "unknown"
+        note = (
+            "labels: classifier version not recorded — "
+            f"{total:,} classified threads predate label versioning"
+        )
+    elif mock and not model and not unknown:
+        kind = "mock"
+        note = (
+            f"labels: deterministic mock ({version}) — all {total:,} classified "
+            "threads carry placeholder labels; a model relabel is pending"
+        )
+    elif model and not mock and not unknown:
+        kind = "model"
+        note = (
+            f"labels: model ({version}) — {total:,} classified threads carry "
+            "model labels"
+        )
+    else:
+        kind = "mixed"
+        parts = []
+        if mock_total:
+            parts.append(f"{round(100 * mock_total / total)}% are "
+                         f"{'/'.join(sorted(mock))} placeholders")
+        if model_total:
+            parts.append(f"{round(100 * model_total / total)}% are "
+                         f"{'/'.join(sorted(model))} model labels")
+        if unknown:
+            parts.append(f"{round(100 * unknown / total)}% record no version")
+        note = f"labels: mixed — {total:,} classified threads: " + ", ".join(parts)
+        if mock_total:
+            note += "; a model relabel is pending for the placeholders"
+    return {
+        "available": True,
+        "total": total,
+        "version": single,
+        "share": round(dominant / total, 2),
+        "kind": kind,
+        "mock": bool(mock_total),
+        "versions": dict(ordered),
+        "note": note,
+    }
+
+
 def comment_tax(court: ballcourt.BallCourt, threads: list[dict], window) -> dict:
     """Threads grouped by ``comment_type`` × ``thread_outcome``.
 
@@ -1439,6 +1688,7 @@ def comment_tax(court: ballcourt.BallCourt, threads: list[dict], window) -> dict
     matrix: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     by_type: dict[str, dict] = defaultdict(lambda: {"threads": 0, "wasted": 0})
     outcomes: dict[str, int] = defaultdict(int)
+    versions: dict[str, int] = defaultdict(int)
     considered = 0
     classified = 0
     wasted = 0
@@ -1458,6 +1708,7 @@ def comment_tax(court: ballcourt.BallCourt, threads: list[dict], window) -> dict
         if not comment_type:
             continue
         classified += 1
+        versions[thread.get("classifier_version") or "unknown"] += 1
         outcome = outcome or "unresolved"
         matrix[comment_type][outcome] += 1
         outcomes[outcome] += 1
@@ -1481,6 +1732,26 @@ def comment_tax(court: ballcourt.BallCourt, threads: list[dict], window) -> dict
             "affected": wasted_here,
             "created_at": iso(thread["created_at"]) if thread.get("created_at") else None,
         })
+    disclosure = thread_label_disclosure(versions)
+    # prd/70 F-10: a placeholder label is not "a definite classifier read".
+    # The API is read by more than the Rules page, so the note names the
+    # classifier and never lets a mock read pass as a model's.
+    if disclosure["kind"] == "mock":
+        read_source = (
+            "or a label from the deterministic mock classifier (a placeholder, "
+            "not a model read)"
+        )
+    elif disclosure["kind"] in ("model", "mixed"):
+        read_source = "or a classifier read"
+    else:
+        read_source = "or a definite classifier read"
+    outcome_note = (
+        "acted_on means a deterministic signal (the diff moved at the anchor) "
+        f"{read_source}; unresolved includes threads whose outcome could not be "
+        "determined, so wasted_share is a floor, not a flattering estimate"
+    )
+    if disclosure["available"]:
+        outcome_note += ". " + disclosure["note"][0].upper() + disclosure["note"][1:]
     return {
         "available": classified > 0,
         "threads": considered,
@@ -1491,13 +1762,11 @@ def comment_tax(court: ballcourt.BallCourt, threads: list[dict], window) -> dict
         "walked_back": outcomes.get("walked_back", 0),
         "unresolved": outcomes.get("unresolved", 0),
         "acted_on": outcomes.get("acted_on", 0),
+        # prd/70 F-10: which classifier produced the labels, and how much of
+        # the cohort it covers, so the page can disclose it next to the card.
+        "classifier": disclosure,
         "rows": _drill_order(rows),
-        "outcome_note": (
-            "acted_on means a deterministic signal (the diff moved at the anchor) "
-            "or a definite classifier read; unresolved includes threads whose "
-            "outcome could not be determined, so wasted_share is a floor, not a "
-            "flattering estimate"
-        ),
+        "outcome_note": outcome_note,
         "by_type": {
             comment_type: {"threads": entry["threads"], "wasted": entry["wasted"]}
             for comment_type, entry in sorted(by_type.items())
@@ -3750,6 +4019,9 @@ def insights(
     suggestions = rank(suggestions, lab_aware=True)
     # prd/37 §2: the headline total counts each cost pool once (most specific).
     at_stake = attribute_at_stake(suggestions)
+    # prd/70 F-11: the page renders at most DRILL_CAP rows per rule, so the
+    # payload carries those rows and the honest totals instead of every item.
+    computed = cap_drill_down(computed, suggestions)
     days = round(max(0.0, (end - start).total_seconds()) / 86400.0, 1)
     # prd/55 §6: the window is not the dataset. The default 1q window is 90
     # days on a 103.6-day store, so 7 PRs are outside it; the header must say
@@ -3775,6 +4047,13 @@ def insights(
         # a store without the Jira ingest says so instead of reporting zeroes.
         "jira": computed["jira"],
         "window": {"start": iso(start), "end": iso(end), "days": days},
+        # prd/70 F-10: every thread-derived metric on this page (comment tax,
+        # questions, story rework) is only as good as its labels. This says
+        # which classifier produced them and how much of the cohort it covers,
+        # so the page can disclose the deterministic mock instead of printing
+        # "1837 classified threads" as if a model had read them.
+        "thread_labels": (computed.get("comment_tax") or {}).get("classifier")
+        or thread_label_disclosure({}),
         # prd/55 §6: the window-vs-dataset fact, so no view claims the dataset's
         # PR count as the cohort's (or silently drops the difference).
         "dataset": {

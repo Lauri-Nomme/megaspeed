@@ -247,6 +247,11 @@ export function storeScopeItem(carried, sprints) {
  * line per item, each item a link to its ticket page (a PR links the story that
  * owns it). The *whole* list is the evidence, not the five examples the rule
  * title quotes; the render cap is stated with its cost when it bites.
+ *
+ * prd/70 F-11: the API ships only this many rows per rule (its ``DRILL_CAP``
+ * matches) plus the metric's real counts, so the header quotes
+ * ``rows_total`` / ``rows_scopes`` and says "the first 200 of 11,885" instead
+ * of pretending the capped page is the whole list.
  */
 export const DRILL_LIMIT = 200;
 
@@ -374,6 +379,13 @@ function drillItem(row, suggestion, base = '') {
 
 /** Every item behind a suggestion, affected first (the API already ordered). */
 export function ruleItems(suggestion, metrics = {}, base = '') {
+  return ruleItemOrder(suggestion, metrics).map(
+    (row) => drillItem(row, suggestion, base),
+  ).filter((item) => item.label);
+}
+
+/** The rows `ruleItems` renders, before they are turned into items. */
+function ruleItemOrder(suggestion, metrics = {}) {
   if (!suggestion) return [];
   const metric = metrics[suggestion.metric] || {};
   const scope = suggestion.scope || {};
@@ -393,7 +405,7 @@ export function ruleItems(suggestion, metrics = {}, base = '') {
   // rule's "affected" test is not the sort's number (censoring, worklog,
   // flow efficiency), so affected is the first key and impact the tie-break.
   // A metric's own order is the last tie-break.
-  rows = rows
+  return rows
     .map((row, index) => ({ row, index }))
     .sort((a, b) => (
       Number(Boolean(b.row.affected)) - Number(Boolean(a.row.affected))
@@ -401,7 +413,43 @@ export function ruleItems(suggestion, metrics = {}, base = '') {
       || a.index - b.index
     ))
     .map((entry) => entry.row);
-  return rows.map((row) => drillItem(row, suggestion, base)).filter((item) => item.label);
+}
+
+/**
+ * prd/70 F-11: how many items the rule *has*, not how many the API shipped.
+ *
+ * The payload caps each drill array at `DRILL_LIMIT` rows (the page renders no
+ * more) and states the real counts next to it: `rows_total` / `rows_affected`
+ * for a team rule, or `rows_scopes[person:X]` / `[sprint:9]` for a scoped one.
+ * The drill-down header must quote the metric's own numbers, so "showing the
+ * first 200 of 11,885" is honest instead of claiming 200 items exist.
+ */
+export function ruleItemTotals(suggestion, metrics = {}) {
+  if (!suggestion) return null;
+  const metric = metrics[suggestion.metric] || {};
+  const scope = suggestion.scope || {};
+  const scopes = metric.rows_scopes || {};
+  let scopeKey = '';
+  if (scope.kind === 'person' && scope.person) scopeKey = `person:${scope.person}`;
+  else if (scope.kind === 'sprint' && scope.sprint != null) scopeKey = `sprint:${scope.sprint}`;
+  const scoped = scopeKey ? scopes[scopeKey] : null;
+  if (scoped && Number.isFinite(Number(scoped.total))) {
+    return {
+      total: Number(scoped.total),
+      affected: Number.isFinite(Number(scoped.affected)) ? Number(scoped.affected) : null,
+    };
+  }
+  const key = Array.isArray(metric.rows) || !Array.isArray(metric.prs)
+    ? 'rows' : 'prs';
+  const total = Number(metric[`${key}_total`]);
+  if (!Number.isFinite(total)) return null;
+  const affected = Number(metric[`${key}_affected`]);
+  return { total, affected: Number.isFinite(affected) ? affected : null };
+}
+
+export function ruleItemTotal(suggestion, metrics = {}) {
+  const totals = ruleItemTotals(suggestion, metrics);
+  return totals ? totals.total : null;
 }
 
 /**
@@ -453,8 +501,14 @@ function drillMarkup(suggestion, metrics, base) {
   const items = ruleItems(suggestion, metrics, base);
   if (!items.length) return '';
   const shown = items.slice(0, DRILL_LIMIT);
-  const affected = items.filter((item) => item.affected).length;
-  const count = `${items.length} item${items.length === 1 ? '' : 's'}`;
+  // prd/70 F-11: the header states the metric's own counts, not the number of
+  // rows the (capped) payload carried, so "first 200 of 11,885" is honest.
+  const totals = ruleItemTotals(suggestion, metrics);
+  const affected = totals && totals.affected != null
+    ? totals.affected
+    : items.filter((item) => item.affected).length;
+  const count = totals ? totals.total : items.length;
+  const countLabel = `${count} item${count === 1 ? '' : 's'}`;
   const hint = [
     affected ? `${affected} affected` : '',
     // prd/37 §3: the rows are sorted by the wait they carry, worst first
@@ -474,12 +528,12 @@ function drillMarkup(suggestion, metrics, base) {
       <td class="drill-value mono" data-label="measured">${esc(item.value)}</td>
     </tr>`;
   }).join('');
-  const cap = items.length > shown.length
-    ? `<p class="drill-more">showing the first ${shown.length} of ${items.length} items
+  const cap = count > shown.length
+    ? `<p class="drill-more">showing the first ${shown.length} of ${count} items
         (each a link; the export carries the first 25)</p>`
     : '';
   return `<details class="rule-drill" data-rule-drill="${esc(suggestion.id)}">
-    <summary><span>${count}</span>
+    <summary><span>${countLabel}</span>
       <span class="drill-hint">${hint}</span></summary>
     <div class="drill-wrap">
       <table class="drill">
@@ -602,6 +656,9 @@ export function ruleRow(suggestion, { base = '', metrics = {} } = {}) {
         </div>
         <h2 class="rule-title">${esc(suggestion.title)}</h2>
         <p class="rule-action">${esc(suggestion.suggestion)}</p>
+        ${suggestion.metric === 'comment_tax' && metricLabelsNote(metrics[suggestion.metric])
+          ? `<p class="rule-caveat" data-thread-labels>${esc(metricLabelsNote(metrics[suggestion.metric]))}</p>`
+          : ''}
         ${suggestion.policy_lab && suggestion.policy_lab.contradiction
           ? `<p class="rule-caveat" data-lab-contradiction="true">The lab does not support this as a lever (${
             esc(suggestion.policy_lab.note || 'no clear effect')}); treat it as a hypothesis to test, not a proven fix.</p>`
@@ -692,6 +749,39 @@ export function personSignalNote(data, { below = true } = {}) {
     (below ? '; the team tab names the team-level rules.' : '.');
 }
 
+/* prd/70 F-10: the thread-derived cards ("comment tax", "questions", story
+ * rework) are only as good as the classifier that labelled the threads. This
+ * store's 11,885 labels are the deterministic ``mock-v1`` placeholder
+ * classifier — hash labels, not a model read — and the page printed "1837
+ * classified threads" without saying so. The API's ``thread_labels`` block
+ * carries the version and its share; this renders it verbatim, and names a
+ * real model version when one is present (never a guessed tag).
+ */
+export function threadLabels(data) {
+  const payload = (data && data.thread_labels)
+    || (((data || {}).metrics || {}).comment_tax || {}).classifier
+    || null;
+  return payload && payload.available ? payload : null;
+}
+
+export function threadLabelNote(data) {
+  const labels = threadLabels(data);
+  return labels ? labels.note : '';
+}
+
+/** The same disclosure for a card, keyed off the metric block. */
+function metricLabelsNote(metric) {
+  const classifier = metric && metric.classifier;
+  return classifier && classifier.available ? classifier.note : '';
+}
+
+function labelsDisclosure(data) {
+  const labels = threadLabels(data);
+  if (!labels) return '';
+  return `<p class="rules-note" data-thread-labels="${esc(labels.kind)}">
+    ${esc(labels.note)}</p>`;
+}
+
 export function rulesMarkup(data, {
   base = '', prSize = null, caps = null, verdict = null, showAllRules = false,
 } = {}) {
@@ -760,6 +850,7 @@ export function rulesMarkup(data, {
         ? `Person rules name a pseudonym and a per-person threshold; ${teamRules.length} team rule${teamRules.length === 1 ? ' is' : 's are'} on the team tab.`
         : 'That is a result, not a missing screen: first review under 24 h, cycle time under 9 d (72 business hours), two review rounds or fewer, no lost approvals. Widen the timeframe or switch to people to check the per-person rules.'}</p>
     </div>
+    ${labelsDisclosure(data)}
     ${firstPassPanels(data && data.metrics, { base })}
     ${worklogPanel((data && data.metrics && data.metrics.worklog_cross_check) || null)}
     ${prSizePanel(prSize, { caps })}
@@ -793,6 +884,7 @@ export function rulesMarkup(data, {
   return `${banner}${note ? `<p class="rules-note">${esc(note)}${teamLink}</p>` : ''}
     ${teamHint}
     ${lab ? `<p class="rules-lab" data-lab-best>${esc(lab)}</p>` : ''}
+    ${labelsDisclosure(data)}
     ${disclosureBar}
     ${firstPassPanels(data && data.metrics, { base })}
     <div class="rules-list">${rows.join('')}</div>
@@ -844,6 +936,10 @@ export function rulesMarkdown(data, base = '') {
     '',
   ];
   if (note) lines.push(`_${note}_`, '');
+  // prd/70 F-10: the export states the classifier behind the thread numbers
+  // too — a placeholder label is not a model read.
+  const labels = threadLabelNote(data);
+  if (labels) lines.push(`_${labels}_`, '');
   const stake = data.at_stake || null;
   if (stake) {
     lines.push(`_${fmtImpact(stake.hours)} at stake — counted once across ` +
@@ -884,8 +980,10 @@ export function rulesMarkdown(data, base = '') {
     if (items.length) {
       const shown = items.slice(0, 25).map((item) => (item.key
         ? `[${item.label}](${ticketHref(item.key, base)})` : item.label));
+      // prd/70 F-11: the export quotes the metric's count, not the capped rows.
+      const total = ruleItemTotal(suggestion, data.metrics || {}) ?? items.length;
       lines.push(
-        `- items (${items.length}${items.length > 25 ? `, first 25` : ''}): ${shown.join(', ')}`,
+        `- items (${total}${total > 25 ? `, first 25` : ''}): ${shown.join(', ')}`,
       );
     }
     lines.push('');
