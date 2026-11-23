@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1537** (`tests/`) + **99** (`scrape/tests`) + **626** (node `app/test`) green.
+Tests: **1538** (`tests/`) + **99** (`scrape/tests`) + **626** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -61,6 +61,14 @@ PERSON rows went 329→223 (merged plus pre-existing orphans), events unchanged 
 76,213, `--verify` OK. Backup: `/data/personal/work/demo-tlla.pre-rekey.duckdb`.
 The laptop's `identity.json` still holds the old pseudonyms: swap its `bb:`
 entries before the next scrape, or the rekeyed actors come back.
+
+## v0.19.2 — keep diff-derived outcomes in a relabel
+
+The 2026-11-23 audit found 1,582 outcome changes were a **builder regression**:
+a pre-v0.16 bundle has no persisted `anchor_changed`, so `_outcome` recomputed
+with `None` and discarded the scrape-time diff result (`rejected`/`walked_back`
+and part of `acted_on`). A bundle without the attribute now keeps its
+`thread_outcome`; only a bundle that carries it is re-derived. Test included.
 
 ## v0.19.1 — a DC BLOCKER is not a model opinion
 

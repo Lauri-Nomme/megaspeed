@@ -113,6 +113,16 @@ def _replay_items(records: list[dict]) -> list[dict]:
 
 def _outcome(thread: dict, intent: str) -> str:
     attributes = thread.get("attributes") or {}
+    # A bundle that predates the persisted ``anchor_changed`` (pre-v0.16) has
+    # already been **computed with the diff at scrape time**. Recomputing it
+    # here with ``anchor_changed=None`` would throw away the diff-derived
+    # rejected/walked_back/acted_on facts and fall to the intent rung. Keep the
+    # previous outcome; only a bundle that carries the attribute can be
+    # re-derived honestly.
+    if "anchor_changed" not in attributes:
+        previous = str(attributes.get("thread_outcome") or "")
+        if previous in classify.THREAD_OUTCOME:
+            return previous
     return classify.thread_outcome(
         resolved=str(thread.get("state") or "") == "resolved",
         anchor_changed=attributes.get("anchor_changed"),

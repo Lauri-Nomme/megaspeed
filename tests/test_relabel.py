@@ -386,6 +386,31 @@ class RelabelTests(unittest.TestCase):
         finally:
             con.close()
 
+    def test_a_pre_v016_bundle_keeps_its_diff_derived_outcome(self):
+        # The fixture bundle carries thread_outcome but no anchor_changed, so a
+        # relabel must not overwrite the scrape-time diff result with an
+        # intent-only guess (the audit's 1,582 outcome regression).
+        report = relabel(
+            self.cfg, trace_path=self.trace, bundle_path=self.bundle,
+            out=self.root / "labels.tgz",
+            classifier=Recording(comment_type="blocker", intent="unclear"),
+            progress=QUIET,
+        )
+        patch = labelpatch.read_patch(report["patch"])
+        rows = [r for r in patch.rows if r["target"] == "thread"]
+        self.assertTrue(rows)
+        for row in rows:
+            if "anchor_changed" in (
+                next(o for o in read_bundle(self.bundle).objects
+                     if o["object_id"] == row["object_id"]).get("attributes") or {}
+            ):
+                continue
+            self.assertEqual(
+                row["labels"].get("thread_outcome"),
+                (row.get("previous") or {}).get("thread_outcome"),
+                row["object_id"],
+            )
+
     def test_the_patch_builder_keeps_a_dc_blocker_blocker(self):
         report = relabel(
             self.cfg, trace_path=self.trace, bundle_path=self.bundle,
