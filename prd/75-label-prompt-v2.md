@@ -62,21 +62,30 @@ deterministic attribute on the THREAD object:
   - identify the family by bot actor + template regex (coverage percentages;
     `Qodana: …`);
   - **coverage = `ci_notice`, always.** The trace shows 2,247 coverage comments
-    from one account (21% of all openers) in 8 template variants — percentages,
-    covered ratios, one- and two-metric subsets, a header-only form, and an
-    emoji form (`:100: % coverage :+1:` = 💯%). None carries a pass/fail token,
-    none states a threshold, and all say "for the first build", so there is no
-    earlier report on the same PR to diff against. There is no deterministic
-    basis for a finding, so the rule must not invent one: store the parsed
-    metrics (`coverage.instruction|line|branch`, percent) and `metrics_zero`
-    when every parsed metric is 0 (the diff report found nothing to score, not
-    a failure). This alone removes the 1,093 `nit` + 922 `optimization` + 156
-    `out_of_scope` + 77 `blocker` labels the first pass put on a bot.
-  - **Qodana has exactly two templates** (29 comments, all from the bot):
+    from one account (21% of all openers) in 9 template variants — percentages,
+    covered ratios, one- and two-metric subsets, a header-only form (18), and an
+    emoji form (`:100: % coverage :+1:` = 💯%, 487). The measured distribution
+    is **positive, not alarming**: instruction p50 = 90% (n=1,713, 387 at 100%),
+    line p50 = 90% (n=1,687, 455 at 100%), branch p50 = 77% (n=1,442, 229 at
+    100%); only 73 of 1,742 reports have every metric at 0. None carries a
+    pass/fail token, none states a threshold, and all say "for the first build",
+    so there is no earlier report on the same PR to diff against. There is no
+    deterministic basis for a finding, so the rule must not invent one: store
+    the parsed metrics (`coverage.instruction|line|branch`, percent) and
+    `metrics_zero` for the 73 (the diff report had nothing to score, or the
+    report failed — not a review verdict). This alone removes the 1,093 `nit` +
+    922 `optimization` + 156 `out_of_scope` + 76 `blocker` labels the first pass
+    put on a bot.
+  - **Qodana has exactly two templates** (30 comments, all from the bot):
     `#### ⚠️ Qodana detected N new issue(s) … Please do not merge without
-    solving/suppressing` → `ci_finding`, `issues=N`, `actionable=true`,
+    solving/suppressing` (20) → `ci_finding`, `issues=N`, `actionable=true`,
     `blocking=true` (the bot states the merge rule itself); `#### ✅ Qodana: no
-    new issues found.` → `ci_notice`, `issues=0`.
+    new issues found.` (10: 9 with report links, 1 without) → `ci_notice`,
+    `issues=0`.
+  - **Both conditions are required: bot actor *and* template.** One human opener
+    (`MeMi`) begins with "qodana", and the text-only regex puts it in the CI
+    bucket; a human discussing a Qodana result is a normal review remark and must
+    stay one.
   - a bot comment that matches **no** known template is `ci_notice` with
     `template=unknown`, counted so a missing rule is visible — never a guess.
 - **Human boilerplate is `admin`, deterministically**: `rebased` / `rebase` /
@@ -97,8 +106,11 @@ deterministic attribute on the THREAD object:
   the queue/blocking graph can carry it without pretending it is a `blocker`.
 - `bot_request` must be excluded from question statistics: 88/139 `@…review`
   commands were booked as `question` (audit), which is neither a question to the
-  author nor a review remark. The substance is the bot's reply; if a human then
-  acts on it, that is a separate `review` message, not the opener.
+  author nor a review remark. Its size is small: 112 openers mention the AI
+  reviewer in prose (the other 37 `@` hits in the trace are Java annotations such
+  as `@Override`/`@Nullable`, which is why a slug list is required). The
+  substance is the bot's reply; if a human then acts on it, that is a separate
+  `review` message, not the opener.
 - `admin` replaces the "no class fits" escape hatch. No `other` value is needed
   in `comment_type` once the kind axis exists; a human non-review note becomes
   `comment_kind=admin` with a null type.
