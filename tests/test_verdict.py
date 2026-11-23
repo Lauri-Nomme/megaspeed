@@ -438,8 +438,9 @@ class LivenessTests(StoreCase):
         fx.person("BiBi", kind="bot")
         # a completed review whose sentinel did the approval
         fx.story("H1", T0, rounds=20, number=12, sentinel="FrMo")
-        # a live review waiting on the sentinel alone
-        fx.story("H2", AS_OF - 30 * HOUR, done=False, rounds=0, merge=0,
+        # a live review waiting on the sentinel alone — wholly inside the
+        # window the card is read in (the fixture's default lead time is 38 h)
+        fx.story("H2", AS_OF - 80 * HOUR, done=False, rounds=0, merge=0,
                  wait_review=1, first_review=1, number=13, sentinel="FrMo")
         _fixture, court, data = self.load(fx)
         payload = verdict.verdict(court, data, (T0, AS_OF))

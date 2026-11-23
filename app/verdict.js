@@ -128,20 +128,49 @@ export function clockLine(verdict) {
     'The verdict names the queue, not a person, and never uses response time.';
 }
 
+/** The named person the holder row shows, and whether they are the sentinel. */
+export function topHolder(holders) {
+  const people = ((holders && holders.people) || [])
+    .filter((person) => person && Number(person.hours) > 0);
+  const sentinels = people
+    .filter((person) => person.role === 'sentinel')
+    .sort((a, b) => Number(b.hours) - Number(a.hours));
+  if (sentinels.length) return { person: sentinels[0], sentinel: true };
+  const top = people.slice().sort((a, b) => Number(b.hours) - Number(a.hours))[0];
+  return top ? { person: top, sentinel: false } : null;
+}
+
+/**
+ * The holder row's value: `FrMo 961 h · peers 142 h–231 h` for a sentinel, or
+ * `top reviewer MaRa ≈4.6k h` for a store with no sentinel.
+ *
+ * prd/70 F-06: the peer range only makes sense against a sentinel; printing it
+ * for the top reviewer compared the person against a range whose upper bound
+ * was their own total (`MaRa ≈4.6k h · peers 0–4624 h`). A peer is labelled
+ * `top reviewer` and gets no self-referential range; a window with no observed
+ * review hours says so instead of naming nobody.
+ */
+export function holderSummary(holders) {
+  const chosen = topHolder(holders);
+  if (!chosen) {
+    return ((holders && holders.people) || []).length
+      ? 'no review hours in this window'
+      : 'no human holder';
+  }
+  const base = chosen.sentinel
+    ? `${chosen.person.person} ${poolHours(chosen.person.hours)}`
+    : `top reviewer ${chosen.person.person} ${poolHours(chosen.person.hours)}`;
+  const peers = holders && holders.peer_range;
+  if (!chosen.sentinel || !peers) return base;
+  return `${base} · peers ${poolHours(peers[0])}–${poolHours(peers[1])}`;
+}
+
 /** The four-row definition list (two rows on a phone; see `.verdict-pools`). */
 export function poolRows(verdict) {
   if (!verdict || !verdict.available || !verdict.constraint) return [];
   const constraint = verdict.constraint;
   const holders = verdict.holders || {};
-  const sentinel = (holders.people || [])
-    .filter((person) => person.role === 'sentinel' && Number(person.hours) > 0)
-    .sort((a, b) => Number(b.hours) - Number(a.hours))[0]
-    || (holders.people || []).filter((person) => Number(person.hours) > 0)[0];
-  const peers = holders.peer_range;
-  const holderText = sentinel
-    ? `${sentinel.person} ${poolHours(sentinel.hours)}` +
-      (peers ? ` · peers ${Math.round(peers[0])}–${Math.round(peers[1])} h` : '')
-    : 'no human holder';
+  const holderText = holderSummary(holders);
   const oldest = oldestItem(verdict);
   const p85 = constraint.p85_hours;
   return [
@@ -276,15 +305,13 @@ function rungBody(rung, { base = '', holderText = '' } = {}) {
 /** The one-line holder split, for the exploit rung on a phone. */
 export function holderLine(verdict) {
   const holders = (verdict && verdict.holders) || {};
-  const people = holders.people || [];
-  const sentinel = people
-    .filter((person) => person.role === 'sentinel' && Number(person.hours) > 0)
-    .sort((a, b) => Number(b.hours) - Number(a.hours))[0]
-    || people.filter((person) => Number(person.hours) > 0)[0];
-  if (!sentinel) return '';
-  const peers = holders.peer_range;
-  return `${sentinel.person} ${poolHours(sentinel.hours)}` +
-    (peers ? ` · peers ${poolHours(peers[0])}–${poolHours(peers[1])}` : '');
+  const chosen = topHolder(holders);
+  if (!chosen) return '';
+  const base = chosen.sentinel
+    ? `${chosen.person.person} ${poolHours(chosen.person.hours)}`
+    : `top reviewer ${chosen.person.person} ${poolHours(chosen.person.hours)}`;
+  const peers = chosen.sentinel ? holders.peer_range : null;
+  return base + (peers ? ` · peers ${poolHours(peers[0])}–${poolHours(peers[1])}` : '');
 }
 
 /** The ladder: exploit → subordinate → elevate, each with state and lab note. */
@@ -322,21 +349,45 @@ export function ladderMarkup(verdict, { base = '' } = {}) {
   }).join('')}</ol>`;
 }
 
-/** The footer's "next constraint" ranking behind a `<details>`. */
+/** A pool row's queue owed *now* (the payload's live-first key). */
+function owedNow(row) {
+  const value = row && row.live_hours != null
+    ? row.live_hours
+    : (row && row.removable_now_hours);
+  return Number(value) || 0;
+}
+
+/**
+ * The footer's "next constraint" ranking behind a `<details>`.
+ *
+ * prd/70 F-05: the summary line printed only `removable_hours` while the table
+ * was ordered by hours **owed now** first (prd/67 W-04), so `verification
+ * 634 h` appeared ahead of `refinement ≈2.3k h` and the caption claimed a
+ * ranking the numbers did not show. The rows are ordered by the measure the
+ * caption names (owed now, then the reference pool) and each row prints both
+ * numbers, so the line can never look mis-sorted again.
+ */
 export function nextConstraint(verdict) {
   // prd/67 W-04: with no current queue there is no "next constraint" either —
   // the historical tails render as history (`historicalMarkup`), not as a rank.
   if (verdict && verdict.available && !verdict.constraint) return [];
   const pools = (verdict && verdict.pools) || [];
-  const rows = pools.length ? pools : ((verdict && verdict.next) || []);
+  const rows = (pools.length ? pools : ((verdict && verdict.next) || [])).slice();
   const top = verdict && verdict.constraint && verdict.constraint.station;
-  return rows.filter((row) => row.station !== top && Number(row.removable_hours) > 0);
+  return rows
+    .filter((row) => row.station !== top && Number(row.removable_hours) > 0)
+    .sort((a, b) => (owedNow(b) - owedNow(a))
+      || (Number(b.removable_hours) - Number(a.removable_hours)));
 }
 
 export function nextLine(verdict) {
   const next = nextConstraint(verdict).slice(0, 3);
   if (!next.length) return 'no other station carries removable wait';
-  return next.map((row) => `${(row.label || row.station).toLowerCase()} ${poolHours(row.removable_hours)}`).join(' · ');
+  return next.map((row) => {
+    const label = (row.label || row.station).toLowerCase();
+    return `${label} ${poolHours(owedNow(row))} owed now ` +
+      `(${poolHours(row.removable_hours)} removable)`;
+  }).join(' · ');
 }
 
 export function nextMarkup(verdict) {
@@ -354,8 +405,9 @@ export function nextMarkup(verdict) {
         <td class="num mono">${esc(poolHours(row.live_hours))}</td>
         <td class="num mono">${esc(poolHours(row.tail_hours))}</td>
       </tr>`).join('')}</tbody></table>
-    <p class="panel-note">Every station's removable pool, ranked by the same clock and
-      method as the constraint. A lower rank is a smaller fix, not no fix.</p>
+    <p class="panel-note">Every station's pool, ranked by hours owed now first and
+      then by the reference removable pool — the same method, clock and window as
+      the constraint. A lower rank is a smaller fix, not no fix.</p>
   </details>`;
 }
 

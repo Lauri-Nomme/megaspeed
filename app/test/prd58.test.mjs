@@ -228,7 +228,10 @@ test('the rungs are ordered exploit → subordinate → elevate, and elevate is 
 test('the next constraint sits behind a native disclosure', () => {
   assert.deepEqual(nextConstraint(VERDICT).map((row) => row.station),
     ['verify', 'start', 'refine']);
-  assert.equal(nextLine(VERDICT), 'verification 81 h · starting work 41 h · refinement 33 h');
+  assert.equal(nextLine(VERDICT),
+    'verification 0 h owed now (81 h removable) · ' +
+    'starting work 0 h owed now (41 h removable) · ' +
+    'refinement 0 h owed now (33 h removable)');
   const html = verdictCard(VERDICT);
   const details = html.match(/<details class="verdict-next" data-next-constraint>([\s\S]*?)<\/details>/);
   assert.ok(details, 'a <details> next-constraint disclosure');
@@ -306,7 +309,7 @@ test('the Markdown export carries the verdict, the ladder and the lab note', () 
   assert.match(markdown, /_exploit first: 3 items are still owed_/);
   assert.match(markdown, /- policy lab: .*no clear effect/);
   assert.match(markdown, /- policy lab: .*−13 % cycle/);
-  assert.match(markdown, /_Next: verification 81 h/);
+  assert.match(markdown, /_Next: verification 0 h owed now \(81 h removable\)/);
 });
 
 /* --------------------------------------------------------------- the rungs */

@@ -29,11 +29,11 @@ The definitions are the ones ``docs/concepts.md`` §6 now carries:
 **One clock per concept.** The station pools are **story-clock** business hours
 measured from the same segment boundaries the ticket page draws (the assignee's
 calendar). The review detail's holders are the **PR ball clock**
-(``Interval.holder_hours``, each holder priced on their own calendar) and are
-*never summed* with the story hours — the payload labels both. Response time
-(the sentinel gate) is a third metric and is not used for the verdict, which is
-why the card can name one constraint without the person-vs-role-vs-response
-ambiguity.
+(``Interval.holder_hours``, each holder priced on their own calendar) clipped to
+the card's own window (prd/70 F-06) and are *never summed* with the story hours
+— the payload labels both. Response time (the sentinel gate) is a third metric
+and is not used for the verdict, which is why the card can name one constraint
+without the person-vs-role-vs-response ambiguity.
 
 Pure projection: no simulation runs here. The ladder's lab notes come from the
 prd/43 advice report the server already builds for ``/api/insights``, so the rung
@@ -191,9 +191,9 @@ NO_QUEUE_EMPTY = "No completed story left an abnormal tail in this window either
 #: How many historical tails the payload names (the note names the first two).
 HISTORICAL_LIMIT = 3
 HOLDER_NOTE = (
-    "Holder hours are person-hours with the ball in review, priced on each "
-    "holder's own calendar (the PR ball clock) — not response time, not "
-    "calendar utilisation, and never added to the story-clock pool."
+    "Holder hours are person-hours with the ball in review inside this window, "
+    "priced on each holder's own calendar (the PR ball clock) — not response "
+    "time, not calendar utilisation, and never added to the story-clock pool."
 )
 
 
@@ -467,18 +467,60 @@ def constraint(pool_table: dict) -> dict | None:
 # --------------------------------------------------------------------------- #
 # holders (the review detail, on the PR ball clock)
 # --------------------------------------------------------------------------- #
-def _ticket_of(pr: dict) -> str | None:
+def _ticket_of(pr: dict, *, kind_by_key=None, state_by_key=None) -> str | None:
+    """The PR's one canonical ticket (prd/70 F-03).
+
+    ``keys[-1]`` was the verdict's private rule, so the card could label ``#11096``
+    with a story closed in 2023 while Aging and the ticket page said the open
+    one. ``ballcourt.primary_ticket`` is the one helper every surface calls: a
+    STORY over an EPIC, a live story over a closed one, the newest on a tie.
+    """
     keys = [key for key in (pr.get("ticket_keys") or []) if key]
-    return keys[-1] if keys else None
+    if not keys:
+        return None
+    return ballcourt.primary_ticket(
+        keys, kind_by_key=kind_by_key, state_by_key=state_by_key,
+    )
 
 
-def holders(court, delivery_rows=()) -> dict:
+def _window_holder_hours(court, interval, window) -> dict[str, float]:
+    """An interval's per-holder hours **inside** ``window`` (prd/70 F-06).
+
+    A whole interval reuses the load-time ``holder_hours`` (each holder priced on
+    their own calendar). An interval that straddles a window edge is re-priced on
+    the same person calendar for the clipped span, so the ``1w``/``4w``/``1q``
+    card never carries a five-year total; ``window=None`` (``All``) keeps the
+    store-wide figure unchanged.
+    """
+    hours = interval.holder_hours or {}
+    if window is None or not hours:
+        return dict(hours)
+    start, end = window
+    clip_start = max(interval.start, start)
+    clip_end = min(interval.end, end)
+    if clip_end <= clip_start:
+        return {}
+    if clip_start == interval.start and clip_end == interval.end:
+        return dict(hours)
+    return {
+        person: court.business_hours(person, clip_start, clip_end)
+        for person in hours
+    }
+
+
+def holders(court, delivery_rows=(), window=None, *,
+            kind_by_key=None, state_by_key=None) -> dict:
     """The review-phase holder split, on the PR ball clock.
 
     Only **observed** review intervals count (``phase == "review"``): the
     unobserved tail's holder is inferred, so it is reported in ``current`` (the
     delivery list's own number) and never mixed into the person totals. Bots are
     excluded outright (concepts.md §2).
+
+    ``window`` is the verdict card's own window (prd/70 F-06): the person hours
+    are clipped to it, so the holder row on a ``1w``/``4w``/``1q`` card quotes
+    that span instead of the store's all-time review history. ``None`` (``All``)
+    keeps the store-wide figure.
     """
     bots = set(court.bots or ())
     acc: dict[str, dict] = {}
@@ -487,7 +529,7 @@ def holders(court, delivery_rows=()) -> dict:
         author = pr.get("actor")
         for interval in state.intervals:
             observed_review = interval.ball == "review" and interval.phase == "review"
-            for person, hours in (interval.holder_hours or {}).items():
+            for person, hours in _window_holder_hours(court, interval, window).items():
                 # a role label is not a person (concepts.md §2): never report
                 # "review" as a holder beside the people it summarises.
                 if not person or person in bots or person in ballcourt.SYNTHETIC:
@@ -532,9 +574,10 @@ def holders(court, delivery_rows=()) -> dict:
     for row in sorted(delivery_rows, key=lambda item: -float(item["waiting_hours"] or 0)):
         current.append({
             "pr": f"#{row['number']}",
-            "ticket": _ticket_of({
-                "ticket_keys": row.get("story_tickets") or row.get("tickets") or [],
-            }),
+            "ticket": _ticket_of(
+                {"ticket_keys": row.get("story_tickets") or row.get("tickets") or []},
+                kind_by_key=kind_by_key, state_by_key=state_by_key,
+            ),
             "hours": _hours(row.get("waiting_hours")),
             "holders": list(row.get("waiting_on") or ()),
             "ball": row.get("ball"),
@@ -559,10 +602,12 @@ def holders(court, delivery_rows=()) -> dict:
         ),
         "note": HOLDER_NOTE,
         "available": bool(people) and any(entry["hours"] > 0 for entry in people),
+        "windowed": window is not None,
         "basis": (
-            "observed review intervals (ball = review, phase = review), each "
-            "holder priced on their own calendar; the unobserved tail is listed "
-            "under adjacent findings, never in the person totals"
+            "observed review intervals (ball = review, phase = review) inside the "
+            "card's own window, each holder priced on their own calendar; the "
+            "unobserved tail is listed under adjacent findings, never in the "
+            "person totals"
         ),
     }
 
@@ -570,7 +615,8 @@ def holders(court, delivery_rows=()) -> dict:
 # --------------------------------------------------------------------------- #
 # exploit items and adjacent findings
 # --------------------------------------------------------------------------- #
-def orphaned_approvals(delivery_rows, court) -> list[dict]:
+def orphaned_approvals(delivery_rows, court, *,
+                       kind_by_key=None, state_by_key=None) -> list[dict]:
     """Open PRs with an approval whose only remaining holder is the sentinel.
 
     The same predicate the Overview card and the Rules sentinel-tail rule use
@@ -594,7 +640,10 @@ def orphaned_approvals(delivery_rows, court) -> list[dict]:
         if all(str(roles.get(person) or "").lower() == "sentinel" for person in waiting):
             out.append({
                 "pr": f"#{row['number']}",
-                "ticket": _ticket_of({"ticket_keys": row.get("story_tickets") or []}),
+                "ticket": _ticket_of(
+                    {"ticket_keys": row.get("story_tickets") or []},
+                    kind_by_key=kind_by_key, state_by_key=state_by_key,
+                ),
                 "hours": _hours(row.get("waiting_hours")),
                 "holders": waiting,
                 "stale": bool(row.get("stale")),
@@ -602,7 +651,8 @@ def orphaned_approvals(delivery_rows, court) -> list[dict]:
     return sorted(out, key=lambda item: -item["hours"])
 
 
-def exploit_items(delivery_rows, orphans, limit: int = 3) -> list[dict]:
+def exploit_items(delivery_rows, orphans, limit: int = 3, *,
+                  kind_by_key=None, state_by_key=None) -> list[dict]:
     """The handful of owned items the exploit rung sends the lead to chase.
 
     The largest current review waits (the delivery list's own holder fact), with
@@ -618,18 +668,19 @@ def exploit_items(delivery_rows, orphans, limit: int = 3) -> list[dict]:
     out = []
     for row in review_rows[:limit]:
         pr = f"#{row['number']}"
+        ticket = _ticket_of(
+            {"ticket_keys": row.get("story_tickets") or []},
+            kind_by_key=kind_by_key, state_by_key=state_by_key,
+        )
         out.append({
             "kind": "pr",
             "pr": pr,
-            "ticket": _ticket_of({"ticket_keys": row.get("story_tickets") or []}),
+            "ticket": ticket,
             "hours": _hours(row.get("waiting_hours")),
             "holders": list(row.get("waiting_on") or ()),
             "orphaned": pr in orphan_prs,
             "stale": bool(row.get("stale")),
-            "href": (
-                f"#ticket/{_ticket_of({'ticket_keys': row.get('story_tickets') or []})}"
-                if row.get("story_tickets") else None
-            ),
+            "href": f"#ticket/{ticket}" if ticket else None,
         })
     return out
 
@@ -640,7 +691,8 @@ def _station_short(rows: list[dict]) -> str:
     return STATION_BY_ID[station]["short"] if station else "the value stream"
 
 
-def adjacent(court, data, open_rows, delivery_rows, done_keys) -> list[dict]:
+def adjacent(court, data, open_rows, delivery_rows, done_keys, *,
+             kind_by_key=None, state_by_key=None) -> list[dict]:
     """The findings beside the verdict: no-live-PR work and unmerged changes."""
     no_live = [
         row for row in open_rows
@@ -672,14 +724,20 @@ def adjacent(court, data, open_rows, delivery_rows, done_keys) -> list[dict]:
         pr = state.pr
         if pr.get("closed_ts") is not None:
             continue
-        tickets = [key for key in (pr.get("ticket_keys") or []) if key in done_keys]
-        if not tickets:
+        # prd/70 F-03: the canonical ticket decides whether this PR is "Done in
+        # Jira, PR open" — a PR that merely *mentions* an old closed key next to
+        # its open story is not an unmerged change.
+        ticket = _ticket_of(
+            {"ticket_keys": pr.get("ticket_keys") or []},
+            kind_by_key=kind_by_key, state_by_key=state_by_key,
+        )
+        if ticket is None or ticket not in done_keys:
             continue
         unmerged.append({
             "pr": f"#{pr['pr_id']}",
-            "key": tickets[-1],
+            "key": ticket,
             "hours": aging.review_hours(state),
-            "href": f"#ticket/{tickets[-1]}",
+            "href": f"#ticket/{ticket}",
         })
     unmerged.sort(key=lambda item: -item["hours"])
     total = round(sum(float(item["hours"] or 0.0) for item in unmerged), 1)
@@ -838,16 +896,20 @@ def verdict(court, data, window, suggestions=None, cross_check=None) -> dict:
     historical_rows = historical(pool_table)
     completed_n = max((pool["n_completed"] for pool in pool_table.values()), default=0)
     done_keys = jira.done_keys(data)
+    # prd/70 F-03: the verdict's labels use the same canonical ticket helper as
+    # Aging and the ticket page, built from the store's own STORY/EPIC rows.
+    kind_by_key, state_by_key = ballcourt.ticket_maps(data)
     delivery = ballcourt.delivery_list(court, done_tickets=done_keys)
     delivery_rows = list(delivery.get("rows") or ())
     open_rows = liveness(court, data)
-    distinct_done_open = {
-        key for row in delivery_rows
-        for key in (row.get("story_tickets") or ())
-        if key in done_keys
-    }
-    orphans = orphaned_approvals(delivery_rows, court)
-    items = exploit_items(delivery_rows, orphans)
+    orphans = orphaned_approvals(
+        delivery_rows, court,
+        kind_by_key=kind_by_key, state_by_key=state_by_key,
+    )
+    items = exploit_items(
+        delivery_rows, orphans,
+        kind_by_key=kind_by_key, state_by_key=state_by_key,
+    )
     # Attach the live PR to each pooled story, so the card can name the item
     # ("#60 (DEL-176) has been in review 144 h, waiting on FrMo") without a
     # second lookup in the browser.
@@ -865,8 +927,17 @@ def verdict(court, data, window, suggestions=None, cross_check=None) -> dict:
             item["orphaned"] = any(
                 orphan["pr"] == item["pr"] for orphan in orphans
             )
-    holder_block = holders(court, delivery_rows)
-    findings = adjacent(court, data, open_rows, delivery_rows, done_keys)
+    holder_block = holders(
+        court, delivery_rows, window,
+        kind_by_key=kind_by_key, state_by_key=state_by_key,
+    )
+    findings = adjacent(
+        court, data, open_rows, delivery_rows, done_keys,
+        kind_by_key=kind_by_key, state_by_key=state_by_key,
+    )
+    unmerged_n = next(
+        (row["n"] for row in findings if row["kind"] == "unmerged"), 0,
+    )
     rungs = ladder(suggestions or (), cross_check, len(items))
     # the exploit rung names the items it sends the lead to chase (prd/58 DoD:
     # "#53/#55/#60"), so the card's ladder and the sentence cannot disagree
@@ -933,7 +1004,7 @@ def verdict(court, data, window, suggestions=None, cross_check=None) -> dict:
             "live": len([row for row in open_rows if row["state"] == "live"]),
             "dead": len([row for row in open_rows if row["state"] == "dead"]),
             "unobserved": len([row for row in open_rows if row["state"] == "unobserved"]),
-            "unmerged": len(distinct_done_open),
+            "unmerged": unmerged_n,
             "open": len(open_rows),
         },
         "rule_rungs": rung_map(),
