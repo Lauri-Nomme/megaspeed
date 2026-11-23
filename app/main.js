@@ -20,8 +20,8 @@ import { BlockingMap, LENSES, blockingText } from '/graph.js';
 import { QueueChart } from '/queues.js';
 import { legendMarkup, responseTable } from '/queues.js';
 import {
-  DAY, fmtAge, fmtBucket, fmtCalendarDuration, fmtCalendarHours, fmtCompact, fmtDay,
-  fmtHours, fmtRange, fmtStamp, esc, whoLabel,
+  DAY, fmtAge, fmtBucket, fmtCalendarDuration, fmtCalendarHours, fmtCompact, fmtCount,
+  fmtDay, fmtDaySpan, fmtHours, fmtRange, fmtStamp, esc, whoLabel,
 } from '/format.js';
 import {
   TABS, tabCounts, tabRows, deliveryTable, overviewMarkup, overviewCounts,
@@ -226,7 +226,8 @@ const timeline = new Timeline({
     // when a brush or a zoom has taken it away from the active timeframe.
     noteTimelineView(stats);
     if (state.page === 'timeline') {
-      $('range').textContent = stats.total ? fmtRange(stats.start, stats.end) : 'no events';
+      const shown = stats.total ? dataWindow(stats.start, stats.end) : null;
+      $('range').textContent = shown ? fmtRange(shown.start, shown.end) : 'no events';
       syncRangeMeta();
     }
     // B7: the timeline's disclosure describes the timeline only. Every other
@@ -368,6 +369,27 @@ function presetWindow() {
   return { start: end - days * DAY, end };
 }
 
+/**
+ * prd/70 F-12: the window `#range` prints, clamped to the data.
+ *
+ * `timeline.fit()` pads the domain by 1.5 % on each side, so `All` ended 22 days
+ * in the future ("28 Sep → 14 Dec") while every other page said "→ 22 Nov". The
+ * range is a statement about the data, so it never claims time the store does
+ * not hold; a custom window inside the data is untouched.
+ */
+function dataWindow(start, end) {
+  const meta = state.meta || {};
+  const first = meta.first_ts ? Date.parse(meta.first_ts) : null;
+  const last = meta.last_ts
+    ? Date.parse(meta.last_ts)
+    : (meta.as_of ? Date.parse(meta.as_of) : null);
+  if (!(start < end)) return { start, end };
+  return {
+    start: first && start < first ? first : start,
+    end: last && end > last ? last : end,
+  };
+}
+
 /* B6: the timeframe control is the top-bar contract for "when". A preset shows
  * pressed; a brush or a zoom shows a `custom` chip instead of leaving a preset
  * pressed over a different window. `#range` is the timeline's window and is
@@ -395,7 +417,10 @@ function renderTimeframe() {
     $('range').textContent = window ? fmtRange(window.start, window.end) : '—';
   } else if (custom) {
     const view = timeline.captureView();
-    if (view) $('range').textContent = fmtRange(view.start, view.end);
+    if (view) {
+      const shown = dataWindow(view.start, view.end);
+      $('range').textContent = fmtRange(shown.start, shown.end);
+    }
   }
   syncRangeMeta();
 }
@@ -519,7 +544,19 @@ function liveStatusText() {
   // prd/28: the phone's top bar is two rows of context; the counts live in the
   // provenance line, so the status is just the liveness dot and its word.
   if (isPhone()) return 'live';
-  return `live · ${state.events.length} events${state.tenant ? ` · ${state.tenant}` : ''}`;
+  // prd/70 F-08: `state.events` is the *loaded* slice (newest 40,000), while
+  // the provenance line reports the store's full event count. Saying
+  // "40000 events" here beside "76213 events" there was two answers to one
+  // question; name what is loaded and what the store holds.
+  const total = Math.max(
+    Number(state.eventTotal) || 0,
+    Number((state.meta && state.meta.events) || 0),
+  );
+  const loaded = state.events.length;
+  const counts = total && loaded < total
+    ? `${fmtCount(loaded)} of ${fmtCount(total)} events loaded`
+    : `${fmtCount(total || loaded)} events`;
+  return `live · ${counts}${state.tenant ? ` · ${state.tenant}` : ''}`;
 }
 
 function setStatus(text, cls = '') {
@@ -989,6 +1026,11 @@ async function ensureData(page) {
       )));
     }
     state.rules = cached(key);
+  }
+  if (page === 'timeline') {
+    // prd/70 F-04: the forecast card is evaluated over the active window, so a
+    // timeframe change is a new question to the same (server-cached) endpoint.
+    await loadForecast(loadSeq);
   }
   if (page === 'ticket') {
     // prd/25: one ticket's cycle. The cache key includes the key, so two ticket
@@ -2489,10 +2531,68 @@ function sourcesRunNote(meta) {
   return `${runs.length} ingest runs${named} built this dataset; the combined tenant joins the PR half to the Jira ticket half on ticket keys.`;
 }
 
+/**
+ * prd/70 F-15: one ingest run's contribution, per source.
+ *
+ * The Sources table used PR columns for every run, so the Jira run read
+ * `0 / 0 / 0` while its 2,391 issues and its events were invisible. A run that
+ * saw PRs reports PRs; a Jira run reports issues. `/api/health`'s `runs` array
+ * carries only the PR counters, so:
+ *   - issues come from the Jira layer's own object counts (stories + epics),
+ *     which is the same 2,391 the run kept;
+ *   - events come from `/api/events/counts.by_repo`: Jira events carry no repo,
+ *     PR events do, and that split is exact on the combined store.
+ * A newer payload that does carry `issues_seen` / `events_written` wins.
+ */
+function sourceRunRow(run, meta = {}, counts = null) {
+  const number = (value) => {
+    if (value == null || value === '') return null;
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  };
+  const run0 = run || {};
+  const prSide = Number(run0.prs_seen || 0) > 0;
+  const jiraSide = !prSide;
+  const derivedIssues = Number(meta.stories || 0) + Number(meta.epics || 0);
+  const issues = jiraSide
+    ? {
+      seen: number(run0.issues_seen) ?? (derivedIssues || null),
+      kept: number(run0.issues_kept) ?? (derivedIssues || null),
+    }
+    : null;
+  const prs = prSide
+    ? { seen: number(run0.prs_seen), kept: number(run0.prs_kept) }
+    : null;
+  // Events: prefer the per-run counter; else split the counts histogram by repo.
+  let events = number(run0.events_written);
+  if (events == null && counts) {
+    const byRepo = counts.by_repo || {};
+    let repo = 0;
+    let repoLess = null;
+    for (const [key, value] of Object.entries(byRepo)) {
+      const n = Number(value) || 0;
+      if (key === 'null' || key === 'None' || key === '') repoLess = n;
+      else repo += n;
+    }
+    if (repoLess == null && counts.total != null) {
+      repoLess = Math.max(0, (Number(counts.total) || 0) - repo);
+    }
+    events = prSide ? repo : repoLess;
+  }
+  return {
+    source: run0.source || '—',
+    as_of: run0.as_of || null,
+    kind: prSide ? 'pr' : 'jira',
+    issues,
+    prs,
+    dropped: prSide ? number(run0.prs_dropped) : null,
+    events: events == null ? null : events,
+  };
+}
+
 function renderSourcesPage() {
   const meta = state.meta || {};
   const tenant = currentTenant() || {};
-  const prs = Number(meta.prs) || 0;
   const rows = [
     ['tenant', meta.tenant || state.tenant || '—'],
     ['build', versionLabel(state.build) || '—'],
@@ -2509,29 +2609,45 @@ function renderSourcesPage() {
       const window = presetWindow();
       const label = TIMEFRAMES[state.timeframe] ? TIMEFRAMES[state.timeframe].label : 'the window';
       return window
-        ? `${fmtDay(window.start)} → ${fmtDay(window.end)} (${label})`
+        ? `${fmtDaySpan(window.start, window.end)} (${label})`
         : '—';
     })()],
-    ['store span', `${meta.first_ts ? fmtDay(Date.parse(meta.first_ts)) : '—'} → ${meta.last_ts ? fmtDay(Date.parse(meta.last_ts)) : '—'} (every event the store holds)`],
+    ['store span', `${meta.first_ts && meta.last_ts
+      ? fmtDaySpan(Date.parse(meta.first_ts), Date.parse(meta.last_ts))
+      : meta.first_ts
+        ? fmtDaySpan(Date.parse(meta.first_ts), Date.parse(meta.first_ts))
+        : '—'} (every event the store holds)`],
     ['duration basis', meta.calendar && meta.calendar.hours_mode === 'business'
       ? `business hours — ${meta.calendar.working_hours?.default || '24/7'} ${meta.calendar.timezone || ''}, holidays and vacations excluded`
       : 'wall-clock hours; no working-hours calendar configured'],
   ];
   // prd/63 F27/V-B: a combined tenant is built from several ingest runs. List
   // each source, not only the latest run's name.
+  // prd/70 F-15: per-source columns — issues for the Jira run, PRs for the PR
+  // run — plus the events each contributed. The row never claims a zero count
+  // for a layer its source does not have.
   const runs = Array.isArray(meta.runs) ? meta.runs : [];
+  const pair = (group) => {
+    if (!group) return '—';
+    const kept = group.kept == null ? '—' : fmtCount(group.kept);
+    const seen = group.seen == null ? '—' : fmtCount(group.seen);
+    return `${kept} kept of ${seen} seen`;
+  };
   const sourceTable = runs.length
     ? `<table class="table compact source-runs"><thead><tr>
-        <th>source</th><th>snapshot</th>${prs
-    ? '<th class="num">PRs seen</th><th class="num">PRs kept</th><th class="num">dropped</th>'
-    : ''}</tr></thead><tbody>${
-        runs.map((run) => `<tr data-source="${esc(run.source)}">
-          <td class="mono">${esc(run.source)}</td>
-          <td class="mono">${run.as_of ? esc(fmtStamp(Date.parse(run.as_of))) : '—'}</td>${prs
-    ? `<td class="num">${run.prs_seen ?? '—'}</td>
-          <td class="num">${run.prs_kept ?? '—'}</td>
-          <td class="num">${run.prs_dropped ?? '—'}</td>`
-    : ''}</tr>`).join('')}</tbody></table>
+        <th>source</th><th>snapshot</th><th class="num">issues</th>
+        <th class="num">PRs</th><th class="num">dropped</th><th class="num">events</th>
+      </tr></thead><tbody>${
+        runs.map((run) => {
+          const row = sourceRunRow(run, meta, state.counts);
+          return `<tr data-source="${esc(run.source)}">
+          <td class="mono">${esc(row.source)}</td>
+          <td class="mono">${row.as_of ? esc(fmtStamp(Date.parse(row.as_of))) : '—'}</td>
+          <td class="num">${pair(row.issues)}</td>
+          <td class="num">${pair(row.prs)}</td>
+          <td class="num">${row.dropped == null ? '—' : fmtCount(row.dropped)}</td>
+          <td class="num">${row.events == null ? '—' : fmtCount(row.events)}</td></tr>`;
+        }).join('')}</tbody></table>
       <p class="panel-note">${esc(sourcesRunNote(meta))}</p>`
     : '';
   $('sources-body').innerHTML = `<dl class="facts">${rows.map(([key, value]) =>
@@ -2932,15 +3048,66 @@ function availableRepos() {
   return [...repos].sort();
 }
 
-function buildScopeOptions() {
+/**
+ * prd/70 F-02: every person this store can scope to, not just the loaded slice.
+ *
+ * `state.events` is the newest 40,000 rows of the store; on the combined corpus
+ * that hid 75 historical actors (`DmMa`, `IvZi`) and every reviewer who only
+ * appears as a link target (`PERSON:LeMi2`). The roster is the union of the
+ * store's PERSON objects, STORY/TICKET/PR owners, queue streams, aging holders
+ * and the loaded events, so a deep link resolves without loading all events.
+ *
+ * Returns `name → loaded-event count` (0 when none of their events are in the
+ * slice), so the select can still rank the busiest people first.
+ */
+function personRoster() {
   const counts = new Map();
-  for (const event of state.events) counts.set(event.actor, (counts.get(event.actor) || 0) + 1);
-  // concepts.md §2: a bot is not a person scope, and "system" is not an actor
-  // a reader can wait on. Both were dead-end options (QA #9/#1).
-  const bots = new Set((state.meta && state.meta.bots) || []);
+  for (const event of state.events || []) {
+    const actor = String(event.actor ?? '').trim();
+    if (actor) counts.set(actor, (counts.get(actor) || 0) + 1);
+  }
+  const people = new Set();
+  const add = (value) => {
+    const name = String(value ?? '').trim();
+    if (!name || name === 'system' || name === 'null' || name === 'undefined') return;
+    people.add(name);
+  };
+  for (const object of state.objects || []) {
+    if (!object) continue;
+    // concepts.md §2: a bot's PERSON row (actor_kind "bot") is not a person.
+    if (object.object_type === 'PERSON' && object.attributes
+      && object.attributes.actor_kind === 'bot') continue;
+    if (object.object_type === 'PERSON' || object.object_type === 'STORY'
+      || object.object_type === 'TICKET' || object.object_type === 'PR') {
+      add(object.actor);
+    }
+  }
+  for (const stream of (state.queues && state.queues.streams) || []) {
+    if (!stream) continue;
+    if (!streamIsQueue(stream)) add(stream.id);
+    for (const person of stream.people || []) add(person);
+  }
+  for (const row of (state.aging && state.aging.rows) || []) {
+    if (!row) continue;
+    for (const holder of row.holder || []) {
+      add(typeof holder === 'string' ? holder : holder && holder.person);
+    }
+    for (const person of row.waiting_on || []) add(person);
+    for (const person of Object.keys(row.waiting_roles || {})) add(person);
+  }
+  for (const event of state.events || []) add(event.actor);
+  for (const bot of (state.meta && state.meta.bots) || []) people.delete(bot);
+  const roster = new Map();
+  for (const name of people) roster.set(name, counts.get(name) || 0);
+  return roster;
+}
+
+function buildScopeOptions() {
+  // prd/70 F-02: the roster, not the 40k event slice (see `personRoster`).
+  const roster = personRoster();
   const options = [['all:all', 'everything']];
-  [...counts.entries()].sort((a, b) => b[1] - a[1])
-    .filter(([actor]) => actor && actor !== 'system' && !bots.has(actor))
+  [...roster.entries()]
+    .sort((a, b) => (b[1] - a[1]) || a[0].localeCompare(b[0]))
     .forEach(([actor]) => options.push([`person:${actor}`, `person ${actor}`]));
   // Every role queue this dataset can show is a scope option, so a role scope
   // set from the queue chart or a graph node always has a matching <option>
@@ -3011,7 +3178,7 @@ function setScope(kind, value, { silent = false } = {}) {
       .catch((err) => setStatus(`scope failed: ${err.message}`, 'stale'));
   }
   if (!silent) {
-    if (!valid) flashStatus('that scope has no events in this dataset — showing everything', 'stale');
+    if (!valid) flashStatus('that scope is not in this dataset — showing everything', 'stale');
     else flashStatus(kind === 'all' ? 'scope cleared' : `scoped to ${state.scope.label}`, 'live');
   }
 }
@@ -3068,10 +3235,17 @@ function validateScope() {
     return normalized.kind === 'all';
   }
   const bots = new Set((state.meta && state.meta.bots) || []);
+  // prd/70 F-02: validate against the store's full roster (PERSON objects,
+  // story/PR owners, queue streams, aging holders and the loaded events) — the
+  // 40k event slice is not the identity space. Before any data has arrived the
+  // roster cannot answer, so the scope is kept and `load()` re-validates it
+  // once the objects are in (a `person:` deep link is not a bad link).
+  const roster = personRoster();
+  const personReady = roster.size > 0 || state.events.length > 0;
   const person = state.scope.kind === 'person'
     && (state.scope.value === 'system'
       || bots.has(state.scope.value)
-      || !state.events.some((event) => event.actor === state.scope.value));
+      || (personReady && !roster.has(state.scope.value)));
   const role = state.scope.kind === 'role'
     && !ROLE_QUEUES.some((queue) => queue.toLowerCase() === String(state.scope.value || '').toLowerCase());
   const ticket = state.scope.kind === 'ticket'
@@ -3431,6 +3605,23 @@ async function loadSprints(seq) {
   return state.sprints;
 }
 
+/* prd/70 F-04: the forecast is evaluated over the active timeframe's window.
+ *
+ * `/api/forecast` without `days` falls back to the whole store when the tenant
+ * has a Jira layer (260 weeks on demo-tlla), so `1q` was refused as "erratic"
+ * (all-time CV 0.87) even though the 90-day CV is 0.45 and the forecast is
+ * available. The window is the same one every other card asks for.
+ */
+function forecastQuery({ target = null, by = null, n = null } = {}) {
+  const query = new URLSearchParams();
+  if (target != null) query.set('target', String(target));
+  const days = timeframeDays() ?? allDays();
+  if (days) query.set('days', String(days));
+  if (by) query.set('by', String(by));
+  if (n != null) query.set('n', String(n));
+  return query.toString();
+}
+
 /* prd/60: the forecast is one endpoint (`/api/forecast`) scoped to the active
  * sprint — the same scope prd/52's at-risk block has (the two entry points open
  * one card). A store with no sprint layer, or a server older than the endpoint,
@@ -3447,7 +3638,7 @@ async function loadForecast(seq) {
   }
   const changedSprint = state.forecastSprint !== sid;
   try {
-    const query = new URLSearchParams({ target: `sprint:${sid}` });
+    const query = forecastQuery({ target: `sprint:${sid}` });
     const payload = await getJSON(withTenant(`/api/forecast?${query}`));
     if (seq !== loadSeq) return null;
     state.forecast = payload && payload.ok ? payload : null;
@@ -4061,11 +4252,11 @@ document.addEventListener('change', async (event) => {
   // the pure re-render.
   const forecastBy = event.target.closest('[data-forecast-by-input]');
   if (forecastBy && state.forecastSprint != null && forecastBy.value) {
-    const query = new URLSearchParams({
+    const query = forecastQuery({
       target: `sprint:${state.forecastSprint}`,
       by: forecastBy.value,
+      n: state.forecastTarget,
     });
-    if (state.forecastTarget != null) query.set('n', String(state.forecastTarget));
     try {
       const payload = await getJSON(withTenant(`/api/forecast?${query}`));
       if (payload && payload.ok) {

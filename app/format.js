@@ -33,6 +33,26 @@ export function fmtDayYear(ms) {
   return `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}`;
 }
 
+/** Roughly eleven months: past this a "28 Sep → 21 Nov" range can repeat a
+ * month label and needs the year on both ends (prd/70 F-12). */
+const MULTI_YEAR_SPAN = 335 * DAY;
+
+/**
+ * A day-granular span: "28 Sep → 21 Nov" inside one year, `"28 Sep 2021 →
+ * 21 Nov 2026"` when the ends are in different years or the span is longer than
+ * ~11 months (prd/70 F-12). A five-year store span printed without years read
+ * like a 54-day autumn window.
+ */
+export function fmtDaySpan(start, end) {
+  const a = new Date(start);
+  const b = new Date(end);
+  const multi = a.getUTCFullYear() !== b.getUTCFullYear()
+    || Math.abs(end - start) > MULTI_YEAR_SPAN;
+  return multi
+    ? `${fmtDayYear(start)} → ${fmtDayYear(end)}`
+    : `${fmtDay(start)} → ${fmtDay(end)}`;
+}
+
 export function fmtClock(ms) {
   const d = new Date(ms);
   return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
@@ -52,12 +72,22 @@ export function fmtAbsolute(ms) {
     `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
 }
 
-/** A timeframe in the top bar: day-granular only when the window is wide. */
+/** A timeframe in the top bar: day-granular only when the window is wide.
+ *
+ * prd/70 F-12: a range that crosses a year boundary (or spans more than ~11
+ * months) carries the year on both ends, so `28 Sep → 21 Nov` can never mean
+ * five years.
+ */
 export function fmtRange(start, end) {
   const span = end - start;
-  if (span <= 2 * DAY) return `${fmtDay(start)} ${fmtClock(start)} → ${fmtDay(end)} ${fmtClock(end)}`;
-  if (span <= 45 * DAY) return `${fmtDay(start)} ${fmtClock(start)} → ${fmtDay(end)} ${fmtClock(end)}`;
-  return `${fmtDay(start)} → ${fmtDay(end)}`;
+  const a = new Date(start);
+  const b = new Date(end);
+  const multi = a.getUTCFullYear() !== b.getUTCFullYear() || span > MULTI_YEAR_SPAN;
+  if (span <= 45 * DAY) {
+    const day = multi ? fmtDayYear : fmtDay;
+    return `${day(start)} ${fmtClock(start)} → ${day(end)} ${fmtClock(end)}`;
+  }
+  return fmtDaySpan(start, end);
 }
 
 export function fmtTick(ms, step) {
@@ -151,6 +181,12 @@ export function fmtBucket(ms) {
   if (ms < DAY) return `${Math.round(ms / HOUR)} h`;
   const days = Math.round(ms / DAY);
   return `${days} calendar day${days === 1 ? '' : 's'}`;
+}
+
+/** Whole count with thousands separators: 76213 → "76,213" (prd/70 F-08/F-15). */
+export function fmtCount(n) {
+  const value = Math.round(Number(n) || 0);
+  return String(value).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
 /** Honest compact notation: 20.4k, ≈5.9M. */
