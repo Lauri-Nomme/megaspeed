@@ -62,6 +62,18 @@ PERSON rows went 329→223 (merged plus pre-existing orphans), events unchanged 
 The laptop's `identity.json` still holds the old pseudonyms: swap its `bb:`
 entries before the next scrape, or the rekeyed actors come back.
 
+## v0.20.3 — the test suite runs in parallel
+
+- `tests/run_parallel.py` (stdlib only) spreads the suite over worker processes
+  and packs whole modules by default, because a module's fixtures are shared per
+  process. `--times` takes a serial timing run and packs the slow tests first.
+- `test_relabel` now shares one live-shaped scrape per process instead of one per
+  test: that module fell from **76 s to 12 s**.
+- Measured: 1,564 discovered; **196 s serial → ~130 s after the fixture fix →
+  15 s at 16 workers** (this box). The 3 class-level skips (Jira lab not
+  reachable) are reported by name; they are the 21 cases `testsRun` does not
+  count.
+
 ## v0.20.2 — comment-kind mix in the metrics; the diff verdict
 
 - `comment_tax` reports `kinds` (`review` / `ci_notice` / `ci_finding` / `bot` /

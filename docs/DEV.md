@@ -292,7 +292,14 @@ comment body, diff or free-text summary. `attributes` holds only keys from
 ```bash
 .venv/bin/python -m ingest --verify     # exit 1 + the offending column if broken
 .venv/bin/python -m unittest discover -s tests -v
+.venv/bin/python tests/run_parallel.py -j 8   # same suite, one process per worker
 ```
+
+The suite is CPU-bound (DuckDB, JSON, small simulations), so the parallel runner
+is the default for a full check; `unittest discover` stays the reference for a
+single failing test. `tests/run_parallel.py --list` prints the ids, and
+`--times <json>` (a `[[seconds, test_id], …]` timing run) makes the scheduler
+pack the slow tests first.
 
 `tests/test_contract.py` covers the pseudonym scheme, collision suffixes, the
 filter's second gate, message classification, idempotency and the canary.

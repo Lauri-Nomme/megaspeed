@@ -17,6 +17,7 @@ The flow under test:
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import io
 import json
 import tempfile
@@ -64,6 +65,27 @@ def _scrape(root: Path, *, seed: int = 5, bundle: dict | None = None,
         progress=QUIET,
     )
     return cfg, out, root / f"{name}.state" / "classify-trace.jsonl"
+
+
+#: The live-shaped scrape is the expensive half of a relabel test (~2.8 s for
+#: four PRs). Its output — the bundle and the call trace — is immutable, so one
+#: scrape per process is shared and each test gets a fresh store path.
+_SHARED_SCRAPE: tuple[Config, Path, Path] | None = None
+
+
+def _shared_scrape() -> tuple[Config, Path, Path]:
+    global _SHARED_SCRAPE
+    if _SHARED_SCRAPE is None:
+        root = Path(tempfile.mkdtemp(prefix="relabel-shared-"))
+        _SHARED_SCRAPE = _scrape(root)
+    return _SHARED_SCRAPE
+
+
+def _fresh_cfg(base: Config, root: Path) -> Config:
+    """The shared config with this test's own store and identity files."""
+    return dataclasses.replace(
+        base, db_path=root / "store.duckdb", identity_path=root / "identity.json"
+    )
 
 
 def _with_question(root: Path) -> dict:
@@ -174,7 +196,8 @@ class LabelPatchApplyTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        self.cfg, self.bundle, self.trace = _scrape(self.root)
+        base, self.bundle, self.trace = _shared_scrape()
+        self.cfg = _fresh_cfg(base, self.root)
         import_bundle(self.cfg, self.bundle)
         self.thread = next(
             obj for obj in read_bundle(self.bundle).objects
@@ -331,7 +354,8 @@ class RelabelTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        self.cfg, self.bundle, self.trace = _scrape(self.root)
+        base, self.bundle, self.trace = _shared_scrape()
+        self.cfg = _fresh_cfg(base, self.root)
 
     def tearDown(self):
         self.tmp.cleanup()
