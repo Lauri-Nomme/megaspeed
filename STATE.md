@@ -36,6 +36,19 @@ Tests: **1461** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`)
   policy-lab guardrail parity, and the desktop column widths. `docs/QA-v012-final.md` records
   22/22 + 10/10 FIXED, 0 regressions, desktop and phone, both themes.
 
+## QA v0.17.3 — combined corpus (`docs/QA-v017-combined.md`)
+
+First free-exploration pass with the PR layer present: **15 findings (3 BUG, 8
+PAPERCUT, 4 POLISH)**, 0 pseudonymisation leaks over 58 API payloads, 0
+regressions across the 16 prd/68 fixes. F-01 (suffix-split identities) is fixed
+in the live store on shared-ticket evidence: `MaPa2→MaPa` (222 shared stories),
+`MaRa2→MaRa` (102), `JaKu4→JaKu` (40), `MaPo6→MaPo` (15), `AlKr2→AlKr` (6);
+persons 223→218, contract OK. `BeWo`/`BeWo2`/`BeWo3` and
+`DaHa`/`DaHa2`/`DaHa4` were **not** merged: no shared ticket keys, and a suffix
+means the BB map already had a different person with those initials.
+Backup: `/data/personal/work/demo-tlla.pre-suffix-merge.duckdb`.
+Open: F-02 (scope roster vs 40k cap), F-03 (multi-key PR attribution), F-04..F-15.
+
 ## Data repair — live store rekey (2026-11-23)
 
 The Bitbucket half was imported with surname-first pseudonyms (`NoLa`) while Jira
