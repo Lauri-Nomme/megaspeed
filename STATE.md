@@ -62,6 +62,26 @@ PERSON rows went 329→223 (merged plus pre-existing orphans), events unchanged 
 The laptop's `identity.json` still holds the old pseudonyms: swap its `bb:`
 entries before the next scrape, or the rekeyed actors come back.
 
+## v0.20.0 — label pass v2 and a deterministic non-review pre-filter
+
+The 2026-11-23 measurements changed the second model pass:
+
+- **Prompt v2** (`ollama-v2`, a new classifier version so the label cache cannot
+  serve a v1 answer): a short statement that the code is wrong is a `blocker`
+  ("this is always false now"), `optimization` is cost-only, the
+  `out_of_scope` example no longer pairs `rejected`, and `thread_intent` is
+  `unclear` unless the text itself states the outcome.
+- **The anchor diff is not an input.** A/B on 21 openers with a hunk changed
+  3 labels, two of them reciprocal (`nit`↔`out_of_scope`): instability, not
+  signal. The cost (2x tokens, a context hash in the cache) is not justified.
+- **`ingest.citext`**: the coverage/Qodana/admin templates the corpus actually
+  contains, as closed-set rules with no model. `relabel` now skips those rows
+  (2,247 coverage + 30 Qodana + admin notes + configured `@alias` commands), so
+  a v2 pass spends its calls on human review text only.
+- `comment_kind` / `label_source` / `ci_template` / `ci_issues` /
+  `coverage_min` / `coverage_zero` are reserved in the taxonomy; the reducer
+  wiring and the `recategorize` migration are the next unit.
+
 ## Label subset — audit-driven (2026-11-23)
 
 The independent audit of the relabel patch (`relabel-audit-report.md`, local)

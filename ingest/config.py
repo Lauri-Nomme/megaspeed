@@ -106,6 +106,9 @@ class Config:
     #: ignored and only these exact keys match.
     ticket_keys: tuple[str, ...] = DEFAULT_TICKET_KEYS
     bot_slugs: tuple[str, ...] = DEFAULT_BOT_SLUGS
+    #: Mention handles people type to address a bot (``@APE``). The alias is not
+    #: necessarily the account name, so it is configured separately (prd/75).
+    bot_aliases: tuple[str, ...] = ()
     base_url: str = ""
     page_limit: int = 25
     seed: int = 20261115
@@ -532,6 +535,9 @@ def load_config(path: str | os.PathLike[str] | None = None) -> Config:
         ticket_keys=ticket_keys,
         bot_slugs=_parse_slugs(
             os.environ.get("MEGASPEED_BOT_SLUGS", actors.get("bot_slugs", list(DEFAULT_BOT_SLUGS)))
+        ),
+        bot_aliases=_parse_slugs(
+            os.environ.get("MEGASPEED_BOT_ALIASES", actors.get("bot_aliases", []))
         ),
         repos=repos,
         base_url=os.environ.get("MEGASPEED_BB_BASE_URL", bb.get("base_url", "")).rstrip("/"),

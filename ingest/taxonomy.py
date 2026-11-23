@@ -118,6 +118,19 @@ PUSH_CLASS = frozenset({"content", "pure_rebase", "rebase_conflict", "other"})
 # is never exclusive with a review (concepts.md §2), so this is a flag, not a
 # ball.
 BUILD_RESULT = frozenset({"success", "failed", "in_progress", "other"})
+#: prd/75: what a comment *is*, orthogonal to ``comment_type`` (what a human
+#: reviewer wants). CI output and administrative notes have no review want, a
+#: bot-directed command is addressed to a tool, and a bot's own comment is not
+#: human review. Only ``review`` may carry a ``comment_type``.
+COMMENT_KIND = frozenset(
+    {"review", "ci_notice", "ci_finding", "bot", "bot_request", "admin"}
+)
+#: Which comment in the thread produced its ``comment_type``: the opener (the
+#: normal case) or the first human reply (a bot/CI thread whose only review
+#: substance is the human answer).
+LABEL_SOURCE = frozenset({"opener", "reply"})
+#: The bot comment templates the corpus actually contains (prd/75).
+CI_TEMPLATE = frozenset({"coverage", "qodana_clean", "qodana_issues", "unknown"})
 ANCHOR_CLASS = frozenset({"file", "general"})
 THREAD_STATE = frozenset({"open", "resolved"})
 CHANGE = frozenset({"added", "removed", "reviewed"})
@@ -253,6 +266,14 @@ OBJECT_ATTRIBUTE_SPEC: dict[str, Any] = {
     "commits_removed": int,
     "severity": SEVERITY,
     "anchor_class": ANCHOR_CLASS,
+    # prd/75: what the thread is (review / CI / bot / admin), who produced its
+    # review label, and the deterministic CI facts a notice or finding carries.
+    "comment_kind": COMMENT_KIND,
+    "label_source": LABEL_SOURCE,
+    "ci_template": CI_TEMPLATE,
+    "ci_issues": COUNT,
+    "coverage_min": COUNT,
+    "coverage_zero": bool,
     # prd/16: the text classifier's projection of a review thread. Both are
     # closed labels; ``classifier_version`` records *which* classifier produced
     # them so a re-classification is replayable (prd/02, data lifecycle).

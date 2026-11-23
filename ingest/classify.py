@@ -203,30 +203,40 @@ def system_prompt(kind: str) -> str:
     _check_kind(kind)
     rules = (
         "comment_type:\n"
-        "  blocker      = the change must not merge until this is fixed (bug, data loss,\n"
-        "                 security, broken contract)\n"
+        "  blocker      = the change must not merge until this is fixed: bug, data loss,\n"
+        "                 security, broken contract. A short statement that the code is\n"
+        "                 wrong or misbehaves is a blocker (\"this is always false now\",\n"
+        "                 \"doesn't work without an unwrap\").\n"
         "  suggestion   = an improvement the author may accept or decline\n"
-        "  question     = the reviewer asks something they do not know (not a demand)\n"
+        "  question     = the reviewer asks for information they do not know; not a\n"
+        "                 demand, and not an imperative like \"rename\"/\"check\"/\"review\"\n"
         "  nit          = style, naming, typo, formatting: trivial, no behaviour change\n"
         "  out_of_scope = a valid remark about work that belongs in another ticket/PR\n"
-        "  optimization = performance, memory, throughput, algorithmic cost\n"
-        "thread_intent: what became of the thread, not what it asks for --\n"
-        "  acted = the ask was implemented (the author says fixed/done/addressed),\n"
-        "  rejected = won't fix / by design / disagree, withdrawn = the commenter takes\n"
-        "  it back, unclear = an ask or remark with no answer yet.\n"
-        "question: true only when the comment genuinely asks for information.\n"
+        "  optimization = performance, memory, throughput or algorithmic cost ONLY when\n"
+        "                 cost is the point; a deferral is out_of_scope, and a coverage\n"
+        "                 percentage is not performance\n"
+        "thread_intent: do NOT predict what became of the thread. Use unclear unless\n"
+        "  this text itself states the outcome: acted (the author says\n"
+        "  fixed/done/addressed), rejected (won't fix / by design / disagree),\n"
+        "  withdrawn (the commenter takes it back). An ask with no stated outcome is\n"
+        "  unclear.\n"
+        "question: true only when the text genuinely asks for information.\n"
         "answered: true when this reply resolves someone else's question.\n"
         "phase: implementation for an author's description/plan, review for a comment\n"
         "  made while reviewing code.\n"
+        "An @handle with no other content (\"@bot review\") is a request to a tool, not\n"
+        "a review remark: suggestion, unclear.\n"
     )
     examples = (
-        '{"comment_type":"nit","thread_intent":"acted","question":false,'
+        '{"comment_type":"nit","thread_intent":"unclear","question":false,'
         '"answered":false,"phase":"review"} -- "nit: rename this variable"\n'
-        '{"comment_type":"blocker","thread_intent":"acted","question":false,'
+        '{"comment_type":"blocker","thread_intent":"unclear","question":false,'
+        '"answered":false,"phase":"review"} -- "this is always false now"\n'
+        '{"comment_type":"blocker","thread_intent":"unclear","question":false,'
         '"answered":false,"phase":"review"} -- "this will crash on a null payload"\n'
         '{"comment_type":"question","thread_intent":"unclear","question":true,'
         '"answered":false,"phase":"review"} -- "why do we need a second retry loop?"\n'
-        '{"comment_type":"out_of_scope","thread_intent":"rejected","question":false,'
+        '{"comment_type":"out_of_scope","thread_intent":"unclear","question":false,'
         '"answered":false,"phase":"review"} -- "unrelated cleanup, belongs in its own ticket"\n'
         '{"comment_type":"optimization","thread_intent":"unclear","question":false,'
         '"answered":false,"phase":"review"} -- "this does a linear scan per row"\n'
@@ -236,8 +246,8 @@ def system_prompt(kind: str) -> str:
     if kind == KIND_DESCRIPTION:
         rules = (
             "question: true only when the author is asking for a decision or missing\n"
-            "  information -- a description that merely states the change and its test\n"
-            "  plan is not a question.\n"
+            "  information. A description that merely states the change and its test\n"
+            "  plan is not a question; require a real question mark outside URLs/code.\n"
             "phase: implementation for an author's description/plan (there is no review\n"
             "  or refinement boundary to observe in a PR body).\n"
         )
@@ -728,7 +738,7 @@ class OllamaClassifier(Classifier):
         #: Injected in tests: ``opener(request, timeout) -> response`` (an
         #: object with ``read()``). Never set on a live run.
         self._opener = opener or self._urlopen
-        self.version = "ollama-v1"
+        self.version = "ollama-v2"
         self.last_prompt_tokens: int | None = None
         self.last_duration_ms: float | None = None
         #: Send ``"think": true`` and keep the model's deliberation in the trace.

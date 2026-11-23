@@ -35,7 +35,7 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import classify, labelpatch, llmtrace, taxonomy
+from . import citext, classify, labelpatch, llmtrace, taxonomy
 from .bundle import Bundle, BundleError, read_bundle
 from .config import load_config
 from .logs import iso
@@ -109,6 +109,24 @@ def _replay_items(records: list[dict]) -> list[dict]:
             key = ("pr", context.get("repo"), context.get("pr_id"), record.get("kind"))
         items[key] = record
     return list(items.values())
+
+
+def _skip_non_review(record: dict, cfg) -> bool:
+    """CI output, admin notes and bot-directed commands are not review text.
+
+    They get a deterministic ``comment_kind`` at ingest (prd/75), so a model pass
+    must not spend a call on them. Skipping keeps the old label for those rows;
+    it does not emit a patch row.
+    """
+    context = record.get("context") or {}
+    if context.get("role") != "opener":
+        return False
+    text = str(record.get("text") or "")
+    if citext.ci_kind(text)[0] != "unknown":
+        return True
+    if citext.is_admin(text):
+        return True
+    return citext.is_bot_request(text, getattr(cfg, "bot_aliases", ()))
 
 
 def _outcome(thread: dict, intent: str) -> str:
@@ -505,6 +523,14 @@ def relabel(
         records, bad = llmtrace.read_trace(trace_path)
         texts_seen = len(records)
     items = _replay_items(records)
+    skipped_non_review = 0
+    kept = []
+    for record in items:
+        if _skip_non_review(record, cfg):
+            skipped_non_review += 1
+            continue
+        kept.append(record)
+    items = kept
     if limit is not None:
         items = items[: max(0, int(limit))]
     threads, questions, prs = _index(bundle)
@@ -728,6 +754,7 @@ def relabel(
             "classified": classified,
             "remaining": len(pending) - classified,
             "texts_total": len(markers),
+            "skipped_non_review": skipped_non_review,
             "batches": batches,
             "trace": str(trace_writer.path) if trace_writer is not None else None,
             "trace_records": trace_writer.count if trace_writer is not None else 0,
@@ -956,6 +983,7 @@ def relabel(
         "texts_classified": classified,
         "texts_cached": cache_hits,
         "texts_total": len(markers),
+        "skipped_non_review": skipped_non_review,
         "batches": batches,
         "batch_size": batch_size,
         "labels_cache": str(cache_path),
