@@ -108,9 +108,15 @@ deterministic attribute on the THREAD object:
   commands were booked as `question` (audit), which is neither a question to the
   author nor a review remark. Its size is small: 112 openers mention the AI
   reviewer in prose (the other 37 `@` hits in the trace are Java annotations such
-  as `@Override`/`@Nullable`, which is why a slug list is required). The
-  substance is the bot's reply; if a human then acts on it, that is a separate
-  `review` message, not the opener.
+  as `@Override`/`@Nullable`, which is why a slug list is required).
+  **The bot does not answer in the comment stream.** In the 2026-11-22 capture,
+  50 of the 112 openers were found; none had a reply from an account that is a
+  bot or named like the mention, 20 had a nested *human* reply, 30 had none, and
+  in all 50 the next comment on the PR was human. So a `bot_request` opener is
+  followed by a human remark or by nothing — the label must not assume a bot
+  answer, and the human follow-up (when present) is the review remark that can
+  carry a `comment_type`. If the responder turns out to be a differently named
+  account, it must be added to the bot slug list, not inferred from the alias.
 - `admin` replaces the "no class fits" escape hatch. No `other` value is needed
   in `comment_type` once the kind axis exists; a human non-review note becomes
   `comment_kind=admin` with a null type.
