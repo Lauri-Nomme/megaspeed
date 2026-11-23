@@ -174,6 +174,125 @@ export function laneHeader(dim, rows, { narrow = false } = {}) {
   return `${short} ${dim === 'story' ? storyCount : list.length}`;
 }
 
+/* ------------------------------------------------------- business hours */
+/** A calendar brief's working window, as minutes from local midnight.
+ *
+ * `"09:00–17:00"` (the config file's en dash) and `"09:00-17:00"`
+ * (`/api/calendar`'s printed form) are the same window. `"off"` is a calendar
+ * that never works, so it parses to `null` instead of silently becoming 24/7.
+ */
+export function parseWorkingWindow(value) {
+  const match = /^\s*(\d{1,2}):(\d{2})\s*(?:[–-]|\.\.)\s*(\d{1,2}):(\d{2})\s*$/.exec(String(value ?? ''));
+  if (!match) return null;
+  const from = Number(match[1]) * 60 + Number(match[2]);
+  const to = Number(match[3]) * 60 + Number(match[4]);
+  if (!(to > from)) return null;
+  return [from, to];
+}
+
+/** One timestamp as *wall-clock* milliseconds in the calendar's timezone.
+ *
+ * The timeline's instants are UTC; a business window is local ("09:00" is the
+ * team's morning). Mapping the instant onto a synthetic UTC stamp that reads the
+ * same as the local clock lets the day walk below stay plain arithmetic. An
+ * unknown timezone falls back to the stamp itself (UTC), which is also what a
+ * runtime without the timezone database has to do.
+ */
+function localWallClock(formatter, ms) {
+  if (!formatter) return ms;
+  const parts = {};
+  for (const part of formatter.formatToParts(new Date(ms))) parts[part.type] = part.value;
+  const value = Date.UTC(
+    Number(parts.year), Number(parts.month) - 1, Number(parts.day),
+    Number(parts.hour) % 24, Number(parts.minute), Number(parts.second),
+  );
+  return Number.isFinite(value) ? value : ms;
+}
+
+/** The team business-hours clock of prd/19, as the timeline needs it.
+ *
+ * prd/70 F-07: the queue lanes summed raw 24/7 wall-clock milliseconds and
+ * printed them as `/h` (`review · 60.9k h`) right under a
+ * `business hours · 1 d = 8 h` legend, so a bare `h` meant business time in the
+ * legend and four times that on the lane next to it. A *team queue* is priced by
+ * the analysis with `calendar.business_hours(None, …)`
+ * (`analysis/ballcourt.py`): the calendar's `working_hours.default` on its
+ * `weekdays`, in its timezone. The lanes use that same clock, so one working day
+ * of review reads 8 h again.
+ *
+ * ``calendar`` is the `meta.calendar` brief from `/api/health`; with no calendar
+ * (or `hours_mode: "wall-clock"`) elapsed milliseconds are the honest number
+ * and the legend says `wall-clock hours`, so nothing is re-priced.
+ *
+ * The brief carries the holiday *count*, not its dates (the day detail is
+ * `GET /api/calendar`), so a lane total is the working-window price: the same
+ * clock as the Queue page, without its per-day holiday deduction.
+ */
+export function makeBusinessClock(calendar) {
+  const brief = calendar || {};
+  if (brief.hours_mode !== 'business') {
+    return {
+      mode: 'wall-clock',
+      window: null,
+      weekdays: null,
+      hours: (t1, t2) => (t2 > t1 ? (t2 - t1) / HOUR : 0),
+    };
+  }
+  const window = parseWorkingWindow(brief.working_hours && brief.working_hours.default);
+  const days = Array.isArray(brief.weekdays) && brief.weekdays.length
+    ? brief.weekdays : [1, 2, 3, 4, 5, 6, 7];
+  const weekdays = new Set(days.map((day) => Number(day)));
+  let formatter = null;
+  try {
+    formatter = new Intl.DateTimeFormat('en-GB', {
+      timeZone: brief.timezone || 'UTC',
+      hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+  } catch {
+    formatter = null;
+  }
+  // A segment's end is usually the next segment's start, and `Intl` is the
+  // costly part of the walk: one bounded memo per clock keeps a cold
+  // `lanes = queues` pass over a big store from becoming an `Intl` benchmark.
+  const local = new Map();
+  const at = (ms) => {
+    const hit = local.get(ms);
+    if (hit !== undefined) return hit;
+    if (local.size >= 4096) local.clear();
+    const value = localWallClock(formatter, ms);
+    local.set(ms, value);
+    return value;
+  };
+  return {
+    mode: 'business',
+    window,
+    weekdays,
+    /** Business hours in `[t1, t2)` — the working window on working weekdays. */
+    hours(t1, t2) {
+      if (!(t2 > t1) || !window) return 0;
+      const start = at(t1);
+      const end = at(t2);
+      const [from, to] = window;
+      let ms = 0;
+      let day = Math.floor(start / DAY) * DAY;
+      // `end - 1` keeps a span that ends exactly at local midnight from
+      // claiming that whole next day, whatever its weekday.
+      const last = Math.floor((end - 1) / DAY) * DAY;
+      for (; day <= last; day += DAY) {
+        // ISO weekday (1 = Monday … 7 = Sunday), as the calendar config states it
+        const iso = ((new Date(day).getUTCDay() + 6) % 7) + 1;
+        if (!weekdays.has(iso)) continue;
+        const low = Math.max(day + from * MINUTE, start);
+        const high = Math.min(day + to * MINUTE, end);
+        if (high > low) ms += high - low;
+      }
+      return ms / HOUR;
+    },
+  };
+}
+
 /* prd/25: semantic zoom for the `stories` dimension. A wide window shows the
  * epic → story hierarchy (PRs would be unreadable), a medium window nests each
  * story's PRs beneath it, and the event markers on those PR bars are the third
@@ -208,6 +327,46 @@ function fit(ctx, text, maxWidth) {
   let value = text;
   while (value.length > 1 && ctx.measureText(`${value}…`).width > maxWidth) value = value.slice(0, -1);
   return `${value}…`;
+}
+
+/**
+ * Which sprint band labels fit on the header row, and where (prd/70 F-12).
+ *
+ * At the 5-year `All` zoom a band was too narrow for its own text, so it drew a
+ * clipped `S55…` and the next band's `S5800` could start a couple of pixels
+ * later — two labels that read as one. Placement is now decided here, in one
+ * pass:
+ *
+ *   · a label never overflows its band, and a clipped label is never drawn at
+ *     all — the longest of the band's `texts` that fits is used, widest first
+ *     (`S5800 · active · lens` → `S5800 · active` → `S5800`);
+ *   · a label that would come within `gap` px of the previous one is skipped,
+ *     so a dense row loses labels instead of stacking them;
+ *   · bands are placed left to right whatever order the payload listed them in.
+ *
+ * Every label is therefore fully inside its own band and clear of its
+ * neighbours: no truncation, no touching, no double-drawn text.
+ */
+export function placeSprintLabels(bands, { measure, pad = 6, gap = 6 } = {}) {
+  const width = typeof measure === 'function' ? measure : (text) => String(text).length * 6.6;
+  const placed = [];
+  let lastRight = -Infinity;
+  const ordered = [...(bands || [])].sort((a, b) => a.left - b.left || a.right - b.right);
+  for (const band of ordered) {
+    if (!(band.right > band.left)) continue;
+    const room = band.right - band.left - 2 * pad;
+    if (!(room > 0)) continue;
+    const text = (band.texts || [band.text]).find(
+      (candidate) => candidate && width(candidate) <= room,
+    );
+    if (!text) continue;
+    const x = band.left + pad;
+    if (x < lastRight + gap) continue;
+    const right = x + width(text);
+    placed.push({ text, x, right });
+    lastRight = right;
+  }
+  return placed;
 }
 
 /**
@@ -382,6 +541,11 @@ export class Timeline {
     // prd/40: the sentinel role, when the payload carries it, so the client's
     // port applies the same precedence gate as the server.
     this.sentinels = new Set();
+    // prd/70 F-07: the clock every queue-lane total is priced on. `setData`
+    // fills it from `meta.calendar`; before that (and for a store with no
+    // calendar config) elapsed wall clock is the only honest number.
+    this.clock = makeBusinessClock(null);
+    this._queueTotals = null;
     this.events = [];
     this.prs = [];
     this.commitsByPr = new Map();
@@ -567,6 +731,10 @@ export class Timeline {
     }
     this.epics = epics;
     this.sentinels = new Set(meta.sentinels || []);
+    // prd/70 F-07: price the queue lanes on the tenant's business-hours clock
+    // (the legend right above the canvas), not on raw 24/7 elapsed time.
+    this.clock = makeBusinessClock(meta.calendar);
+    this._queueTotals = null;
     this.now = meta.as_of ? Date.parse(meta.as_of) : (meta.last_ts ? Date.parse(meta.last_ts) : Date.now());
 
     const times = this.events.map((e) => e.t).concat(this.prs.map((p) => p.created));
@@ -847,10 +1015,21 @@ export class Timeline {
       return rows;
     }
     if (this.dim === 'queue') {
-      return QUEUE_ORDER.map((key) => {
-        const hours = this.queueHours(key);
-        return { key, hours, count: Math.round(hours), label: `${key} · ${fmtCompact(hours)} h` };
-      }).filter((row) => row.hours > 0);
+      // prd/70 F-07: these are business hours (a working day is 8 h, exactly as
+      // the `business hours · 1 d = 8 h` legend says) — or wall-clock hours when
+      // the store has no calendar, which is the legend's other wording. A bare
+      // `h` therefore always means what the legend above it means. A lane that
+      // drew segments keeps its row even at an honest 0 h.
+      const totals = this.queueTotals();
+      return QUEUE_ORDER
+        .map((key) => ({ key, entry: totals.get(key) || { hours: 0, segments: 0 } }))
+        .filter(({ entry }) => entry.segments > 0)
+        .map(({ key, entry }) => ({
+          key,
+          hours: entry.hours,
+          count: Math.round(entry.hours),
+          label: `${key} · ${fmtCompact(entry.hours)} h`,
+        }));
     }
     // W-01 (prd/67): an actor lane is someone who acted *inside the window*.
     // The list used to be every actor ever seen — a 252-person Jira store drew
@@ -1076,15 +1255,41 @@ export class Timeline {
     return rows;
   }
 
+  /** The hours the ball sat in one queue, over the whole store.
+   *
+   * prd/70 F-07: priced on the team's business-hours clock (`makeBusinessClock`)
+   * — the `1 d = 8 h` unit the legend above the canvas states — never on the
+   * raw elapsed time the canvas draws, printed as if it were that unit.
+   */
   queueHours(queue) {
-    let hours = 0;
+    const entry = this.queueTotals().get(queue);
+    return entry ? entry.hours : 0;
+  }
+
+  /** Every queue's hours in one pass, cached per data load.
+   *
+   * `laneRows()` runs on every scroll and zoom frame, and a day-walk per segment
+   * is not a per-frame cost: the walk happens once per `setData` and every later
+   * frame reads the totals. A queue also remembers how many segments it drew, so
+   * a queue whose time is entirely outside the working window keeps its lane
+   * (with an honest `0 h`) instead of vanishing from the canvas.
+   */
+  queueTotals() {
+    if (this._queueTotals && this._queueTotals.prs === this.prs
+        && this._queueTotals.clock === this.clock) return this._queueTotals.totals;
+    const totals = new Map();
     for (const pr of this.prs) {
       for (const seg of this.lifecycle(pr)) {
         if (seg.to <= seg.from) continue;
-        if (this.queueOf(seg) === queue) hours += (seg.to - seg.from) / HOUR;
+        const queue = this.queueOf(seg);
+        const entry = totals.get(queue) || { hours: 0, segments: 0 };
+        entry.hours += this.clock.hours(seg.from, seg.to);
+        entry.segments += 1;
+        totals.set(queue, entry);
       }
     }
-    return hours;
+    this._queueTotals = { prs: this.prs, clock: this.clock, totals };
+    return totals;
   }
 
   queueOf(seg) {
@@ -1386,10 +1591,15 @@ export class Timeline {
     const top = g.laneTop;
     const bottom = g.height;
     const labelY = AXIS_H + HIST_H + 11;
+    const labelFont = `600 ${Math.max(10, g.label - 1)}px "JetBrains Mono", ui-monospace, monospace`;
     // prd/68 F-15: sprint bands overlap by a few days, so label text used to be
-    // painted on top of the previous one (`S15621`/`S16256`). Track the right
-    // edge of the last label like `drawAxis` does and skip a colliding one.
-    let lastLabelRight = -Infinity;
+    // painted on top of the previous one (`S15621`/`S16256`).
+    // prd/70 F-12: at the 5-year `All` zoom a band too narrow for its own text
+    // drew a clipped `S55…` and the next `S5800` could start 2 px later, so two
+    // labels read as one. Labels are now placed by `placeSprintLabels()`: the
+    // longest form that fits the band, never clipped, never touching a
+    // neighbour, and skipped rather than stacked on a dense row.
+    const labels = [];
     this.sprints.forEach((sprint, index) => {
       if (!sprint.hasBand) return;
       const left = Math.max(g.gutter, this.px(sprint.start));
@@ -1422,21 +1632,18 @@ export class Timeline {
         ctx.restore();
       }
       if (right - left >= 30) {
-        ctx.font = `600 ${Math.max(10, g.label - 1)}px "JetBrains Mono", ui-monospace, monospace`;
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'middle';
-        const text = fit(
-          ctx, `S${sprint.id}${sprint.active ? ' · active' : ''}${focused ? ' · lens' : ''}`,
-          right - left - 12,
-        );
-        const labelLeft = left + 6;
-        const labelWidth = ctx.measureText(text).width;
-        // a label whose box would touch the last one is skipped, not overdrawn
-        if (text && labelLeft >= lastLabelRight + 4) {
-          ctx.fillStyle = color('--canvas-region-label');
-          ctx.fillText(text, labelLeft, labelY);
-          lastLabelRight = labelLeft + labelWidth;
-        }
+        const key = `S${sprint.id}`;
+        const lens = focused ? ' · lens' : '';
+        labels.push({
+          left,
+          right,
+          // widest first: the full name, then without the state, then the key
+          texts: [...new Set([
+            `${key}${sprint.active ? ' · active' : ''}${lens}`,
+            `${key}${lens}`,
+            key,
+          ])],
+        });
       }
       // pushed before the lanes, so a bar / event / story hit always wins
       this.hits.push({
@@ -1444,6 +1651,16 @@ export class Timeline {
         y0: top - HEADER_H, y1: bottom, sprint,
       });
     });
+    if (!labels.length) return;
+    ctx.font = labelFont;
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = color('--canvas-region-label');
+    for (const label of placeSprintLabels(labels, {
+      measure: (text) => ctx.measureText(text).width,
+    })) {
+      ctx.fillText(label.text, label.x, labelY);
+    }
   }
 
   /** B7: two legible label rows, measured and edge-clamped so nothing clips. */
