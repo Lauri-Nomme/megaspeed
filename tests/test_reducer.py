@@ -25,7 +25,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from ingest import fixtures
+from ingest import classify, fixtures
 from ingest.bitbucket import PullRequest
 from ingest.config import Config
 from ingest.pipeline import KeyFilter, Reducer, Stats
@@ -41,6 +41,9 @@ HASH_C = "c" * 40
 GRACE = {"name": "grace", "displayName": "Grace Hopper", "type": "NORMAL"}
 ALAN = {"name": "alan", "displayName": "Alan Turing", "type": "NORMAL"}
 ADA = {"name": "ada", "displayName": "Ada Lovelace", "type": "NORMAL"}
+#: A service-shaped account name: ``classify_actor`` reads it as a bot without
+#: any configuration (the DC account type is NORMAL).
+_CI_BOT = {"name": "ci-bot", "displayName": "CI", "type": "NORMAL"}
 
 
 def _activity(activity_id: int, action: str, offset: int, user: dict | None = None, **extra) -> dict:
@@ -219,6 +222,152 @@ class FixtureShapeTests(unittest.TestCase):
             self.assertEqual(comment["state"], "RESOLVED")
             self.assertIsNotNone(comment["resolvedDate"])
             self.assertIsNotNone(comment["resolver"])
+
+
+class CommentKindTests(unittest.TestCase):
+    """prd/75: review / CI / bot / admin, decided before the model."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.cfg = Config(
+            db_path=root / "store.duckdb",
+            identity_path=root / "identity.json",
+            ticket_regex=r"\b[A-Z]+-\d+\b",
+            key_shape=r"^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$",
+            repos=[("ENG", "platform")],
+            bot_aliases=("ape",),
+        )
+        self.classifier = _Forced("nit")
+        self.reducer = Reducer(
+            self.cfg,
+            IdentityTable(self.cfg.identity_path),
+            KeyFilter.build(self.cfg.ticket_regex, self.cfg.key_shape, self.cfg.ticket_projects),
+            AS_OF,
+            self.classifier,
+        )
+        self.stats = Stats()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def reduce(self, pr: PullRequest) -> dict:
+        self.reducer.reduce(pr, ["PROJ-1"], pr.activities, self.stats)
+        thread = next(
+            o for o in self.stats.objects
+            if o["object_type"] == "THREAD" and o["object_id"].endswith(":101")
+        )
+        return json.loads(thread["attributes"]) if isinstance(thread["attributes"], str) else thread["attributes"]
+
+    def _comment(self, text, author, replies=()):
+        return {
+            "id": 101,
+            "text": text,
+            "author": author,
+            "state": "OPEN",
+            "comments": list(replies),
+        }
+
+    def test_ci_coverage_is_a_notice_and_never_calls_the_model(self):
+        attrs = self.reduce(_pr([
+            _activity(1, "OPENED", 0, ADA),
+            _activity(
+                2, "COMMENTED", 5, _CI_BOT,
+                comment=self._comment(
+                    "Partial code coverage [report](http://x).\n"
+                    "Coverage info for the first build:\n\ninstruction coverage is 0%",
+                    _CI_BOT,
+                ),
+                commentAction="ADDED",
+                commentAnchor={"path": "a.py", "line": 1},
+            ),
+        ]))
+        self.assertEqual(attrs["comment_kind"], "ci_notice")
+        self.assertEqual(attrs["ci_template"], "coverage")
+        self.assertEqual(attrs["coverage_min"], 0)
+        self.assertTrue(attrs["coverage_zero"])
+        self.assertNotIn("comment_type", attrs)
+        self.assertEqual(self.classifier.seen, [])
+
+    def test_qodana_finding_carries_the_count(self):
+        attrs = self.reduce(_pr([
+            _activity(1, "OPENED", 0, ADA),
+            _activity(
+                2, "COMMENTED", 5, _CI_BOT,
+                comment=self._comment(
+                    "#### ⚠️ Qodana detected 1021 new issue(s)\n\n"
+                    "Please do not merge without solving/suppressing",
+                    _CI_BOT,
+                ),
+                commentAction="ADDED",
+            ),
+        ]))
+        self.assertEqual(attrs["comment_kind"], "ci_finding")
+        self.assertEqual(attrs["ci_template"], "qodana_issues")
+        self.assertEqual(attrs["ci_issues"], 1021)
+        self.assertNotIn("comment_type", attrs)
+
+    def test_admin_note_is_not_sent_to_the_model(self):
+        attrs = self.reduce(_pr([
+            _activity(1, "OPENED", 0, ADA),
+            _activity(
+                2, "COMMENTED", 5, GRACE,
+                comment=self._comment("Rebased https://x/commits/abc", GRACE),
+                commentAction="ADDED",
+            ),
+        ]))
+        self.assertEqual(attrs["comment_kind"], "admin")
+        self.assertNotIn("comment_type", attrs)
+        self.assertEqual(self.classifier.seen, [])
+
+    def test_review_remark_is_labeled_from_the_opener(self):
+        attrs = self.reduce(_pr([
+            _activity(1, "OPENED", 0, ADA),
+            _activity(
+                2, "COMMENTED", 5, GRACE,
+                comment=self._comment("please rename this", GRACE),
+                commentAction="ADDED",
+                commentAnchor={"path": "a.py", "line": 1},
+            ),
+        ]))
+        self.assertEqual(attrs["comment_kind"], "review")
+        self.assertEqual(attrs["label_source"], "opener")
+        self.assertEqual(attrs["comment_type"], "nit")
+        self.assertEqual(attrs["classifier_version"], "forced-v1")
+
+    def test_bot_thread_labels_the_first_human_reply(self):
+        attrs = self.reduce(_pr([
+            _activity(1, "OPENED", 0, ADA),
+            _activity(
+                2, "COMMENTED", 5, _CI_BOT,
+                comment=self._comment(
+                    "Partial code coverage [report](http://x).\n"
+                    "Coverage info for the first build:",
+                    _CI_BOT,
+                    replies=[{"id": 102, "text": "the report is stale", "author": GRACE}],
+                ),
+                commentAction="ADDED",
+            ),
+        ]))
+        self.assertEqual(attrs["comment_kind"], "ci_notice")
+        self.assertEqual(attrs["label_source"], "reply")
+        self.assertEqual(attrs["comment_type"], "nit")
+        self.assertEqual(len(self.classifier.seen), 1)
+        self.assertEqual(self.classifier.seen[0][0], "the report is stale")
+
+
+class _Forced(classify.MockClassifier):
+    backend = "forced"
+    version = "forced-v1"
+
+    def __init__(self, comment_type: str):
+        super().__init__()
+        self.forced = comment_type
+        self.seen: list[tuple] = []
+
+    def classify(self, text, kind, context=None):
+        self.seen.append((text, kind, context))
+        return {**super().classify(text, kind, context), "comment_type": self.forced}
 
 
 if __name__ == "__main__":

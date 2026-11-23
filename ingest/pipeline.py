@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from . import classify, taxonomy
+from . import citext, classify, taxonomy
 from .bitbucket import PullRequest
 from .config import Config
 from .pseudonym import IdentityTable
@@ -474,6 +474,10 @@ class Reducer:
                         else (ts if resolved else None)
                     )
                     entry["resolver"] = (comment.get("resolver") or {}) if resolved else {}
+                    # prd/75: what this thread *is*, decided deterministically
+                    # from the author and the text before any model call.
+                    if comment_action != "UPDATED":
+                        self._comment_kind(entry, actor, str(comment.get("text") or ""))
                     # prd/16: one label set per thread, taken from the comment
                     # that opened it. The raw body never leaves this branch.
                     if comment_action != "UPDATED" and self.classifier is not None:
@@ -488,6 +492,7 @@ class Reducer:
                     if labels is not None:
                         entry.setdefault("classifier_version", classifier_version)
                         entry.setdefault("comment_type", labels["comment_type"])
+                        entry.setdefault("label_source", "opener")
                         entry.setdefault("thread_intent", labels["thread_intent"])
                         entry.setdefault("question", labels["question"])
                         entry["phase"] = labels["phase"]
@@ -510,6 +515,25 @@ class Reducer:
                             )
                             if answer is not None:
                                 entry.setdefault("answer", answer)
+                    # prd/75: a bot/CI thread has no human opener to label. If a
+                    # human replied, that reply is the review remark -- one call
+                    # per such thread, not per reply.
+                    if (
+                        comment_action != "UPDATED"
+                        and self.classifier is not None
+                        and not entry.get("label_source")
+                        and entry.get("comment_kind") in ("bot", "ci_notice", "ci_finding")
+                    ):
+                        reply = self._first_human_reply(
+                            comment, ts, stats, pr=pr, thread_id=thread_id,
+                            keys=keys, commit_ids=commit_ids,
+                        )
+                        if reply is not None:
+                            label, version, source, reply_actor = reply
+                            entry["comment_type"] = label
+                            entry["classifier_version"] = version
+                            entry["label_source"] = source
+                            entry["commenter"] = reply_actor
                 if comment_action == "UPDATED":
                     # Edits and thread-resolution updates change the ReviewThread
                     # object, not the dialogue log.
@@ -648,7 +672,17 @@ class Reducer:
             attributes = {
                 "severity": entry["severity"],
                 "anchor_class": entry["anchor_class"],
+                "comment_kind": entry.get("comment_kind") or "review",
             }
+            if entry.get("label_source"):
+                attributes["label_source"] = entry["label_source"]
+            if entry.get("ci_template"):
+                attributes["ci_template"] = entry["ci_template"]
+            if entry.get("ci_issues") is not None:
+                attributes["ci_issues"] = int(entry["ci_issues"])
+            if entry.get("coverage_min") is not None:
+                attributes["coverage_min"] = int(entry["coverage_min"])
+                attributes["coverage_zero"] = bool(entry["coverage_zero"])
             resolver_is_commenter = bool(
                 resolver_actor and resolver_actor == entry.get("commenter")
             )
@@ -790,6 +824,8 @@ class Reducer:
             if self._actor_kind(activity.get("user") or {}) == "bot":
                 continue
             body = str(comment.get("text") or "").strip()
+            if citext.is_bot_request(body, self.cfg.bot_aliases) or citext.is_admin(body):
+                continue  # a command to a tool, or a status note (prd/75)
             if body:
                 items.append(
                     (
@@ -824,6 +860,77 @@ class Reducer:
         """The batch's answer for ``text``, or ``None`` when it was not batched."""
         return self._labels.get((kind, classify.digest(text)))
 
+    def _comment_kind(self, entry: dict, actor: str, text: str) -> None:
+        """What this thread is: review, CI, bot output, a bot request, or admin.
+
+        Deterministic and first (prd/75): the author kind is known before the
+        model, the CI/admin templates are matched on text, and the result decides
+        whether a model call happens at all. ``comment_type`` is left unset for
+        everything that is not a human review remark.
+        """
+        if entry.get("comment_kind"):
+            return
+        if self.actor_kind(actor) == "bot":
+            template, issues, low = citext.ci_kind(text)
+            if template == "unknown":
+                entry["comment_kind"] = "bot"
+            elif template == "qodana_issues":
+                entry["comment_kind"] = "ci_finding"
+            else:
+                entry["comment_kind"] = "ci_notice"
+            entry["ci_template"] = template
+            if issues is not None:
+                entry["ci_issues"] = issues
+            if low is not None:
+                entry["coverage_min"] = max(0, min(100, int(round(low))))
+                entry["coverage_zero"] = low <= 0
+            return
+        if citext.is_bot_request(text, self.cfg.bot_aliases):
+            entry["comment_kind"] = "bot_request"
+        elif citext.is_admin(text):
+            entry["comment_kind"] = "admin"
+        else:
+            entry["comment_kind"] = "review"
+
+    def _first_human_reply(
+        self,
+        comment: dict,
+        ts: datetime,
+        stats: Stats,
+        *,
+        pr: PullRequest | None = None,
+        thread_id: str | None = None,
+        keys: list[str] | None = None,
+        commit_ids: set[str] | None = None,
+    ) -> tuple[str, str, str, str] | None:
+        """``(comment_type, version, "reply", actor)`` for a bot thread's first
+        human reply, or ``None``.
+
+        A bot/CI thread's opener is not a review remark, but people do reply to
+        it; that reply is the only human substance the thread has (prd/75).
+        """
+        assert self.classifier is not None
+        for reply in comment.get("comments") or []:
+            reply = reply or {}
+            body = str(reply.get("text") or "").strip()
+            if not body or citext.is_admin(body):
+                continue
+            reply_actor = self._actor(reply.get("author") or {}, stats)
+            if self.actor_kind(reply_actor) == "bot":
+                continue
+            labels = self.classifier.classify(
+                body,
+                classify.KIND_COMMENT,
+                self._text_context(
+                    pr, role="reply", keys=list(keys or ()), commit_ids=commit_ids,
+                    thread_id=thread_id, comment_id=reply.get("id"),
+                    ts=_ts(reply.get("createdDate"), ts),
+                ),
+            )
+            version = getattr(self.classifier, "last_version", "") or self.classifier.version
+            return labels["comment_type"], version, "reply", reply_actor
+        return None
+
     def _comment_labels(
         self,
         actor: str,
@@ -850,6 +957,10 @@ class Reducer:
             stats.bot_comments_skipped += 1
             return None, None
         body = str(text or "").strip()
+        if citext.is_bot_request(body, self.cfg.bot_aliases) or citext.is_admin(body):
+            # A command addressed to a tool, or a status note: not a review
+            # remark, so there is nothing to classify (prd/75).
+            return None, None
         if not body:
             # An attachment-only or empty comment: the residual label, decided
             # deterministically instead of asking the model about nothing.

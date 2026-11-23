@@ -37,7 +37,7 @@ def _version() -> str:
     try:
         baked = (Path(__file__).resolve().parent.parent / "VERSION").read_text().strip()
     except OSError:
-        return "0.20.0"
+        return "0.20.1"
     return baked[1:] if baked.startswith("v") else baked
 
 

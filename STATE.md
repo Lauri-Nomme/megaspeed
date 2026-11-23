@@ -62,6 +62,19 @@ PERSON rows went 329→223 (merged plus pre-existing orphans), events unchanged 
 The laptop's `identity.json` still holds the old pseudonyms: swap its `bb:`
 entries before the next scrape, or the rekeyed actors come back.
 
+## v0.20.1 — comment_kind at ingest + recategorize
+
+- The reducer sets ``comment_kind`` on every THREAD from the author kind and the
+  ``ingest.citext`` templates, before the model; a bot/CI/admin/bot-request
+  thread gets no ``comment_type``. A bot/CI thread whose first human reply is
+  the only review substance is labelled from that reply
+  (``label_source=reply``), one call per thread.
+- ``python -m ingest recategorize --trace ... [--apply]`` re-derives
+  ``comment_kind`` for an existing store, removes the model label from
+  non-review threads, and repairs the stale ``actor_kind`` on a bot's events
+  (the first scrape stamped the coverage bot ``human``). Dry-run by default,
+  backup + contract verify on ``--apply``.
+
 ## v0.20.0 — label pass v2 and a deterministic non-review pre-filter
 
 The 2026-11-23 measurements changed the second model pass:
