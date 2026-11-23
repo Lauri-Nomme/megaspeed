@@ -11,6 +11,15 @@ already fixed since that review.
 - `/api/insights` 12 MB payload (drill cap) — 4.1 (payload only; compute still open);
 - rules drill-down payload size — 5.3 (row building may remain).
 
+## Measured 2026-11-24 (`docs/perf-v020.md`)
+
+Warm `/api/insights?days=1882` is 1.1 s / 1.23 MB; queues 0.09 s, delivery
+0.08 s, verdict 0.02 s. The cold first request is **25 s** (40 s under
+cProfile), of which **33.5 s is the policy-lab simulation**
+(5 scenarios × 30 runs, 2.8M SimPy events); the bundle is 2.5 s and the rules
+are 2.8 s. P1 is not visible in this profile. **New P8: policy-lab cold start**
+— pre-warm vs persist vs fewer runs (a statistics decision).
+
 ## Candidates (profile first, then keep the ones that still bite)
 
 | id | area | item | note |
