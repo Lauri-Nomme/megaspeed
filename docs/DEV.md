@@ -235,6 +235,34 @@ Copy one map to the other side and pass `--identity`. Every model call is also w
 `<out>.trace.jsonl` (full request/response incl. thinking; `--no-call-trace`
 disables it). That trace is raw zone — never transfer it.
 
+### Jira sprint metadata refresh (`--sprints-only`)
+
+The team's sprints are named `Sprint 352`-style; the scrape parses the number
+into `sprint_no` (prd/70 F-16) and never stores the name. Refreshing that number
+on an existing store does **not** need a full re-scrape (every issue, worklog and
+changelog) for a handful of sprint rows:
+
+```bash
+# Data Center. Add --fixture to exercise it on the synthetic corpus.
+.venv/bin/python -m ingest scrape --jira --sprints-only \
+    --out export/demo-sprints.tgz
+# Cloud: --jira-cloud --sprints-only, reading MEGASPEED_JIRA_CLOUD_BASE_URL
+# (the local emulation proxy in dev). No --live needed: this is a direct read.
+
+.venv/bin/python -m ingest import export/demo-sprints.tgz --db data/demo.duckdb
+```
+
+The tgz holds **SPRINT objects only** — no events, no issues, worklogs or
+changelogs — with `manifest.sprint_refresh: true` and `watermark_ts: null`. The
+scrape reads the board and its sprint list (two requests per project), reduces
+them through the same reducer as a full scrape (so the rows and `sprint_no` are
+identical), needs no identity map or pepper (a SPRINT carries no actor) and
+writes no state (no watermark, no issue/sprint cursor). Import upserts the rows,
+runs the same `--verify` contract and reports `mode: sprint-refresh`; it
+deliberately does **not** write an `ingest_runs` row or move
+`source_watermark`, so the next full scrape's cursor is unchanged. Re-running it
+is harmless.
+
 ---
 
 ## 3. Store schema (`data/megaspeed.duckdb`)
