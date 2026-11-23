@@ -336,6 +336,28 @@ class SprintNumberApiTests(unittest.TestCase):
         self.assertIsNone(body["at_risk"]["sprint_no"])
         self.assertIn("sprint_no", body["at_risk"])
 
+    def test_the_ticket_membership_carries_the_number(self):
+        reply = get("/api/ticket/DEL-100", tenant="del")
+        self.assertEqual(reply.status, 200, reply.body)
+        memberships = reply.json()["sprints"]["memberships"]
+        by_id = {row["sprint_id"]: row for row in memberships}
+        self.assertEqual(by_id[4392]["sprint_no"], 352)
+        self.assertIn("sprint_no", by_id[18568])
+        self.assertIsNone(by_id[18568]["sprint_no"])
+
+    def test_the_rules_drill_down_rows_carry_the_number(self):
+        body = get("/api/insights", tenant="del", days=3650).json()
+        metrics = body["metrics"]
+        delivery = {row["sprint_id"]: row for row in metrics["sprint_delivery"]["rows"]}
+        self.assertEqual(delivery[4392]["sprint_no"], 352)
+        self.assertIsNone(delivery[18568]["sprint_no"])
+        carry = metrics["carry_over"]["rows"]
+        self.assertTrue(carry, "the open story missed both closed sprints")
+        row = carry[0]
+        self.assertEqual(row["sprints"], [4392, 18568])
+        # parallel lists: the id and the parsed number travel together
+        self.assertEqual(row["sprint_nos"], [352, None])
+
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()

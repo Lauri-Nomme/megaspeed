@@ -69,13 +69,16 @@ class Fixture:
         self.objects.append(record)
 
     def sprint(self, sid: int, start: datetime, end: datetime | None = None,
-               state: str = "closed", closed: datetime | None = None) -> str:
+               state: str = "closed", closed: datetime | None = None,
+               sprint_no: int | None = None) -> str:
         object_id = f"SPRINT:ENG#{sid}"
         self._object(
             "SPRINT", object_id, state=state, created_at=start, closed_at=closed,
             attributes={
                 "goal_class": "feature",
                 **({"end_date": end.strftime("%Y-%m-%d")} if end else {}),
+                # prd/70 F-16: the number the scrape parsed from the name
+                **({"sprint_no": sprint_no} if sprint_no is not None else {}),
             },
         )
         return object_id

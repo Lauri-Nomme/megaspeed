@@ -414,6 +414,24 @@ def _sprint_id(object_id: str) -> int | None:
     return int(text) if text.isdigit() else None
 
 
+def sprint_label(sprint: dict | None) -> str:
+    """One sprint label for every read-side surface (prd/70 F-16).
+
+    `S352` when the scrape parsed the team's `Sprint 352` name into
+    ``sprint_no``, else `S<id>` (`S4392`) for a store scraped before that
+    attribute existed. Mirrors the client's ``sprintLabel`` so a Rules row, a
+    trend bucket and the sprint lens cannot disagree. ``"sprint"`` when the row
+    carries neither (a membership event with no SPRINT object).
+    """
+    if not sprint:
+        return "sprint"
+    number = sprint.get("sprint_no")
+    if isinstance(number, int) and not isinstance(number, bool) and number >= 0:
+        return f"S{number}"
+    sid = sprint.get("id")
+    return f"S{sid}" if sid is not None else "sprint"
+
+
 def event_sprint_id(event: dict) -> int | None:
     """The sprint an event is about: its ``sprint_id`` attribute, else its link.
 
@@ -1540,6 +1558,12 @@ def carry_over(
     """
     stories = cohort(data, window)
     memberships, outcomes, boundaries = sprint_outcomes(court, data)
+    # prd/70 F-16: the rows name sprints by id; the numbers let every surface
+    # print `S352` instead of `S4392` without a second lookup.
+    sprint_numbers = {
+        sprint["id"]: sprint.get("sprint_no")
+        for sprint in data.sprints.values() if sprint.get("id") is not None
+    }
     rows: list[dict] = []
     readded = 0
     for story in stories:
@@ -1561,6 +1585,8 @@ def carry_over(
             "key": story.key,
             "tickets": [story.key],
             "sprints": membership["sprints"],
+            # parallel to ``sprints``: ``None`` where the store has no number
+            "sprint_nos": [sprint_numbers.get(sid) for sid in membership["sprints"]],
             "missed_sprints": missed,
             "status": "late" if done is not None else "never",
             "done_at": iso(done) if done else None,
@@ -2445,6 +2471,9 @@ def sprint_delivery(
         if not members:
             continue
         end = boundary["end"]
+        # prd/70 F-16: every drill-down row names the sprint the same way the
+        # strip does (`S352`, else `S4392`).
+        sprint_no = sprint.get("sprint_no")
         counts = {"by_end": 0, "late": 0, "never": 0, "unmerged": 0}
         points = {"by_end": 0, "late": 0, "never": 0, "unmerged": 0}
         # prd/46 §4: "committed" is the scope at the sprint's start; a story
@@ -2477,6 +2506,7 @@ def sprint_delivery(
                     "key": story.key,
                     "tickets": [story.key],
                     "sprint_id": sid,
+                    "sprint_no": sprint_no,
                     "status": "unmerged",
                     "points": story.points,
                     "slip_hours": None,
@@ -2503,6 +2533,7 @@ def sprint_delivery(
                     "key": story.key,
                     "tickets": [story.key],
                     "sprint_id": sid,
+                    "sprint_no": sprint_no,
                     "status": "late",
                     "points": story.points,
                     "slip_hours": round(
@@ -2522,6 +2553,7 @@ def sprint_delivery(
                     "key": story.key,
                     "tickets": [story.key],
                     "sprint_id": sid,
+                    "sprint_no": sprint_no,
                     "status": "never",
                     "points": story.points,
                     "slip_hours": None,

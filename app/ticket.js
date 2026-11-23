@@ -13,7 +13,7 @@
  * every string here is testable with `node --test`.
  */
 
-import { fmtAbsolute, fmtHours, fmtCalendarDuration, esc } from './format.js';
+import { fmtAbsolute, fmtHours, fmtCalendarDuration, esc, sprintLabel } from './format.js';
 import { PHASE } from './timeline.js';
 import { ticketHref } from './tickets.js';
 import { color, onPalette } from './theme.js';
@@ -355,8 +355,8 @@ export function sprintStrip(payload) {
   const chips = memberships.map((sprint) => {
     const [kind, label] = OUTCOME[sprint.outcome] || OUTCOME.unknown;
     return `
-    <span class="sprint-chip" title="sprint ${esc(sprint.sprint_id)}${sprint.object_id ? ` · ${esc(sprint.object_id)}` : ''}">
-      <b class="mono">#${esc(sprint.sprint_id)}</b>
+    <span class="sprint-chip" title="sprint ${esc(sprintLabel(sprint))}${sprint.object_id ? ` · ${esc(sprint.object_id)}` : ''}">
+      <b class="mono">${esc(sprintLabel(sprint))}</b>
       <span class="mono muted">${esc(shortStamp(sprint.start))} → ${esc(shortStamp(sprint.end || sprint.planned_end))}</span>
       <span class="pill ${kind}">${esc(label)}</span>
       <span class="pill neutral">${esc(sprint.state || 'unknown')}</span>
@@ -875,7 +875,7 @@ export function ticketMarkdown(payload, base = '') {
     `## sprints`,
     '',
     ...((payload.sprints && payload.sprints.memberships) || []).map((sprint) =>
-      `- #${sprint.sprint_id} · ${sprint.state || 'unknown'} · added ${sprint.added || '—'}` +
+      `- ${sprintLabel(sprint)} · ${sprint.state || 'unknown'} · added ${sprint.added || '—'}` +
       `${sprint.removed ? ` · removed ${sprint.removed}` : ''}`),
     '',
     `## worklog vs active`,

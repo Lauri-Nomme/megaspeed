@@ -285,9 +285,8 @@ def sprint_bounds(
             "exclusive_end": False,
             "in_progress": not closed,
             "sprint_id": sprint.get("id"),
-            "label": (
-                f"S{sprint.get('id')}" if sprint.get("id") is not None else "sprint"
-            ),
+            # prd/70 F-16: `S352` from the parsed name, else `S<id>`
+            "label": jira_analysis.sprint_label(sprint),
         })
     out.sort(key=lambda row: (row["start"], row["sprint_id"] or 0))
     return out
@@ -784,6 +783,10 @@ def trend(
         "active_sprint": (
             {
                 "id": active_sprint.get("id"),
+                # prd/70 F-16: the payload names the sprint the way the bucket
+                # label does (`S352`, else `S<id>`).
+                "sprint_no": active_sprint.get("sprint_no"),
+                "sprint_label": jira_analysis.sprint_label(active_sprint),
                 "object_id": active_sprint.get("object_id"),
                 "start": iso(_sprint_datetime(active_sprint.get("start"))),
                 "planned_end": active_sprint.get("planned_end"),
@@ -794,7 +797,7 @@ def trend(
         # is none — never a future placeholder.
         "active_sprint_note": (
             (
-                f"S{active_sprint.get('id')} in progress"
+                f"{jira_analysis.sprint_label(active_sprint)} in progress"
                 if active_sprint.get("id") is not None else "a sprint in progress"
             )
             if active_sprint is not None else (

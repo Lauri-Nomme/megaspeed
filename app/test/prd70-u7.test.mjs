@@ -19,11 +19,15 @@ import { readFileSync } from 'node:fs';
 import { sprintLabel } from '../format.js';
 import { sprintBands, sprintScopeLine, sprintStrip } from '../sprints.js';
 import { Timeline } from '../timeline.js';
+import { ruleItems } from '../rules.js';
+import { sprintStrip as ticketSprintStrip, ticketMarkdown } from '../ticket.js';
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 const MAIN = read('main.js');
 const SPRINTS = read('sprints.js');
 const TIMELINE = read('timeline.js');
+const RULES = read('rules.js');
+const TICKET = read('ticket.js');
 
 const DAY = 86_400_000;
 const START = Date.parse('2026-09-01T00:00:00Z');
@@ -141,7 +145,79 @@ test('prd/70 F-16: a carry-over path is labels, not raw ids', () => {
   assert.match(strip, /<td data-label="next">S353<\/td>/);
 });
 
-/* ------------------------------------------------------------- the timeline */
+/* ------------------------------------------------------- rules drill-down */
+
+test('prd/70 F-16: a sprint-delivery drill row names the sprint by its number', () => {
+  const metric = {
+    rows: [
+      { kind: 'story', key: 'DEMO-1', tickets: ['DEMO-1'], sprint_id: 4392,
+        sprint_no: 352, status: 'late', slip_hours: 4, points: 3 },
+      { kind: 'story', key: 'DEMO-2', tickets: ['DEMO-2'], sprint_id: 18568,
+        sprint_no: null, status: 'never', points: 2 },
+    ],
+  };
+  const suggestion = {
+    id: 'sprint-on-time', metric: 'sprint_delivery', scope: { kind: 'team' },
+    evidence: {},
+  };
+  const items = ruleItems(suggestion, { sprint_delivery: metric });
+  assert.equal(items[0].detail, 'S352 · late · 3 points');
+  // a store scraped before the parse keeps the id, never an invented number
+  assert.equal(items[1].detail, 'S18568 · never · 2 points');
+});
+
+test('prd/70 F-16: a carry-over path pairs each id with its number', () => {
+  const suggestion = {
+    id: 'jira-carry-over', metric: 'carry_over', scope: { kind: 'team' },
+    evidence: {},
+  };
+  const metric = {
+    rows: [
+      { kind: 'story', key: 'DEMO-1', tickets: ['DEMO-1'],
+        sprints: [4392, 4395], sprint_nos: [352, 353],
+        status: 'late', points: 3 },
+      { kind: 'story', key: 'DEMO-2', tickets: ['DEMO-2'],
+        sprints: [4392, 4395], status: 'never', points: 2 },
+    ],
+  };
+  const items = ruleItems(suggestion, { carry_over: metric });
+  assert.equal(items[0].value, 'sprints S352 → S353');
+  // no numbers on the row: the same two ids, labelled the honest way
+  assert.equal(items[1].value, 'sprints S4392 → S4395');
+});
+
+/* ------------------------------------------------------------ ticket page */
+
+test('prd/70 F-16: the ticket chip and export use the shared label', () => {
+  const payload = {
+    sprints: {
+      memberships: [
+        { sprint_id: 4392, sprint_no: 352, state: 'closed',
+          start: '2026-09-01T09:00:00Z', end: '2026-09-14T16:00:00Z',
+          planned_end: '2026-09-15', added: '2026-09-01T09:30:00Z',
+          outcome: 'late' },
+        { sprint_id: 18568, state: 'active',
+          start: '2026-09-15T09:00:00Z', end: null,
+          planned_end: '2026-09-28', added: '2026-09-15T10:00:00Z',
+          outcome: 'by_end' },
+      ],
+    },
+  };
+  const chips = ticketSprintStrip(payload);
+  assert.match(chips, /<b class="mono">S352<\/b>/);
+  assert.match(chips, /<b class="mono">S18568<\/b>/);
+  assert.doesNotMatch(chips, /#4392|#18568/);
+  assert.match(chips, /title="sprint S352"/);
+
+  const markdown = ticketMarkdown({
+    key: 'DEMO-1', story: {}, segments: {}, sprints: payload.sprints,
+  });
+  assert.match(markdown, /^- S352 · closed · added 2026-09-01T09:30:00Z/m);
+  assert.match(markdown, /^- S18568 · active · added 2026-09-15T10:00:00Z/m);
+  assert.doesNotMatch(markdown, /^- #4392/m);
+});
+
+/* -------------------------------------------------------------- the timeline */
 
 function stubContext() {
   const ctx = {
@@ -217,9 +293,15 @@ test('prd/70 F-16: no surface builds its own `S${...}` label', () => {
   assert.match(SPRINTS, /import \{[^}]*sprintLabel[^}]*\} from '\.\/format\.js'/);
   assert.match(TIMELINE, /sprintLabel/);
   assert.match(MAIN, /sprintLabel/);
+  assert.match(RULES, /import \{[^}]*sprintLabel[^}]*\} from '\.\/format\.js'/);
+  assert.match(TICKET, /import \{[^}]*sprintLabel[^}]*\} from '\.\/format\.js'/);
   // the old hand-rolled labels are gone
   assert.doesNotMatch(MAIN, /`S\$\{state\.sprint\}`/);
   assert.doesNotMatch(MAIN, /sprint S\$\{state\.sprint\}/);
   assert.doesNotMatch(SPRINTS, /label: `S\$\{sprint\.sprint_id\}`/);
   assert.doesNotMatch(TIMELINE, /const key = `S\$\{sprint\.id\}`/);
+  assert.doesNotMatch(RULES, /`S\$\{row\.sprint_id\}/);
+  assert.doesNotMatch(RULES, /row\.sprints\.join\(' → '\)/);
+  assert.doesNotMatch(TICKET, /#\$\{esc\(sprint\.sprint_id\)\}/);
+  assert.doesNotMatch(TICKET, /#\$\{sprint\.sprint_id\}/);
 });
