@@ -8,6 +8,9 @@ The ingest is split into the two sides of the airgap (prd/11 §7):
     # import side (this env): tgz -> DuckDB store
     python3 -m ingest import export/del.tgz --db data/del.duckdb
 
+    # identity maintenance (prd/71): one auditable merge, dry run by default
+    python3 -m ingest rekey --db data/del.duckdb --map MaPa2=MaPa
+
 The older one-shot form is still supported and is the dev shortcut
 (``--live`` = scrape + import back-to-back, through a real bundle file):
 
@@ -136,7 +139,7 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # Two halves, two CLIs: `python3 -m ingest scrape|import ...`. The scrape
     # side is also its own artifact (scrape/build.sh -> megaspeed-scrape).
-    if argv and argv[0] in ("scrape", "import", "relabel"):
+    if argv and argv[0] in ("scrape", "import", "relabel", "rekey"):
         command, rest = argv[0], argv[1:]
         if command == "scrape":
             from .scrape_cli import main as scrape_main
@@ -146,6 +149,10 @@ def main(argv: list[str] | None = None) -> int:
             from .relabel import main as relabel_main
 
             return relabel_main(rest)
+        if command == "rekey":
+            from .rekey import main as rekey_main
+
+            return rekey_main(rest)
         from .importer import main as import_main
 
         return import_main(rest)
