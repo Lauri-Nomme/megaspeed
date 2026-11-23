@@ -62,6 +62,21 @@ PERSON rows went 329→223 (merged plus pre-existing orphans), events unchanged 
 The laptop's `identity.json` still holds the old pseudonyms: swap its `bb:`
 entries before the next scrape, or the rekeyed actors come back.
 
+## v0.20.6 — replies are events
+
+- prd/76: one `comment_added` per nested reply (`reply=true`, `reply_index`,
+  `parent_comment_id`), same object set as the opener, **no labels**. The 5,832
+  replies across 5,311 threads were invisible; the log is now complete.
+- No metric moves: `ballcourt`/`analysis.jira`/`server.query` exclude replies
+  (SQL `coalesce(...) <> 'true'` plus a Python guard), `derive_review_rounds`
+  and `derive_approvals_lost` ignore them, and `recategorize` still reads the
+  opener. Acceptance is a counterfactual store with the reply rows deleted:
+  queues, delivery, comment tax, review rounds and `/api/events` are identical.
+- `python -m ingest backfill-replies --hans-scrape DIR --identity PATH
+  [--apply]`: re-reads the capture for stored PRs, idempotent by `event_key`,
+  backup + contract verify, reports unknown authors.
+- 1,588 tests (pytest, 8 workers) and 99 scrape tests green.
+
 ## v0.20.5 — the scrape reuses labels it already paid for
 
 - `ingest/labelcache.py`: one digest-keyed, raw-text-free `LabelCache` (moved

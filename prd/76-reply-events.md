@@ -1,8 +1,11 @@
 # 76 — Replies as first-class events (v0.21 design)
 
-Status: **draft.** v0.20.1 can label the first human reply of a bot/CI thread at
-scrape time and store that label on the THREAD (`label_source=reply`). It cannot
-represent the reply itself, because the event log has no reply events.
+Status: **implemented (v0.20.6).** Ingest emits one `comment_added` per nested
+reply (`reply=true`, `reply_index`, `parent_comment_id`) on the opener's object
+set, with no labels. Every existing reader excludes them (ballcourt/jira/query,
+review rounds, approvals-lost), so the event log is complete while the metrics
+stay identical. `python -m ingest backfill-replies --hans-scrape DIR --identity
+PATH [--apply]` fills an existing store from the capture, idempotently.
 
 ## Measured gap
 
