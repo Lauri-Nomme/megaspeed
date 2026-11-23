@@ -58,6 +58,63 @@ class Counting(classify.MockClassifier):
         return super().classify(text, kind, context)
 
 
+class Fallback(Counting):
+    """The inner backend falls back to the mock for one text."""
+
+    def __init__(self):
+        super().__init__()
+        self.fail = True
+
+    def classify(self, text, kind, context=None):
+        labels = super().classify(text, kind, context)
+        self.last_version = "mock-v1" if self.fail else self.version
+        return labels
+
+
+class FallbackNotCachedTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = Path(self.tmp.name) / labelcache.CACHE_FILE
+        self.cache = labelcache.LabelCache(
+            self.path, model="fake-model", think=False, version="counting-v1"
+        )
+        self.inner = Fallback()
+        self.wrapper = labelcache.CachedClassifier(self.inner, self.cache)
+
+    def tearDown(self):
+        self.cache.close()
+        self.tmp.cleanup()
+
+    def test_a_fallback_label_never_enters_the_cache(self):
+        self.wrapper.classify(CANARY, classify.KIND_COMMENT)
+        self.assertIsNone(self.cache.get(classify.KIND_COMMENT, CANARY))
+        self.assertEqual(len(self.cache), 0)
+
+        # Once the backend answers for real, the label is cached and reused.
+        self.inner.fail = False
+        self.wrapper.classify(CANARY, classify.KIND_COMMENT)
+        self.assertIsNotNone(self.cache.get(classify.KIND_COMMENT, CANARY))
+        self.wrapper.classify(CANARY, classify.KIND_COMMENT)
+        self.assertEqual(self.wrapper.hits, 1)
+
+    def test_a_fallback_batch_answer_is_not_cached(self):
+        class BatchFallback(Counting):
+            def classify_many(self, items):
+                return [
+                    (self._labels_only(text, kind), "mock-v1")
+                    for text, kind, *_rest in items
+                ]
+
+        wrapper = labelcache.CachedClassifier(
+            BatchFallback(),
+            labelcache.LabelCache(
+                self.path, model="fake-model", think=False, version="counting-v1"
+            ),
+        )
+        wrapper.classify_many([(CANARY, classify.KIND_COMMENT)])
+        self.assertEqual(len(wrapper.cache), 0)
+
+
 class LabelCacheTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

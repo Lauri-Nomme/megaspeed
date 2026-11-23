@@ -261,8 +261,14 @@ class CachedClassifier(classify.Classifier):
             labels = self.inner.classify(text, kind)
         else:
             labels = self.inner.classify(text, kind, context)
-        self._store(kind, text, labels)
-        self.last_version = getattr(self.inner, "last_version", None) or self.version
+        # A per-call fallback (the box down, a schema violation) is stamped with
+        # the fallback's version. It must never enter the cache under the model's
+        # identity: that would turn one transient failure into a permanent mock
+        # label for every future run.
+        version = getattr(self.inner, "last_version", None) or self.version
+        if version == self.version:
+            self._store(kind, text, labels)
+        self.last_version = version
         return labels
 
     def classify_many(
@@ -302,7 +308,10 @@ class CachedClassifier(classify.Classifier):
                 )
             for index, (labels, version) in zip(pending, answers):
                 text, kind, _context = prepared[index]
-                self._store(kind, text, labels)
+                # Same rule as a single call: a fallback answer is not cached
+                # under the model identity.
+                if version == self.version:
+                    self._store(kind, text, labels)
                 results[index] = (labels, version)
             self.last_version = (
                 getattr(self.inner, "last_version", None) or self.version

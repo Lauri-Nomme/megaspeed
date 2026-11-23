@@ -62,6 +62,20 @@ PERSON rows went 329→223 (merged plus pre-existing orphans), events unchanged 
 The laptop's `identity.json` still holds the old pseudonyms: swap its `bb:`
 entries before the next scrape, or the rekeyed actors come back.
 
+## v0.20.5 — the scrape reuses labels it already paid for
+
+- `ingest/labelcache.py`: one digest-keyed, raw-text-free `LabelCache` (moved
+  out of `relabel.py`) and a `CachedClassifier` that answers hits without a
+  request, calls the inner batch only for misses, and traces every hit with
+  `cached: true`.
+- The scrape uses `<state-dir>/classify-cache.jsonl` by default for a real
+  backend on a non-fixture source (`--classify-cache PATH`,
+  `--no-classify-cache`). Mock/fixture runs create no state. A relabel cache can
+  be shared by pointing `--classify-cache` at `<out>.labels.jsonl`.
+- A per-call fallback (mock-v1) is never cached under the model identity.
+- Acceptance: a second scrape of the same fixture makes **0** model calls and
+  emits identical labels; 1,571 tests green (pytest, 8 workers, 22.7 s).
+
 ## v0.20.4 — pytest for the dev loop
 
 - `requirements-dev.txt` (pytest, pytest-xdist), `pytest.ini`, `.pytest_cache/`

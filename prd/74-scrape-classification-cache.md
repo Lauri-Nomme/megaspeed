@@ -1,6 +1,12 @@
 # 74 — Scrape classification cache (draft; after the relabel workflow settles)
 
-Status: **draft / not dispatched.**
+Status: **implemented (v0.20.5).** `ingest/labelcache.py` holds one
+digest-keyed, raw-text-free cache and a `CachedClassifier` wrapper; the scrape
+uses `<state-dir>/classify-cache.jsonl` by default (`--classify-cache PATH`,
+`--no-classify-cache`), and `ingest relabel` still defaults to
+`<out>.labels.jsonl` — point both flags at one file to share it. A per-call
+fallback is **not** cached under the model identity, so one transient failure
+cannot become a permanent mock label.
 
 ## Problem
 
@@ -32,13 +38,17 @@ One digest-keyed cache shared by the scrape and relabel:
 - The cache contains no raw prose; `--verify` unaffected.
 - The trace has a `cached: true` record for every hit.
 
-## Files
+## Implementation notes (v0.20.5)
 
-`ingest/classify.py` (hook/сache interface), `ingest/scrape.py` (wire the
-state-dir cache), `ingest/relabel.py` (default to the shared path), tests.
-
-## Why later
-
-The relabel run is still producing the first model-labelled corpus. Once its
-patch is imported, we will know the real hit-rate and whether the scrape needs
-the cache at all (the relabel may remain the only model path).
+- `LabelCache` moved out of `relabel.py` into `ingest/labelcache.py`, unchanged.
+- `CachedClassifier` consults the cache per text, calls the inner batch only for
+  misses (worker pool preserved), traces every hit with `cached: true`, and
+  reports `cache: {path, read, hits, misses}` in the manifest provenance.
+- Only a non-mock, non-fixture source is wrapped; fixture/mock runs create no
+  state, so tests and `--fixture` scrapes are unchanged.
+- The relabel's cache path stays `<out>.labels.jsonl`; a scrape can reuse a
+  relabel cache by passing `--classify-cache <out>.labels.jsonl` (same model /
+  think / version identity).
+- Acceptance is covered by `tests/test_labelcache.py`: repeat text = 0 calls,
+  batch misses only, identity mismatch = miss, a fallback is never cached, a hit
+  is traced, and a second scrape of the same fixture makes 0 model calls.
