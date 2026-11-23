@@ -105,3 +105,22 @@ We re-ran all checks covering the `prd/68` fixes on the touched files (`analysis
 - **Observed:**
   - **`F-05`:** The `#verdict` footer summary still reads `Next: verification 634 h · refinement ≈2.3k h · starting work ≈1.8k h` without noting that `Verification` ranks first because it has `8 h` owed now (`live_hours`), while the expanded `.panel-note` still says `"ranked by the same clock and method as the constraint"` without mentioning live-first ranking.
   - **`F-06`:** `HOLDERS PR clock` in `#verdict` still sums all-time 5-year review hours (`MaRa ≈4.6k h · peers 0–4624 h`) identically across `4w`, `1q`, and `All`, and includes `MaRa` (`4623.7 h`) as the upper bound of `peers 0–4624 h`.
+
+
+---
+
+## Final addendum — U4 + U7 (v0.18.0)
+
+- **F-03 client END:** fixed in `9163b12` — `/api/objects` orders `EPIC` before `TICKET`, and the
+  `TICKET` row downgraded the epic into the story tier where its open state beat its done story.
+  `#11030` now resolves to the story in Delivery/Timeline as well.
+- **F-03 verdict:** U4 uses the canonical ticket; `/api/verdict?days=90` gives `#11030 → DEMO-57507`
+  and `#11096 → DEMO-60130`.
+- **F-05:** `Next:` is now explicitly ordered by hours owed now, then the reference pool, and prints
+  both (`verification 8 h owed now (634 h removable)`), consistent with the caption.
+- **F-06:** holder PR hours are clipped to the card's window (`50.97 h` @1w, `271.98 h` @4w,
+  `617.0 h` @1q; `All` unchanged) and the redundant peer range is suppressed for a peer.
+- **F-16:** scrape-side `sprint_no` (numeric, no name text), API rows, and one `S<sprint_no>` /
+  `S<id>` formatter across Sprints, Timeline, Rules, ticket chips and Trend. The live store predates
+  the parser (`sprint_no: null`), so it renders the `S<id>` fallback until a Jira re-scrape with the
+  original identity map.

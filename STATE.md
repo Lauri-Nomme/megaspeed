@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1461** (`tests/`) + **99** (`scrape/tests`) + **553** (node `app/test`) green.
+Tests: **1507** (`tests/`) + **99** (`scrape/tests`) + **626** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -61,6 +61,21 @@ PERSON rows went 329→223 (merged plus pre-existing orphans), events unchanged 
 76,213, `--verify` OK. Backup: `/data/personal/work/demo-tlla.pre-rekey.duckdb`.
 The laptop's `identity.json` still holds the old pseudonyms: swap its `bb:`
 entries before the next scrape, or the rekeyed actors come back.
+
+## v0.18.0 — prd/70 combined-corpus QA fixes
+
+Free exploration with the PR layer present produced 15 findings; F-01 was a data
+repair (all suffix identities merged, 199 people) and F-02…F-15 are fixed in
+file-disjoint units: person roster vs the 40k client cap, one canonical ticket
+per multi-key PR (Aging/Delivery/Tickets/Timeline/Verdict, Epic pages list their
+PRs), one holder story (`review queue` / `ready to merge`), timeframe-aware
+forecast, honest top-bar counts, business-hours queue lanes, year-bearing date
+ranges, mock-classifier disclosure, a 1.05 MB `/api/insights` (was 12.2 MB),
+full aging PR ids, single epic state pills, per-source Sources columns, and
+windowed verdict holder hours. F-16 adds a scrape-time numeric `sprint_no`
+(`S352` labels, `S<id>` fallback; a Jira re-scrape with the original identity
+map is needed to populate live). QA re-verify: 12 PASS, F-03 completed by the
+EPIC/TICKET index fix, F-05/F-06 completed by U4; 0 regressions.
 
 ## v0.17.3 — name order, cross-source linking, concurrent relabel
 
