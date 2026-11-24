@@ -21,6 +21,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from unittest import mock
 
 from analysis import ballcourt, rules
 from ingest import fixtures
@@ -492,6 +493,26 @@ class BackfillTests(unittest.TestCase):
         self.assertEqual(second["replies_inserted"], 0)
         self.assertEqual(second["replies_skipped"], 2)
         self.assertTrue(second["verified"], second.get("problems"))
+
+    def test_the_backup_is_taken_before_the_store_opens(self):
+        # Windows cannot copy an open DuckDB file (WinError 32): the backup has
+        # to happen before connect(), not beside the writes.
+        import ingest.backfill as bf
+
+        real_connect = bf.connect
+        seen = {}
+
+        def spy(path, *args, **kwargs):
+            seen["backup"] = list(Path(path).parent.glob("*.pre-backfill-*"))
+            return real_connect(path, *args, **kwargs)
+
+        with mock.patch.object(bf, "connect", spy):
+            report = bf.backfill_replies(
+                self.cfg, hans_scrape=self.capture,
+                identity_path=self.identity_path, apply=True, backup=True,
+            )
+        self.assertTrue(report["backup"])
+        self.assertTrue(seen["backup"], "backup must exist before connect()")
 
     def test_backfilled_rows_match_a_fresh_ingest(self):
         self.backfill(apply=True)

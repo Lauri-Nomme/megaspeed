@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 from datetime import datetime
 from pathlib import Path
 
@@ -361,6 +362,20 @@ def write_run(con, run: dict) -> None:
             int(run.get("issues_skipped") or 0),
         ),
     )
+
+
+def backup_db(path: str | Path, tag: str) -> Path:
+    """Copy the store next to itself, **before** any connection opens it.
+
+    On Windows a DuckDB file held open by this process cannot be copied
+    (WinError 32: sharing violation). The caller must take the backup first and
+    only then connect; this helper exists so the ordering cannot drift again.
+    """
+    source = Path(path)
+    stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    target = Path(str(source) + f".pre-{tag}-{stamp}.duckdb")
+    shutil.copy2(source, target)
+    return target
 
 
 def imported_scope(con) -> tuple[str, ...]:

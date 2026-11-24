@@ -23,9 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +32,7 @@ from .config import Config, load_config
 from .hans import HansTransport
 from .pipeline import SYSTEM_ACTOR, _ts, classify_actor, reply_events
 from .pseudonym import IdentityTable, actor_key
-from .store import connect, imported_scope, utcnow, verify, write_events
+from .store import backup_db, connect, imported_scope, utcnow, verify, write_events
 
 
 class BackfillError(RuntimeError):
@@ -109,6 +107,9 @@ def backfill_replies(
         actor_kinds.setdefault(who, classify_actor(user, cfg.bot_slugs))
         return who
 
+    # Copy the store before opening it (WinError 32 on an open DuckDB file), so
+    # an --apply always has its backup.
+    backup_path = backup_db(cfg.db_path, "backfill") if apply and backup else None
     con = connect(cfg.db_path)
     try:
         prs = _pr_rows(con, repo)
@@ -192,10 +193,7 @@ def backfill_replies(
         if not apply:
             report["dry_run"] = True
             return report
-        if backup:
-            stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-            backup_path = Path(str(cfg.db_path) + f".pre-backfill-{stamp}.duckdb")
-            shutil.copy2(cfg.db_path, backup_path)
+        if backup_path is not None:
             report["backup"] = str(backup_path)
         con.execute("BEGIN")
         try:

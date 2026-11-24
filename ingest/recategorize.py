@@ -26,17 +26,15 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import sys
 from collections import Counter
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from . import citext, taxonomy
 from .config import Config, load_config
 from .llmtrace import read_trace
-from .store import connect, imported_scope, verify
+from .store import backup_db, connect, imported_scope, verify
 
 
 class RecategorizeError(RuntimeError):
@@ -116,6 +114,11 @@ def recategorize(
     trace_path = Path(trace_path).expanduser()
     if not trace_path.is_file():
         raise RecategorizeError(f"no trace at {trace_path}")
+    # Copy the store before opening it: on Windows an open DuckDB file cannot be
+    # copied (WinError 32), and an --apply must always have its backup.
+    backup_path = (
+        backup_db(cfg.db_path, "recategorize") if apply and backup else None
+    )
     con = connect(cfg.db_path)
     report: dict[str, Any] = {
         "mode": "recategorize",
@@ -197,10 +200,7 @@ def recategorize(
         if not apply:
             report["dry_run"] = True
             return report
-        if backup:
-            stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
-            backup_path = Path(str(cfg.db_path) + f".pre-recategorize-{stamp}.duckdb")
-            shutil.copy2(cfg.db_path, backup_path)
+        if backup_path is not None:
             report["backup"] = str(backup_path)
         con.execute("BEGIN")
         try:

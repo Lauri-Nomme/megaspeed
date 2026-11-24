@@ -62,6 +62,14 @@ PERSON rows went 329→223 (merged plus pre-existing orphans), events unchanged 
 The laptop's `identity.json` still holds the old pseudonyms: swap its `bb:`
 entries before the next scrape, or the rekeyed actors come back.
 
+## v0.20.7 — the backup is taken before the store opens
+
+- `recategorize --apply` and `backfill-replies --apply` copied the DuckDB file
+  **after** opening it, which is fine on POSIX and a hard `WinError 32` on
+  Windows. `store.backup_db()` now runs before `connect()`, and two ordering
+  tests assert the copy exists at connect time.
+- No behaviour change otherwise.
+
 ## v0.20.6 — replies are events
 
 - prd/76: one `comment_added` per nested reply (`reply=true`, `reply_index`,

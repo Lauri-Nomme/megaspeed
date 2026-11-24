@@ -6,6 +6,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from ingest.config import Config
 from ingest.recategorize import recategorize
@@ -146,6 +147,25 @@ class RecategorizeTests(unittest.TestCase):
 
         # a bot thread with no text in the trace is still a bot
         self.assertEqual(self._attrs("THREAD:ENG/platform#1:104")["comment_kind"], "bot")
+
+    def test_the_backup_is_taken_before_the_store_opens(self):
+        # Windows cannot copy an open DuckDB file (WinError 32), so the copy
+        # must happen before ``connect``; assert the ordering, not just the path.
+        import ingest.recategorize as rec
+
+        real_connect = rec.connect
+        seen = {}
+
+        def spy(path, *args, **kwargs):
+            seen["backup"] = list(Path(self.tmp.name).glob(
+                "store.duckdb.pre-recategorize-*"
+            ))
+            return real_connect(path, *args, **kwargs)
+
+        with mock.patch.object(rec, "connect", spy):
+            report = rec.recategorize(self.cfg, trace_path=self.trace, apply=True)
+        self.assertTrue(report["backup"])
+        self.assertTrue(seen["backup"], "backup must exist before connect()")
 
     def test_stale_event_actor_kind_is_repaired(self):
         recategorize(self.cfg, trace_path=self.trace, apply=True)
