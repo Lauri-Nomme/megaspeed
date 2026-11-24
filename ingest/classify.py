@@ -203,25 +203,31 @@ def system_prompt(kind: str) -> str:
     _check_kind(kind)
     rules = (
         "comment_type:\n"
-        "  blocker      = the change must not merge until this is fixed: bug, data loss,\n"
-        "                 security, broken contract. A short statement that the code is\n"
-        "                 wrong or misbehaves is a blocker (\"this is always false now\",\n"
-        "                 \"doesn't work without an unwrap\").\n"
-        "  suggestion   = an improvement the author may accept or decline\n"
-        "  question     = the reviewer asks for information they do not know; not a\n"
-        "                 demand, and not an imperative like \"rename\"/\"check\"/\"review\"\n"
-        "  nit          = style, naming, typo, formatting: trivial, no behaviour change\n"
+        "  blocker      = the change must not merge until this is fixed: a bug, data\n"
+        "                 loss, security, a broken contract, a race/deadlock, or a\n"
+        "                 resource left open. The defect must be in CODE BEHAVIOUR. A\n"
+        "                 misleading comment, a bad name, missing docs or a missing test\n"
+        "                 is NOT a blocker (nit or suggestion).\n"
+        "  suggestion   = an improvement the author may accept or decline. A request or\n"
+        "                 a proposal is a suggestion even when phrased as a question\n"
+        "                 (\"can we...\", \"should we...\", \"let's...\").\n"
+        "  question     = the reviewer asks for information they do not know. Not a\n"
+        "                 request, not an imperative, not \"can we/should we\".\n"
+        "  nit          = style, naming, typo, formatting: trivial, no behaviour change.\n"
+        "                 An explicit \"nit:\" or \"ubernit\" prefix is a nit unless the\n"
+        "                 text describes a defect.\n"
         "  out_of_scope = a valid remark about work that belongs in another ticket/PR\n"
-        "  optimization = performance, memory, throughput or algorithmic cost ONLY when\n"
-        "                 cost is the point; a deferral is out_of_scope, and a coverage\n"
-        "                 percentage is not performance\n"
+        "  optimization = speed, memory, allocation or throughput when that is the point;\n"
+        "                 a benchmark result or \"this runs per record\" is optimization,\n"
+        "                 a deferral is out_of_scope\n"
         "thread_intent: do NOT predict what became of the thread. Use unclear unless\n"
         "  this text itself states the outcome: acted (the author says\n"
         "  fixed/done/addressed), rejected (won't fix / by design / disagree),\n"
-        "  withdrawn (the commenter takes it back). An ask with no stated outcome is\n"
-        "  unclear.\n"
-        "question: true only when the text genuinely asks for information.\n"
-        "answered: true when this reply resolves someone else's question.\n"
+        "  withdrawn (never mind / nvm / ignore that / the commenter takes it back).\n"
+        "question: true only for a real information ask; false for requests and\n"
+        "  proposals.\n"
+        "answered: false for an opener; true only when this text answers someone\n"
+        "  else's question.\n"
         "phase: implementation for an author's description/plan, review for a comment\n"
         "  made while reviewing code.\n"
         "An @handle with no other content (\"@bot review\") is a request to a tool, not\n"
@@ -242,6 +248,14 @@ def system_prompt(kind: str) -> str:
         '"answered":false,"phase":"review"} -- "this does a linear scan per row"\n'
         '{"comment_type":"suggestion","thread_intent":"acted","question":false,'
         '"answered":true,"phase":"review"} -- "good catch, fixed in the next push"\n'
+        '{"comment_type":"suggestion","thread_intent":"unclear","question":false,'
+        '"answered":false,"phase":"review"} -- "can we also show the count in the message?"\n'
+        '{"comment_type":"suggestion","thread_intent":"unclear","question":false,'
+        '"answered":false,"phase":"review"} -- "missing test for the empty branch"\n'
+        '{"comment_type":"blocker","thread_intent":"unclear","question":false,'
+        '"answered":false,"phase":"review"} -- "this leaks credentials to the target host"\n'
+        '{"comment_type":"suggestion","thread_intent":"withdrawn","question":false,'
+        '"answered":false,"phase":"review"} -- "nvm, it is handled elsewhere"\n'
     )
     if kind == KIND_DESCRIPTION:
         rules = (
@@ -738,7 +752,7 @@ class OllamaClassifier(Classifier):
         #: Injected in tests: ``opener(request, timeout) -> response`` (an
         #: object with ``read()``). Never set on a live run.
         self._opener = opener or self._urlopen
-        self.version = "ollama-v2"
+        self.version = "ollama-v3"
         self.last_prompt_tokens: int | None = None
         self.last_duration_ms: float | None = None
         #: Send ``"think": true`` and keep the model's deliberation in the trace.

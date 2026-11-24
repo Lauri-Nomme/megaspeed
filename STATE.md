@@ -62,6 +62,27 @@ PERSON rows went 329→223 (merged plus pre-existing orphans), events unchanged 
 The laptop's `identity.json` still holds the old pseudonyms: swap its `bb:`
 entries before the next scrape, or the rekeyed actors come back.
 
+## v0.21.0 — label prompt v3 (the audit's targeted fixes)
+
+`ollama-v3` changes only the prompt, from the v2 audit:
+- **question**: a request or proposal ("can we / should we / let's") is a
+  `suggestion`, `question=false`; v2 had regressed v1's main win here.
+- **blocker**: code behaviour only (bug, data loss, security, broken contract,
+  race/deadlock, resource left open); a misleading comment, a name, missing docs
+  or a missing test is not a blocker. Security/close examples added.
+- **nit**: an explicit `nit:`/`ubernit` prefix stays `nit` unless it describes a
+  defect.
+- **optimization**: speed/memory/allocation/throughput when that is the point;
+  benchmark results count.
+- **withdrawn**: "nvm / never mind / ignore that"; **answered=false** for openers.
+- `relabel` never caches a per-call fallback under the model identity (one v2
+  timeout became a sticky mock label).
+- `@svc-…`, `@ci-…`, `@…-bot` mentions are skipped without configuration (29
+  commands escaped the v2 skip).
+
+A v3 pass needs the v2 trace as its text source and a **new** cache; the v2
+cache is keyed by version and cannot serve v3.
+
 ## 2026-11-24 — v2 audit → merged labels (data operation)
 
 The v2 audit (`relabel-audit-v2-report.md`, local) found v2 **worse by volume**

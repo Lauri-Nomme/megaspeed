@@ -550,6 +550,29 @@ class RelabelTests(unittest.TestCase):
         self.assertEqual(report["replayable"], 3)
         self.assertLessEqual(report["rows"], 3)
 
+    def test_a_fallback_answer_is_not_cached(self):
+        from ingest.labelcache import LabelCache
+
+        class Fallback(Recording):
+            def classify(self, text, kind, context=None):
+                labels = super().classify(text, kind, context)
+                self.last_version = "mock-v1"
+                return labels
+
+        out = self.root / "fallback.tgz"
+        relabel(
+            self.cfg, trace_path=self.trace, bundle_path=self.bundle,
+            out=out, classifier=Fallback(comment_type="nit"), progress=QUIET,
+        )
+        cache = LabelCache(
+            str(out) + ".labels.jsonl", model="", think=False,
+            version="recording-v1",
+        )
+        try:
+            self.assertEqual(len(cache), 0)
+        finally:
+            cache.close()
+
     def test_a_missing_trace_is_an_operator_error(self):
         with self.assertRaises(RelabelError):
             relabel(

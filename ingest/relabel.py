@@ -555,9 +555,13 @@ def relabel(
         return results
 
     def absorb(group: list[tuple[str, str]], results: list[tuple[dict, str]]) -> None:
-        for (mkind, body), (labels, _version) in zip(group, results):
+        for (mkind, body), (labels, version) in zip(group, results):
             answers[(mkind, body)] = labels
-            cache.put(mkind, body, labels)
+            # A per-call fallback (the box timed out, the schema failed) is
+            # stamped with the fallback's version; caching it under the model
+            # identity would turn one transient failure into a permanent label.
+            if version == text.version:
+                cache.put(mkind, body, labels)
             counters["classified"] += 1
         cache.flush()
         counters["batches"] += 1

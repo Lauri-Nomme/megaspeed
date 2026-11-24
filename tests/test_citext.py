@@ -95,8 +95,13 @@ class BotRequestTests(unittest.TestCase):
         self.assertFalse(citext.is_bot_request("mail a@bot.com", ["bot"]))
         self.assertFalse(citext.is_bot_request("see `@bot`", ["bot"]))
 
-    def test_no_alias_configured(self):
-        self.assertFalse(citext.is_bot_request("@bot review", []))
+    def test_a_service_shaped_handle_needs_no_configuration(self):
+        for text in ("@svc-review please look", "@ci-bot run", "@deploy-bot check"):
+            self.assertTrue(citext.is_bot_request(text, []), text)
+        self.assertTrue(citext.is_bot_request("@bot review", []))
+
+    def test_a_human_alias_is_not_service_shaped(self):
+        self.assertFalse(citext.is_bot_request("@APE review", []))
 
 
 if __name__ == "__main__":

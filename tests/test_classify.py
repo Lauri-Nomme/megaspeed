@@ -478,7 +478,7 @@ class OllamaOfflineTests(unittest.TestCase):
         classifier.classify("anything", classify.KIND_COMMENT)
         report = classifier.report()
         self.assertEqual(report["backend"], "ollama")
-        self.assertEqual(report["version"], "ollama-v2")
+        self.assertEqual(report["version"], "ollama-v3")
         self.assertEqual(report["model"], "test-model")
         self.assertEqual(report["fallbacks"], 1)
         self.assertEqual(report["calls"], 1)

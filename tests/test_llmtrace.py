@@ -367,7 +367,7 @@ class ClassifierTraceTests(unittest.TestCase):
         self.assertEqual(record["text"], "nit: rename this")
         self.assertTrue(record["ok"])
         self.assertEqual(record["labels"], labels)
-        self.assertEqual(record["label_version"], "ollama-v2")
+        self.assertEqual(record["label_version"], "ollama-v3")
         self.assertTrue(record["request"]["think"])
         self.assertEqual(
             record["request"]["format"], classify.schema_for(classify.KIND_COMMENT)

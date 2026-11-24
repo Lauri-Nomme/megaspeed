@@ -134,13 +134,24 @@ def mentions(text: str) -> list[str]:
     return MENTION.findall(prose)
 
 
-def is_bot_request(text: str, aliases) -> bool:
-    """True when the text addresses a configured bot alias.
+#: A mention that is a tool even when its alias was not configured: service
+#: accounts are named ``svc-…``, ``ci-…``, ``…-bot``, or a bare ``bot``.
+SERVICE_HANDLE = re.compile(
+    r"^(?:bot|agent)$|^(?:svc|ci|bot|agent)[-.]|[-.](?:bot|agent)$", re.I
+)
 
-    The alias is the handle people type (``@APE``), which is not necessarily
-    the bot's account name, so it is configured separately.
+
+def is_bot_request(text: str, aliases) -> bool:
+    """True when the text addresses a bot, by configured alias or account shape.
+
+    The alias is the handle people type (``@APE``), which is not necessarily the
+    bot's account name, so it is configured separately. A service-shaped handle
+    (``@svc-review``, ``@ci-bot``, ``@deploy-bot``) is a tool without any
+    configuration; the audit found 29 such commands escaping the skip.
     """
     wanted = {str(a).strip().lower() for a in (aliases or ()) if str(a).strip()}
-    if not wanted:
-        return False
-    return any(handle.lower() in wanted for handle in mentions(text))
+    for handle in mentions(text):
+        low = handle.lower()
+        if low in wanted or SERVICE_HANDLE.search(low):
+            return True
+    return False
