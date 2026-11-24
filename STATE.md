@@ -62,6 +62,27 @@ PERSON rows went 329→223 (merged plus pre-existing orphans), events unchanged 
 The laptop's `identity.json` still holds the old pseudonyms: swap its `bb:`
 entries before the next scrape, or the rekeyed actors come back.
 
+## 2026-11-24 — v2 audit → merged labels (data operation)
+
+The v2 audit (`relabel-audit-v2-report.md`, local) found v2 **worse by volume**
+on `comment_type` (v1 better 278 vs v2 183, weighted) and better on
+`thread_intent` / `out_of_scope`. The imported v2 labels were corrected with a
+**merge patch** (no model run):
+
+- `comment_type`: v1, except v2's `out_of_scope` where v1 said
+  `suggestion`/`question`; 980 threads changed, 0 label mismatches on 8,036;
+- `question` / `answered` / `phase`: v1. The merge patch is bundle-relative, so
+  a store-relative fix added 77 / removed 44 question events;
+- `thread_intent`: v2, keeping v1's `withdrawn` (not stored; the outcome is
+  diff-derived);
+- all 8,036 merged threads are stamped `merge-v1v2`; the 687 no-text openers
+  keep `ollama-v1`; outcomes unchanged.
+
+Final: 81,370 events, 2,465 question events, kinds unchanged. The v3 prompt
+targets the audit's losses: interrogative requests, code-only blockers,
+`withdrawn`, `answered=false` on openers, explicit `nit:`, the leftover `@bot`
+skips, and the one timeout fallback.
+
 ## v0.20.7 — the backup is taken before the store opens
 
 - `recategorize --apply` and `backfill-replies --apply` copied the DuckDB file
