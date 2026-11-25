@@ -72,6 +72,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import json
 import math
 import os
@@ -1434,6 +1435,45 @@ _advice_cache: dict[tuple, dict] = {}
 ADVICE_CACHE_SIZE = 32
 
 
+#: Bump when the policy lab's model or report shape changes. It is part of the
+#: on-disk key, so a new build can never serve a previous build's simulation.
+ADVICE_DISK_VERSION = "v1"
+
+
+def _advice_disk_path(key: tuple) -> Path:
+    """Where the lab result for ``key`` lives under the tenants dir.
+
+    The key already carries the store stamp, the calendar stamps, the window and
+    the repo; ``ADVICE_DISK_VERSION`` adds the code identity. The file is a
+    plain JSON payload (no prose), so a restart is warm.
+    """
+    payload = json.dumps([ADVICE_DISK_VERSION, *key], sort_keys=True, default=str)
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+    return TENANTS_DIR / ".cache" / "advice" / f"{digest}.json"
+
+
+def _read_advice_disk(path: Path) -> dict | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _write_advice_disk(path: Path, report: dict) -> None:
+    """Best-effort atomic write: a read-only tenant dir must not break Rules."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(
+            json.dumps(report, sort_keys=True, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        os.replace(tmp, path)
+    except OSError:
+        pass
+
+
 def _advice_payload(con, tenant: str, path: Path, court, jira, window, repo: str | None = None) -> dict:
     key = (
         tenant, str(path), _file_stamp(path), _calendar_key(tenant),
@@ -1443,6 +1483,25 @@ def _advice_payload(con, tenant: str, path: Path, court, jira, window, repo: str
         hit = _advice_cache.get(key)
     if hit is not None:
         return hit
+    disk_path = _advice_disk_path(key)
+    stored = _read_advice_disk(disk_path)
+    if stored is not None:
+        with _advice_lock:
+            _advice_cache[key] = stored
+        return stored
+    report = _compute_advice(con, tenant, path, court, jira, window, repo)
+    with _advice_lock:
+        if len(_advice_cache) >= ADVICE_CACHE_SIZE:
+            _advice_cache.clear()
+        _advice_cache[key] = report
+    # A stated no-result (the model could not calibrate) is not a result worth
+    # persisting: the next run should retry, not quote a transient failure.
+    if report.get("available", True):
+        _write_advice_disk(disk_path, report)
+    return report
+
+
+def _compute_advice(con, tenant: str, path: Path, court, jira, window, repo: str | None = None) -> dict:
     try:
         refinement = jira_analysis.refinement_cost(court, jira, window)
         calibration = policy_lab.calibrate(
@@ -1513,10 +1572,6 @@ def _advice_payload(con, tenant: str, path: Path, court, jira, window, repo: str
         report = advice_crosscheck.unavailable(
             f"the policy lab could not run on this store: {exc}"
         )
-    with _advice_lock:
-        if len(_advice_cache) >= ADVICE_CACHE_SIZE:
-            _advice_cache.clear()
-        _advice_cache[key] = report
     return report
 
 

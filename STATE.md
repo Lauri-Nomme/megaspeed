@@ -62,6 +62,17 @@ PERSON rows went 329→223 (merged plus pre-existing orphans), events unchanged 
 The laptop's `identity.json` still holds the old pseudonyms: swap its `bb:`
 entries before the next scrape, or the rekeyed actors come back.
 
+## v0.21.1 — the policy lab survives a restart
+
+The first `/api/insights` per window spent ~25 s (33 s profiled) in the policy-lab
+SimPy simulation (`docs/perf-v020.md`). The result is now persisted under
+`<tenants-dir>/.cache/advice/<key>.json`, keyed by tenant, store stamp, calendar
+stamps, window, repo and `ADVICE_DISK_VERSION`; a restart reads it instead of
+re-simulating. A stated no-result is not persisted (the next run retries), the
+write is atomic and best-effort, and the memory cache still fronts it. Tests:
+second process reads the disk, window/store changes are new keys, corrupt files
+are ignored, an unavailable report is not written.
+
 ## v0.21.0 — label prompt v3 (the audit's targeted fixes)
 
 `ollama-v3` changes only the prompt, from the v2 audit:
