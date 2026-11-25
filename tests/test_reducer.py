@@ -485,6 +485,233 @@ class CommentKindTests(unittest.TestCase):
         )
 
 
+class ReplyIntentTests(unittest.TestCase):
+    """prd/75: the last human reply is the outcome evidence when the diff is unknown."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.cfg = Config(
+            db_path=root / "store.duckdb",
+            identity_path=root / "identity.json",
+            ticket_regex=r"\b[A-Z]+-\d+\b",
+            key_shape=r"^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$",
+            repos=[("ENG", "platform")],
+        )
+        self.classifier = _Scripted()
+        self.reducer = Reducer(
+            self.cfg,
+            IdentityTable(self.cfg.identity_path),
+            KeyFilter.build(self.cfg.ticket_regex, self.cfg.key_shape, self.cfg.ticket_projects),
+            AS_OF,
+            self.classifier,
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _thread(
+        self,
+        replies=(),
+        *,
+        resolved: bool = True,
+        change: dict | None = None,
+        resolver: dict | None = None,
+        opener: str = "the cache key is missing the model name",
+        opener_author: dict | None = None,
+    ) -> tuple[dict, Stats]:
+        comment = {
+            "id": 101,
+            "text": opener,
+            "author": opener_author or GRACE,
+            "severity": "NORMAL",
+            "state": "RESOLVED" if resolved else "OPEN",
+            "threadResolved": resolved,
+            "comments": list(replies),
+        }
+        if resolved:
+            comment["resolvedDate"] = T0 + 20 * 60_000
+            comment["resolver"] = resolver or GRACE
+        activity = _activity(
+            2, "COMMENTED", 5, opener_author or GRACE,
+            comment=comment, commentAction="ADDED",
+            commentAnchor={"path": "a.py", "line": 1},
+        )
+        if change is not None:
+            activity["megaspeedThreadChange"] = change
+        pr = _pr([_activity(1, "OPENED", 0, ADA), activity])
+        stats = Stats()
+        self.reducer.reduce(pr, ["PROJ-1"], pr.activities, stats)
+        thread = next(
+            o for o in stats.objects
+            if o["object_type"] == "THREAD" and o["object_id"].endswith(":101")
+        )
+        attrs = thread["attributes"]
+        if isinstance(attrs, str):
+            attrs = json.loads(attrs)
+        return attrs, stats
+
+    def test_the_last_human_reply_decides_an_unknown_diff(self):
+        for reply, intent, outcome in (
+            ("fixed in the next push", "acted", "acted_on"),
+            ("won't fix, by design", "rejected", "rejected"),
+            ("nvm, handled", "withdrawn", "walked_back"),
+        ):
+            with self.subTest(reply=reply):
+                self.classifier.seen.clear()
+                self.classifier.intents[reply] = intent
+                attrs, _stats = self._thread(
+                    replies=[{"id": 102, "text": reply, "author": ADA}],
+                )
+                self.assertEqual(attrs["thread_outcome"], outcome)
+                # the opener (batched) plus the one reply-intent call
+                self.assertEqual(
+                    [text for text, *_ in self.classifier.seen],
+                    ["the cache key is missing the model name", reply],
+                )
+
+    def test_the_reply_intent_call_is_not_no_fit_filtered(self):
+        # A status note is exactly what the intent call is for (prd/78).
+        attrs, _stats = self._thread(
+            replies=[{"id": 102, "text": "fixed in the next push", "author": ADA}],
+        )
+        reply_call = self.classifier.seen[-1]
+        self.assertEqual(reply_call[0], "fixed in the next push")
+        self.assertEqual(reply_call[2]["role"], "reply")
+        self.assertEqual(attrs["thread_outcome"], "acted_on")
+
+    def test_a_known_diff_outranks_the_reply(self):
+        attrs, _stats = self._thread(
+            replies=[{"id": 102, "text": "won't fix, by design", "author": ADA}],
+            change={"changed": True},
+        )
+        self.assertEqual(attrs["thread_outcome"], "acted_on")
+        self.assertEqual(len(self.classifier.seen), 1)  # the opener only
+
+        self.classifier.seen.clear()
+        attrs, _stats = self._thread(
+            replies=[{"id": 102, "text": "fixed in the next push", "author": ADA}],
+            change={"changed": False},
+            resolver=ADA,
+        )
+        self.assertEqual(attrs["thread_outcome"], "rejected")
+        self.assertEqual(len(self.classifier.seen), 1)
+
+    def test_without_a_human_reply_the_opener_intent_is_used(self):
+        self.classifier.intents["the cache key is missing the model name"] = "acted"
+        attrs, _stats = self._thread()
+        self.assertEqual(attrs["thread_outcome"], "acted_on")
+        self.assertEqual(len(self.classifier.seen), 1)
+
+    def test_a_bot_reply_is_ignored(self):
+        attrs, _stats = self._thread(replies=[
+            {"id": 102, "text": "fixed in the next push", "author": ADA},
+            {"id": 103, "text": "coverage moved to 91%", "author": _CI_BOT},
+        ])
+        self.assertEqual(attrs["thread_outcome"], "acted_on")
+        self.assertEqual(
+            [text for text, *_ in self.classifier.seen],
+            ["the cache key is missing the model name", "fixed in the next push"],
+        )
+
+    def test_an_open_thread_makes_no_intent_call(self):
+        attrs, _stats = self._thread(
+            replies=[{"id": 102, "text": "fixed in the next push", "author": ADA}],
+            resolved=False,
+        )
+        self.assertEqual(attrs["thread_outcome"], "unresolved")
+        self.assertEqual(len(self.classifier.seen), 1)  # the opener only
+
+
+class DescriptionGuardTests(unittest.TestCase):
+    """prd/75 finding 7: a description question needs a real ``?`` in prose."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        root = Path(self.tmp.name)
+        self.cfg = Config(
+            db_path=root / "store.duckdb",
+            identity_path=root / "identity.json",
+            ticket_regex=r"\b[A-Z]+-\d+\b",
+            key_shape=r"^[A-Z][A-Z0-9_]{0,9}-\d{1,6}$",
+            repos=[("ENG", "platform")],
+        )
+        self.classifier = _Scripted()
+        self.reducer = Reducer(
+            self.cfg,
+            IdentityTable(self.cfg.identity_path),
+            KeyFilter.build(self.cfg.ticket_regex, self.cfg.key_shape, self.cfg.ticket_projects),
+            AS_OF,
+            self.classifier,
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _question_events(self, description: str) -> list[dict]:
+        # The model says "question" for every case; the guard must decide.
+        self.classifier.description_question = True
+        pr = _pr([_activity(1, "OPENED", 0, ADA)])
+        pr.pr["description"] = description
+        stats = Stats()
+        self.reducer.reduce(pr, ["PROJ-1"], pr.activities, stats)
+        return [
+            e for e in stats.events
+            if e["activity"] == "question_raised" and e["event_key"].endswith(":desc:q")
+        ]
+
+    def test_a_real_question_in_prose_is_emitted(self):
+        events = self._question_events(
+            "should this cache key include the model name? it is stale on a bump"
+        )
+        self.assertEqual(len(events), 1)
+
+    def test_a_question_mark_in_a_url_emits_nothing(self):
+        for description in (
+            "see https://x/overview?commentId=1045138 for the report",
+            "[the trace](/pull-requests/7?tab=activity) shows the retry loop",
+        ):
+            with self.subTest(description=description):
+                self.assertEqual(self._question_events(description), [])
+
+    def test_a_question_mark_in_code_emits_nothing(self):
+        for description in (
+            "```\nif (a?.b) { return; }\n```\nthe guard is cheap",
+            "the guard `a?.b` keeps it safe",
+        ):
+            with self.subTest(description=description):
+                self.assertEqual(self._question_events(description), [])
+
+    def test_a_statement_the_model_read_as_a_question_emits_nothing(self):
+        events = self._question_events("this fixes the cache key and adds a test")
+        self.assertEqual(events, [])
+        self.assertEqual(len(self.classifier.seen), 1)  # one description call
+
+
+class _Scripted(classify.MockClassifier):
+    """A mock with the intent/question answers a test needs to control."""
+
+    backend = "scripted"
+    version = "scripted-v1"
+
+    def __init__(self, comment_type: str = "nit"):
+        super().__init__()
+        self.forced = comment_type
+        self.intents: dict[str, str] = {}
+        self.description_question: bool | None = None
+        self.seen: list[tuple] = []
+
+    def classify(self, text, kind, context=None):
+        self.seen.append((text, kind, context))
+        labels = super().classify(text, kind, context)
+        if kind == classify.KIND_COMMENT:
+            labels["comment_type"] = self.forced
+            labels["thread_intent"] = self.intents.get(text, labels["thread_intent"])
+        elif self.description_question is not None:
+            labels["question"] = self.description_question
+        return labels
+
+
 class _Forced(classify.MockClassifier):
     backend = "forced"
     version = "forced-v1"

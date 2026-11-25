@@ -957,6 +957,9 @@ class Golden10Tests(unittest.TestCase):
         ).fetchall())
         # prd/76: the 19 openers plus 4 nested replies the capture holds. The
         # replies are asserted separately so a change in either half is visible.
+        # prd/75: the capture's only description `?` is a URL query string
+        # (`…/commits/<sha>?since=<sha>`), so the description guard drops its
+        # question event; the one comment question in PR 8 remains.
         self.assertEqual(events, {
             "pr_opened": 10,
             "comment_added": 23,
@@ -965,7 +968,7 @@ class Golden10Tests(unittest.TestCase):
             "pr_merged": 5,
             "pr_pushed": 4,
             "pr_unapproved": 2,
-            "question_raised": 2,
+            "question_raised": 1,
             "pr_declined": 1,
         })
         self.assertEqual(

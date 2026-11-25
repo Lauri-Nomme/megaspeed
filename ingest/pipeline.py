@@ -212,6 +212,32 @@ def reply_events(
     return rows
 
 
+def last_human_reply(
+    comment: dict,
+    actor_kind_for: Callable[[dict | None], str],
+    opener_ts: datetime,
+) -> tuple[str, Any, datetime] | None:
+    """``(text, reply_id, ts)`` for a comment's last human reply with text.
+
+    prd/75: a reply is where the author states what became of the thread
+    ("fixed in the next push", "won't fix, by design", "nvm, handled"), so it --
+    not the opener -- is the intent evidence when the diff is unknown. Nothing
+    is filtered here: a status note is exactly what the intent call is for
+    (prd/78 "replies are exempt"), and an empty or bot reply is not evidence at
+    all. The text goes back to the reduction for one model call and is dropped.
+    """
+    candidate = None
+    for reply in comment.get("comments") or []:
+        reply = reply or {}
+        body = str(reply.get("text") or "").strip()
+        if not body:
+            continue
+        if actor_kind_for(reply.get("author") or {}) == "bot":
+            continue
+        candidate = (body, reply.get("id"), _ts(reply.get("createdDate"), opener_ts))
+    return candidate
+
+
 @dataclass
 class KeyFilter:
     pattern: re.Pattern[str]
@@ -532,6 +558,15 @@ class Reducer:
                         else (ts if resolved else None)
                     )
                     entry["resolver"] = (comment.get("resolver") or {}) if resolved else {}
+                    # prd/75: a thread with an unknown diff is judged by what the
+                    # last human reply says became of it, and that reply is exempt
+                    # from the no-fit filter (prd/78). Only the candidate is kept
+                    # here -- the text lives no longer than this PR's reduction --
+                    # and the one model call happens in the thread loop below,
+                    # once the final state and the missing diff are both known.
+                    candidate = last_human_reply(comment, self._actor_kind, ts)
+                    if candidate is not None:
+                        entry["reply_candidate"] = candidate
                     # prd/75: what this thread *is*, decided deterministically
                     # from the author and the text before any model call.
                     if comment_action != "UPDATED":
@@ -778,11 +813,25 @@ class Reducer:
             if entry.get("comment_type"):
                 # prd/16: comment_type + thread_outcome are the labels the
                 # "comment tax" analysis (prd/15 Q4) joins on.
+                if entry.get("anchor_changed") is None and entry.get("resolved"):
+                    # prd/75: the diff cannot decide an outcome this thread, so
+                    # the last human reply decides the intent fallback. It is
+                    # one call, for this thread only -- never for an open
+                    # thread (its outcome is ``unresolved`` regardless), a bot
+                    # reply, or a diff-derived outcome. A thread with no review
+                    # label computes no outcome, so it makes no call either.
+                    entry["reply_intent"] = self._reply_intent(
+                        entry, pr=pr, thread_id=thread_id, keys=keys,
+                        commit_ids=commit_ids,
+                    )
                 outcome = classify.thread_outcome(
                     resolved=bool(entry.get("resolved")),
                     anchor_changed=entry.get("anchor_changed"),
                     resolver_is_commenter=resolver_is_commenter,
-                    thread_intent=entry.get("thread_intent", "unclear"),
+                    thread_intent=(
+                        entry.get("reply_intent")
+                        or entry.get("thread_intent", "unclear")
+                    ),
                 )
                 attributes["comment_type"] = entry["comment_type"]
                 attributes["thread_outcome"] = outcome
@@ -1030,6 +1079,40 @@ class Reducer:
             return labels["comment_type"], version, "reply", reply_actor
         return None
 
+    def _reply_intent(
+        self,
+        entry: dict,
+        *,
+        pr: PullRequest | None = None,
+        thread_id: str | None = None,
+        keys: list[str] | None = None,
+        commit_ids: set[str] | None = None,
+    ) -> str | None:
+        """The last human reply's ``thread_intent``, or ``None``.
+
+        prd/75: the opener cannot know what became of a thread; a reply can
+        ("fixed in the next push", "won't fix, by design", "nvm, handled"). It
+        is read once per thread that needs it -- the diff is unknown and the
+        thread is resolved -- and it is *not* filtered by ``is_admin`` /
+        ``is_notice``: a status note is exactly what this call is for (prd/78).
+        Only the intent is taken; the reply's ``comment_type`` belongs to
+        nothing here.
+        """
+        assert self.classifier is not None
+        candidate = entry.get("reply_candidate")
+        if not candidate:
+            return None
+        body, reply_id, reply_ts = candidate
+        labels = self.classifier.classify(
+            body,
+            classify.KIND_COMMENT,
+            self._text_context(
+                pr, role="reply", keys=list(keys or ()), commit_ids=commit_ids,
+                thread_id=thread_id, comment_id=reply_id, ts=reply_ts,
+            ),
+        )
+        return labels["thread_intent"]
+
     def _comment_labels(
         self,
         actor: str,
@@ -1147,6 +1230,13 @@ class Reducer:
         else:
             labels = answer[0]
         if not labels["question"]:
+            return
+        if not citext.has_real_question(body):
+            # prd/75 (finding 7): a description is a question only when the
+            # prose has a real ``?`` outside URLs and code. A statement the model
+            # read as a question, or a ``?`` in a link/code sample, is forced
+            # off and emits nothing; the phase is unchanged.
+            labels = {**labels, "question": False}
             return
         stats.questions_raised += 1
         self._event(

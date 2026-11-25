@@ -139,6 +139,27 @@ def mentions(text: str) -> list[str]:
     return MENTION.findall(prose)
 
 
+#: A bare URL, and a markdown link target -- a ``?`` in either is a query string,
+#: not a question about the code.
+URL = re.compile(r"https?://\S+", re.I)
+MD_TARGET = re.compile(r"\]\([^)\s]*\)")
+
+
+def has_real_question(text: str) -> bool:
+    """True when the text asks a question: a ``?`` in prose.
+
+    prd/75 (finding 7): a PR description is a question only when the ``?`` sits
+    in the prose, so a query string (``…?commentId=1``), a code fence or inline
+    code do not count. The model can read a statement as a question; this is the
+    deterministic guard that keeps a description from adding a question row on
+    a URL or a code sample.
+    """
+    prose = CODE.sub(" ", text or "")
+    prose = MD_TARGET.sub(" ", prose)
+    prose = URL.sub(" ", prose)
+    return "?" in prose
+
+
 #: A mention that is a tool even when its alias was not configured: service
 #: accounts are named ``svc-…``, ``ci-…``, ``…-bot``, or a bare ``bot``.
 SERVICE_HANDLE = re.compile(

@@ -179,6 +179,38 @@ class NoticeTests(unittest.TestCase):
                 self.assertTrue(citext.is_notice(text), text)
 
 
+class DescriptionQuestionTests(unittest.TestCase):
+    """prd/75: a description asks a question only with a real ``?`` in prose."""
+
+    def test_a_question_mark_in_prose_is_a_question(self):
+        for text in (
+            "should this cache key include the model name?",
+            "Why is the retry loop unbounded? It can spin.",
+            "Can we ship this before the freeze?\n\nSee the plan.",
+        ):
+            self.assertTrue(citext.has_real_question(text), text)
+
+    def test_a_question_mark_in_a_url_is_not_a_question(self):
+        for text in (
+            "see https://x/overview?commentId=1045138 for the report",
+            "the trace is at https://x/y?a=1&b=2",
+            "[the report](/pull-requests/7?tab=activity) says zero",
+        ):
+            self.assertFalse(citext.has_real_question(text), text)
+
+    def test_a_question_mark_in_code_is_not_a_question(self):
+        for text in (
+            "```\nif (a?.b) { return; }\n```\nsee the snippet",
+            "the guard `a?.b` keeps it safe",
+            "```js\nx?.[0]\n```",
+        ):
+            self.assertFalse(citext.has_real_question(text), text)
+
+    def test_a_statement_has_no_question(self):
+        for text in ("this fixes the cache key", "", "the change is behind a flag."):
+            self.assertFalse(citext.has_real_question(text), text)
+
+
 class BotRequestTests(unittest.TestCase):
     def test_alias_in_prose(self):
         self.assertTrue(citext.is_bot_request("@BOT review", ["bot"]))
