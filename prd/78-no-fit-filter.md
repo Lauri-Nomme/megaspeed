@@ -1,6 +1,6 @@
 # 78 — The deterministic no-fit filter
 
-Status: **draft (design; implementation goes to a subagent).**
+Status: **implemented (v0.22.0).** The gold-set ≥90%/≤2% measurement is still a laptop/auditor step; the predicate's true/false examples are pinned in `tests/test_citext.py`.
 
 ## What “no-fit” means
 

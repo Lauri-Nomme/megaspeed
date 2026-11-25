@@ -73,6 +73,23 @@ write is atomic and best-effort, and the memory cache still fronts it. Tests:
 second process reads the disk, window/store changes are new keys, corrupt files
 are ignored, an unavailable report is not written.
 
+## v0.22.0 — a no-fit opener is not a review remark
+
+- `citext.is_notice`: whole-text, bounded, code/defect-guarded families for
+  rebase/merge notes, review requests, author status notes, bare links and
+  fyi/thanks. It is a superset of `is_admin`; a concrete defect phrase always
+  wins.
+- The reducer applies it to **openers only** (`_classify_batch`, `_comment_labels`,
+  `_comment_kind`), so a notice costs no model call and gets
+  `comment_kind=admin` with no `comment_type`. `recategorize` uses it on
+  `role=opener` records.
+- **Replies are exempt**: a status note in a reply (“fixed”, “won’t fix”, “nvm”)
+  is intent/outcome evidence; the reply path keeps only the old `is_admin`
+  review-label skip (prd/75/78). A human `@mention wdyt` is a question, not a
+  notice.
+- Tests: 1,585 passed, 21 skipped, 294 subtests (pytest, 8 workers). The gold-set
+  measurement remains a laptop/auditor step.
+
 ## v0.21.2 — persist a deterministic lab no-result too
 
 The v0.21.1 guard treated every `available: false` report as transient. On this

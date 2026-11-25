@@ -1,9 +1,13 @@
 # 75 — Label prompt/schema v2 (draft, after the 2026-11-23 audit)
 
-Status: **draft.** The audit of the first model relabel (`relabel-audit-report`)
-found the model clearly better on `comment_type` (83% of decisive human samples)
-and mostly better on questions, but exposed systematic noise that a prompt and a
-deterministic pre-filter should remove before the next model pass.
+Status: **partly implemented (v0.22.0).** Done: the prompt v2/v3 changes
+(requests are not questions, code-only blockers, cost-only optimization, the
+`out_of_scope` example, description question rule), the `comment_kind` axis,
+CI/bot/admin handling, the `@alias`/service-handle skip, and the no-fit filter
+(prd/78). Not adopted: an `other` `comment_type` (the kind axis covers it) and
+the diff-as-prompt-context (measured, rejected). **Remaining: intent from the
+last human reply, and a deterministic description-question guard** — see
+*Remaining* below.
 
 ## Findings to fix
 
@@ -29,6 +33,40 @@ deterministic pre-filter should remove before the next model pass.
    outside URLs/code, or drop PR adds.
 8. **AI-bot commands are labelled question.** 88/139 "review/verify/explain"
    commands to an AI reviewer; deterministic `@`-command pre-filter.
+
+## Remaining (the v0.23 unit)
+
+### 1. Intent from the last human reply
+
+Today one label set is taken from the **opener**, including `thread_intent`;
+the outcome ladder uses it only when `anchor_changed` is unknown. An opener
+cannot know what became of the thread, and a reply can: “fixed in the next
+push”, “won't fix, by design”, “nvm, handled”. A reply that is a status note is
+**not** no-fit (prd/78) and must reach the model.
+
+- when the diff is unknown (`anchor_changed` absent) and the thread has at least
+  one reply, classify the **last human reply** with `role="reply"` and use its
+  `thread_intent` for the outcome; the opener's intent is used only when there
+  is no human reply;
+- the deterministic diff (`anchor_changed`) and the resolver still outrank both;
+- cost: one call per such thread; the reply text is used at scrape time and not
+  stored;
+- tests: unknown anchor + resolved + last reply “fixed” → `acted_on`; “won't
+  fix” → `rejected`; `anchor_changed=True` → `acted_on` regardless of the reply;
+  a bot/CI thread's first-human-reply **review label** path is unchanged.
+
+### 2. Description question guard
+
+A PR description is a question only when it contains a real `?` outside URLs,
+fences and inline code; otherwise force `question=false`. Tests for a question in
+prose, a `?` inside a URL, and a `?` inside a code block.
+
+### Not doing
+
+- `other` in `comment_type` (the `comment_kind=admin` axis is the answer);
+- the diff as prompt context (v2 A/B: 3/21, two reciprocal → no signal);
+- removing `thread_intent` from the opener schema: it is still the only input
+  for threads with no replies. The reply wins when it exists.
 
 ## Proposed taxonomy v2 (awaiting sign-off)
 
