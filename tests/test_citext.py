@@ -105,6 +105,7 @@ class NoticeTests(unittest.TestCase):
         "PTAL",
         "can someone review this?",
         "@alice please review",
+        "@alice check this",
         "LGTM",
         "+1",
         "ship it",
@@ -135,6 +136,8 @@ class NoticeTests(unittest.TestCase):
     #: from the comment tax, which is the expensive error.
     FALSE_POSITIVES = (
         "can we also show the count in the message?",
+        "@alice wdyt about the cache key?",
+        "@alice thoughts?",
         "this will fail when the list is empty",
         "nit: rename this",
         "Rebased it, but this loop now skips the last element whenever the list "

@@ -245,10 +245,12 @@ _CAN_REVIEW = re.compile(
 )
 
 #: "@handle review/look" -- a human request; a bot-shaped handle is
-#: :func:`is_bot_request` and wins first in the pipeline.
+#: :func:`is_bot_request` and wins first in the pipeline. Opinion questions
+#: ("@alice wdyt", "@alice thoughts?") are real questions about the code and
+#: stay review remarks.
 _MENTION_REQUEST = re.compile(
     r"@[A-Za-z][\w.-]*\s+(?:please\s+|pls\s+)?"
-    r"(?:review|look|take\s+a\s+look|check|wdyt|thoughts|ptal)"
+    r"(?:review|look|take\s+a\s+look|check|ptal)"
     r"(?:\s+(?:this|it|pls|please))?",
     re.I,
 )
