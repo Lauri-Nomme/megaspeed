@@ -1,0 +1,32 @@
+[Unit]
+Description=megaspeed — local review/flow server
+Documentation=file://%h/dev/megaspeed/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The repository and its venv are per-user; the real store paths, tenant name
+# and port live outside the repo in ~/.config/megaspeed/env (see deploy/README).
+WorkingDirectory=%h/dev/megaspeed
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=-%h/.config/megaspeed/env
+ExecStart=%h/dev/megaspeed/.venv/bin/python -m server
+
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+SyslogIdentifier=megaspeed
+
+# Modest hardening that does not depend on where the store lives. The store is
+# writable only if you opt in (see the README's ReadWritePaths note).
+NoNewPrivileges=yes
+PrivateTmp=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=default.target
