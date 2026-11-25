@@ -73,6 +73,21 @@ write is atomic and best-effort, and the memory cache still fronts it. Tests:
 second process reads the disk, window/store changes are new keys, corrupt files
 are ignored, an unavailable report is not written.
 
+## v0.23.0 — the reply decides the intent fallback
+
+- prd/75 remaining: for a **resolved** thread whose diff is **unknown** and
+  which has a review label, the **last human reply** is classified for
+  `thread_intent` (one call, `role="reply"`). Status notes are exempt from the
+  no-fit filter (prd/78); the diff and resolver still outrank it; the opener's
+  intent is used only when there is no human reply. Open threads, bot replies
+  and known diffs make no call.
+- A PR description is a question only when it has a real `?` outside URLs,
+  markdown link targets, fences and inline code; otherwise `question=false` and
+  no event.
+- 1,599 tests (pytest, 8 workers, 21.5 s; 301 subtests) and 99 scrape tests.
+  The live store's stored outcomes are unchanged; the change applies to the
+  next scrape.
+
 ## v0.22.0 — a no-fit opener is not a review remark
 
 - `citext.is_notice`: whole-text, bounded, code/defect-guarded families for

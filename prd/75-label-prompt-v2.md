@@ -1,6 +1,6 @@
 # 75 — Label prompt/schema v2 (draft, after the 2026-11-23 audit)
 
-Status: **partly implemented (v0.22.0).** Done: the prompt v2/v3 changes
+Status: **implemented (v0.23.0).** Done: the prompt v2/v3 changes
 (requests are not questions, code-only blockers, cost-only optimization, the
 `out_of_scope` example, description question rule), the `comment_kind` axis,
 CI/bot/admin handling, the `@alias`/service-handle skip, and the no-fit filter
@@ -34,9 +34,9 @@ last human reply, and a deterministic description-question guard** — see
 8. **AI-bot commands are labelled question.** 88/139 "review/verify/explain"
    commands to an AI reviewer; deterministic `@`-command pre-filter.
 
-## Remaining (the v0.23 unit)
+## Implemented in v0.23.0 (the former remaining unit)
 
-### 1. Intent from the last human reply
+### 1. Intent from the last human reply — done
 
 Today one label set is taken from the **opener**, including `thread_intent`;
 the outcome ladder uses it only when `anchor_changed` is unknown. An opener
@@ -55,7 +55,7 @@ push”, “won't fix, by design”, “nvm, handled”. A reply that is a statu
   fix” → `rejected`; `anchor_changed=True` → `acted_on` regardless of the reply;
   a bot/CI thread's first-human-reply **review label** path is unchanged.
 
-### 2. Description question guard
+### 2. Description question guard — done
 
 A PR description is a question only when it contains a real `?` outside URLs,
 fences and inline code; otherwise force `question=false`. Tests for a question in
