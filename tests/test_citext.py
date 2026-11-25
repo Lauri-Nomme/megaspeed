@@ -85,6 +85,97 @@ class AdminTests(unittest.TestCase):
             self.assertFalse(citext.is_admin(text), text)
 
 
+class NoticeTests(unittest.TestCase):
+    """prd/78: the deterministic no-fit filter, whole-text and conservative."""
+
+    #: One example per family in the PRD table (plus the trailing-link and
+    #: trailing-thanks shapes).
+    TRUE_POSITIVES = (
+        # rebase / merge / conflicts
+        "Rebased https://x/commits/abc",
+        "rebase",
+        "[rebased](https://x/commits/abc#core%2FFile.java)",
+        "Rebased & resolved conflicts (https://x/commits/abc)",
+        "merged master",
+        "Merge origin/main into feature",
+        "resolved conflicts",
+        "conflicts resolved in src/main.py",
+        # review requests
+        "please review",
+        "PTAL",
+        "can someone review this?",
+        "@alice please review",
+        "LGTM",
+        "+1",
+        "ship it",
+        "please review https://x/pull-requests/7 thanks",
+        # author status
+        "closing this",
+        "done",
+        "fixed in abc1234",
+        "fixed in the next push",
+        "added the test case",
+        "updated the PR",
+        "will add the fix",
+        "I'll try another approach",
+        "I’ll take a look",
+        "nvm, handled",
+        # link / attachment / admin
+        "https://x/overview?commentId=1045138",
+        "![image.png](attachment:7210/56520)",
+        "same here https://x/overview?commentId=1",
+        "fyi",
+        "heads up",
+        "see above",
+        "thanks",
+    )
+
+    #: These are review remarks even though they open with a notice-ish word or
+    #: share a family's vocabulary. A false positive here removes real text
+    #: from the comment tax, which is the expensive error.
+    FALSE_POSITIVES = (
+        "can we also show the count in the message?",
+        "this will fail when the list is empty",
+        "nit: rename this",
+        "Rebased it, but this loop now skips the last element whenever the list "
+        "is empty, so the diff will be wrong",
+        "merged the two lists here",
+        "review this loop for an overflow",
+        "can you look at the whole pipeline? I think it will break",
+        "why do we need a retry loop?",
+        "same problem here: the lock is never released",
+        "fixed in the loop above",
+        "will change the behavior for existing callers",
+        "will take the lock twice",
+        "updated the count but the message still says the old value",
+        "```\nrebased\n```",
+        "see `rebase` above",
+    )
+
+    def test_true_positives_are_notices(self):
+        for text in self.TRUE_POSITIVES:
+            with self.subTest(text=text):
+                self.assertTrue(citext.is_notice(text), text)
+
+    def test_false_positives_are_review_remarks(self):
+        for text in self.FALSE_POSITIVES:
+            with self.subTest(text=text):
+                self.assertFalse(citext.is_notice(text), text)
+
+    def test_is_notice_supersedes_is_admin(self):
+        for text in (
+            "Rebased https://x/commits/abc",
+            "same as https://x/overview?commentId=1",
+            "depends on https://x/pull-requests/2",
+            "related to https://x/pull-requests/250",
+            "![image.png](attachment:7210/56520)",
+            "https://x/overview?commentId=1045138",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(citext.is_admin(text), text)
+                self.assertTrue(citext.is_notice(text), text)
+
+
 class BotRequestTests(unittest.TestCase):
     def test_alias_in_prose(self):
         self.assertTrue(citext.is_bot_request("@BOT review", ["bot"]))

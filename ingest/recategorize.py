@@ -8,7 +8,7 @@ time (the PERSON row was corrected later).
 
 This command is deterministic and idempotent. It reads the texts from a
 ``classify`` trace (the same raw-zone file a relabel uses), classifies each
-thread's opener with :mod:`ingest.citext`, and writes only closed labels:
+thread's **opener** with :mod:`ingest.citext`, and writes only closed labels:
 
 * ``comment_kind`` on every THREAD (review / ci_notice / ci_finding / bot /
   bot_request / admin) plus the CI facts (``ci_template``, ``ci_issues``,
@@ -73,6 +73,11 @@ def _openers(con) -> dict[str, str]:
 
 
 def _trace_texts(trace_path: Path) -> dict[str, str]:
+    """thread id -> **opener** text (prd/78: replies are never read here).
+
+    A reply carries ``role=reply`` in the trace; it is skipped, so a status note
+    there can never re-categorise its thread. Only the opener decides the kind.
+    """
     records, _bad = read_trace(trace_path)
     texts: dict[str, str] = {}
     for record in records:
@@ -98,7 +103,9 @@ def _kind_for(text: str, opener_kind: str, aliases: tuple[str, ...]) -> tuple[st
         return ("ci_finding" if template == "qodana_issues" else "ci_notice"), extra
     if text and citext.is_bot_request(text, aliases):
         return "bot_request", {}
-    if text and citext.is_admin(text):
+    if text and citext.is_notice(text):
+        # prd/78: rebase/merge, review requests, author status notes, bare
+        # links, fyi -- a status note, not a review remark.
         return "admin", {}
     return "review", {}
 

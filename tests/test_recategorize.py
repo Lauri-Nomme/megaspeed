@@ -55,6 +55,10 @@ class RecategorizeTests(unittest.TestCase):
                     "comment_type": "nit", "classifier_version": "mock-v1",
                     "severity": "suggestion",
                 },
+                "THREAD:ENG/platform#1:105": {
+                    "comment_type": "suggestion", "classifier_version": "ollama-v1",
+                    "severity": "suggestion",
+                },
             }
             for tid, attrs in threads.items():
                 con.execute(
@@ -66,6 +70,7 @@ class RecategorizeTests(unittest.TestCase):
                 "THREAD:ENG/platform#1:102": "GrHo",
                 "THREAD:ENG/platform#1:103": "GrHo",
                 "THREAD:ENG/platform#1:104": "CiBo",
+                "THREAD:ENG/platform#1:105": "GrHo",
             }
             for index, (tid, actor) in enumerate(opener.items(), start=1):
                 key = f"ENG/platform#1:act:{index}"
@@ -89,12 +94,20 @@ class RecategorizeTests(unittest.TestCase):
              "\ninstruction coverage is 0%"),
             ("THREAD:ENG/platform#1:102", "Rebased https://x/commits/abc"),
             ("THREAD:ENG/platform#1:103", "nit: rename this"),
+            ("THREAD:ENG/platform#1:105", "please review"),
         ]
+        records = [
+            {"context": {"role": "opener", "thread_id": tid}, "text": text}
+            for tid, text in rows
+        ]
+        # prd/78: a reply record must never be read as the opener. This one is a
+        # notice shape; if _trace_texts used it, thread 103 would flip to admin.
+        records.append({
+            "context": {"role": "reply", "thread_id": "THREAD:ENG/platform#1:103"},
+            "text": "closing this",
+        })
         self.trace.write_text(
-            "\n".join(
-                json.dumps({"context": {"role": "opener", "thread_id": tid}, "text": text})
-                for tid, text in rows
-            ),
+            "\n".join(json.dumps(record) for record in records),
             encoding="utf-8",
         )
 
@@ -116,7 +129,7 @@ class RecategorizeTests(unittest.TestCase):
         self.assertTrue(report["dry_run"])
         self.assertFalse(report["applied"])
         self.assertEqual(report["kinds"]["ci_notice"], 1)
-        self.assertEqual(report["kinds"]["admin"], 1)
+        self.assertEqual(report["kinds"]["admin"], 2)  # 102 "Rebased", 105 "please review"
         self.assertEqual(report["kinds"]["review"], 1)
         self.assertEqual(report["kinds"]["bot"], 1)
         self.assertEqual(self._attrs("THREAD:ENG/platform#1:101")["comment_type"], "nit")
@@ -147,6 +160,22 @@ class RecategorizeTests(unittest.TestCase):
 
         # a bot thread with no text in the trace is still a bot
         self.assertEqual(self._attrs("THREAD:ENG/platform#1:104")["comment_kind"], "bot")
+
+        # prd/78: a review request opener is admin and loses its model label
+        request = self._attrs("THREAD:ENG/platform#1:105")
+        self.assertEqual(request["comment_kind"], "admin")
+        self.assertNotIn("comment_type", request)
+        self.assertNotIn("classifier_version", request)
+
+    def test_a_reply_record_cannot_change_the_thread_kind(self):
+        # Thread 103's opener is a review remark; the trace also holds a reply
+        # "closing this". recategorize is opener-only (prd/78), so the reply is
+        # ignored and the thread stays a labelled review remark.
+        recategorize(self.cfg, trace_path=self.trace, apply=True)
+        review = self._attrs("THREAD:ENG/platform#1:103")
+        self.assertEqual(review["comment_kind"], "review")
+        self.assertEqual(review["comment_type"], "nit")
+        self.assertEqual(review["label_source"], "opener")
 
     def test_the_backup_is_taken_before_the_store_opens(self):
         # Windows cannot copy an open DuckDB file (WinError 32), so the copy

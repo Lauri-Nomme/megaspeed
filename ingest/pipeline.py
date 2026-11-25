@@ -905,8 +905,15 @@ class Reducer:
             if self._actor_kind(activity.get("user") or {}) == "bot":
                 continue
             body = str(comment.get("text") or "").strip()
-            if citext.is_bot_request(body, self.cfg.bot_aliases) or citext.is_admin(body):
-                continue  # a command to a tool, or a status note (prd/75)
+            if (
+                citext.is_bot_request(body, self.cfg.bot_aliases)
+                or citext.is_admin(body)
+                or citext.is_notice(body)
+            ):
+                # A command to a tool, a status note, or a no-fit notice
+                # (prd/75, prd/78): no model call for any of them. This loop
+                # only sees openers; a nested reply is never batched here.
+                continue
             if body:
                 items.append(
                     (
@@ -948,6 +955,10 @@ class Reducer:
         model, the CI/admin templates are matched on text, and the result decides
         whether a model call happens at all. ``comment_type`` is left unset for
         everything that is not a human review remark.
+
+        prd/78: a human *opener* that is a no-fit notice (rebase/merge, review
+        request, author status, bare link, fyi) is ``admin``. Replies never
+        reach this method as an opener, so a status note there stays evidence.
         """
         if entry.get("comment_kind"):
             return
@@ -968,7 +979,7 @@ class Reducer:
             return
         if citext.is_bot_request(text, self.cfg.bot_aliases):
             entry["comment_kind"] = "bot_request"
-        elif citext.is_admin(text):
+        elif citext.is_admin(text) or citext.is_notice(text):
             entry["comment_kind"] = "admin"
         else:
             entry["comment_kind"] = "review"
@@ -989,11 +1000,18 @@ class Reducer:
 
         A bot/CI thread's opener is not a review remark, but people do reply to
         it; that reply is the only human substance the thread has (prd/75).
+
+        prd/78: this is a **reply** path and is exempt from the no-fit filter.
+        A status note here ("fixed", "won't fix", "nvm") is the outcome evidence
+        the intent pass needs, so only ``is_admin`` is skipped -- never
+        ``is_notice``.
         """
         assert self.classifier is not None
         for reply in comment.get("comments") or []:
             reply = reply or {}
             body = str(reply.get("text") or "").strip()
+            # prd/78: keep the old is_admin skip for the *review label* only; do
+            # not extend it to is_notice, or a status reply loses its intent.
             if not body or citext.is_admin(body):
                 continue
             reply_actor = self._actor(reply.get("author") or {}, stats)
@@ -1038,9 +1056,15 @@ class Reducer:
             stats.bot_comments_skipped += 1
             return None, None
         body = str(text or "").strip()
-        if citext.is_bot_request(body, self.cfg.bot_aliases) or citext.is_admin(body):
-            # A command addressed to a tool, or a status note: not a review
-            # remark, so there is nothing to classify (prd/75).
+        if (
+            citext.is_bot_request(body, self.cfg.bot_aliases)
+            or citext.is_admin(body)
+            or citext.is_notice(body)
+        ):
+            # A command addressed to a tool, a status note, or a no-fit notice
+            # (prd/75, prd/78): not a review remark, so there is nothing to
+            # classify. This is the **opener** path only; a nested reply is
+            # never filtered here (prd/78 "replies are exempt").
             return None, None
         if not body:
             # An attachment-only or empty comment: the residual label, decided

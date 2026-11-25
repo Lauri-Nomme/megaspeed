@@ -11,6 +11,11 @@ describe, and that a model should never be asked to guess:
   review remarks.
 * **bot-directed text** -- ``@bot review``; the opener is a request to a tool.
 
+:func:`is_notice` widens the administrative set to the *no-fit* families of
+prd/78 (merge/conflict notes, review requests, author status notes, fyi/thanks).
+It is anchored on the whole text on purpose: ``"rebased"`` is a notice, a long
+remark that merely starts with it is a review comment.
+
 Everything here is a closed-set answer derived from the text alone, with no
 model and no raw-text retention. The pipeline decides *who* the author is
 (deterministic bot/human, prd/02); this module only decides *what the text is*
@@ -155,3 +160,203 @@ def is_bot_request(text: str, aliases) -> bool:
         if low in wanted or SERVICE_HANDLE.search(low):
             return True
     return False
+
+
+# ---------------------------------------------------------------------------
+# prd/78: the deterministic no-fit filter.
+#
+# A *notice* is text that fits none of the six review classes: a rebase/merge
+# note, a review request, an author status note, a bare link/attachment, fyi.
+# The filter is deliberately conservative -- a false positive removes a real
+# review remark from the comment tax, while a false negative costs one model
+# call -- so every rule matches the **whole** text (optionally followed by one
+# link or "thanks"), never a prefix.
+
+#: A longer notice is a merged-note or a link; a review remark is never this
+#: long as a bare notice.
+_MAX_NOTICE = 400
+#: Status/request families are short phrases. A "will fix ..." that runs on for
+#: 300 characters is prose, not a status note.
+_MAX_SHORT_NOTICE = 200
+
+#: One trailing link/attachment and an optional "thanks" that any notice may
+#: carry. Everything is optional, so ``sub`` only strips when the tail is the
+#: end of the text.
+_TRAILING = re.compile(
+    r"(?:\s*(?:\(?https?://\S+?\)?|!\[[^\]]*\]\(attachment:\d+/\d+\)))?"
+    r"(?:\s*[-–—,]?\s*(?:thanks|thank\s+you|thx|cheers))?"
+    r"\s*[.!?]*\s*$",
+    re.I,
+)
+
+#: A concrete defect phrase wins over any notice shape: the PRD says "err on the
+#: side of sending it to the model" when the text states broken behaviour.
+DEFECT = re.compile(
+    r"\b(?:break(?:s|ing)?|broken|crash\w*|data\s+loss|security|vulnerab\w*"
+    r"|regression|fail(?:s|ed|ing|ure)?|wrong|incorrect|always\s+(?:false|true)"
+    r"|does\s*n[o']?t\s+work|doesn['’]t\s+work|won['’]t\s+work"
+    r"|null\s+pointer|exception|leak(?:s|ing)?|deadlock|race\s+condition)\b",
+    re.I,
+)
+
+#: rebase / [rebased], optionally "& resolved conflicts" and a branch.
+_REBASE = re.compile(
+    r"\[?\s*rebas(?:ed|e|ing)\s*\]?"
+    r"(?:\s*(?:&|and|,)?\s*(?:resolved|solved|fixed)?\s*conflicts?)?"
+    r"(?:\s+(?:on|onto|from|with|to|against)\s+[\w./-]+)?",
+    re.I,
+)
+
+#: "merged master", "merge origin/main", "merged with develop into x".
+_MERGE = re.compile(
+    r"(?:merged|merge|merging)"
+    r"(?:\s+(?:with|from|into|to|against)\s+[\w./-]+)?"
+    r"(?:\s+(?:master|main|develop|development|dev|trunk"
+    r"|origin/[\w./-]+|[\w.-]+/[\w./-]+))?"
+    r"(?:\s+(?:into|to)\s+[\w./-]+)?"
+    r"(?:\s*(?:&|and|,)\s*(?:resolved|solved|fixed)\s+conflicts?)?",
+    re.I,
+)
+
+_CONFLICTS = re.compile(
+    r"(?:(?:resolved|solved|fixed)\s+conflicts?"
+    r"|conflicts?\s+(?:resolved|solved|fixed))"
+    r"(?:\s+(?:in|on)\s+[\w./-]+)?",
+    re.I,
+)
+
+#: A one-word or short review request, optionally with "please".
+_REVIEW_REQUEST = re.compile(
+    r"(?:please\s+)?(?:re-?review|review(?:\s+(?:this|it|again|pls|please))?"
+    r"|ptal|take\s+a\s+look|have\s+a\s+look"
+    r"|looks?\s+good(?:\s+to\s+me)?|lgtm|ship\s+it|\+1|:\+1:|👍)",
+    re.I,
+)
+
+#: "can/could someone|you review ..." -- *not* "can we ...", which is a
+#: suggestion about the code (see :data:`DEFECT`-style negatives in the tests).
+_CAN_REVIEW = re.compile(
+    r"(?:can|could|would|will)\s+(?:someone|somebody|anyone|you|u)"
+    r"\s+(?:please\s+)?"
+    r"(?:review|take\s+a\s+look|have\s+a\s+look|look\s+(?:at\s+)?(?:this|it|that)"
+    r"|check\s+(?:this|it))"
+    r"(?:\s+(?:this|it|that|please|pls))*",
+    re.I,
+)
+
+#: "@handle review/look" -- a human request; a bot-shaped handle is
+#: :func:`is_bot_request` and wins first in the pipeline.
+_MENTION_REQUEST = re.compile(
+    r"@[A-Za-z][\w.-]*\s+(?:please\s+|pls\s+)?"
+    r"(?:review|look|take\s+a\s+look|check|wdyt|thoughts|ptal)"
+    r"(?:\s+(?:this|it|pls|please))?",
+    re.I,
+)
+
+#: closing this / done / fixed / nvm, handled.
+_STATUS = re.compile(
+    r"(?:closing|closed|close)"
+    r"(?:\s+(?:this|it|the\s+(?:pr|pull\s+request|thread|issue|ticket|one))"
+    r"(?:\s+(?:as|now|for\s+now|since)\b.*)?)?"
+    r"|(?:nvm|never\s?mind|my\s+bad|oops)"
+    r"(?:[,;–—-]\s*(?:handled|done|fixed|resolved|thanks))?"
+    r"|(?:done|finished|fixed|handled|resolved|all\s+good|good\s+catch)",
+    re.I,
+)
+
+#: "will add the fix", "I'll try another approach", "going to push". The verb
+#: list is closed: "will fail when ..." and "will change the behaviour" are
+#: predictions about the code, not author commitments.
+_WILL = re.compile(
+    r"(?:will|i['’]ll|i\s+will|we['’]ll|we\s+will|i['’]m\s+going\s+to"
+    r"|going\s+to|gonna)\s+"
+    r"(?:add|fix|try|push|do|rebase|close|revert|check|look|update|apply"
+    r"|implement|address|remove|rename|wait|take\s+a\s+look)\b.*",
+    re.I,
+)
+
+#: "fixed in <sha>" / "fixed in the next push"; not "fixed in the loop above".
+_FIXED_IN = re.compile(
+    r"(?:fixed|addressed|resolved|done)\s+(?:in|by)\s+"
+    r"(?:[0-9a-f]{6,40}"
+    r"|the\s+(?:next|latest|last|new|same)\s+(?:push|commit|patchset|update|pr)"
+    r"|[A-Za-z0-9._-]+/\S*)",
+    re.I,
+)
+
+#: "added the test", "updated the PR" -- a closed noun list, so "updated the
+#: count" (a suggestion about code) does not match.
+_ADDED_UPDATED = re.compile(
+    r"(?:added|updated|removed|deleted|applied|pushed)\s+"
+    r"(?:the\s+|a\s+|an\s+|some\s+|new\s+)?"
+    r"(?:tests?|unit\s+tests?|test\s+case|it\s+test|docs?|documentation|readme"
+    r"|pr|description|comment|branch|reviewers?|review|fix|change|changes"
+    r"|commit|code|checks?|build|release\s+notes|labels?|version|bump|tag"
+    r"|dependenc(?:y|ies)|null\s+check|guard)"
+    r"(?:\s+(?:to|for|in)\s+[\w./#-]+)?",
+    re.I,
+)
+
+#: fyi / heads up / note:, whole text only (no arbitrary tail).
+_ADMIN_TAG = re.compile(
+    r"(?:fyi|for\s+your\s+information|heads?\s+up|psa|note|nb)"
+    r"(?:\s*:\s*(?:see\s+above|above|link|link\s+below))?",
+    re.I,
+)
+
+_SEE_ABOVE = re.compile(
+    r"(?:see|as)\s+(?:above|below)(?:\s+(?:link|comment|reply))?", re.I
+)
+
+#: The families that may run past :data:`_MAX_SHORT_NOTICE` (a merge note with
+#: resolved files, a rebase with a very long link).
+NOTICE_RULES_LONG = (_REBASE, _MERGE, _CONFLICTS)
+
+#: Everything else: whole-text, short, no code.
+NOTICE_RULES = (
+    _REBASE,
+    _MERGE,
+    _CONFLICTS,
+    _REVIEW_REQUEST,
+    _CAN_REVIEW,
+    _MENTION_REQUEST,
+    _STATUS,
+    _WILL,
+    _FIXED_IN,
+    _ADDED_UPDATED,
+    _ADMIN_TAG,
+    _SEE_ABOVE,
+)
+
+
+def _notice_core(body: str) -> str:
+    """``body`` without one trailing link/attachment and one trailing thanks."""
+    return _TRAILING.sub("", body, count=1).strip()
+
+
+def is_notice(text: str) -> bool:
+    """True when the **whole** text is a no-fit notice, not a review remark.
+
+    The match is anchored (``fullmatch`` on the stripped text) and bounded, and
+    a code fence, inline code or a concrete defect phrase always wins: those are
+    review text even when they open with "rebased" or "will fix". A bare link,
+    an image attachment and ``same as`` keep their :func:`is_admin` answers, so
+    this predicate is a strict superset of it.
+    """
+    body = (text or "").strip()
+    if not body or len(body) > _MAX_NOTICE:
+        return False
+    if CODE.search(body):
+        return False
+    if is_admin(body):
+        return True
+    core = _notice_core(body)
+    if not core:
+        # "thanks", "thanks!", or a bare link already caught above.
+        return True
+    if is_admin(core):
+        return True
+    rules = NOTICE_RULES_LONG if len(core) > _MAX_SHORT_NOTICE else NOTICE_RULES
+    if not any(rule.fullmatch(core) for rule in rules):
+        return False
+    return not DEFECT.search(core)

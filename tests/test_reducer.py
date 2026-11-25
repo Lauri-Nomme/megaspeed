@@ -363,6 +363,127 @@ class CommentKindTests(unittest.TestCase):
         self.assertEqual(len(self.classifier.seen), 1)
         self.assertEqual(self.classifier.seen[0][0], "the report is stale")
 
+    # -- prd/78: the deterministic no-fit filter (openers only) -------------
+
+    def _reduce_fresh(self, pr: PullRequest) -> tuple[dict, Stats]:
+        stats = Stats()
+        self.reducer.reduce(pr, ["PROJ-1"], pr.activities, stats)
+        thread = next(
+            o for o in stats.objects
+            if o["object_type"] == "THREAD" and o["object_id"].endswith(":101")
+        )
+        attrs = thread["attributes"]
+        if isinstance(attrs, str):
+            attrs = json.loads(attrs)
+        return attrs, stats
+
+    def test_notice_opener_is_admin_and_never_calls_the_model(self):
+        for text in (
+            "please review",
+            "LGTM",
+            "+1",
+            "closing this",
+            "fixed in abc1234",
+            "will add the fix",
+            "merged master",
+            "fyi",
+            "https://x/overview?commentId=1045138",
+        ):
+            with self.subTest(text=text):
+                self.classifier.seen.clear()
+                attrs, stats = self._reduce_fresh(_pr([
+                    _activity(1, "OPENED", 0, ADA),
+                    _activity(
+                        2, "COMMENTED", 5, GRACE,
+                        comment=self._comment(text, GRACE),
+                        commentAction="ADDED",
+                        commentAnchor={"path": "a.py", "line": 1},
+                    ),
+                ]))
+                self.assertEqual(attrs["comment_kind"], "admin", text)
+                self.assertNotIn("comment_type", attrs, text)
+                self.assertEqual(self.classifier.seen, [], text)
+                # the dialogue event stays in the log; only the label is withheld
+                events = [e for e in stats.events if e["activity"] == "comment_added"]
+                self.assertEqual(len(events), 1, text)
+
+    def test_a_suggestion_that_looks_like_a_request_stays_a_review_remark(self):
+        attrs, _stats = self._reduce_fresh(_pr([
+            _activity(1, "OPENED", 0, ADA),
+            _activity(
+                2, "COMMENTED", 5, GRACE,
+                comment=self._comment(
+                    "can we also show the count in the message?", GRACE
+                ),
+                commentAction="ADDED",
+                commentAnchor={"path": "a.py", "line": 1},
+            ),
+        ]))
+        self.assertEqual(attrs["comment_kind"], "review")
+        self.assertEqual(attrs["comment_type"], "nit")
+
+    def test_a_status_note_in_a_reply_does_not_admin_the_opener(self):
+        # prd/78 "replies are exempt": "fixed in the next push" is the outcome
+        # evidence for the thread, not a no-fit opener.
+        attrs, stats = self._reduce_fresh(_pr([
+            _activity(1, "OPENED", 0, ADA),
+            _activity(
+                2, "COMMENTED", 5, GRACE,
+                comment=self._comment(
+                    "the cache key is missing the model name",
+                    GRACE,
+                    replies=[{
+                        "id": 102,
+                        "text": "fixed in the next push",
+                        "author": ADA,
+                    }],
+                ),
+                commentAction="ADDED",
+                commentAnchor={"path": "a.py", "line": 1},
+            ),
+        ]))
+        self.assertEqual(attrs["comment_kind"], "review")
+        self.assertEqual(attrs["label_source"], "opener")
+        self.assertEqual(attrs["comment_type"], "nit")
+        self.assertEqual(
+            [text for text, *_ in self.classifier.seen],
+            ["the cache key is missing the model name"],
+        )
+        replies = [
+            e for e in stats.events
+            if e["activity"] == "comment_added" and e["attributes"].get("reply")
+        ]
+        self.assertEqual(len(replies), 1)
+        self.assertEqual(replies[0]["attributes"]["parent_comment_id"], 101)
+
+    def test_a_status_note_reply_on_a_bot_thread_is_still_classified(self):
+        # The bot-thread review-label skip stays is_admin-only: a status note
+        # reply must still reach the model (prd/78 / prd/75 intent).
+        attrs, _stats = self._reduce_fresh(_pr([
+            _activity(1, "OPENED", 0, ADA),
+            _activity(
+                2, "COMMENTED", 5, _CI_BOT,
+                comment=self._comment(
+                    "Partial code coverage [report](http://x).\n"
+                    "Coverage info for the first build:",
+                    _CI_BOT,
+                    replies=[{
+                        "id": 102,
+                        "text": "fixed in the next push",
+                        "author": GRACE,
+                    }],
+                ),
+                commentAction="ADDED",
+            ),
+        ]))
+        self.assertEqual(attrs["comment_kind"], "ci_notice")
+        self.assertEqual(attrs["label_source"], "reply")
+        self.assertEqual(attrs["comment_type"], "nit")
+        self.assertEqual(
+            [text for text, *_ in self.classifier.seen],
+            ["fixed in the next push"],
+        )
+
 
 class _Forced(classify.MockClassifier):
     backend = "forced"
