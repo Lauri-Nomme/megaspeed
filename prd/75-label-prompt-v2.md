@@ -187,7 +187,9 @@ taxonomy review accepts the wider vocabulary; it needs analysis/UI support.
 **Prompt/schema:**
 - remove `thread_intent` from the opener call; derive outcome deterministically
   from the persisted `anchor_changed` (v0.16+ bundles), or classify the last
-  reply when intent is genuinely needed;
+  reply when intent is genuinely needed. That reply-intent call is **exempt
+  from the no-fit filter** (prd/78): the last human reply is exactly where
+  “fixed / won't fix / nvm” lives;
 - fix the `out_of_scope` example to `intent=unclear`;
 - add mild-defect blocker examples (“this is always false now”, “doesn't work
   without an unwrap”);

@@ -39,6 +39,33 @@ A **deterministic pre-model filter**, not a prompt rule and not a new
 The filter is conservative on purpose: a false positive removes a real review
 remark from the comment tax, while a false negative costs one model call.
 
+## Replies are exempt — this is the important boundary
+
+The filter applies to **opener** text only. A nested reply is never filtered,
+because a reply is where the author states what became of the thread:
+
+- “fixed in the next push”, “won't fix, by design”, “nvm, handled” are not
+  no-fit administrative notes; they are the **intent/outcome evidence** the
+  outcome ladder and `thread_intent` need (prd/75);
+- the opener's review label and the thread's outcome are separate outputs: a
+  thread can have a review remark for a label and a status note for its outcome;
+- the reply event must stay in the log (it does), and the raw text must reach the
+  intent classifier before it is discarded, so the filter must not remove it
+  from the model input.
+
+Consequences for the implementation:
+
+- the pre-model check is `role == "opener"` **and** the no-fit predicate;
+- the first-human-reply label on a bot/CI thread may still skip a status note
+  for the *review label* (a status note is not a review remark), but that skip
+  must not be reused for the **intent** pass: the last human reply is classified
+  for intent and bypasses this filter;
+- `recategorize` reads only opener records (`role == "opener"`), so the store
+  migration cannot touch a reply;
+- if a reply is classified for intent and the text is also a review remark, the
+  intent call may return `comment_type` as well; the filter still does not apply
+  to it.
+
 ## Rules (to be measured, not guessed)
 
 `ingest.citext` gains `is_notice(text)` (or `is_admin` is extended; the PRD
@@ -58,7 +85,8 @@ are subsumed.
 ## Where it applies
 
 - **Scrape/reducer**: before the model, in the same place `citext.is_admin` is
-  checked now; set `comment_kind=admin`, skip `_comment_labels`.
+  checked now; set `comment_kind=admin`, skip `_comment_labels` — **openers
+  only**; `_first_human_reply` and any reply-intent path are outside it.
 - **Existing store**: `recategorize` already reads the opener text from the
   trace; the filter sets `admin` and removes `comment_type`/`classifier_version`
   for the matched human threads. A dry run reports the counts first.
@@ -73,7 +101,9 @@ rows):
 - **≤2% of real review text caught** (≤3 rows of 156);
 - no `blocker`, `question` or `optimization` gold row is filtered;
 - the store dry run reports the same `admin` count the eval predicts (±5%);
-- a second `recategorize --apply` changes nothing.
+- a second `recategorize --apply` changes nothing;
+- a status-note **reply** is still sent to the intent classifier and is not
+  marked `admin` by this filter.
 
 If the filter misses the target, narrow the rules; do not widen them to hit the
 percentage.
