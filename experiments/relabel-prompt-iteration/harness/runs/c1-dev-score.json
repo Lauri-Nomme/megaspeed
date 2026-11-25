@@ -1,0 +1,345 @@
+{
+ "split": "dev",
+ "scored": 112,
+ "missing": 0,
+ "res": {
+  "ALL": {
+   "n": 67,
+   "correct": 48,
+   "per_class": {
+    "blocker": {
+     "tp": 7,
+     "fp": 4,
+     "fn": 2,
+     "P": 0.6363636363636364,
+     "R": 0.7777777777777778,
+     "F1": 0.7000000000000001
+    },
+    "nit": {
+     "tp": 15,
+     "fp": 4,
+     "fn": 4,
+     "P": 0.7894736842105263,
+     "R": 0.7894736842105263,
+     "F1": 0.7894736842105263
+    },
+    "optimization": {
+     "tp": 2,
+     "fp": 1,
+     "fn": 3,
+     "P": 0.6666666666666666,
+     "R": 0.4,
+     "F1": 0.5
+    },
+    "out_of_scope": {
+     "tp": 1,
+     "fp": 0,
+     "fn": 1,
+     "P": 1.0,
+     "R": 0.5,
+     "F1": 0.6666666666666666
+    },
+    "question": {
+     "tp": 13,
+     "fp": 3,
+     "fn": 3,
+     "P": 0.8125,
+     "R": 0.8125,
+     "F1": 0.8125
+    },
+    "suggestion": {
+     "tp": 10,
+     "fp": 7,
+     "fn": 6,
+     "P": 0.5882352941176471,
+     "R": 0.625,
+     "F1": 0.6060606060606061
+    }
+   },
+   "macro_F1": 0.6791168261562999,
+   "defect_n": 10,
+   "defect_tp": 8,
+   "blocker_fp_nondefect": 3,
+   "confusion": {
+    "blocker": {
+     "question": 1,
+     "blocker": 7,
+     "nit": 1
+    },
+    "nit": {
+     "nit": 15,
+     "suggestion": 3,
+     "question": 1
+    },
+    "optimization": {
+     "suggestion": 3,
+     "optimization": 2
+    },
+    "out_of_scope": {
+     "suggestion": 1,
+     "out_of_scope": 1
+    },
+    "question": {
+     "question": 13,
+     "nit": 1,
+     "blocker": 2
+    },
+    "suggestion": {
+     "suggestion": 10,
+     "nit": 2,
+     "question": 1,
+     "optimization": 1,
+     "blocker": 2
+    }
+   },
+   "qflag_correct_raw": 59,
+   "qflag_fp_nonqtype_raw": 0,
+   "qflag_correct_qtype": 58,
+   "qflag_fp_nonqtype_qtype": 0,
+   "intent_correct": 66
+  },
+  "HIGH": {
+   "n": 43,
+   "correct": 35,
+   "per_class": {
+    "blocker": {
+     "tp": 7,
+     "fp": 1,
+     "fn": 0,
+     "P": 0.875,
+     "R": 1.0,
+     "F1": 0.9333333333333333
+    },
+    "nit": {
+     "tp": 13,
+     "fp": 2,
+     "fn": 2,
+     "P": 0.8666666666666667,
+     "R": 0.8666666666666667,
+     "F1": 0.8666666666666667
+    },
+    "optimization": {
+     "tp": 1,
+     "fp": 0,
+     "fn": 2,
+     "P": 1.0,
+     "R": 0.3333333333333333,
+     "F1": 0.5
+    },
+    "out_of_scope": {
+     "tp": 1,
+     "fp": 0,
+     "fn": 1,
+     "P": 1.0,
+     "R": 0.5,
+     "F1": 0.6666666666666666
+    },
+    "question": {
+     "tp": 7,
+     "fp": 0,
+     "fn": 1,
+     "P": 1.0,
+     "R": 0.875,
+     "F1": 0.9333333333333333
+    },
+    "suggestion": {
+     "tp": 6,
+     "fp": 5,
+     "fn": 2,
+     "P": 0.5454545454545454,
+     "R": 0.75,
+     "F1": 0.631578947368421
+    }
+   },
+   "macro_F1": 0.7552631578947367,
+   "defect_n": 7,
+   "defect_tp": 7,
+   "blocker_fp_nondefect": 1,
+   "confusion": {
+    "blocker": {
+     "blocker": 7
+    },
+    "nit": {
+     "nit": 13,
+     "suggestion": 2
+    },
+    "optimization": {
+     "suggestion": 2,
+     "optimization": 1
+    },
+    "out_of_scope": {
+     "suggestion": 1,
+     "out_of_scope": 1
+    },
+    "question": {
+     "question": 7,
+     "nit": 1
+    },
+    "suggestion": {
+     "suggestion": 6,
+     "nit": 1,
+     "blocker": 1
+    }
+   },
+   "qflag_correct_raw": 39,
+   "qflag_fp_nonqtype_raw": 0,
+   "qflag_correct_qtype": 39,
+   "qflag_fp_nonqtype_qtype": 0,
+   "intent_correct": 42
+  },
+  "LOW": {
+   "n": 24,
+   "correct": 13,
+   "per_class": {
+    "blocker": {
+     "tp": 0,
+     "fp": 3,
+     "fn": 2,
+     "P": 0.0,
+     "R": 0.0,
+     "F1": 0.0
+    },
+    "nit": {
+     "tp": 2,
+     "fp": 2,
+     "fn": 2,
+     "P": 0.5,
+     "R": 0.5,
+     "F1": 0.5
+    },
+    "optimization": {
+     "tp": 1,
+     "fp": 1,
+     "fn": 1,
+     "P": 0.5,
+     "R": 0.5,
+     "F1": 0.5
+    },
+    "out_of_scope": {
+     "tp": 0,
+     "fp": 0,
+     "fn": 0,
+     "P": 0.0,
+     "R": 0.0,
+     "F1": 0.0
+    },
+    "question": {
+     "tp": 6,
+     "fp": 3,
+     "fn": 2,
+     "P": 0.6666666666666666,
+     "R": 0.75,
+     "F1": 0.7058823529411765
+    },
+    "suggestion": {
+     "tp": 4,
+     "fp": 2,
+     "fn": 4,
+     "P": 0.6666666666666666,
+     "R": 0.5,
+     "F1": 0.5714285714285715
+    }
+   },
+   "macro_F1": 0.3795518207282913,
+   "defect_n": 3,
+   "defect_tp": 1,
+   "blocker_fp_nondefect": 2,
+   "confusion": {
+    "blocker": {
+     "question": 1,
+     "nit": 1
+    },
+    "nit": {
+     "question": 1,
+     "suggestion": 1,
+     "nit": 2
+    },
+    "optimization": {
+     "optimization": 1,
+     "suggestion": 1
+    },
+    "out_of_scope": {},
+    "question": {
+     "question": 6,
+     "blocker": 2
+    },
+    "suggestion": {
+     "nit": 1,
+     "suggestion": 4,
+     "question": 1,
+     "optimization": 1,
+     "blocker": 1
+    }
+   },
+   "qflag_correct_raw": 20,
+   "qflag_fp_nonqtype_raw": 0,
+   "qflag_correct_qtype": 19,
+   "qflag_fp_nonqtype_qtype": 0,
+   "intent_correct": 24
+  },
+  "nofit_n": 45,
+  "nofit_dist": {
+   "nit": 11,
+   "blocker": 5,
+   "out_of_scope": 11,
+   "suggestion": 10,
+   "question": 4,
+   "optimization": 4
+  },
+  "nofit_qflag_true": 5,
+  "mandatory_defect_n": 1,
+  "mandatory_defect_not_blocker": 0
+ },
+ "irr": {
+  "n": 17,
+  "agree": 11,
+  "blk_tp": 1,
+  "blk_gold": 1,
+  "blk_pred": 1
+ },
+ "audit": {
+  "n": 5,
+  "agree": 3,
+  "blk_tp": 0,
+  "blk_gold": 1,
+  "blk_pred": 0
+ },
+ "vs": {
+  "ok": false,
+  "why": [
+   "defect_tp +1 < +3",
+   "blocker_fp +2 > +1",
+   "suggestion tp -4 < -2",
+   "qflag -4 < -2",
+   "nofit->nit +3 > +2 (systematic)",
+   "nofit->out_of_scope +4 > +2 (systematic)",
+   "nofit->question +3 > +2 (systematic)"
+  ],
+  "deltas": {
+   "defect_tp": 1,
+   "blocker_fp": 2,
+   "opt_tp": 0,
+   "opt_fp": 0,
+   "qflag_raw": -4,
+   "correct": -4,
+   "nofit_blocker": -1,
+   "nofit_question": 3,
+   "class_tp": {
+    "blocker": 0,
+    "nit": 0,
+    "optimization": 0,
+    "out_of_scope": 1,
+    "question": -1,
+    "suggestion": -4
+   },
+   "nofit_class": {
+    "blocker": -1,
+    "nit": 3,
+    "optimization": -1,
+    "out_of_scope": 4,
+    "question": 3,
+    "suggestion": -8
+   }
+  }
+ }
+}

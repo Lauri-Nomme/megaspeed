@@ -1,0 +1,6 @@
+# Per-row outputs and caches hold thread ids or review text: never commit.
+*.jsonl
+!*.jsonl.stats.json
+harness-cache.jsonl
+work/
+__pycache__/

@@ -1,0 +1,30 @@
+prompt 5306695b03e0  rows 112  cached 0  to call 112
+  20/112  0.412 texts/s
+  40/112  0.323 texts/s
+  60/112  0.349 texts/s
+  80/112  0.230 texts/s
+  100/112  0.216 texts/s
+{"prompt_sha": "5306695b03e0", "rows": 112, "called": 112, "errors": 0, "elapsed_s": 483.8, "texts_per_s": 0.232, "median_wall_ms": 9558, "p90_wall_ms": 33722}
+prompt 5306695b03e0  rows 112  cached 0  to call 112
+  20/112  0.412 texts/s
+  40/112  0.319 texts/s
+  60/112  0.358 texts/s
+  80/112  0.289 texts/s
+  100/112  0.222 texts/s
+{"prompt_sha": "5306695b03e0", "rows": 112, "called": 112, "errors": 0, "elapsed_s": 472.8, "texts_per_s": 0.237, "median_wall_ms": 9385, "p90_wall_ms": 35810}
+prompt 5306695b03e0  rows 253  cached 112  to call 141
+  20/141  0.336 texts/s
+  40/141  0.379 texts/s
+  60/141  0.401 texts/s
+  80/141  0.435 texts/s
+  100/141  0.429 texts/s
+  120/141  0.407 texts/s
+  140/141  0.403 texts/s
+{"prompt_sha": "5306695b03e0", "rows": 253, "called": 141, "errors": 0, "elapsed_s": 348.2, "texts_per_s": 0.405, "median_wall_ms": 8480, "p90_wall_ms": 15734}
+prompt 5306695b03e0  rows 126  cached 10  to call 116
+  20/116  0.207 texts/s
+  40/116  0.292 texts/s
+  60/116  0.334 texts/s
+  80/116  0.352 texts/s
+  100/116  0.348 texts/s
+{"prompt_sha": "5306695b03e0", "rows": 126, "called": 116, "errors": 0, "elapsed_s": 318.3, "texts_per_s": 0.364, "median_wall_ms": 8315, "p90_wall_ms": 13364}

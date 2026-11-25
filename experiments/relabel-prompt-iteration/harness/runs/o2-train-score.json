@@ -1,0 +1,349 @@
+{
+ "split": "train",
+ "scored": 253,
+ "missing": 0,
+ "res": {
+  "ALL": {
+   "n": 156,
+   "correct": 120,
+   "per_class": {
+    "blocker": {
+     "tp": 18,
+     "fp": 3,
+     "fn": 12,
+     "P": 0.8571428571428571,
+     "R": 0.6,
+     "F1": 0.7058823529411764
+    },
+    "nit": {
+     "tp": 32,
+     "fp": 10,
+     "fn": 8,
+     "P": 0.7619047619047619,
+     "R": 0.8,
+     "F1": 0.7804878048780488
+    },
+    "optimization": {
+     "tp": 7,
+     "fp": 2,
+     "fn": 2,
+     "P": 0.7777777777777778,
+     "R": 0.7777777777777778,
+     "F1": 0.7777777777777778
+    },
+    "out_of_scope": {
+     "tp": 0,
+     "fp": 2,
+     "fn": 2,
+     "P": 0.0,
+     "R": 0.0,
+     "F1": 0.0
+    },
+    "question": {
+     "tp": 33,
+     "fp": 4,
+     "fn": 4,
+     "P": 0.8918918918918919,
+     "R": 0.8918918918918919,
+     "F1": 0.8918918918918919
+    },
+    "suggestion": {
+     "tp": 30,
+     "fp": 15,
+     "fn": 8,
+     "P": 0.6666666666666666,
+     "R": 0.7894736842105263,
+     "F1": 0.7228915662650601
+    }
+   },
+   "macro_F1": 0.6464885656256592,
+   "defect_n": 32,
+   "defect_tp": 19,
+   "blocker_fp_nondefect": 2,
+   "confusion": {
+    "blocker": {
+     "question": 2,
+     "blocker": 18,
+     "nit": 5,
+     "suggestion": 5
+    },
+    "nit": {
+     "nit": 32,
+     "suggestion": 7,
+     "question": 1
+    },
+    "optimization": {
+     "optimization": 7,
+     "suggestion": 1,
+     "nit": 1
+    },
+    "out_of_scope": {
+     "suggestion": 1,
+     "question": 1
+    },
+    "question": {
+     "question": 33,
+     "nit": 2,
+     "suggestion": 1,
+     "blocker": 1
+    },
+    "suggestion": {
+     "suggestion": 30,
+     "optimization": 2,
+     "nit": 2,
+     "out_of_scope": 2,
+     "blocker": 2
+    }
+   },
+   "qflag_correct_raw": 147,
+   "qflag_fp_nonqtype_raw": 2,
+   "qflag_correct_qtype": 147,
+   "qflag_fp_nonqtype_qtype": 0,
+   "intent_correct": 154
+  },
+  "HIGH": {
+   "n": 89,
+   "correct": 80,
+   "per_class": {
+    "blocker": {
+     "tp": 16,
+     "fp": 1,
+     "fn": 0,
+     "P": 0.9411764705882353,
+     "R": 1.0,
+     "F1": 0.9696969696969697
+    },
+    "nit": {
+     "tp": 26,
+     "fp": 1,
+     "fn": 3,
+     "P": 0.9629629629629629,
+     "R": 0.896551724137931,
+     "F1": 0.9285714285714286
+    },
+    "optimization": {
+     "tp": 5,
+     "fp": 1,
+     "fn": 0,
+     "P": 0.8333333333333334,
+     "R": 1.0,
+     "F1": 0.9090909090909091
+    },
+    "out_of_scope": {
+     "tp": 0,
+     "fp": 1,
+     "fn": 2,
+     "P": 0.0,
+     "R": 0.0,
+     "F1": 0.0
+    },
+    "question": {
+     "tp": 17,
+     "fp": 1,
+     "fn": 1,
+     "P": 0.9444444444444444,
+     "R": 0.9444444444444444,
+     "F1": 0.9444444444444444
+    },
+    "suggestion": {
+     "tp": 16,
+     "fp": 4,
+     "fn": 3,
+     "P": 0.8,
+     "R": 0.8421052631578947,
+     "F1": 0.8205128205128205
+    }
+   },
+   "macro_F1": 0.7620527620527621,
+   "defect_n": 16,
+   "defect_tp": 16,
+   "blocker_fp_nondefect": 1,
+   "confusion": {
+    "blocker": {
+     "blocker": 16
+    },
+    "nit": {
+     "nit": 26,
+     "suggestion": 3
+    },
+    "optimization": {
+     "optimization": 5
+    },
+    "out_of_scope": {
+     "suggestion": 1,
+     "question": 1
+    },
+    "question": {
+     "question": 17,
+     "nit": 1
+    },
+    "suggestion": {
+     "suggestion": 16,
+     "optimization": 1,
+     "out_of_scope": 1,
+     "blocker": 1
+    }
+   },
+   "qflag_correct_raw": 86,
+   "qflag_fp_nonqtype_raw": 1,
+   "qflag_correct_qtype": 86,
+   "qflag_fp_nonqtype_qtype": 0,
+   "intent_correct": 87
+  },
+  "LOW": {
+   "n": 67,
+   "correct": 40,
+   "per_class": {
+    "blocker": {
+     "tp": 2,
+     "fp": 2,
+     "fn": 12,
+     "P": 0.5,
+     "R": 0.14285714285714285,
+     "F1": 0.22222222222222224
+    },
+    "nit": {
+     "tp": 6,
+     "fp": 9,
+     "fn": 5,
+     "P": 0.4,
+     "R": 0.5454545454545454,
+     "F1": 0.4615384615384615
+    },
+    "optimization": {
+     "tp": 2,
+     "fp": 1,
+     "fn": 2,
+     "P": 0.6666666666666666,
+     "R": 0.5,
+     "F1": 0.5714285714285715
+    },
+    "out_of_scope": {
+     "tp": 0,
+     "fp": 1,
+     "fn": 0,
+     "P": 0.0,
+     "R": 0.0,
+     "F1": 0.0
+    },
+    "question": {
+     "tp": 16,
+     "fp": 3,
+     "fn": 3,
+     "P": 0.8421052631578947,
+     "R": 0.8421052631578947,
+     "F1": 0.8421052631578947
+    },
+    "suggestion": {
+     "tp": 14,
+     "fp": 11,
+     "fn": 5,
+     "P": 0.56,
+     "R": 0.7368421052631579,
+     "F1": 0.6363636363636364
+    }
+   },
+   "macro_F1": 0.45560969245179767,
+   "defect_n": 16,
+   "defect_tp": 3,
+   "blocker_fp_nondefect": 1,
+   "confusion": {
+    "blocker": {
+     "question": 2,
+     "nit": 5,
+     "suggestion": 5,
+     "blocker": 2
+    },
+    "nit": {
+     "nit": 6,
+     "suggestion": 4,
+     "question": 1
+    },
+    "optimization": {
+     "optimization": 2,
+     "suggestion": 1,
+     "nit": 1
+    },
+    "out_of_scope": {},
+    "question": {
+     "question": 16,
+     "nit": 1,
+     "suggestion": 1,
+     "blocker": 1
+    },
+    "suggestion": {
+     "suggestion": 14,
+     "nit": 2,
+     "out_of_scope": 1,
+     "optimization": 1,
+     "blocker": 1
+    }
+   },
+   "qflag_correct_raw": 61,
+   "qflag_fp_nonqtype_raw": 1,
+   "qflag_correct_qtype": 61,
+   "qflag_fp_nonqtype_qtype": 0,
+   "intent_correct": 67
+  },
+  "nofit_n": 97,
+  "nofit_dist": {
+   "out_of_scope": 21,
+   "nit": 21,
+   "blocker": 7,
+   "suggestion": 26,
+   "optimization": 16,
+   "question": 6
+  },
+  "nofit_qflag_true": 7,
+  "mandatory_defect_n": 3,
+  "mandatory_defect_not_blocker": 1
+ },
+ "irr": {
+  "n": 41,
+  "agree": 28,
+  "blk_tp": 2,
+  "blk_gold": 5,
+  "blk_pred": 2
+ },
+ "audit": {
+  "n": 9,
+  "agree": 4,
+  "blk_tp": 1,
+  "blk_gold": 5,
+  "blk_pred": 1
+ },
+ "vs": {
+  "ok": false,
+  "why": [
+   "nofit->optimization +8 > +2 (systematic)",
+   "nofit->out_of_scope +4 > +2 (systematic)",
+   "nofit->question +3 > +2 (systematic)"
+  ],
+  "deltas": {
+   "defect_tp": 3,
+   "blocker_fp": -1,
+   "opt_tp": 3,
+   "opt_fp": 1,
+   "qflag_raw": -2,
+   "correct": 3,
+   "nofit_blocker": -1,
+   "nofit_question": 3,
+   "class_tp": {
+    "blocker": 2,
+    "nit": 1,
+    "optimization": 3,
+    "out_of_scope": 0,
+    "question": -1,
+    "suggestion": -2
+   },
+   "nofit_class": {
+    "blocker": -1,
+    "nit": -3,
+    "optimization": 8,
+    "out_of_scope": 4,
+    "question": 3,
+    "suggestion": -11
+   }
+  }
+ }
+}

@@ -1,0 +1,300 @@
+{
+ "split": "holdout",
+ "scored": 107,
+ "missing": 0,
+ "res": {
+  "ALL": {
+   "n": 62,
+   "correct": 45,
+   "per_class": {
+    "blocker": {
+     "tp": 5,
+     "fp": 1,
+     "fn": 3,
+     "P": 0.8333333333333334,
+     "R": 0.625,
+     "F1": 0.7142857142857143
+    },
+    "nit": {
+     "tp": 13,
+     "fp": 3,
+     "fn": 8,
+     "P": 0.8125,
+     "R": 0.6190476190476191,
+     "F1": 0.7027027027027026
+    },
+    "optimization": {
+     "tp": 1,
+     "fp": 0,
+     "fn": 1,
+     "P": 1.0,
+     "R": 0.5,
+     "F1": 0.6666666666666666
+    },
+    "out_of_scope": {
+     "tp": 1,
+     "fp": 1,
+     "fn": 3,
+     "P": 0.5,
+     "R": 0.25,
+     "F1": 0.3333333333333333
+    },
+    "question": {
+     "tp": 8,
+     "fp": 1,
+     "fn": 0,
+     "P": 0.8888888888888888,
+     "R": 1.0,
+     "F1": 0.9411764705882353
+    },
+    "suggestion": {
+     "tp": 17,
+     "fp": 11,
+     "fn": 2,
+     "P": 0.6071428571428571,
+     "R": 0.8947368421052632,
+     "F1": 0.7234042553191489
+    }
+   },
+   "macro_F1": 0.6802615238159668,
+   "defect_n": 9,
+   "defect_tp": 6,
+   "blocker_fp_nondefect": 0,
+   "confusion": {
+    "blocker": {
+     "blocker": 5,
+     "nit": 1,
+     "suggestion": 1,
+     "out_of_scope": 1
+    },
+    "nit": {
+     "nit": 13,
+     "suggestion": 7,
+     "question": 1
+    },
+    "optimization": {
+     "optimization": 1,
+     "nit": 1
+    },
+    "out_of_scope": {
+     "suggestion": 3,
+     "out_of_scope": 1
+    },
+    "question": {
+     "question": 8
+    },
+    "suggestion": {
+     "blocker": 1,
+     "suggestion": 17,
+     "nit": 1
+    }
+   },
+   "qflag_correct_raw": 61,
+   "qflag_fp_nonqtype_raw": 1,
+   "qflag_correct_qtype": 62,
+   "qflag_fp_nonqtype_qtype": 0,
+   "intent_correct": 61
+  },
+  "HIGH": {
+   "n": 35,
+   "correct": 26,
+   "per_class": {
+    "blocker": {
+     "tp": 2,
+     "fp": 0,
+     "fn": 1,
+     "P": 1.0,
+     "R": 0.6666666666666666,
+     "F1": 0.8
+    },
+    "nit": {
+     "tp": 11,
+     "fp": 1,
+     "fn": 6,
+     "P": 0.9166666666666666,
+     "R": 0.6470588235294118,
+     "F1": 0.7586206896551724
+    },
+    "optimization": {
+     "tp": 1,
+     "fp": 0,
+     "fn": 0,
+     "P": 1.0,
+     "R": 1.0,
+     "F1": 1.0
+    },
+    "out_of_scope": {
+     "tp": 1,
+     "fp": 0,
+     "fn": 2,
+     "P": 1.0,
+     "R": 0.3333333333333333,
+     "F1": 0.5
+    },
+    "question": {
+     "tp": 2,
+     "fp": 1,
+     "fn": 0,
+     "P": 0.6666666666666666,
+     "R": 1.0,
+     "F1": 0.8
+    },
+    "suggestion": {
+     "tp": 9,
+     "fp": 7,
+     "fn": 0,
+     "P": 0.5625,
+     "R": 1.0,
+     "F1": 0.72
+    }
+   },
+   "macro_F1": 0.7631034482758622,
+   "defect_n": 3,
+   "defect_tp": 2,
+   "blocker_fp_nondefect": 0,
+   "confusion": {
+    "blocker": {
+     "nit": 1,
+     "blocker": 2
+    },
+    "nit": {
+     "nit": 11,
+     "suggestion": 5,
+     "question": 1
+    },
+    "optimization": {
+     "optimization": 1
+    },
+    "out_of_scope": {
+     "suggestion": 2,
+     "out_of_scope": 1
+    },
+    "question": {
+     "question": 2
+    },
+    "suggestion": {
+     "suggestion": 9
+    }
+   },
+   "qflag_correct_raw": 34,
+   "qflag_fp_nonqtype_raw": 1,
+   "qflag_correct_qtype": 35,
+   "qflag_fp_nonqtype_qtype": 0,
+   "intent_correct": 35
+  },
+  "LOW": {
+   "n": 27,
+   "correct": 19,
+   "per_class": {
+    "blocker": {
+     "tp": 3,
+     "fp": 1,
+     "fn": 2,
+     "P": 0.75,
+     "R": 0.6,
+     "F1": 0.6666666666666665
+    },
+    "nit": {
+     "tp": 2,
+     "fp": 2,
+     "fn": 2,
+     "P": 0.5,
+     "R": 0.5,
+     "F1": 0.5
+    },
+    "optimization": {
+     "tp": 0,
+     "fp": 0,
+     "fn": 1,
+     "P": 0.0,
+     "R": 0.0,
+     "F1": 0.0
+    },
+    "out_of_scope": {
+     "tp": 0,
+     "fp": 1,
+     "fn": 1,
+     "P": 0.0,
+     "R": 0.0,
+     "F1": 0.0
+    },
+    "question": {
+     "tp": 6,
+     "fp": 0,
+     "fn": 0,
+     "P": 1.0,
+     "R": 1.0,
+     "F1": 1.0
+    },
+    "suggestion": {
+     "tp": 8,
+     "fp": 4,
+     "fn": 2,
+     "P": 0.6666666666666666,
+     "R": 0.8,
+     "F1": 0.7272727272727272
+    }
+   },
+   "macro_F1": 0.48232323232323226,
+   "defect_n": 6,
+   "defect_tp": 4,
+   "blocker_fp_nondefect": 0,
+   "confusion": {
+    "blocker": {
+     "blocker": 3,
+     "suggestion": 1,
+     "out_of_scope": 1
+    },
+    "nit": {
+     "suggestion": 2,
+     "nit": 2
+    },
+    "optimization": {
+     "nit": 1
+    },
+    "out_of_scope": {
+     "suggestion": 1
+    },
+    "question": {
+     "question": 6
+    },
+    "suggestion": {
+     "blocker": 1,
+     "suggestion": 8,
+     "nit": 1
+    }
+   },
+   "qflag_correct_raw": 27,
+   "qflag_fp_nonqtype_raw": 0,
+   "qflag_correct_qtype": 27,
+   "qflag_fp_nonqtype_qtype": 0,
+   "intent_correct": 26
+  },
+  "nofit_n": 45,
+  "nofit_dist": {
+   "suggestion": 19,
+   "blocker": 7,
+   "question": 1,
+   "out_of_scope": 9,
+   "nit": 7,
+   "optimization": 2
+  },
+  "nofit_qflag_true": 2,
+  "mandatory_defect_n": 0,
+  "mandatory_defect_not_blocker": 0
+ },
+ "irr": {
+  "n": 16,
+  "agree": 10,
+  "blk_tp": 0,
+  "blk_gold": 2,
+  "blk_pred": 0
+ },
+ "audit": {
+  "n": 126,
+  "agree": 53,
+  "blk_tp": 5,
+  "blk_gold": 31,
+  "blk_pred": 11
+ }
+}
