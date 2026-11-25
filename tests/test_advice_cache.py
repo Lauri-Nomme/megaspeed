@@ -24,7 +24,7 @@ class AdviceDiskCacheTests(unittest.TestCase):
 
         def fake(*args, **kwargs):
             self.computes += 1
-            return {"available": True, "scenarios": {"s": {"x": 1}}}
+            return {"available": True, "scenarios": {"s": {"x": 1}}}, True
 
         self.patcher = mock.patch.object(
             app_module, "_compute_advice", side_effect=fake
@@ -81,11 +81,23 @@ class AdviceDiskCacheTests(unittest.TestCase):
             "available": True, "scenarios": {"s": {"x": 1}}
         })
 
-    def test_a_stated_no_result_is_not_persisted(self):
+    def test_a_deterministic_no_result_is_persisted(self):
         self.patcher.stop()
         self.patcher = mock.patch.object(
             app_module, "_compute_advice",
-            side_effect=lambda *a, **k: {"available": False, "note": "no model"},
+            side_effect=lambda *a, **k: ({"available": False, "note": "no model"}, True),
+        )
+        self.patcher.start()
+        self.call()
+        app_module._advice_cache.clear()
+        self.call()
+        self.assertEqual(len(self.files()), 1)
+
+    def test_an_exception_result_is_not_persisted(self):
+        self.patcher.stop()
+        self.patcher = mock.patch.object(
+            app_module, "_compute_advice",
+            side_effect=lambda *a, **k: ({"available": False, "note": "boom"}, False),
         )
         self.patcher.start()
         self.call()

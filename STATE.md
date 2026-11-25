@@ -73,6 +73,14 @@ write is atomic and best-effort, and the memory cache still fronts it. Tests:
 second process reads the disk, window/store changes are new keys, corrupt files
 are ignored, an unavailable report is not written.
 
+## v0.21.2 — persist a deterministic lab no-result too
+
+The v0.21.1 guard treated every `available: false` report as transient. On this
+store the policy lab consistently returns "no validated result" **after**
+running the 5-scenario simulation, so the 12 s cold cost came back on every
+restart. `_compute_advice` now returns `(report, cacheable)`: a computed report
+is persisted even when unavailable; only the exception path is retried.
+
 ## v0.21.0 — label prompt v3 (the audit's targeted fixes)
 
 `ollama-v3` changes only the prompt, from the v2 audit:

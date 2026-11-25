@@ -1489,19 +1489,22 @@ def _advice_payload(con, tenant: str, path: Path, court, jira, window, repo: str
         with _advice_lock:
             _advice_cache[key] = stored
         return stored
-    report = _compute_advice(con, tenant, path, court, jira, window, repo)
+    report, cacheable = _compute_advice(con, tenant, path, court, jira, window, repo)
     with _advice_lock:
         if len(_advice_cache) >= ADVICE_CACHE_SIZE:
             _advice_cache.clear()
         _advice_cache[key] = report
-    # A stated no-result (the model could not calibrate) is not a result worth
-    # persisting: the next run should retry, not quote a transient failure.
-    if report.get("available", True):
+    # A computed report is worth persisting even when it says "no validated
+    # result": that verdict is deterministic for this store/window, and the
+    # simulation behind it is the 12 s cold cost. Only an exception is
+    # transient, so `_compute_advice` marks that case uncacheable.
+    if cacheable:
         _write_advice_disk(disk_path, report)
     return report
 
 
-def _compute_advice(con, tenant: str, path: Path, court, jira, window, repo: str | None = None) -> dict:
+def _compute_advice(con, tenant: str, path: Path, court, jira, window, repo: str | None = None) -> tuple[dict, bool]:
+    """The lab report and whether it may be persisted (exceptions are transient)."""
     try:
         refinement = jira_analysis.refinement_cost(court, jira, window)
         calibration = policy_lab.calibrate(
@@ -1569,10 +1572,13 @@ def _compute_advice(con, tenant: str, path: Path, court, jira, window, repo: str
         # A store the model cannot calibrate (or a SimPy edge case) is a stated
         # no-result, not a 503: the measured rules still answer, and the page
         # says why the lab did not.
-        report = advice_crosscheck.unavailable(
-            f"the policy lab could not run on this store: {exc}"
+        return (
+            advice_crosscheck.unavailable(
+                f"the policy lab could not run on this store: {exc}"
+            ),
+            False,
         )
-    return report
+    return report, True
 
 
 @app.get("/api/insights")
