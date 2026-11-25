@@ -61,8 +61,14 @@ Options, in increasing risk:
 4. **Window-independent lab**: compute once over the full store and reuse for
    any `days`. Changes semantics — the calibration is window-scoped today.
 
-Recommendation: decide (1) vs (2) with the product owner; do not touch the
-simulation until then. The warm path is already fine.
+**Implemented as (2) — persisted results (prd/77, v0.21.1).** The computed
+report is stored under `<tenants-dir>/.cache/advice/` and keyed by the store and
+calendar stamps, the window, the repo and `ADVICE_DISK_VERSION`; an exception is
+still retried, a deterministic "no validated result" is cached. Measured on the
+live store: the first request after a restart fell from **~12 s to 3.2 s**, and
+the cache file's mtime is unchanged on the warm request (loaded, not
+recomputed). The simulation itself is untouched; fewer runs remains a statistics
+decision.
 
 ## Test-suite note
 

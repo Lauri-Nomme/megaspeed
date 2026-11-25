@@ -130,4 +130,5 @@ Draft. Iterating in committed slices. **No implementation yet.**
 | `73-performance-v2.md` | Performance long-tail v2 (draft; measure before dispatch) |
 | `74-scrape-classification-cache.md` | Scrape classification cache (draft; after the relabel workflow settles) |
 | `75-label-prompt-v2.md` | Label prompt v2, CI/admin taxonomy and the anchor-diff verdict |
-| `76-reply-events.md` | Replies as first-class events (v0.21 design; draft) |
+| `76-reply-events.md` | Replies as first-class events (v0.21 design; implemented) |
+| `77-policy-lab-cache.md` | The policy-lab result survives a restart (v0.21.1) |
