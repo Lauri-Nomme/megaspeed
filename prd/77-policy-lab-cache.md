@@ -60,7 +60,7 @@ Persist the computed report to
 `_write_advice_disk`, `_advice_payload`, `_compute_advice`),
 `tests/test_advice_cache.py`.
 
-## Measured (2026-11-25, `grail-tlla`, `days=1882`)
+## Measured (2026-11-25, `demo-tlla`, `days=1882`)
 
 | | before | after |
 |---|---:|---:|
