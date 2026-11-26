@@ -138,6 +138,11 @@ class NoticeTests(unittest.TestCase):
         "can we also show the count in the message?",
         "@alice wdyt about the cache key?",
         "@alice thoughts?",
+        "merged the two lists here https://x/pr/1",
+        "The merge in #123 is missing the retry guard",
+        "Details: the retry loop is wrong",
+        "this null check is not needed",
+        "keep it open until the cache is fixed",
         "this will fail when the list is empty",
         "nit: rename this",
         "Rebased it, but this loop now skips the last element whenever the list "
@@ -177,6 +182,81 @@ class NoticeTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertTrue(citext.is_admin(text), text)
                 self.assertTrue(citext.is_notice(text), text)
+
+    #: prd/78 B/C/G: the paraphrased shapes from the gold audit, written as
+    #: synthetic strings (the gold text itself is never copied here). B is a
+    #: rebase/merge/reshuffle note with a reason clause or a non-template target
+    #: **and a reference**; C is a review request phrased outside the old lists;
+    #: G is a framed pointer.
+    WIDENED_TRUE = (
+        # B -- rebase/merge with a prefix or reason clause, still a note
+        "Since #123 was merged, rebased onto main: https://x/commits/abc",
+        "Because the base PR merged, I rebased the branch: https://x/commits/abc",
+        "Base PR #100 merged, rebased: https://x/commits/def",
+        "Rebased on top of the logging refactor: https://x/commits/abc",
+        "Rebased to main branch: https://x/commits/abc",
+        "Rebased and updated the tests: https://x/commits/abc",
+        "Reworked the parser and rebased; please review: https://x/commits/abc",
+        # B -- commit reshuffle, noun-before-verb status
+        "Squashed the commits into one: https://x/commits/abc",
+        "Reordered the commits to keep the diff readable: https://x/commits/abc",
+        "Rewrote the commits into two: https://x/commits/abc",
+        "Tests added: https://x/commits/abc",
+        "Tests added",
+        "Reviewers added to the PR: https://x/pr/1",
+        # C -- review requests outside the old closed lists
+        "quick look",
+        "a quick look?",
+        "Could I get the frontend team's review?",
+        "Needs the backend team's review",
+        "Requesting the platform team's approval",
+        "@alice please review",  # pinned positive
+        "@alice check this",  # pinned positive
+        "@bob can you take a look at the cache layer: https://x/pr/1",
+        "@team review the new parser https://x/pr/1",
+        "@alice feel free to comment later",
+        # G -- pointers with framing text
+        "fyi: https://x/report",
+        "fyi https://x/report",
+        "see #1234",
+        "see the CI report",
+        "More context: https://x/pr/1",
+        "Details: #42",
+        "Related: #42",
+        "Tracked in #123",
+        "Filed as #123",
+        # E -- safely-distinguishable process notes
+        "let's wait for #12 to merge",
+        "not needed",
+        "This is not needed",
+        "belongs to a past sprint",
+        "keep it open",
+        "merge it last",
+    )
+
+    #: The same widened families, but the text is a remark about the code. The
+    #: reference requirement and the remark/defect guard are what separate them.
+    WIDENED_FALSE = (
+        "merged the two lists here https://x/pr/1",
+        "The merge in #123 is missing the retry guard",
+        "rebased the branch and the loop skips the last row https://x/pr/1",
+        "Rebased on top of the new util: https://x/commits/abc, the helper duplicates the old one",
+        "Details: the retry loop is wrong",
+        "this null check is not needed",
+        "keep it open until the cache is fixed",
+        "@alice wdyt about the cache key?",  # opinion question, pinned
+        "@alice thoughts?",  # opinion question, pinned
+    )
+
+    def test_widened_bc_g_shapes_are_notices(self):
+        for text in self.WIDENED_TRUE:
+            with self.subTest(text=text):
+                self.assertTrue(citext.is_notice(text), text)
+
+    def test_widened_shapes_do_not_capture_review_remarks(self):
+        for text in self.WIDENED_FALSE:
+            with self.subTest(text=text):
+                self.assertFalse(citext.is_notice(text), text)
 
 
 class DescriptionQuestionTests(unittest.TestCase):

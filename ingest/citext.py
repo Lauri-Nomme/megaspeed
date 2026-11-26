@@ -206,7 +206,7 @@ _MAX_SHORT_NOTICE = 200
 _TRAILING = re.compile(
     r"(?:\s*(?:\(?https?://\S+?\)?|!\[[^\]]*\]\(attachment:\d+/\d+\)))?"
     r"(?:\s*[-–—,]?\s*(?:thanks|thank\s+you|thx|cheers))?"
-    r"\s*[.!?]*\s*$",
+    r"\s*[.!?:]*\s*$",
     re.I,
 )
 
@@ -217,6 +217,32 @@ DEFECT = re.compile(
     r"|regression|fail(?:s|ed|ing|ure)?|wrong|incorrect|always\s+(?:false|true)"
     r"|does\s*n[o']?t\s+work|doesn['’]t\s+work|won['’]t\s+work"
     r"|null\s+pointer|exception|leak(?:s|ing)?|deadlock|race\s+condition)\b",
+    re.I,
+)
+
+#: A merge/rebase note may now carry a reason clause (prd/78 B), so a contrast
+#: or remark word means the text goes on to discuss the code: send it to the
+#: model. This is deliberately narrower than :data:`DEFECT` (which still wins).
+_REMARK = re.compile(
+    r"\b(?:but|however|though|although|instead|missing|skips?|skipping"
+    r"|should|must|why|consider|nit|rename|still|off"
+    r"|conflicts?\s+with|outdated"
+    r"|duplicat\w*|unclear|confusing|fragile|inefficient|hard\s+to|unnecessary)\b",
+    re.I,
+)
+
+#: "merged the two lists here" is a remark about code, not a branch note; a
+#: genuine rebase note has no reason to say "here" (see :func:`_is_merge_note`).
+_HERE = re.compile(r"\bhere\b", re.I)
+
+#: What keeps a reshuffle/rebase note a note and not a remark: a link, a
+#: commit sha, a PR/ticket number, or a branch/path reference (prd/78 B).
+_REF = re.compile(
+    r"(?:https?://\S+"
+    r"|#\d+"
+    r"|\b[0-9a-f]{7,40}\b"
+    r"|(?:pr|pull\s+request|commit|branch|ticket|issue)\s*#?\d+"
+    r"|[\w.-]+/[\w.-]+)",
     re.I,
 )
 
@@ -248,9 +274,20 @@ _CONFLICTS = re.compile(
 
 #: A one-word or short review request, optionally with "please".
 _REVIEW_REQUEST = re.compile(
-    r"(?:please\s+)?(?:re-?review|review(?:\s+(?:this|it|again|pls|please))?"
+    r"(?:please\s+)?"
+    r"(?:re-?review|review(?:\s+(?:this|it|again|pls|please))?"
     r"|ptal|take\s+a\s+look|have\s+a\s+look"
-    r"|looks?\s+good(?:\s+to\s+me)?|lgtm|ship\s+it|\+1|:\+1:|👍)",
+    r"|(?:a\s+)?quick\s+(?:look|review)"
+    r"|looks?\s+good(?:\s+to\s+me)?|lgtm|ship\s+it|\+1|:\+1:|👍"
+    r"|approv(?:e|al)|sign[- ]?off)",
+    re.I,
+)
+
+#: "could I get the frontend team's review" / "needs the team review" (prd/78 C).
+_TEAM_REVIEW = re.compile(
+    r"(?:(?:can|could)\s+(?:i|we)\s+get\s+(?:a\s+|the\s+)?"
+    r"|(?:need|needs|request(?:ing|ed)?|please\s+request)\s+(?:a\s+|the\s+)?)"
+    r"(?:[\w'-]+\s+){0,2}team'?s?\s+(?:review|approval)",
     re.I,
 )
 
@@ -268,11 +305,34 @@ _CAN_REVIEW = re.compile(
 #: "@handle review/look" -- a human request; a bot-shaped handle is
 #: :func:`is_bot_request` and wins first in the pipeline. Opinion questions
 #: ("@alice wdyt", "@alice thoughts?") are real questions about the code and
-#: stay review remarks.
+#: stay review remarks. A review request may name what to look at, so it may run
+#: longer than the other short families; :func:`_is_mention_request` bounds it.
 _MENTION_REQUEST = re.compile(
     r"@[A-Za-z][\w.-]*\s+(?:please\s+|pls\s+)?"
-    r"(?:review|look|take\s+a\s+look|check|ptal)"
-    r"(?:\s+(?:this|it|pls|please))?",
+    r"(?:(?:can|could|would)\s+you\s+(?:please\s+)?|feel\s+free\s+to\s+)?"
+    r"(?:review|re-review|look|take\s+a\s+look|have\s+a\s+look|check|ptal"
+    r"|approve|approval|sign[- ]?off"
+    r"|comment(?:\s+(?:later|here|below))?)"
+    r"(?:[^\n]{0,320})?",
+    re.I,
+)
+
+#: "tests added" (noun before verb), an author status note (prd/78 B).
+_NOUN_VERB_NOTE = re.compile(
+    r"(?:tests?|unit\s+tests?|checks?|docs?|changes?"
+    r"|reviewers?|approvers?)\s+"
+    r"(?:added|updated|fixed|applied|removed|pushed|included|requested)"
+    r"(?:\s+(?:to|for|in|on)\s+(?:the\s+)?[\w./#-]+(?:\s+[\w./#-]+)?)?",
+    re.I,
+)
+
+#: prd/78 B: a rebase/merge note and a commit reshuffle are notes only when the
+#: text carries a reference; :func:`_is_merge_note` enforces that.
+_MERGE_NOTE_WORD = re.compile(r"(?:rebas(?:ed|e|ing)|merg(?:ed|e|ing))", re.I)
+_COMMITS_NOTE = re.compile(
+    r"(?:squash(?:ed|ing)?|reorder(?:ed|ing)?|reshuffl(?:ed|ing)?"
+    r"|rewor(?:k|ked|king)|rewr(?:ite|ote|itten|iting)|moved?)\s+"
+    r"(?:the\s+|all\s+|my\s+|these\s+)?commits?\b",
     re.I,
 )
 
@@ -320,20 +380,49 @@ _ADDED_UPDATED = re.compile(
     re.I,
 )
 
-#: fyi / heads up / note:, whole text only (no arbitrary tail).
+#: fyi / heads up / note, whole text only; a trailing link is stripped before
+#: this runs, so "fyi: <link>" leaves "fyi" (prd/78 G).
 _ADMIN_TAG = re.compile(
     r"(?:fyi|for\s+your\s+information|heads?\s+up|psa|note|nb)"
-    r"(?:\s*:\s*(?:see\s+above|above|link|link\s+below))?",
+    r"(?:\s*:\s*(?:see\s+above|above|link(?:\s+below)?|details|report)?)?",
     re.I,
 )
 
+#: "see above/below" plus a footnote-style "see the link / #123 / the ticket"
+#: (prd/78 G).
 _SEE_ABOVE = re.compile(
-    r"(?:see|as)\s+(?:above|below)(?:\s+(?:link|comment|reply))?", re.I
+    r"(?:see|as)\s+(?:above|below|#\d+|https?://\S+"
+    r"|the\s+(?:[\w.-]+\s+){0,2}"
+    r"(?:link|comment|thread|pr|pull\s+request|ticket|issue|report|logs?|details?)"
+    r"|this\s+(?:link|comment|thread|pr|pull\s+request))"
+    r"(?:\s+(?:above|below|for\s+(?:details|context)))?",
+    re.I,
 )
 
-#: The families that may run past :data:`_MAX_SHORT_NOTICE` (a merge note with
-#: resolved files, a rebase with a very long link).
-NOTICE_RULES_LONG = (_REBASE, _MERGE, _CONFLICTS)
+#: A short labelled pointer ("more context: <link>", "related: #123").
+_POINTER = re.compile(
+    r"(?:more\s+)?(?:context|details|info|information|background|reference"
+    r"|link|pointer|related)s?\s*(?:[:\-–—]\s*)?"
+    r"(?:see\s+)?(?:above|below|link|#\d+|https?://\S+|[\w.-]+/[\w.-]+)?",
+    re.I,
+)
+
+#: "filed as #123" / "tracked in #456": a process pointer (prd/78 G).
+_TRACKED = re.compile(
+    r"(?:filed|tracked|logged|recorded)\s+(?:as|in|under)\s+#?\d+", re.I
+)
+
+#: prd/78 E: safely-distinguishable process/scheduling notes. Anything that
+#: would need to reason about the code is deliberately left to the model.
+_PROCESS = re.compile(
+    r"let'?s\s+wait(?:er)?(?:\s+for\s+[^?]{1,60})?"
+    r"|(?:this\s+is\s+)?(?:not|no\s+longer)\s+needed"
+    r"|belongs?\s+(?:to|in)\s+(?:a\s+|the\s+)?"
+    r"(?:past|previous|last)\s+(?:sprint|release|iteration)"
+    r"|(?:please\s+)?keep\s+(?:it|this|the\s+pr)\s+open"
+    r"|merge\s+(?:it\s+|this\s+)?last",
+    re.I,
+)
 
 #: Everything else: whole-text, short, no code.
 NOTICE_RULES = (
@@ -341,20 +430,54 @@ NOTICE_RULES = (
     _MERGE,
     _CONFLICTS,
     _REVIEW_REQUEST,
+    _TEAM_REVIEW,
     _CAN_REVIEW,
     _MENTION_REQUEST,
+    _NOUN_VERB_NOTE,
     _STATUS,
     _WILL,
     _FIXED_IN,
     _ADDED_UPDATED,
     _ADMIN_TAG,
     _SEE_ABOVE,
+    _POINTER,
+    _TRACKED,
+    _PROCESS,
 )
 
 
 def _notice_core(body: str) -> str:
     """``body`` without one trailing link/attachment and one trailing thanks."""
-    return _TRAILING.sub("", body, count=1).strip()
+    core = _TRAILING.sub("", body, count=1).strip()
+    # A label left dangling by the link/thanks removal ("tests added: <link>").
+    return core.rstrip(" \t:,-–—").strip()
+
+
+def _is_merge_note(core: str, body: str) -> bool:
+    """prd/78 B: a rebase/merge/reshuffle note that carries a reference.
+
+    The reference (link, sha, #123, branch/path) is what keeps it a note,
+    "merged the two lists here" stays a potential review remark. A reason
+    clause or prefix is allowed, but a contrast/remark word sends it to the
+    model; :func:`is_notice` still applies :data:`DEFECT`.
+    """
+    if not _REF.search(body):
+        return False
+    if not (_MERGE_NOTE_WORD.search(core) or _COMMITS_NOTE.search(core)):
+        return False
+    if _REMARK.search(core):
+        return False
+    return len(core.split()) <= 30 and not _HERE.search(core)
+
+
+def _is_mention_request(core: str) -> bool:
+    """prd/78 C: a human mention that asks for a review, not an opinion."""
+    return bool(_MENTION_REQUEST.fullmatch(core)) and not _REMARK.search(core)
+
+
+def _is_pointer(core: str) -> bool:
+    """prd/78 G: a short labelled pointer with framing text."""
+    return bool(_POINTER.fullmatch(core)) and not _REMARK.search(core)
 
 
 def is_notice(text: str) -> bool:
@@ -365,6 +488,12 @@ def is_notice(text: str) -> bool:
     review text even when they open with "rebased" or "will fix". A bare link,
     an image attachment and ``same as`` keep their :func:`is_admin` answers, so
     this predicate is a strict superset of it.
+
+    prd/78 B/C/G widen the anchored rules: a rebase/merge note may carry a
+    reason clause but **must** carry a reference, a mention may name what to
+    look at, and a pointer may be framed. Those matches are still whole-text,
+    short (a mention over 200 chars must carry a link) and defeated by code or
+    a defect/remark word.
     """
     body = (text or "").strip()
     if not body or len(body) > _MAX_NOTICE:
@@ -379,7 +508,14 @@ def is_notice(text: str) -> bool:
         return True
     if is_admin(core):
         return True
-    rules = NOTICE_RULES_LONG if len(core) > _MAX_SHORT_NOTICE else NOTICE_RULES
-    if not any(rule.fullmatch(core) for rule in rules):
+    if len(core) > _MAX_SHORT_NOTICE:
+        # A long text is never a bare status note; only a review request that
+        # names what to look at and carries a link is (prd/78 C).
+        if _is_mention_request(core) and _REF.search(body):
+            return not DEFECT.search(core)
+        return False
+    if _is_merge_note(core, body) or _is_mention_request(core) or _is_pointer(core):
+        return not DEFECT.search(core)
+    if not any(rule.fullmatch(core) for rule in NOTICE_RULES):
         return False
     return not DEFECT.search(core)
