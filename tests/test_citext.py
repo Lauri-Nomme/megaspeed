@@ -275,8 +275,6 @@ class NoticeTests(unittest.TestCase):
         "belongs to a past sprint",
         "keep it open",
         "merge it last",
-        "should be merged last",
-        "This should be closed",
         # round 2 -- wording that missed the closed lists
         "could you have a quick look",
         "take a quick look",
@@ -307,6 +305,48 @@ class NoticeTests(unittest.TestCase):
         "The report is here",
         "Details are below",
         "The link is attached",
+        # round 3 -- C wording/structures that missed the closed lists
+        "welcome comments later",
+        "could you have a quick look at the new loader",
+        "reviewer added",
+        "forgot to add a reviewer",
+        "added a reviewer",
+        "needs a reviewer",
+        "you should rebase",
+        "you should rebase onto main",
+        "please rebase this",
+        "review from the frontend",
+        "Could I get a review from the frontend?",
+        "Could I get a review from the frontend team?",
+        "the frontend should review this",
+        "plan for the remaining comments",
+        "merge as-is",
+        "can be merged as-is",
+        "the remaining comments can be addressed later",
+        # round 3 -- B short rebase/merge notes without a reference
+        "Rebased on main",
+        "Merged master",
+        "Rebased on the main branch",
+        "Merged in master",
+        "Rebased on release/1.2",
+        "split the two commits",
+        "Split the two commits into one",
+        # round 3 -- G unlabelled pointers
+        "this is the report",
+        "see attached",
+        "see attached file",
+        "the link is below",
+        "details are attached",
+        # round 3 -- two short inline tokens are still decoration (B/C only)
+        "Rebased `Feature` and `Loader` onto main: https://x/commits/abc",
+        '@"alice" review the new `Cache` and `Loader` classes: https://x/pr/1',
+        # round 3 -- a mention across a line break, and a long C body with a
+        # handle but no reference
+        '@"alice" please take a look\nat the new loader, thanks',
+        '@"alice" could you please take a look at the new cache key computation '
+        "and the retry policy in the loader, because both changed for every "
+        "caller in the pipeline and the comments in the new helper are a bit "
+        "sparse now and need a second pass",
     )
 
     #: The same widened families, but the text is a remark about the code. The
@@ -331,6 +371,24 @@ class NoticeTests(unittest.TestCase):
         "the link is broken https://x",
         # a long status note may not use the B/C 400-char allowance
         "will add the fix " + "and a test " * 20,
+        # round 3 -- close/status is trailing-only; these are resource-close
+        # remarks and must not be filtered
+        "this should be closed",
+        "should be closed",
+        "close it",
+        "closing",
+        "closed",
+        "should be merged last",
+        "This should be closed",
+        # round 3 -- a general "you should ..." is a suggestion, not a rebase
+        # request
+        "you should use a map instead",
+        # round 3 -- not a branch note
+        "this merged into the main flow",
+        # round 3 -- two tokens are decoration, three are content
+        "see `a` `b` `c` above",
+        # round 3 -- a merge-plan question is not a merge-plan statement
+        "can we merge as-is?",
     )
 
     def test_widened_bc_g_shapes_are_notices(self):
@@ -342,6 +400,44 @@ class NoticeTests(unittest.TestCase):
         for text in self.WIDENED_FALSE:
             with self.subTest(text=text):
                 self.assertFalse(citext.is_notice(text), text)
+
+
+class CloseStatusTests(unittest.TestCase):
+    """prd/78 round 3: a close/status phrase is trailing-only, never a bare verb.
+
+    A bare "close it" / "closed" is exactly the shape of a resource-close review
+    remark (buffer/sink/stream/executor), so only the thread/PR form is a status
+    note. "should be merged last" is only allowed as a trailing phrase after a
+    rebase/merge note or a review request.
+    """
+
+    def test_close_with_an_object_is_a_status_note(self):
+        for text in (
+            "closing this",
+            "closed this",
+            "closing the PR",
+            "closing the thread",
+        ):
+            self.assertTrue(citext.is_notice(text), text)
+
+    def test_a_bare_or_imperative_close_is_not_a_notice(self):
+        for text in (
+            "this should be closed",
+            "should be closed",
+            "close it",
+            "closing",
+            "closed",
+        ):
+            self.assertFalse(citext.is_notice(text), text)
+
+    def test_the_trailing_process_phrase_still_applies(self):
+        self.assertTrue(
+            citext.is_notice("Rebased onto main: https://x, should be merged last")
+        )
+        self.assertTrue(
+            citext.is_notice('@"alice" please review this, should be merged last')
+        )
+        self.assertFalse(citext.is_notice("should be merged last"))
 
 
 class DescriptionQuestionTests(unittest.TestCase):

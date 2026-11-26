@@ -335,6 +335,8 @@ _REVIEW_REQUEST = re.compile(
     r"(?:re-?review|review(?:\s+(?:this|it|again|pls|please))?"
     r"|ptal|(?:take|have)\s+(?:a\s+)?(?:quick\s+)?look"
     r"|(?:a\s+)?quick\s+(?:look|review)"
+    r"|welcome\s+(?:any\s+|more\s+|further\s+)?comments?"
+    r"(?:\s+(?:later|here|below|after))?"
     r"|looks?\s+good(?:\s+to\s+me)?|lgtm|ship\s+it|\+1|:\+1:|👍"
     r"|approv(?:e|al)|sign[- ]?off)",
     re.I,
@@ -356,7 +358,47 @@ _CAN_REVIEW = re.compile(
     r"(?:review|(?:take|have)\s+(?:a\s+)?(?:quick\s+)?look"
     r"|look\s+(?:at\s+)?(?:this|it|that)"
     r"|check\s+(?:this|it))"
+    r"(?:\s+(?:at|into|through)\s+[^?\n]{1,80})?"
     r"(?:\s+(?:this|it|that|please|pls))*",
+    re.I,
+)
+
+#: A reviewer-added / review-requested note without a handle (prd/78 C).
+_REVIEWER_NOTE = re.compile(
+    r"(?:reviewers?|approvers?)\s+(?:added|requested|removed|updated)"
+    r"|(?:forgot|need|needs|remember)\s+(?:to\s+)?add\s+"
+    r"(?:a\s+|another\s+|the\s+)?(?:reviewers?|approvers?)"
+    r"|(?:needs?|wants?)\s+(?:a\s+|another\s+|the\s+)?"
+    r"(?:reviewers?|approvers?|review|approval)"
+    r"(?:\s+(?:to|for|on)\s+(?:the\s+)?[\w./#-]+)?",
+    re.I,
+)
+
+#: "you should rebase" / "please rebase this" -- a process request, not a
+#: general "you should ..." suggestion about code.
+_REBASE_REQUEST = re.compile(
+    r"you\s+should\s+rebase(?:\s+(?:this|it|the\s+branch|onto|on)\b.*)?"
+    r"|(?:please\s+)?rebase\s+(?:this|it|the\s+branch)"
+    r"(?:\s+(?:on|onto)\s+(?:the\s+)?[\w./-]+)?",
+    re.I,
+)
+
+#: A named group's review, with or without the word "team" (prd/78 C).
+_GROUP_REVIEW = re.compile(
+    r"(?:review|approval)\s+from\s+(?:the\s+)?[\w'-]+(?:\s+team)?"
+    r"|(?:the\s+)?[\w'-]+(?:\s+team)?\s+should\s+review\s+(?:this|it|the\s+branch)"
+    r"|(?:can|could)\s+(?:i|we)\s+get\s+(?:a\s+|the\s+)?"
+    r"(?:[\w'-]+\s+){0,2}(?:team\s+)?(?:review|approval)"
+    r"(?:\s+from\s+(?:the\s+)?[\w'-]+(?:\s+team)?)?",
+    re.I,
+)
+
+#: A statement about the merge plan, not a request (prd/78 C).
+_MERGE_PLAN = re.compile(
+    r"(?:the\s+)?plan\s+for\s+(?:the\s+)?remaining\s+comments?"
+    r"|merge\s+(?:it\s+|this\s+|the\s+pr\s+)?as[- ]is"
+    r"|(?:the\s+)?remaining\s+comments?\s+(?:can|will)\s+be\s+addressed\s+later"
+    r"|(?:can|could|may)\s+(?:be\s+)?merged\s+as[- ]is",
     re.I,
 )
 
@@ -373,7 +415,7 @@ _MENTION_REQUEST = re.compile(
     r"(?:review|re-review|look|take\s+a\s+look|have\s+a\s+look|check|ptal"
     r"|approve|approval|sign[- ]?off"
     r"|comment(?:\s+(?:later|here|below))?)"
-    r"(?:[^\n]{0,320})?",
+    r"(?:[\s\S]{0,400})?",
     re.I,
 )
 
@@ -386,23 +428,39 @@ _NOUN_VERB_NOTE = re.compile(
     re.I,
 )
 
+#: prd/78 B: a short rebase/merge note that names a branch, with no reference
+#: ("Rebased on main", "Merged master", "Rebased on the main branch").
+_SHORT_B = re.compile(
+    r"(?:rebas(?:ed|e|ing)|merg(?:ed|e|ing))\s+"
+    r"(?:(?:on|onto|into|from|with|to|in)\s+)?"
+    r"(?:the\s+)?(?:main|master|develop(?:ment)?|dev|trunk"
+    r"|release(?:/[\w.-]+)?|[\w.-]+/[\w./-]+)"
+    r"(?:\s+branch)?"
+    r"(?:\s+(?:into|to)\s+[\w./-]+)?",
+    re.I,
+)
+
 #: prd/78 B: a rebase/merge note and a commit reshuffle are notes only when the
 #: text carries a reference; :func:`_is_merge_note` enforces that.
 _MERGE_NOTE_WORD = re.compile(r"(?:rebas(?:ed|e|ing)|merg(?:ed|e|ing))", re.I)
 _COMMITS_NOTE = re.compile(
     r"(?:(?:squash|reorder|reshuffl|rewor(?:k|ked|king)|rewr(?:ite|ote|itten|iting)"
     r"|move|split|fold|drop|join|combine|collapse)\w*\s+"
-    r"(?:the\s+|all\s+|my\s+|these\s+|a\s+|an\s+)?commits?\b"
+    r"(?:[\w'-]+\s+){0,2}commits?\b"
     r"|commits?\s+(?:squashed|reordered|reshuffled|rewritten|moved|split"
-    r"|folded|dropped|joined|combined|collapsed))",
+    r"|folded|dropped|joined|combined|collapsed))"
+    r"(?:\s+(?:into|to)\s+[\w'-]+(?:\s+[\w'-]+)?)?",
     re.I,
 )
 
-#: closing this / done / fixed / nvm, handled.
+#: closing this / done / fixed / nvm, handled. ``closing``/``closed`` need an
+#: object (the thread/PR) so "close it" or a bare "closed" -- which can be a
+#: request to close a buffer/sink/stream -- is not a notice. The imperative
+#: ``close`` is not a status at all.
 _STATUS = re.compile(
-    r"(?:closing|closed|close)"
-    r"(?:\s+(?:this|it|the\s+(?:pr|pull\s+request|thread|issue|ticket|one))"
-    r"(?:\s+(?:as|now|for\s+now|since)\b.*)?)?"
+    r"(?:closing|closed)\s+"
+    r"(?:this|it|the\s+(?:pr|pull\s+request|thread|issue|ticket|one))"
+    r"(?:\s+(?:as|now|for\s+now|since)\b.*)?"
     r"|(?:nvm|never\s?mind|my\s+bad|oops)"
     r"(?:[,;–—-]\s*(?:handled|done|fixed|resolved|thanks))?"
     r"|(?:done|finished|fixed|handled|resolved|all\s+good|good\s+catch)",
@@ -454,6 +512,7 @@ _ADMIN_TAG = re.compile(
 #: (prd/78 G).
 _SEE_ABOVE = re.compile(
     r"(?:please\s+)?see\s+(?:above|below|#\d+|https?://\S+|\[\^?\d{1,3}\]"
+    r"|attached(?:\s+(?:file|report|link))?"
     r"|the\s+(?:[\w.-]+\s+){0,2}"
     r"(?:link|comment|thread|pr|pull\s+request|ticket|issue|report|logs?|details?)"
     r"|this\s+(?:link|comment|thread|pr|pull\s+request))"
@@ -470,12 +529,16 @@ _POINTER = re.compile(
     re.I,
 )
 
-#: An unlabelled pointer sentence ("the report is here", "details are attached").
+#: An unlabelled pointer sentence ("the report is here", "this is the report",
+#: "details are attached").
 _POINTER_SENTENCE = re.compile(
     r"(?:please\s+)?(?:the\s+)?(?:report|link|details?|context|reference|ticket"
     r"|issue|pr|pull\s+request|logs?)\s+"
     r"(?:is|are|can\s+be\s+found)\s+"
-    r"(?:in|at|here|below|above|attached|in\s+the\s+[\w.-]+(?:\s+file)?)",
+    r"(?:in|at|here|below|above|attached|in\s+the\s+[\w.-]+(?:\s+file)?)"
+    r"|this\s+(?:is|was)\s+(?:the\s+)?"
+    r"(?:report|link|details?|context|reference|ticket|issue|pr|pull\s+request|logs?)"
+    r"|(?:details?|context|reference)\s+(?:are|is)\s+attached",
     re.I,
 )
 
@@ -492,9 +555,7 @@ _PROCESS = re.compile(
     r"|belongs?\s+(?:to|in)\s+(?:a\s+|the\s+)?"
     r"(?:past|previous|last)\s+(?:sprint|release|iteration)"
     r"|(?:please\s+)?keep\s+(?:it|this|the\s+pr)\s+open"
-    r"|merge\s+(?:it\s+|this\s+)?last"
-    r"|(?:this\s+|it\s+|the\s+pr\s+)?should\s+be\s+"
-    r"(?:merged|closed|approved)(?:\s+(?:last|first|now))?",
+    r"|merge\s+(?:it\s+|this\s+)?last",
     re.I,
 )
 
@@ -513,11 +574,17 @@ _PROCESS_SHOULD = re.compile(
 NOTICE_RULES = (
     _REBASE,
     _MERGE,
+    _SHORT_B,
     _CONFLICTS,
     _REVIEW_REQUEST,
     _TEAM_REVIEW,
+    _GROUP_REVIEW,
+    _REVIEWER_NOTE,
+    _REBASE_REQUEST,
     _CAN_REVIEW,
+    _COMMITS_NOTE,
     _NOUN_VERB_NOTE,
+    _MERGE_PLAN,
     _STATUS,
     _WILL,
     _FIXED_IN,
@@ -538,17 +605,21 @@ def _notice_core(body: str) -> str:
     return core.rstrip(" \t:,-–—").strip()
 
 
-def _strip_one_inline(body: str) -> str | None:
-    """Remove one short inline-code token, or ``None`` when it is not decoration.
+def _strip_inline_tokens(body: str) -> str | None:
+    """Remove up to two short inline-code tokens, or ``None`` when unsafe.
 
-    prd/78 round 2: one short token (a path, a method name) must not cancel an
-    otherwise notice-shaped text. Several tokens, or a long one, are content.
+    prd/78 round 2/3: one or two short tokens (paths, method names) must not
+    cancel an otherwise notice-shaped text. Three or more, or a long token
+    (``INLINE`` only matches ≤40 chars, and the caller re-checks ``CODE``), are
+    content.
     """
     tokens = list(INLINE.finditer(body))
-    if len(tokens) != 1:
+    if not tokens or len(tokens) > 2:
         return None
-    token = tokens[0]
-    return (body[: token.start()] + " " + body[token.end() :]).strip()
+    out = body
+    for token in reversed(tokens):
+        out = out[: token.start()] + " " + out[token.end() :]
+    return out.strip()
 
 
 def _without_process_tail(core: str) -> str:
@@ -599,18 +670,19 @@ def _is_pointer(core: str) -> bool:
 def is_notice(text: str) -> bool:
     """True when the **whole** text is a no-fit notice, not a review remark.
 
-    A code fence always wins; one *short* inline token is removed before
-    matching (prd/78 round 2), but a second token is code again. A concrete
-    defect phrase always wins too: those are review text even when they open
-    with "rebased" or "will fix". A bare link, an image attachment and
+    A code fence always wins; up to two *short* inline tokens are removed before
+    matching (prd/78 round 2/3), but a third or a long token is code again. A
+    concrete defect phrase always wins too: those are review text even when they
+    open with "rebased" or "will fix". A bare link, an image attachment and
     ``same as`` keep their :func:`is_admin` answers, so this predicate is a
     strict superset of it.
 
-    prd/78 B/C/G widen the anchored rules: a rebase/merge note may carry a
-    reason clause but **must** carry a reference, a mention may name what to
-    look at (and is always run through the real-remark guard), and a pointer may
-    be framed. B/C may run to :data:`_MAX_NOTICE` when they carry a reference;
-    the status families stay at :data:`_MAX_SHORT_NOTICE`.
+    prd/78 B/C/G widen the anchored rules: a short rebase/merge note may name a
+    branch, a longer one must carry a reference, a mention may name what to look
+    at (and is always run through the real-remark guard), and a pointer may be
+    framed. A trailing "..., should be merged last" is stripped before matching,
+    never on its own. B/C may run to :data:`_MAX_NOTICE` (C with a handle, B with
+    a reference); the status families stay at :data:`_MAX_SHORT_NOTICE`.
     """
     body = (text or "").strip()
     if not body or len(body) > _MAX_NOTICE:
@@ -618,11 +690,11 @@ def is_notice(text: str) -> bool:
     if FENCE.search(body):
         return False
     if INLINE.search(body):
-        # One short inline token is decoration only for B/C. The token itself
-        # may be the reference ("rebased `feature/x`"), so the pre-strip text is
-        # the reference source. Every other family stays code-blocked, which
-        # keeps "see `rebase` above" a review remark.
-        stripped = _strip_one_inline(body)
+        # Short inline tokens are decoration only for B/C. The tokens may be
+        # the reference ("rebased `feature/x`"), so the pre-strip text is the
+        # reference source. Every other family stays code-blocked, which keeps
+        # "see `rebase` above" a review remark.
+        stripped = _strip_inline_tokens(body)
         if stripped is None or not stripped or CODE.search(stripped):
             return False
         core = _notice_core(stripped)
@@ -641,14 +713,22 @@ def is_notice(text: str) -> bool:
         return True
     if is_admin(core):
         return True
-    if len(core) > _MAX_SHORT_NOTICE:
-        # Only B/C may run long, and only with a reference.
-        if _REF.search(body):
-            if _is_merge_note(core, body) or _is_mention_request(core):
-                return not DEFECT.search(core)
+    # A trailing "..., should be merged last" is allowed after a note/request;
+    # stripping it must never make a bare "should be ..." a notice.
+    note = _without_process_tail(core)
+    if not note:
         return False
-    if _is_merge_note(core, body) or _is_mention_request(core) or _is_pointer(core):
-        return not DEFECT.search(core)
-    if not any(rule.fullmatch(core) for rule in NOTICE_RULES):
+    if len(note) > _MAX_SHORT_NOTICE:
+        # B needs a reference here; C needs a handle (the mention rule).
+        if _is_merge_note(note, body) or _is_mention_request(note):
+            return not DEFECT.search(note)
         return False
-    return not DEFECT.search(core)
+    if (
+        _is_merge_note(note, body)
+        or _is_mention_request(note)
+        or _is_pointer(note)
+    ):
+        return not DEFECT.search(note)
+    if not any(rule.fullmatch(note) for rule in NOTICE_RULES):
+        return False
+    return not DEFECT.search(note)
