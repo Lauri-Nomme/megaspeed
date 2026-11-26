@@ -570,12 +570,14 @@ class Reducer:
                     # prd/75: what this thread *is*, decided deterministically
                     # from the author and the text before any model call.
                     if comment_action != "UPDATED":
-                        self._comment_kind(entry, actor, str(comment.get("text") or ""))
+                        self._comment_kind(
+                            entry, actor, str(comment.get("text") or ""), author
+                        )
                     # prd/16: one label set per thread, taken from the comment
                     # that opened it. The raw body never leaves this branch.
                     if comment_action != "UPDATED" and self.classifier is not None:
                         labels, classifier_version = self._comment_labels(
-                            actor, comment.get("text"), severity, stats,
+                            actor, comment.get("text"), severity, stats, author=author,
                             context=self._text_context(
                                 pr, role="opener", keys=keys, commit_ids=commit_ids,
                                 thread_id=thread_id, comment_id=comment["id"],
@@ -954,14 +956,25 @@ class Reducer:
             if self._actor_kind(activity.get("user") or {}) == "bot":
                 continue
             body = str(comment.get("text") or "").strip()
+            opener_actor = self.ident.pseudonym(activity.get("user") or {})
             if (
                 citext.is_bot_request(body, self.cfg.bot_aliases)
+                or (
+                    # prd/79: the PR author's own note is not a review remark;
+                    # skip it exactly where _comment_labels will skip it, so the
+                    # batch asks the model about nothing the walk will not use.
+                    author
+                    and opener_actor == author
+                    and body
+                    and not citext.looks_like_question(body)
+                )
                 or citext.is_admin(body)
                 or citext.is_notice(body)
             ):
-                # A command to a tool, a status note, or a no-fit notice
-                # (prd/75, prd/78): no model call for any of them. This loop
-                # only sees openers; a nested reply is never batched here.
+                # A command to a tool, the author's own note, a status note, or
+                # a no-fit notice (prd/75, prd/78, prd/79): no model call for
+                # any of them. This loop only sees openers; a nested reply is
+                # never batched here.
                 continue
             if body:
                 items.append(
@@ -977,7 +990,7 @@ class Reducer:
                             comment_id=comment["id"],
                             activity_id=activity.get("id"),
                             ts=_ts(activity.get("createdDate"), self.as_of),
-                            actor=self.ident.pseudonym(activity.get("user") or {}),
+                            actor=opener_actor,
                         ),
                     )
                 )
@@ -997,7 +1010,9 @@ class Reducer:
         """The batch's answer for ``text``, or ``None`` when it was not batched."""
         return self._labels.get((kind, classify.digest(text)))
 
-    def _comment_kind(self, entry: dict, actor: str, text: str) -> None:
+    def _comment_kind(
+        self, entry: dict, actor: str, text: str, author: str | None = None
+    ) -> None:
         """What this thread is: review, CI, bot output, a bot request, or admin.
 
         Deterministic and first (prd/75): the author kind is known before the
@@ -1008,6 +1023,11 @@ class Reducer:
         prd/78: a human *opener* that is a no-fit notice (rebase/merge, review
         request, author status, bare link, fyi) is ``admin``. Replies never
         reach this method as an opener, so a status note there stays evidence.
+
+        prd/79: the PR author's own opener is an administrative note unless it
+        asks the reviewers something (:func:`ingest.citext.looks_like_question`).
+        The comparison is pseudonym-to-pseudonym, both already deterministic, so
+        it costs no model call. A bot is never an author note.
         """
         if entry.get("comment_kind"):
             return
@@ -1028,6 +1048,13 @@ class Reducer:
             return
         if citext.is_bot_request(text, self.cfg.bot_aliases):
             entry["comment_kind"] = "bot_request"
+        elif (
+            author
+            and actor == author
+            and (text or "").strip()
+            and not citext.looks_like_question(text)
+        ):
+            entry["comment_kind"] = "admin"
         elif citext.is_admin(text) or citext.is_notice(text):
             entry["comment_kind"] = "admin"
         else:
@@ -1120,6 +1147,7 @@ class Reducer:
         severity: str,
         stats: Stats,
         *,
+        author: str | None = None,
         context: dict | None = None,
     ) -> tuple[dict | None, str | None]:
         """Raw comment body -> (closed labels, backend version).
@@ -1141,13 +1169,22 @@ class Reducer:
         body = str(text or "").strip()
         if (
             citext.is_bot_request(body, self.cfg.bot_aliases)
+            or (
+                # prd/79: the PR author's own note is not a review remark, so it
+                # is never sent -- unless it asks the reviewers something.
+                author
+                and actor == author
+                and body
+                and not citext.looks_like_question(body)
+            )
             or citext.is_admin(body)
             or citext.is_notice(body)
         ):
-            # A command addressed to a tool, a status note, or a no-fit notice
-            # (prd/75, prd/78): not a review remark, so there is nothing to
-            # classify. This is the **opener** path only; a nested reply is
-            # never filtered here (prd/78 "replies are exempt").
+            # A command addressed to a tool, a status note, a no-fit notice
+            # (prd/75, prd/78), or the PR author's own note (prd/79): not a
+            # review remark, so there is nothing to classify. This is the
+            # **opener** path only; a nested reply is never filtered here
+            # (prd/78 "replies are exempt").
             return None, None
         if not body:
             # An attachment-only or empty comment: the residual label, decided

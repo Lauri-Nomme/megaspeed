@@ -959,7 +959,9 @@ class Golden10Tests(unittest.TestCase):
         # replies are asserted separately so a change in either half is visible.
         # prd/75: the capture's only description `?` is a URL query string
         # (`…/commits/<sha>?since=<sha>`), so the description guard drops its
-        # question event; the one comment question in PR 8 remains.
+        # question event. prd/79: the capture's only comment question (PR 8) is
+        # the PR author's own note -- an administrative note, not a review
+        # remark -- so it is no longer sent to the model either.
         self.assertEqual(events, {
             "pr_opened": 10,
             "comment_added": 23,
@@ -968,7 +970,6 @@ class Golden10Tests(unittest.TestCase):
             "pr_merged": 5,
             "pr_pushed": 4,
             "pr_unapproved": 2,
-            "question_raised": 1,
             "pr_declined": 1,
         })
         self.assertEqual(
@@ -1029,11 +1030,19 @@ class Golden10Tests(unittest.TestCase):
         ).fetchall()
         self.assertEqual(len(rows), 19)
         kinds = set()
+        unlabelled = []
         for (attrs,) in rows:
             payload = json.loads(attrs)
+            if "comment_type" not in payload:
+                # prd/79: an opener written by the PR author is admin and gets no
+                # review label. The golden capture has exactly one (PR 8).
+                self.assertEqual(payload["comment_kind"], "admin")
+                unlabelled.append(payload)
+                continue
             self.assertIn(payload["comment_type"], taxonomy.COMMENT_TYPE)
             self.assertIn(payload["thread_outcome"], taxonomy.THREAD_OUTCOME)
             kinds.add(payload["comment_type"])
+        self.assertEqual(len(unlabelled), 1)
         self.assertGreaterEqual(len(kinds), 2)
 
     def test_verify_passes(self):

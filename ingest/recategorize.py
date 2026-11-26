@@ -20,6 +20,11 @@ thread's **opener** with :mod:`ingest.citext`, and writes only closed labels:
 
 ``thread_outcome`` is deliberately left alone: it is derived from the diff and
 the resolver, not from the comment text, so it stays truthful for any thread.
+
+prd/79: a human opener written by the PR author is ``admin`` (the author's own
+note is not a review remark) unless it asks the reviewers something. The author
+comes from the PR object's ``actor`` (its documented role), joined through the
+thread id; a thread with no text stays ``review``.
 """
 
 from __future__ import annotations
@@ -72,6 +77,34 @@ def _openers(con) -> dict[str, str]:
     }
 
 
+def _pr_authors(con) -> dict[str, str]:
+    """PR object id -> author pseudonym (``objects.actor``, prd/44 DES-6).
+
+    The column's role for a PR *is* the author (``store.ACTOR_ROLE_BY_TYPE``),
+    so this is the same deterministic pseudonym the reducer wrote in
+    :meth:`ingest.pipeline.Reducer.reduce`. An old or hand-built store may have
+    no ``actor`` on its PR rows; the map is then empty and the prd/79 rule
+    simply never fires (never guessed).
+    """
+    return {
+        object_id: actor
+        for object_id, actor in con.execute(
+            "SELECT object_id, actor FROM objects"
+            " WHERE object_type='PR' AND actor IS NOT NULL"
+        ).fetchall()
+        if actor
+    }
+
+
+def _thread_pr(thread_id: str) -> str:
+    """``THREAD:<repo>#<pr>:<comment>`` -> ``PR:<repo>#<pr>`` (else ``""``)."""
+    body = thread_id.partition("THREAD:")[2]
+    repo_pr, _sep, comment = body.rpartition(":")
+    if not repo_pr or not comment:
+        return ""
+    return f"PR:{repo_pr}"
+
+
 def _trace_texts(trace_path: Path) -> dict[str, str]:
     """thread id -> **opener** text (prd/78: replies are never read here).
 
@@ -88,8 +121,37 @@ def _trace_texts(trace_path: Path) -> dict[str, str]:
     return texts
 
 
-def _kind_for(text: str, opener_kind: str, aliases: tuple[str, ...]) -> tuple[str, dict[str, Any]]:
-    """``(comment_kind, extra attributes)`` from the opener text and actor kind."""
+def _is_author_note(text: str, opener_kind: str, opener_actor: str, author: str) -> bool:
+    """prd/79: a human opener written by the PR author that is not a question.
+
+    An empty (or whitespace) body is not an author note: without text the safe
+    default is ``review``, never a guess.
+    """
+    return bool(
+        (text or "").strip()
+        and author
+        and opener_kind != "bot"
+        and opener_actor == author
+        and not citext.looks_like_question(text)
+    )
+
+
+def _kind_for(
+    text: str,
+    opener_kind: str,
+    aliases: tuple[str, ...],
+    *,
+    opener_actor: str = "",
+    author: str = "",
+) -> tuple[str, dict[str, Any]]:
+    """``(comment_kind, extra attributes)`` from the opener text and actor kind.
+
+    prd/79: a human opener written *by the PR author* is an administrative note,
+    not a review remark -- unless it asks the reviewers something. The check
+    runs after the bot paths (a bot is never an author note) and before
+    ``is_admin``/``is_notice`` (which it mostly subsumes for author text). With
+    no text there is no author-note path: the caller keeps ``review``.
+    """
     if opener_kind == "bot":
         template, issues, low = citext.ci_kind(text)
         if template == "unknown":
@@ -103,6 +165,10 @@ def _kind_for(text: str, opener_kind: str, aliases: tuple[str, ...]) -> tuple[st
         return ("ci_finding" if template == "qodana_issues" else "ci_notice"), extra
     if text and citext.is_bot_request(text, aliases):
         return "bot_request", {}
+    if _is_author_note(text, opener_kind, opener_actor, author):
+        # prd/79: the author explaining or justifying their own change. The
+        # existing ``admin`` kind, no new attribute (no schema change).
+        return "admin", {}
     if text and citext.is_notice(text):
         # prd/78: rebase/merge, review requests, author status notes, bare
         # links, fyi -- a status note, not a review remark.
@@ -135,6 +201,7 @@ def recategorize(
     }
     try:
         person_kind = _person_kinds(con)
+        pr_author = _pr_authors(con)
         openers = _openers(con)
         texts = _trace_texts(trace_path)
         rows = con.execute(
@@ -143,6 +210,7 @@ def recategorize(
         kinds = Counter()
         removed_types = Counter()
         no_text = Counter()
+        author_notes = 0
         changed = 0
         updates: list[tuple[str, str]] = []
         for thread_id, raw in rows:
@@ -156,7 +224,15 @@ def recategorize(
                 # remark and keeps its label (the safe default).
                 kind, extra = ("bot", {}) if opener_kind == "bot" else ("review", {})
             else:
-                kind, extra = _kind_for(text, opener_kind, cfg.bot_aliases)
+                author = pr_author.get(_thread_pr(thread_id), "")
+                if _is_author_note(text, opener_kind, actor, author):
+                    # prd/79: reported on its own line so the new admin count can
+                    # be checked against the author-opener count (minus questions).
+                    author_notes += 1
+                kind, extra = _kind_for(
+                    text, opener_kind, cfg.bot_aliases,
+                    opener_actor=actor, author=author,
+                )
             kinds[kind] += 1
             new = dict(attributes)
             new["comment_kind"] = kind
@@ -199,6 +275,7 @@ def recategorize(
                 "threads": len(rows),
                 "threads_changed": changed,
                 "kinds": dict(kinds),
+                "author_notes": author_notes,
                 "removed_labels": dict(removed_types),
                 "no_text": dict(no_text),
                 "actor_kind_repaired": len(actor_updates),
@@ -273,6 +350,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"trace    {report['trace']}")
     print(f"threads  {report['threads']} · changed {report['threads_changed']}")
     print(f"kinds    {report['kinds']}")
+    print(f"notes    {report['author_notes']} author openers -> admin (prd/79)")
     if report["removed_labels"]:
         print(f"removed  {report['removed_labels']}")
     if report["no_text"]:

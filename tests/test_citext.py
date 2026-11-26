@@ -211,6 +211,50 @@ class DescriptionQuestionTests(unittest.TestCase):
             self.assertFalse(citext.has_real_question(text), text)
 
 
+class QuestionGuardTests(unittest.TestCase):
+    """prd/79: the author-note guard -- a question or a request, ``?`` or not."""
+
+    def test_a_question_word_opens_a_question(self):
+        for text in (
+            "Why the extra guard",
+            "should the retry budget grow",
+            "Can we ship before the freeze",
+            "Is the cache shared between tenants",
+            "does the metric include bots",
+            "Where is the flag read",
+            "> Who resolves the thread",
+        ):
+            self.assertTrue(citext.looks_like_question(text), text)
+
+    def test_a_request_to_reviewers_opens_a_question(self):
+        for text in (
+            "please review",
+            "Please check the retry path",
+            "pls review this again",
+            "## please take a look",
+        ):
+            self.assertTrue(citext.looks_like_question(text), text)
+
+    def test_the_real_question_mark_is_reused(self):
+        self.assertTrue(citext.looks_like_question("the cache key looks wrong?"))
+        # a URL query string and a code sample are still not questions
+        self.assertFalse(
+            citext.looks_like_question("the report is at https://x/y?a=1")
+        )
+        self.assertFalse(citext.looks_like_question("the guard `a?.b` stays"))
+
+    def test_author_statement_prose_is_not_a_question(self):
+        for text in (
+            "",
+            "   ",
+            "This keeps the existing retry budget unchanged.",
+            "Isolated the flag behind a config default so the old path is intact.",
+            "The change only touches the admin surface.",
+            "I moved the constant into the settings module.",
+        ):
+            self.assertFalse(citext.looks_like_question(text), text)
+
+
 class BotRequestTests(unittest.TestCase):
     def test_alias_in_prose(self):
         self.assertTrue(citext.is_bot_request("@BOT review", ["bot"]))
