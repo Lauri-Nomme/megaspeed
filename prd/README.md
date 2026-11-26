@@ -133,4 +133,5 @@ Draft. Iterating in committed slices. **No implementation yet.**
 | `76-reply-events.md` | Replies as first-class events (v0.21 design; implemented) |
 | `77-policy-lab-cache.md` | The policy-lab result survives a restart (v0.21.1) |
 | `78-no-fit-filter.md` | Deterministic no-fit/notice filter (v0.22.0; measured, scope corrected) |
-| `79-author-notes.md` | Author-authored openers are not review remarks (draft) |
+| `79-author-notes.md` | Author-authored openers are not review remarks (implemented v0.24.0) |
+| `80-browser-jira-titles.md` | Ticket titles resolved in the browser (draft; needs §8 answers) |
