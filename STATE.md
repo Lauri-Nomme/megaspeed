@@ -73,6 +73,29 @@ write is atomic and best-effort, and the memory cache still fronts it. Tests:
 second process reads the disk, window/store changes are new keys, corrupt files
 are ignored, an unavailable report is not written.
 
+## v0.24.2 — the no-fit filter ships; close/status phrases go trailing-only
+
+- The last latent false-positive path is gone: `_PROCESS` no longer accepts a
+  standalone "should be merged/closed/approved", and `_STATUS` needs an object
+  (`closing this`, `closed the PR`). A bare `closed`, `close it` or
+  "this should be closed" is a review remark again — the 13 resource-close
+  remarks (buffer/sink/stream/executor) are the reason.
+- C widened with pinned shapes: `welcome comments later`, reviewer-added notes
+  without a handle, `you should rebase` / `please rebase this`, a named group's
+  review with or without the word "team", a merge-plan statement, a mention
+  across a line break, and a 400-char body carrying a handle.
+- B: a short branch note without a reference (`Rebased on main`,
+  `Merged master`), reshuffle wording with words between verb and noun, and up
+  to two short inline tokens (B/C only).
+- G: `see attached`, `this is the report`, `the link is below`, a trailing
+  "should" phrase after a link.
+- **Shipped as good enough.** Final gold: 13/97 train, B/C/G 8/25,
+  **0/156 false positives** (0/62 holdout). The ≥23 target is not met and will
+  not be chased; missed notices stay `review`. prd/78 records the trade.
+- 1,647 tests / 426 subtests, 99 scrape tests. Store unchanged: review 6,740 ·
+  admin 2,100 · bot_request 112 (the ~39-thread quoted bot-request/C delta is
+  deliberately not migrated).
+
 ## v0.24.1 — quoted handles and the guarded mention family
 
 - `citext.mentions` reads the DC quoted form `@"name"`/`@'name'` (355 corpus

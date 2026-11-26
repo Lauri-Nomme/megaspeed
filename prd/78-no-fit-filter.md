@@ -1,6 +1,6 @@
 # 78 — The deterministic no-fit filter
 
-Status: **implemented (v0.22.0); measured, scope corrected (2026-11-26).**
+Status: **shipped (v0.24.2); measured, completeness gap accepted (2026-11-26).**
 The first gold measurement: **0 false positives** (0/156 train, 0/62 holdout),
 but only **3/97** gold-nofit caught. The target was mis-specified: gold `nofit`
 includes author explanations (39), process/deferral notes (14), benchmark
@@ -119,6 +119,22 @@ clause and a reference, team/mention review requests, pointers, and five whole
 text process notes). Synthetic shapes are pinned in `tests/test_citext.py`;
 the frozen-gold re-measurement is still the gate. A mention plus a real remark
 is guarded by the defect/remark checks.
+
+### Final measurement (v0.24.2) — shipped as good enough
+
+Three gold rounds on the frozen set: 3/97 → 10/97 → 13/97 train no-fit caught,
+with **0/156 train and 0/62 holdout false positives** in every round. The
+B/C/G slice ended at **8/25** (B 6/10, C 0/10, G 2/5) against a ≥23 target.
+The gap is accepted rather than chased: a missed notice stays `review` (the
+safe default), while a false positive silently deletes a real remark. C is the
+weak family — reviewer-added notes, request wording and multi-line bodies are
+too close to ordinary review prose to pattern without risk.
+
+v0.24.2 removed the last latent false-positive path: standalone close/status
+phrases (`this should be closed`, `should be closed`, `close it`, bare
+`closed`) are no longer notices; `closing`/`closed` need an object, and only a
+*trailing* "should be merged/closed/approved" tail on a rebase or mention note
+counts. See `STATE.md` for the shape list.
 
 ## Acceptance (redefined)
 
