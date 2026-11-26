@@ -112,6 +112,14 @@ C review-request wording 10, D code fence 8, E process 14, F benchmark 8,
 G link/pointer 5. **B/C/G are the filter's scope**; the fixed lists and the
 code guard are why only 3/25 match. A is PRD 79.
 
+### v0.24.0: B/C/G widened
+
+The fixed lists were widened for the B/C/G families (rebase/merge with a reason
+clause and a reference, team/mention review requests, pointers, and five whole
+text process notes). Synthetic shapes are pinned in `tests/test_citext.py`;
+the frozen-gold re-measurement is still the gate. A mention plus a real remark
+is guarded by the defect/remark checks.
+
 ## Acceptance (redefined)
 
 On the frozen gold set (`v3` iteration `gold.jsonl`: 97 no-fit rows, 156 real

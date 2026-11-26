@@ -73,6 +73,21 @@ write is atomic and best-effort, and the memory cache still fronts it. Tests:
 second process reads the disk, window/store changes are new keys, corrupt files
 are ignored, an unavailable report is not written.
 
+## v0.24.0 — no-fit phase 2: wider notices, author notes
+
+- `is_notice` widened to the B/C/G notice shapes (rebase/merge with a reason and
+  a reference, team/mention review requests, pointers, five process notes);
+  fixed-list misses are the target, not author prose.
+- prd/79: a human **opener by the PR author** that is not a question is
+  `comment_kind=admin` (no `comment_type`, no model call); author questions stay
+  `review`; replies are untouched. The reducer and `recategorize` both apply it,
+  and the store migration reports `author_notes` separately.
+- The live store has 2,894 threads whose opener is the PR author; the migration
+  is pending the trace. A recategorize dry run must run with
+  `MEGASPEED_BOT_ALIASES=APE`, or the 112 bot-directed threads regress.
+- 1,636 tests (357 subtests) and 99 scrape tests. The B/C/G gold re-measurement
+  and the store migration remain the two checks.
+
 ## v0.23.0 — the reply decides the intent fallback
 
 - prd/75 remaining: for a **resolved** thread whose diff is **unknown** and

@@ -1,6 +1,6 @@
 # 79 — Author notes are not review remarks
 
-Status: **draft; needs sign-off.**
+Status: **implemented (v0.24.0).**
 
 ## Problem
 
