@@ -73,6 +73,23 @@ write is atomic and best-effort, and the memory cache still fronts it. Tests:
 second process reads the disk, window/store changes are new keys, corrupt files
 are ignored, an unavailable report is not written.
 
+## v0.24.1 — quoted handles and the guarded mention family
+
+- `citext.mentions` reads the DC quoted form `@"name"`/`@'name'` (355 corpus
+  openers; 79 bare), so `is_bot_request` finally sees the 29 quoted
+  service-account commands and the C review requests.
+- `_MENTION_REQUEST` left the general notice list; every mention goes through
+  `_is_mention_request` and its real-remark guard. A quoted mention plus “check
+  whether this copy is needed, and why” stays a review remark; a quoted service
+  command is a bot request.
+- B/C/G: one short inline token (B/C only), a 400-char bound with a reference,
+  a trailing “should be merged/closed” process phrase, team/named-group review
+  requests, commit-reshuffle wording, footnote pointers; every pinned false
+  positive still passes (0 on the frozen gold at v0.24.0).
+- 1,644 tests / 384 subtests; the v0.24.1 frozen-gold re-measurement is the
+  gate before the store migration or a re-scrape. Do not apply the new B/C/G
+  shapes to the live store until it passes.
+
 ## v0.24.0 — no-fit phase 2: wider notices, author notes
 
 - `is_notice` widened to the B/C/G notice shapes (rebase/merge with a reason and
