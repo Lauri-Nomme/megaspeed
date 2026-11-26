@@ -132,4 +132,5 @@ Draft. Iterating in committed slices. **No implementation yet.**
 | `75-label-prompt-v2.md` | Label prompt v2, CI/admin taxonomy and the anchor-diff verdict |
 | `76-reply-events.md` | Replies as first-class events (v0.21 design; implemented) |
 | `77-policy-lab-cache.md` | The policy-lab result survives a restart (v0.21.1) |
-| `78-no-fit-filter.md` | Deterministic no-fit/notice filter (draft; before the o2 re-screen) |
+| `78-no-fit-filter.md` | Deterministic no-fit/notice filter (v0.22.0; measured, scope corrected) |
+| `79-author-notes.md` | Author-authored openers are not review remarks (draft) |

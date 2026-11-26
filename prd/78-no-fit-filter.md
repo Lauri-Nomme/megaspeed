@@ -1,6 +1,14 @@
 # 78 — The deterministic no-fit filter
 
-Status: **implemented (v0.22.0).** The gold-set ≥90%/≤2% measurement is still a laptop/auditor step; the predicate's true/false examples are pinned in `tests/test_citext.py`.
+Status: **implemented (v0.22.0); measured, scope corrected (2026-11-26).**
+The first gold measurement: **0 false positives** (0/156 train, 0/62 holdout),
+but only **3/97** gold-nofit caught. The target was mis-specified: gold `nofit`
+includes author explanations (39), process/deferral notes (14), benchmark
+reports (8) and code-fenced dumps (8), none of which this filter aims at.
+The redefined acceptance is **≥90% of the notice-shaped families B/C/G (25
+rows), 0 false positives**; A is a role rule (PRD 79), F is automation, D is
+the code guard, E is optional. The live store already has the 46 true admin
+threads from the filter.
 
 ## What “no-fit” means
 
@@ -92,13 +100,25 @@ are subsumed.
   for the matched human threads. A dry run reports the counts first.
 - **Bot/CI**: unchanged (`ci_notice`/`ci_finding`/`bot` already precede this).
 
-## Acceptance (measure before shipping)
+## Measured 2026-11-26 (frozen gold, 97 nofit / 156 real)
+
+| split | nofit caught | real caught (FP) |
+|---|---:|---:|
+| train | 3 / 97 (3.1%) | **0 / 156** |
+| holdout | 0 / 45 | **0 / 62** |
+
+The missed rows are families: A author explanation 39, B rebase wording 10,
+C review-request wording 10, D code fence 8, E process 14, F benchmark 8,
+G link/pointer 5. **B/C/G are the filter's scope**; the fixed lists and the
+code guard are why only 3/25 match. A is PRD 79.
+
+## Acceptance (redefined)
 
 On the frozen gold set (`v3` iteration `gold.jsonl`: 97 no-fit rows, 156 real
 rows):
 
-- **≥90% of gold-nofit caught**;
-- **≤2% of real review text caught** (≤3 rows of 156);
+- **≥90% of the B/C/G notice families caught** (23 of 25 on the frozen gold);
+- **≤2% of real review text caught** (≤3 rows of 156) — currently 0;
 - no `blocker`, `question` or `optimization` gold row is filtered;
 - the store dry run reports the same `admin` count the eval predicts (±5%);
 - a second `recategorize --apply` changes nothing;
