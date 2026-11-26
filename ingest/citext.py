@@ -160,6 +160,46 @@ def has_real_question(text: str) -> bool:
     return "?" in prose
 
 
+#: prd/79: the opening word of a question. The list is closed and anchored on
+#: the first word, so "Isolate the flag" is not a question and "Is the cache
+#: shared?" is. A ``?`` anywhere in the prose is already
+#: :func:`has_real_question`; this catches the question that omits it.
+QUESTION_OPENER = re.compile(
+    r"(?:why|what|how|should|could|can|is|are|does|do|did|where|when|who|which"
+    r"|would|will)\b",
+    re.I,
+)
+
+#: prd/79: an opening request to the reviewers ("please review/check").
+REQUEST_OPENER = re.compile(
+    r"(?:please|pls)\s+(?:re-?review|review|check|take\s+a\s+look"
+    r"|have\s+a\s+look|look|ptal)\b",
+    re.I,
+)
+
+#: Blockquote markers, bullets, emoji and leading punctuation before the first
+#: word. Only the opening word is read, never a later one.
+_OPENER_TRIM = re.compile(r"^[\s>*#\-–—•✅⚠️:]+")
+
+
+def looks_like_question(text: str) -> bool:
+    """True when the text asks or requests something (prd/79).
+
+    The guard for the author-note rule: an author's own *question* to the
+    reviewers is a review remark, not an administrative note. True when a real
+    ``?`` sits in the prose (:func:`has_real_question` -- not a URL query string
+    and not code) or when the text opens with a question word or a "please
+    review/check". Statement prose is what the rule is for; it returns False.
+    """
+    body = (text or "").strip()
+    if not body:
+        return False
+    if has_real_question(body):
+        return True
+    lead = _OPENER_TRIM.sub("", body)
+    return bool(QUESTION_OPENER.match(lead) or REQUEST_OPENER.match(lead))
+
+
 #: A mention that is a tool even when its alias was not configured: service
 #: accounts are named ``svc-…``, ``ci-…``, ``…-bot``, or a bare ``bot``.
 SERVICE_HANDLE = re.compile(

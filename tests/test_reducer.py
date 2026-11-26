@@ -484,6 +484,70 @@ class CommentKindTests(unittest.TestCase):
             ["fixed in the next push"],
         )
 
+    # -- prd/79: the author's own opener is an administrative note ----------
+
+    def _author_thread(self, text, opener, replies=()):
+        return self._reduce_fresh(_pr([
+            _activity(1, "OPENED", 0, ADA),
+            _activity(
+                2, "COMMENTED", 5, opener,
+                comment=self._comment(text, opener, replies=replies),
+                commentAction="ADDED",
+                commentAnchor={"path": "a.py", "line": 1},
+            ),
+        ]))
+
+    def test_an_author_explanation_is_an_admin_note_and_never_calls_the_model(self):
+        # ADA authored the PR (``_pr``), so her own statement is not a review
+        # remark and must not enter the comment tax (prd/79).
+        attrs, stats = self._author_thread(
+            "This keeps the existing retry budget unchanged. The extra guard "
+            "only applies to the admin path, so the hot path is untouched.",
+            ADA,
+        )
+        self.assertEqual(attrs["comment_kind"], "admin")
+        self.assertNotIn("comment_type", attrs)
+        self.assertNotIn("classifier_version", attrs)
+        self.assertEqual(self.classifier.seen, [])
+        events = [e for e in stats.events if e["activity"] == "comment_added"]
+        self.assertEqual(len(events), 1)
+
+    def test_an_author_question_stays_a_review_remark(self):
+        for text in (
+            "Should the guard also cover the retry path?",
+            "Should the guard also cover the retry path",
+            "why is the cache key shared",
+            "please review the guard placement",
+        ):
+            with self.subTest(text=text):
+                self.classifier.seen.clear()
+                attrs, _stats = self._author_thread(text, ADA)
+                self.assertEqual(attrs["comment_kind"], "review", text)
+                self.assertEqual(attrs["comment_type"], "nit", text)
+                self.assertEqual(
+                    [seen[0] for seen in self.classifier.seen], [text], text
+                )
+
+    def test_a_reviewer_statement_opener_stays_a_review_remark(self):
+        attrs, _stats = self._author_thread(
+            "the guard silently swallows the retry budget", GRACE
+        )
+        self.assertEqual(attrs["comment_kind"], "review")
+        self.assertEqual(attrs["label_source"], "opener")
+        self.assertEqual(attrs["comment_type"], "nit")
+
+    def test_an_author_status_reply_does_not_admin_the_thread(self):
+        # prd/79 "replies stay exempt": the author's own "fixed in ..." is the
+        # outcome evidence, not an opener -- the reviewer's thread stays review.
+        attrs, _stats = self._author_thread(
+            "the cache key is missing the model name",
+            GRACE,
+            replies=[{"id": 102, "text": "fixed in abc1234", "author": ADA}],
+        )
+        self.assertEqual(attrs["comment_kind"], "review")
+        self.assertEqual(attrs["label_source"], "opener")
+        self.assertEqual(attrs["comment_type"], "nit")
+
 
 class ReplyIntentTests(unittest.TestCase):
     """prd/75: the last human reply is the outcome evidence when the diff is unknown."""

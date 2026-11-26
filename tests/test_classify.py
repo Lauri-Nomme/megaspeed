@@ -50,6 +50,7 @@ T0 = 1_790_000_000_000  # epoch ms
 
 ADA = {"name": "ada", "displayName": "Ada Lovelace", "type": "NORMAL"}
 GRACE = {"name": "grace", "displayName": "Grace Hopper", "type": "NORMAL"}
+ALAN = {"name": "alan", "displayName": "Alan Turing", "type": "NORMAL"}
 
 
 def _config(root: Path) -> Config:
@@ -727,11 +728,12 @@ class ReducerBatchTests(unittest.TestCase):
         # The trace is per call and carries the thread it came from: a relabel
         # run must be able to correct *both* threads, so an identical text in
         # two threads is two records (the labels are, of course, identical).
+        # prd/79: both openers are reviewers -- an author's own text is skipped.
         pr = _pr(description="", activities=[
             _activity(1, "OPENED", 0, ADA),
             _activity(2, "COMMENTED", 5, GRACE,
                       comment=_comment(101, "nit: rename this"), commentAction="ADDED"),
-            _activity(3, "COMMENTED", 6, ADA,
+            _activity(3, "COMMENTED", 6, ALAN,
                       comment=_comment(102, "nit: rename this"), commentAction="ADDED"),
         ])
         self._reduce(pr)
