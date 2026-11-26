@@ -127,16 +127,33 @@ def is_admin(text: str) -> bool:
 
 
 #: ``@handle`` outside code fences/inline code and not an email local part.
+#: Bitbucket DC writes 355 corpus handles in the quoted form (``@"name"``,
+#: ``@'name'``); they are mentions exactly like the bare form (prd/78 round 2).
 CODE = re.compile(r"```.*?```|`[^`\n]*`", re.S)
+FENCE = re.compile(r"```.*?```", re.S)
+#: One *short* inline token may decorate an otherwise notice-shaped text (a
+#: path, a method name). A long token or several tokens are content, not
+#: decoration, and cancel the notice.
+INLINE = re.compile(r"`([^`\n]{1,40})`")
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
-MENTION = re.compile(r"(?<![\w.+-])@([A-Za-z][\w.-]*)")
+MENTION = re.compile(
+    r"(?<![\w.+-])@(?:\"([^\"\n]{1,64})\"|'([^'\n]{1,64})'|([A-Za-z][\w.-]*))"
+)
 
 
 def mentions(text: str) -> list[str]:
-    """``@handles`` in prose, not in code fences, inline code, or an email."""
+    """``@handles`` in prose, not in code fences, inline code, or an email.
+
+    Both ``@handle`` and the quoted DC form ``@"name"`` / ``@'name'`` are
+    returned as the unquoted handle, so aliases and the service-shape check work
+    on either spelling.
+    """
     prose = CODE.sub(" ", text or "")
     prose = EMAIL.sub(" ", prose)
-    return MENTION.findall(prose)
+    return [
+        match.group(1) or match.group(2) or match.group(3)
+        for match in MENTION.finditer(prose)
+    ]
 
 
 #: A bare URL, and a markdown link target -- a ``?`` in either is a query string,
@@ -316,7 +333,7 @@ _CONFLICTS = re.compile(
 _REVIEW_REQUEST = re.compile(
     r"(?:please\s+)?"
     r"(?:re-?review|review(?:\s+(?:this|it|again|pls|please))?"
-    r"|ptal|take\s+a\s+look|have\s+a\s+look"
+    r"|ptal|(?:take|have)\s+(?:a\s+)?(?:quick\s+)?look"
     r"|(?:a\s+)?quick\s+(?:look|review)"
     r"|looks?\s+good(?:\s+to\s+me)?|lgtm|ship\s+it|\+1|:\+1:|👍"
     r"|approv(?:e|al)|sign[- ]?off)",
@@ -327,7 +344,7 @@ _REVIEW_REQUEST = re.compile(
 _TEAM_REVIEW = re.compile(
     r"(?:(?:can|could)\s+(?:i|we)\s+get\s+(?:a\s+|the\s+)?"
     r"|(?:need|needs|request(?:ing|ed)?|please\s+request)\s+(?:a\s+|the\s+)?)"
-    r"(?:[\w'-]+\s+){0,2}team'?s?\s+(?:review|approval)",
+    r"(?:[\w'-]+\s+){0,2}(?:team'?s?|[\w'-]+['’]s)\s+(?:review|approval)",
     re.I,
 )
 
@@ -336,7 +353,8 @@ _TEAM_REVIEW = re.compile(
 _CAN_REVIEW = re.compile(
     r"(?:can|could|would|will)\s+(?:someone|somebody|anyone|you|u)"
     r"\s+(?:please\s+)?"
-    r"(?:review|take\s+a\s+look|have\s+a\s+look|look\s+(?:at\s+)?(?:this|it|that)"
+    r"(?:review|(?:take|have)\s+(?:a\s+)?(?:quick\s+)?look"
+    r"|look\s+(?:at\s+)?(?:this|it|that)"
     r"|check\s+(?:this|it))"
     r"(?:\s+(?:this|it|that|please|pls))*",
     re.I,
@@ -347,8 +365,10 @@ _CAN_REVIEW = re.compile(
 #: ("@alice wdyt", "@alice thoughts?") are real questions about the code and
 #: stay review remarks. A review request may name what to look at, so it may run
 #: longer than the other short families; :func:`_is_mention_request` bounds it.
+#: The quoted DC spelling (``@"alice"``) is the same mention.
+_HANDLE = r"@(?:\"[^\"\n]{1,64}\"|'[^'\n]{1,64}'|[A-Za-z][\w.-]*)"
 _MENTION_REQUEST = re.compile(
-    r"@[A-Za-z][\w.-]*\s+(?:please\s+|pls\s+)?"
+    _HANDLE + r"\s+(?:please\s+|pls\s+)?"
     r"(?:(?:can|could|would)\s+you\s+(?:please\s+)?|feel\s+free\s+to\s+)?"
     r"(?:review|re-review|look|take\s+a\s+look|have\s+a\s+look|check|ptal"
     r"|approve|approval|sign[- ]?off"
@@ -370,9 +390,11 @@ _NOUN_VERB_NOTE = re.compile(
 #: text carries a reference; :func:`_is_merge_note` enforces that.
 _MERGE_NOTE_WORD = re.compile(r"(?:rebas(?:ed|e|ing)|merg(?:ed|e|ing))", re.I)
 _COMMITS_NOTE = re.compile(
-    r"(?:squash(?:ed|ing)?|reorder(?:ed|ing)?|reshuffl(?:ed|ing)?"
-    r"|rewor(?:k|ked|king)|rewr(?:ite|ote|itten|iting)|moved?)\s+"
-    r"(?:the\s+|all\s+|my\s+|these\s+)?commits?\b",
+    r"(?:(?:squash|reorder|reshuffl|rewor(?:k|ked|king)|rewr(?:ite|ote|itten|iting)"
+    r"|move|split|fold|drop|join|combine|collapse)\w*\s+"
+    r"(?:the\s+|all\s+|my\s+|these\s+|a\s+|an\s+)?commits?\b"
+    r"|commits?\s+(?:squashed|reordered|reshuffled|rewritten|moved|split"
+    r"|folded|dropped|joined|combined|collapsed))",
     re.I,
 )
 
@@ -431,7 +453,7 @@ _ADMIN_TAG = re.compile(
 #: "see above/below" plus a footnote-style "see the link / #123 / the ticket"
 #: (prd/78 G).
 _SEE_ABOVE = re.compile(
-    r"(?:see|as)\s+(?:above|below|#\d+|https?://\S+"
+    r"(?:please\s+)?see\s+(?:above|below|#\d+|https?://\S+|\[\^?\d{1,3}\]"
     r"|the\s+(?:[\w.-]+\s+){0,2}"
     r"(?:link|comment|thread|pr|pull\s+request|ticket|issue|report|logs?|details?)"
     r"|this\s+(?:link|comment|thread|pr|pull\s+request))"
@@ -443,7 +465,17 @@ _SEE_ABOVE = re.compile(
 _POINTER = re.compile(
     r"(?:more\s+)?(?:context|details|info|information|background|reference"
     r"|link|pointer|related)s?\s*(?:[:\-–—]\s*)?"
-    r"(?:see\s+)?(?:above|below|link|#\d+|https?://\S+|[\w.-]+/[\w.-]+)?",
+    r"(?:see\s+)?(?:above|below|link|#\d+|https?://\S+|\[\^?\d{1,3}\]"
+    r"|[\w.-]+/[\w.-]+)?",
+    re.I,
+)
+
+#: An unlabelled pointer sentence ("the report is here", "details are attached").
+_POINTER_SENTENCE = re.compile(
+    r"(?:please\s+)?(?:the\s+)?(?:report|link|details?|context|reference|ticket"
+    r"|issue|pr|pull\s+request|logs?)\s+"
+    r"(?:is|are|can\s+be\s+found)\s+"
+    r"(?:in|at|here|below|above|attached|in\s+the\s+[\w.-]+(?:\s+file)?)",
     re.I,
 )
 
@@ -460,7 +492,20 @@ _PROCESS = re.compile(
     r"|belongs?\s+(?:to|in)\s+(?:a\s+|the\s+)?"
     r"(?:past|previous|last)\s+(?:sprint|release|iteration)"
     r"|(?:please\s+)?keep\s+(?:it|this|the\s+pr)\s+open"
-    r"|merge\s+(?:it\s+|this\s+)?last",
+    r"|merge\s+(?:it\s+|this\s+)?last"
+    r"|(?:this\s+|it\s+|the\s+pr\s+)?should\s+be\s+"
+    r"(?:merged|closed|approved)(?:\s+(?:last|first|now))?",
+    re.I,
+)
+
+#: A trailing process phrase on a rebase/merge note or a review request
+#: ("..., should be merged last"). Stripped before the remark guard, never
+#: allowed to turn a bare "should be ..." into a notice on its own.
+_PROCESS_SHOULD = re.compile(
+    r"\s*[,;:–—-]?\s*(?:this\s+|it\s+|the\s+pr\s+)?should\s+be\s+"
+    r"(?:merged|closed|approved|squashed|rebased)"
+    r"(?:\s+(?:last|first|now|as[- ]is))?"
+    r"(?:\s+(?:after|before)\s+#?\d+)?\s*[.!]*\s*$",
     re.I,
 )
 
@@ -472,7 +517,6 @@ NOTICE_RULES = (
     _REVIEW_REQUEST,
     _TEAM_REVIEW,
     _CAN_REVIEW,
-    _MENTION_REQUEST,
     _NOUN_VERB_NOTE,
     _STATUS,
     _WILL,
@@ -481,6 +525,7 @@ NOTICE_RULES = (
     _ADMIN_TAG,
     _SEE_ABOVE,
     _POINTER,
+    _POINTER_SENTENCE,
     _TRACKED,
     _PROCESS,
 )
@@ -493,7 +538,25 @@ def _notice_core(body: str) -> str:
     return core.rstrip(" \t:,-–—").strip()
 
 
-def _is_merge_note(core: str, body: str) -> bool:
+def _strip_one_inline(body: str) -> str | None:
+    """Remove one short inline-code token, or ``None`` when it is not decoration.
+
+    prd/78 round 2: one short token (a path, a method name) must not cancel an
+    otherwise notice-shaped text. Several tokens, or a long one, are content.
+    """
+    tokens = list(INLINE.finditer(body))
+    if len(tokens) != 1:
+        return None
+    token = tokens[0]
+    return (body[: token.start()] + " " + body[token.end() :]).strip()
+
+
+def _without_process_tail(core: str) -> str:
+    """``core`` without a trailing "..., should be merged/closed last"."""
+    return _PROCESS_SHOULD.sub("", core, count=1).strip().rstrip(" \t:,-–—")
+
+
+def _is_merge_note(core: str, reference_source: str) -> bool:
     """prd/78 B: a rebase/merge/reshuffle note that carries a reference.
 
     The reference (link, sha, #123, branch/path) is what keeps it a note,
@@ -501,42 +564,72 @@ def _is_merge_note(core: str, body: str) -> bool:
     clause or prefix is allowed, but a contrast/remark word sends it to the
     model; :func:`is_notice` still applies :data:`DEFECT`.
     """
-    if not _REF.search(body):
+    note = _without_process_tail(core)
+    if not note or not _REF.search(reference_source):
         return False
-    if not (_MERGE_NOTE_WORD.search(core) or _COMMITS_NOTE.search(core)):
+    if not (_MERGE_NOTE_WORD.search(note) or _COMMITS_NOTE.search(note)):
         return False
-    if _REMARK.search(core):
+    if _REMARK.search(note) or _HERE.search(note):
         return False
-    return len(core.split()) <= 30 and not _HERE.search(core)
+    # A short note is a phrase; a long one may carry a reason clause, but it is
+    # still bounded (B may run to _MAX_NOTICE only with a reference).
+    limit = 30 if len(note) <= _MAX_SHORT_NOTICE else 60
+    return len(note.split()) <= limit
 
 
 def _is_mention_request(core: str) -> bool:
-    """prd/78 C: a human mention that asks for a review, not an opinion."""
-    return bool(_MENTION_REQUEST.fullmatch(core)) and not _REMARK.search(core)
+    """prd/78 C: a human mention that asks for a review, not an opinion.
+
+    The real-remark guard lives here (not in the general rule list): a quoted
+    mention followed by a verdict ("check whether this copy is needed, and why")
+    is a review remark. A service-shaped handle is a bot request, not a notice.
+    """
+    note = _without_process_tail(core)
+    if not note or is_bot_request(note, ()):
+        return False
+    return bool(_MENTION_REQUEST.fullmatch(note)) and not _REMARK.search(note)
 
 
 def _is_pointer(core: str) -> bool:
     """prd/78 G: a short labelled pointer with framing text."""
-    return bool(_POINTER.fullmatch(core)) and not _REMARK.search(core)
+    note = _without_process_tail(core)
+    return bool(note) and bool(_POINTER.fullmatch(note)) and not _REMARK.search(note)
 
 
 def is_notice(text: str) -> bool:
     """True when the **whole** text is a no-fit notice, not a review remark.
 
-    The match is anchored (``fullmatch`` on the stripped text) and bounded, and
-    a code fence, inline code or a concrete defect phrase always wins: those are
-    review text even when they open with "rebased" or "will fix". A bare link,
-    an image attachment and ``same as`` keep their :func:`is_admin` answers, so
-    this predicate is a strict superset of it.
+    A code fence always wins; one *short* inline token is removed before
+    matching (prd/78 round 2), but a second token is code again. A concrete
+    defect phrase always wins too: those are review text even when they open
+    with "rebased" or "will fix". A bare link, an image attachment and
+    ``same as`` keep their :func:`is_admin` answers, so this predicate is a
+    strict superset of it.
 
     prd/78 B/C/G widen the anchored rules: a rebase/merge note may carry a
     reason clause but **must** carry a reference, a mention may name what to
-    look at, and a pointer may be framed. Those matches are still whole-text,
-    short (a mention over 200 chars must carry a link) and defeated by code or
-    a defect/remark word.
+    look at (and is always run through the real-remark guard), and a pointer may
+    be framed. B/C may run to :data:`_MAX_NOTICE` when they carry a reference;
+    the status families stay at :data:`_MAX_SHORT_NOTICE`.
     """
     body = (text or "").strip()
     if not body or len(body) > _MAX_NOTICE:
+        return False
+    if FENCE.search(body):
+        return False
+    if INLINE.search(body):
+        # One short inline token is decoration only for B/C. The token itself
+        # may be the reference ("rebased `feature/x`"), so the pre-strip text is
+        # the reference source. Every other family stays code-blocked, which
+        # keeps "see `rebase` above" a review remark.
+        stripped = _strip_one_inline(body)
+        if stripped is None or not stripped or CODE.search(stripped):
+            return False
+        core = _notice_core(stripped)
+        if not core:
+            return False
+        if _is_merge_note(core, body) or _is_mention_request(core):
+            return not DEFECT.search(core)
         return False
     if CODE.search(body):
         return False
@@ -549,10 +642,10 @@ def is_notice(text: str) -> bool:
     if is_admin(core):
         return True
     if len(core) > _MAX_SHORT_NOTICE:
-        # A long text is never a bare status note; only a review request that
-        # names what to look at and carries a link is (prd/78 C).
-        if _is_mention_request(core) and _REF.search(body):
-            return not DEFECT.search(core)
+        # Only B/C may run long, and only with a reference.
+        if _REF.search(body):
+            if _is_merge_note(core, body) or _is_mention_request(core):
+                return not DEFECT.search(core)
         return False
     if _is_merge_note(core, body) or _is_mention_request(core) or _is_pointer(core):
         return not DEFECT.search(core)

@@ -85,6 +85,49 @@ class AdminTests(unittest.TestCase):
             self.assertFalse(citext.is_admin(text), text)
 
 
+class QuotedMentionTests(unittest.TestCase):
+    """prd/78 round 2: DC's quoted ``@"name"`` handles are mentions too."""
+
+    def test_quoted_handles_are_returned_unquoted(self):
+        self.assertEqual(citext.mentions('@"alice" review'), ["alice"])
+        self.assertEqual(citext.mentions("@'bob' please look"), ["bob"])
+        self.assertEqual(
+            citext.mentions('@"alice" and @bob and @"svc-review"'),
+            ["alice", "bob", "svc-review"],
+        )
+
+    def test_quoted_code_and_email_are_not_mentions(self):
+        self.assertEqual(citext.mentions('see `@"alice"` above'), [])
+        self.assertEqual(citext.mentions("mail a@bob.com"), [])
+
+    def test_quoted_service_handle_is_a_bot_request(self):
+        self.assertTrue(citext.is_bot_request('@"svc-review" please look', []))
+        self.assertTrue(citext.is_bot_request('@"ci-bot" run', []))
+        self.assertTrue(citext.is_bot_request('@"APE" review', ["ape"]))
+
+    def test_quoted_human_handle_is_not_a_bot_request(self):
+        self.assertFalse(citext.is_bot_request('@"alice" wdyt', []))
+        self.assertFalse(citext.is_bot_request('@"APE" review', []))
+
+    def test_quoted_mention_review_is_a_notice(self):
+        self.assertTrue(citext.is_notice('@"alice" review'))
+        self.assertTrue(citext.is_notice('@"alice" please take a look'))
+
+    def test_quoted_mention_with_a_verdict_is_not_a_notice(self):
+        self.assertFalse(
+            citext.is_notice('@"alice" check whether this copy is needed, and why')
+        )
+
+    def test_quoted_service_handle_is_a_bot_request_not_a_notice(self):
+        # The service shape is bot_request before the notice filter runs.
+        self.assertTrue(citext.is_bot_request('@"svc-review" review', []))
+        self.assertFalse(citext.is_notice('@"svc-review" review'))
+
+    def test_quoted_opinion_questions_stay_non_notices(self):
+        self.assertFalse(citext.is_notice('@"alice" wdyt about the cache key?'))
+        self.assertFalse(citext.is_notice('@"alice" thoughts?'))
+
+
 class NoticeTests(unittest.TestCase):
     """prd/78: the deterministic no-fit filter, whole-text and conservative."""
 
@@ -232,6 +275,38 @@ class NoticeTests(unittest.TestCase):
         "belongs to a past sprint",
         "keep it open",
         "merge it last",
+        "should be merged last",
+        "This should be closed",
+        # round 2 -- wording that missed the closed lists
+        "could you have a quick look",
+        "take a quick look",
+        "Could I get the frontend's review?",
+        "Needs the frontend's review",
+        "Split the commits into two: https://x/commits/abc",
+        "Commits reordered to keep the diff readable: https://x/commits/abc",
+        "Dropped a commit from the branch: https://x/commits/abc",
+        # round 2 -- one short inline token is decoration, not content
+        "Rebased `feature/x` onto main: https://x/commits/abc",
+        '@"alice" review the new `CacheKey` class: https://x/pr/1',
+        # round 2 -- B/C may run to 400 chars with a reference
+        "Because the shared cache refactor landed in #123 and this branch was "
+        "three commits behind the new base, rebased onto main: "
+        "https://x/commits/abc and resolved the conflicts in the cache loader "
+        "and the retry helper",
+        '@"alice" could you please take a look at the new cache key computation '
+        "and the retry policy in the loader, because both changed for every "
+        "caller in the pipeline and the comments in the new helper are a bit "
+        "sparse: https://x/pr/1",
+        # round 2 -- a trailing process phrase after a link/handle
+        "Rebased onto main: https://x/commits/abc, should be merged last",
+        '@"alice" please review this, should be merged last',
+        # round 2 -- footnote brackets and an unlabelled pointer sentence
+        "see [1]",
+        "see [^2]",
+        "please see the report",
+        "The report is here",
+        "Details are below",
+        "The link is attached",
     )
 
     #: The same widened families, but the text is a remark about the code. The
@@ -246,6 +321,16 @@ class NoticeTests(unittest.TestCase):
         "keep it open until the cache is fixed",
         "@alice wdyt about the cache key?",  # opinion question, pinned
         "@alice thoughts?",  # opinion question, pinned
+        # round 2 -- quoted mention plus a verdict is a review remark
+        '@"alice" check whether this copy is needed, and why',
+        # round 2 -- inline code in a remark is content, and the strip cannot
+        # turn a pointer into a notice
+        "this `map.get(k)` returns null when the key is missing",
+        "please review `src/main.py`, it has a wrong branch",
+        "The report is here but the numbers are missing",
+        "the link is broken https://x",
+        # a long status note may not use the B/C 400-char allowance
+        "will add the fix " + "and a test " * 20,
     )
 
     def test_widened_bc_g_shapes_are_notices(self):
