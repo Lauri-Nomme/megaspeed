@@ -192,6 +192,40 @@ A small topbar control beside the theme toggle: **Titles — on/off**.
    set; the pasted token lives in memory only.
 8. Off means off: with the toggle off, no summary text is in the DOM (asserted).
 
+## The Titles panel — `?view=titles`
+
+A real view in the app (sidebar → **Workspace → Titles**), not a console
+workflow. It is simultaneously the importer, the status board and the probe
+bench, so nobody copy-pastes JavaScript to find out whether a transport works.
+
+**Status:** keys in the tenant, keys with a title, coverage ("412 of 600"),
+`fetched_at` of the oldest/newest entry, and a staleness warning past 30 days.
+
+**Import (transport A):** a file input plus a paste box. Both accept the three
+shapes (§Phases); a malformed line is counted and skipped, never a partial
+write. Shown as "imported 412 · skipped 3 · 1886 unchanged".
+
+**Bookmarklet (transport B):** a draggable `javascript:` anchor ("drag me to
+the bookmarks bar") — our own pages set no CSP header, so the link renders and
+drags normally — plus a "copy snippet" button for the console fallback and one
+sentence of instructions. The snippet fetches `summary,issuetype` for the
+store's epic set from the Jira tab, then `window.open`s this panel and
+`postMessage`s the payload; the panel validates `event.origin` against the
+configured Jira origin and the payload shape before merging.
+
+**Token (transport C):** cloudId field with a **Discover** button
+(`/_edge/tenant_info`, CORS-open), a token field (type=password, never
+persisted), **Test gateway** (probe 2, prints the HTTP status and a one-line
+sample), and **Fetch titles** for the keys this tenant has. Expiry countdown;
+when it lapses the panel says so once and does not retry.
+
+**Danger zone:** **Forget titles** (drops the tenant's object store), and the
+titles on/off toggle mirrored from the topbar so the whole feature is
+manageable from one page.
+
+**The topbar toggle** stays a small control beside the theme toggle (the
+screen-share kill switch); the panel is where the feature is configured.
+
 ## Probes (before dispatch, ~2 minutes)
 
 1. **Bookmarklet CSP:** drag a `javascript:alert(1)` bookmark onto the Jira
