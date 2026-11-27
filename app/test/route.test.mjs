@@ -149,6 +149,8 @@ test('P-2: unknown or absent parameters are ignored, not trusted', () => {
     metric: null, bucket: null, policy: null,
     // prd/59: the Delivery subset is route state (`?tab=aging`).
     tab: null,
+    // prd/80: titles are on unless the link says `?titles=off`.
+    titles: null,
   });
   assert.equal(parseRoute('?view=bogus', '').view, null);
   assert.equal(parseRoute('?tenant=del', '').view, null);

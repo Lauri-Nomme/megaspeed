@@ -618,7 +618,7 @@ export function epicMarkup(payload, { base = '', benchmark = true } = {}) {
   const prCount = payload.pr_count ?? prs.length;
   const rows = children.map((story) => `<tr>
       <td class="c-id" data-label="story">${ticketHref(story.key, base)
-        ? `<a class="ticket-link mono" href="${esc(ticketHref(story.key, base))}" data-ticket="${esc(story.key)}">${esc(story.key)}</a>`
+        ? `<a class="ticket-link mono" href="${esc(ticketHref(story.key, base))}" data-ticket="${esc(story.key)}" data-ticket-line="1">${esc(story.key)}</a>`
         : `<span class="mono">${esc(story.key)}</span>`}</td>
       <td class="c-state" data-label="state"><span class="pill ${story.censored ? 'waiting' : 'healthy'}">${esc(story.state || 'unknown')}${story.censored && story.state !== 'open' ? ' · open' : ''}</span></td>
       <td class="c-dur num" data-label="points">${story.points == null ? '—' : esc(story.points)}</td>

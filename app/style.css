@@ -466,6 +466,27 @@ button:focus-visible, select:focus-visible, canvas:focus-visible, tr:focus-visib
   border-color: var(--accent-line-faint);
 }
 
+/* --- titles toggle (prd/80): the screen-share kill switch -----------------
+ * A small control beside the theme toggle. On is quiet (the key is always the
+ * visible text); off is dimmed. It hides text, never data: the cache stays in
+ * IndexedDB and nothing is deleted.
+ */
+.titles-toggle {
+  width: auto;
+  min-width: var(--control-h);
+  padding: 0 6px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  line-height: 1;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-control);
+}
+.titles-toggle:hover { color: var(--text-primary); background: var(--bg-hover); }
+.titles-toggle[aria-pressed="false"] { color: var(--text-tertiary); opacity: .55; }
+.titles-toggle.on { color: var(--text-secondary); }
+
 .status { display: inline-flex; align-items: center; gap: 6px; color: var(--text-tertiary); font-size: 11px; }
 .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--text-tertiary); }
 .status.live { color: var(--text-secondary); }
@@ -3109,3 +3130,205 @@ tr.response-row:hover td, tr.response-row:focus-visible td { background: var(--b
 .stability-sentence { flex-basis: 100%; margin: 0; font-size: 11.5px; color: var(--text-secondary); }
 .stability-sentence.little-note { color: var(--text-tertiary); }
 .stability-strip.insufficient .stability-sentence { color: var(--text-tertiary); }
+
+/* --- titles (prd/80) ------------------------------------------------------
+ * Titles are content that never transits the server, so every surface here is
+ * an annotation over markup that already existed: the key stays the visible
+ * text in tables, and a title is a popover (hover/focus), a subtitle on the
+ * ticket page, or a muted second line in the epic page's ticket list.
+ *
+ * The second line is opt-in per surface. It is never inside an inline table
+ * cell by default, so the delivery table's row heights and column widths do
+ * not move when a browser has imported titles.
+ */
+.titles-panel {
+  display: grid;
+  gap: 14px;
+  max-width: 880px;
+  padding: 4px 0 40px;
+}
+.titles-block {
+  padding: 12px 14px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-hairline);
+  border-radius: var(--radius-popover);
+}
+.titles-block h2 { margin: 0 0 6px; font-size: 13px; }
+.titles-block .muted {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+}
+.titles-coverage { margin: 0; font-size: 14px; font-weight: 600; }
+.titles-warn {
+  margin: 8px 0 0;
+  padding: 6px 8px;
+  font-size: 12px;
+  color: var(--warning);
+  border-left: 2px solid var(--warning);
+  background: var(--warning-veil, transparent);
+}
+.titles-note {
+  margin: 10px 0 0;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-hairline);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-tertiary);
+}
+.titles-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  align-items: center;
+  margin: 8px 0;
+}
+.titles-block .control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+.titles-block input[type="text"],
+.titles-block input[type="password"] {
+  height: var(--control-h);
+  min-width: 190px;
+  padding: 0 7px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--text-primary);
+  background: var(--bg-control);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-control);
+}
+.titles-block input[type="text"]:focus-visible,
+.titles-block input[type="password"]:focus-visible,
+.titles-block input[type="file"]:focus-visible,
+.titles-paste:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+}
+.titles-paste {
+  display: block;
+  width: 100%;
+  min-height: 64px;
+  margin: 8px 0;
+  padding: 6px 8px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-control);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-control);
+  resize: vertical;
+}
+.titles-import-line,
+.titles-probe {
+  margin: 6px 0 0;
+  min-height: 16px;
+  font-size: 11.5px;
+  color: var(--text-secondary);
+  white-space: pre-wrap;
+}
+.titles-bookmarklet { text-decoration: none; cursor: grab; }
+.titles-bookmarklet:active { cursor: grabbing; }
+.titles-danger .chip.danger {
+  color: var(--critical);
+  border-color: var(--critical-line);
+}
+.titles-danger .chip.danger:hover { background: var(--critical-tint); }
+
+/* The muted second line (epic page's ticket list only — opt-in via
+ * `data-ticket-line`, so no inline table cell grows). */
+.ticket-title {
+  display: block;
+  max-width: 100%;
+  margin-top: 1px;
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ticket-title-icon { margin-right: 4px; }
+.type-glyph { display: inline-block; vertical-align: -3px; }
+.type-glyph[data-type="epic"] { vertical-align: -2px; }
+
+/* The ticket page's subtitle: the key stays the h1. */
+.ticket-title-sub {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  max-width: 78ch;
+  margin: 2px 0 0;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+}
+.ticket-title-sub-icon { display: inline-flex; flex: 0 0 auto; }
+.ticket-title-sub-icon svg { display: block; }
+
+/* The one delegated popover (hover and focus). Fixed-positioned over the page
+ * so no table reflows; pointer-events none so it never steals the hover it
+ * was opened by. */
+.title-pop {
+  position: fixed;
+  z-index: 70;
+  padding: 8px 10px;
+  background: var(--popover-bg);
+  border: 1px solid var(--border-control);
+  border-radius: var(--radius-popover);
+  box-shadow: var(--shadow-popover);
+  pointer-events: none;
+}
+.title-pop[hidden] { display: none; }
+.title-pop-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--text-tertiary);
+}
+.title-pop-key {
+  margin-left: auto;
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--text-secondary);
+}
+.title-pop-summary {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: var(--text-primary);
+}
+.title-pop-foot {
+  margin: 6px 0 0;
+  font-size: 10.5px;
+  color: var(--text-tertiary);
+}
+
+/* prd/80 §Render: keyboard focus is visible, and a touch hold opens the
+ * popover instead of selecting the key. A plain tap still navigates. */
+a[data-ticket]:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
+@media (hover: none) {
+  [data-ticket] {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+}

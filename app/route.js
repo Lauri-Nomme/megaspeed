@@ -25,7 +25,12 @@ import { THEMES, normalizeTheme } from './theme.js';
 export const ROUTE_VIEWS = [
   'overview', 'delivery', 'timeline', 'ticket',
   'blocking', 'queue', 'trend', 'rules', 'policy', 'sources',
+  // prd/80: the Titles importer/probe bench is a real view, not a console flow.
+  'titles',
 ];
+
+/** prd/80: the titles toggle's closed set; `off` is the only thing worth a URL. */
+export const ROUTE_TITLES = ['on', 'off'];
 
 /** The closed set of scope kinds (scope.js owns the behaviour). */
 export const SCOPE_KINDS = ['person', 'role', 'ticket', 'repo'];
@@ -81,7 +86,7 @@ function normalizeView(view) {
  */
 export function serializeRoute({
   tenant = null, view = null, ticket = null, timeframe = null, scope = null,
-  sprint = null, from = null, to = null, theme = null,
+  sprint = null, from = null, to = null, theme = null, titles = null,
   trendMetric = null, trendBucket = null, policy = null, tab = null,
 } = {}) {
   const params = new URLSearchParams();
@@ -118,6 +123,10 @@ export function serializeRoute({
   }
   // dark is the default, so it costs no characters and old links keep working
   if (normalizeTheme(theme) === 'light') params.set('theme', 'light');
+  // prd/80: titles are on unless the link says otherwise, so only `off` is
+  // written — a screen-shared link opens with the keys only (a preference, not
+  // a secret; the same rule as `?theme=`).
+  if (titles === 'off') params.set('titles', 'off');
   const query = params.toString();
   const hash = ticket ? `#ticket/${encodeURIComponent(ticket)}` : '';
   return `${query ? `?${query}` : ''}${hash}`;
@@ -178,6 +187,10 @@ export function parseRoute(search = '', hash = '') {
     to: /^\d+$/.test(params.get('to') || '') ? Number(params.get('to')) : null,
     // null means "no opinion": keep the stored preference (dark by default).
     theme: normalizeTheme(params.get('theme')),
+    // prd/80: null means "keep this browser's toggle"; `off` is a deliberate,
+    // shareable hidden view (it does not rewrite the stored preference).
+    titles: ROUTE_TITLES.includes(params.get('titles') || '')
+      ? params.get('titles') : null,
   };
 }
 

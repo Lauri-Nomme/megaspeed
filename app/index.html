@@ -23,7 +23,7 @@
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<!-- prd/63 F19: the first Tab stop skips the nine sidebar items. -->
+<!-- prd/63 F19: the first Tab stop skips the sidebar items. -->
 <a class="skip-link" href="#main">skip to content</a>
 <div class="app" id="app">
   <header class="topbar">
@@ -68,6 +68,11 @@
     </form>
     <button type="button" class="theme-toggle" id="theme-toggle" aria-pressed="false"
             aria-label="switch to the light theme" title="switch to the light theme">☾</button>
+    <!-- prd/80: the titles kill switch — a screen-share control, beside the
+         theme toggle. It hides text, never data: the cache stays in IndexedDB. -->
+    <button type="button" class="titles-toggle" id="titles-toggle" aria-pressed="true"
+            aria-label="titles on — click to hide ticket titles"
+            title="titles on — click to hide ticket titles">Tt</button>
     <div class="density" id="density" role="group" aria-label="density">
       <button type="button" data-d="S" aria-pressed="false" title="dense">S</button>
       <button type="button" data-d="M" aria-pressed="true" class="on" title="default">M</button>
@@ -104,6 +109,7 @@
       </div>
       <div class="nav-group"><span class="nav-label">Workspace</span>
         <button type="button" class="nav-item" data-page="sources">Sources</button>
+        <button type="button" class="nav-item" data-page="titles">Titles</button>
       </div>
       <div class="nav-foot">
         <span id="nav-count" class="mono">—</span>
@@ -307,6 +313,13 @@
           <h2>Provenance</h2>
           <div id="sources-body" class="facts-block"></div>
         </div>
+      </section>
+
+      <!-- Titles (prd/80): the importer, the status board and the probe bench.
+           A view, not a console workflow — and it never asks this server for a
+           title, because no route returns one. -->
+      <section class="page" id="page-titles" aria-labelledby="page-title" hidden>
+        <div id="titles-body"></div>
       </section>
 
       <aside class="drawer" id="drawer" hidden aria-live="polite" tabindex="-1"

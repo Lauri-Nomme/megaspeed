@@ -43,6 +43,20 @@ import {
   PRESETS, readScenario, scenarioQuery,
 } from '/policy.js';
 import { annotateRow, epicKeySet, keyListsOf, rowTicket, ticketFromQuery, ticketKey } from '/tickets.js';
+/* prd/80: titles arrive from Jira via the operator's browser and never from
+ * this server. The pure vocabulary, the cache and the transports are imported
+ * here; the hydrator runs at the end of every view render. */
+import {
+  TITLE_TTL_DAYS, ageDays, coverage as titleCoverage, formatAge, normalizeKey,
+  readTitlesConfig, readTitlesPref, storeTitlesConfig, storeTitlesPref,
+  titlesEnabled,
+} from '/titles.js';
+import { getTitles, mergeTitles, openCache } from '/titles-cache.js';
+import {
+  annotateDetailTitle, hydrateTitles, listenTitlesMessage, titlesMarkup,
+  wireTitlePopover, wireTitlesPanel,
+} from '/titles-panel.js';
+import { bookmarkletCode } from '/titles-probe.js';
 import { versionLabel, versionTitle } from '/version.js';
 import {
   DEFAULT_SIZE_CAPS, capPercent, capsQuery, flagCounts, normalizeSizeCaps,
@@ -86,6 +100,9 @@ const PAGES = {
   rules: { title: 'Rules', question: 'What should we change first?' },
   policy: { title: 'Policy lab', question: 'What should we change first?' },
   sources: { title: 'Sources', question: 'What is this screen made of?' },
+  // prd/80: the importer and the probe bench. A real view: the sidebar's
+  // Workspace → Titles, not a console workflow.
+  titles: { title: 'Titles', question: 'What was this work?' },
 };
 
 const TIMEFRAMES = {
@@ -205,6 +222,20 @@ const state = {
   // prd/63 F14: the one-line notice for a silent fallback (unknown tenant,
   // view, timeframe or scope), cleared on the next real navigation.
   notice: '',
+  // prd/80: titles resolved in the browser. `titles` is the hydrated cache
+  // (Map key -> {summary, type, fetched_at}); `titlesStore` is the IndexedDB
+  // handle (opened lazily); the token is MEMORY ONLY — never localStorage, a
+  // URL or a cookie we set (rule 7). `titlesSeq` lets a pending fetch know it
+  // was superseded by the off switch.
+  titles: new Map(),
+  titlesStore: null,
+  titlesTenant: null,
+  titlesEnabled: true,
+  titlesSite: '',
+  titlesCloudId: '',
+  titlesToken: '',
+  titlesExpiry: 0,
+  titlesSeq: 0,
 };
 
 /* prd/48: the in-app entry stack (see history.js). Every distinct view state
@@ -622,6 +653,9 @@ function routeHref() {
     // dark is the default, so only a light view puts anything in the URL: an
     // existing dark link is byte-identical to what it was before themes.
     theme: state.theme === 'light' ? 'light' : null,
+    // prd/80: titles are on by default too, so only the screen-share state
+    // (`?titles=off`) costs characters — and a shared link opens hidden.
+    titles: state.titlesEnabled ? null : 'off',
   });
 }
 
@@ -873,6 +907,11 @@ function renderPage() {
   if (page === 'policy') renderPolicyPage();
   if (page === 'overview') renderOverviewPage();
   if (page === 'sources') renderSourcesPage();
+  if (page === 'titles') renderTitlesPage();
+  // prd/80: the render tail. One explicit hydration call per view render (not a
+  // MutationObserver), after every view's markup exists and before the
+  // preference is saved.
+  renderTitlesChrome();
   saveUI();
 }
 
@@ -1208,6 +1247,9 @@ function resetTenantData() {
   state.eventTotal = 0;
   state.eventLimit = EVENT_MAX;
   state.epicKeys = new Set();
+  // prd/80: titles are per tenant; another dataset's cache must not paint here.
+  state.titles = new Map();
+  state.titlesTenant = null;
   state.cache.clear();
   $('load-all').hidden = true;
   // B12: a brush chip (and every hover/selection) belongs to the dataset it was
@@ -1605,6 +1647,9 @@ function renderDeliveryPage() {
     );
   }
   renderDeliveryDetail();
+  // prd/80: a tab/filter/sort repaint is a render too — re-annotate the new
+  // anchors (the cache is already in memory, so this is a Map lookup each).
+  renderTitles();
 }
 
 /** prd/59: refetch the aging payload after a control change, then repaint. */
@@ -1901,6 +1946,14 @@ async function applyRoute() {
     // prd/10 §3.1: a `?theme=` link is a destination like any other; an absent
     // parameter keeps the stored preference (dark is the default either way).
     if (route.theme && route.theme !== state.theme) setTheme(route.theme, { save: false });
+    // prd/80: `?titles=off` is a destination, not a preference flip — visiting
+    // a colleague's hidden-titles link must not rewrite this browser's toggle
+    // (the same rule prd/63 F29 set for `?theme=`).
+    if (route.titles === 'off' && state.titlesEnabled) {
+      setTitlesEnabled(false, { save: false });
+    } else if (route.titles === 'on' && !state.titlesEnabled) {
+      setTitlesEnabled(true, { save: false });
+    }
     if (route.tenant && route.tenant !== state.tenant) {
       await setTenant(route.tenant, { silent: true });
     }
@@ -2672,6 +2725,320 @@ function renderSourcesPage() {
     ? `tenant ${state.meta.tenant || state.tenant || '—'} · ` +
       `snapshot ${fmtStamp(Date.parse(state.meta.as_of))} · read-only, pseudonymised store`
     : '');
+}
+
+// ---------------------------------------------------------------- titles (prd/80)
+/* The feature's page wiring, in one place. What it is built around:
+ *
+ *   - **No title ever transits megaspeed.** There is no title request from this
+ *     file at all: the only network client is the panel's transport C, which
+ *     calls the configured Jira site or `api.atlassian.com` and nothing else.
+ *     The cache lives in IndexedDB, the render is `textContent`, and the export
+ *     paths (Markdown/CSV) never call the hydrator.
+ *   - **One deterministic call per render**, never a `MutationObserver`:
+ *     `renderTitles()` at the end of every view render and after a sort/filter
+ *     repaint.
+ *   - **Off means off:** with the toggle off, `renderTitles()` removes the
+ *     annotations and returns before reading a single title, so no summary text
+ *     is in the DOM.
+ *
+ * A browser that never imported anything renders exactly what it rendered
+ * before this feature existed: no node, no request.
+ */
+
+let titlesPanel = null;
+let titlesPopover = null;
+
+/** Every ticket key this tenant's store knows: coverage, and the fetch scope. */
+function titleKeySet() {
+  const keys = new Set();
+  const add = (value) => {
+    const key = normalizeKey(value);
+    if (key) keys.add(key);
+  };
+  for (const obj of state.objects || []) {
+    for (const key of obj.ticket_keys || []) add(key);
+    const id = String(obj.object_id || '');
+    const at = id.indexOf(':');
+    if (at >= 0) add(id.slice(at + 1));
+  }
+  for (const key of state.epicKeys || []) add(key);
+  for (const row of (state.delivery && state.delivery.rows) || []) {
+    for (const key of row.tickets || []) add(key);
+  }
+  for (const row of (state.sprints && state.sprints.rows) || []) add(row.key);
+  if (state.ticketKey) add(state.ticketKey);
+  return [...keys].sort();
+}
+
+/** The top-bar kill switch, beside the theme toggle (prd/80 §The toggle). */
+function renderTitlesToggle() {
+  const button = $('titles-toggle');
+  if (!button) return;
+  const on = state.titlesEnabled;
+  const label = on
+    ? 'titles on — click to hide ticket titles'
+    : 'titles off — click to show ticket titles';
+  button.textContent = 'Tt';
+  button.setAttribute('aria-pressed', String(on));
+  button.setAttribute('aria-label', label);
+  button.title = label;
+  button.classList.toggle('on', on);
+}
+
+/**
+ * The cache → DOM hop. Called by `renderTitles()` only.
+ *
+ * `loadTitles()` reads the tenant's cached rows from IndexedDB (a local read,
+ * not a request). It then renders. Nothing here can reach the network.
+ */
+async function loadTitles() {
+  const tenant = state.tenant;
+  const generation = state.titlesSeq;
+  if (!tenant) {
+    state.titles = new Map();
+    state.titlesTenant = null;
+    renderTitles();
+    return;
+  }
+  try {
+    if (!state.titlesStore) state.titlesStore = await openCache();
+    const map = await getTitles(tenant, titleKeySet(), state.titlesStore);
+    // A tenant switch or the off switch while the read was in flight: the rows
+    // belong to nobody on screen, so the paint is dropped.
+    if (state.tenant !== tenant || generation !== state.titlesSeq) return;
+    state.titles = map;
+    state.titlesTenant = tenant;
+  } catch {
+    if (generation !== state.titlesSeq) return;
+    state.titles = new Map();
+    state.titlesTenant = tenant;
+  }
+  renderTitles();
+}
+
+/**
+ * Annotate what is on screen. The ticket keys stay the only visible text in an
+ * inline table cell; only the epic page's ticket list asks for the muted second
+ * line (`data-ticket-line`), so column widths and row heights do not move.
+ */
+function renderTitles() {
+  const page = $('page-title');
+  // A render replaces the anchors the popover was anchored to, and a closed
+  // popover keeps no title text (rule 8).
+  if (titlesPopover) titlesPopover.close();
+  if (!state.titlesEnabled) {
+    // Rule 8: off means off. Remove every annotation and return before a
+    // single title is read — not even a Map lookup.
+    hydrateTitles(document.getElementById('main'), { enabled: false });
+    annotateDetailTitle(page, { enabled: false });
+    return;
+  }
+  hydrateTitles(document.getElementById('main'), {
+    enabled: true,
+    titles: state.titles,
+  });
+  // The ticket page keeps the key as its h1 and adds the summary as a subtitle,
+  // so that page answers "where did the time go for *this* ticket".
+  const key = state.page === 'ticket' ? String(state.ticketKey || '').toUpperCase() : '';
+  annotateDetailTitle(page, {
+    key,
+    title: key && state.titles.size ? state.titles.get(key) || null : null,
+    enabled: true,
+  });
+}
+
+/** Coverage/freshness straight from the hydrated map (the panel's status block). */
+function titleStatus() {
+  const keys = titleKeySet();
+  const rows = [...state.titles.entries()].map(([key, value]) => ({ key, ...value }));
+  const view = titleCoverage(rows, keys);
+  let oldest = null;
+  let newest = null;
+  for (const row of rows) {
+    if (!row.fetched_at) continue;
+    if (oldest == null || row.fetched_at < oldest) oldest = row.fetched_at;
+    if (newest == null || row.fetched_at > newest) newest = row.fetched_at;
+  }
+  const now = Date.now();
+  const phrase = (stamp) => {
+    const days = ageDays(stamp, now);
+    return days == null ? '' : formatAge(days);
+  };
+  const oldestDays = ageDays(oldest, now);
+  return {
+    coverage: view,
+    keys,
+    oldest,
+    newest,
+    oldestText: phrase(oldest),
+    newestText: phrase(newest),
+    stale: oldestDays != null && oldestDays > TITLE_TTL_DAYS,
+  };
+}
+
+/** Repaint the status lines after a merge, without rebuilding the inputs. */
+function paintTitleStatus() {
+  const status = titleStatus();
+  const setText = (id, text) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = text;
+  };
+  setText('titles-coverage', status.coverage.text);
+  setText('titles-freshness', [status.oldestText ? `oldest ${status.oldestText}` : '',
+    status.newestText ? `newest ${status.newestText}` : ''].filter(Boolean).join(' · ')
+    || `no title cached for ${state.tenant || 'this dataset'}`);
+}
+
+/**
+ * The `?view=titles` body: the importer, the status board and the probe bench.
+ * `titlesMarkup()` is pure; the interactions were bound once to the container by
+ * `wireTitlesPanel()`, so replacing this innerHTML never loses a handler.
+ */
+function renderTitlesPage() {
+  const body = $('titles-body');
+  if (!body) return;
+  const status = titleStatus();
+  const keys = status.keys;
+  const origin = (() => {
+    try { return window.location.origin; } catch { return ''; }
+  })();
+  const href = state.titlesSite
+    ? bookmarkletCode({ site: state.titlesSite, targetOrigin: origin, keys })
+    : '';
+  let note = '';
+  if (!state.titlesSite) {
+    note = 'Set the Jira site in step 3 first — the bookmarklet bakes it in, '
+      + 'along with this dataset\'s ticket keys.';
+  } else if (!keys.length) {
+    note = 'This dataset has no ticket keys yet, so the snippet would fetch nothing. '
+      + 'Open a dataset with stories or epics first.';
+  } else {
+    note = `The snippet carries ${keys.length} key${keys.length === 1 ? '' : 's'} and requests `
+      + 'summary and issuetype only. Open Jira, click the bookmark, and this panel receives '
+      + 'the rows (origin-checked) and merges them.';
+  }
+  body.innerHTML = titlesMarkup({
+    enabled: state.titlesEnabled,
+    tenant: state.tenant || '',
+    site: state.titlesSite,
+    cloudId: state.titlesCloudId,
+    coverageText: status.coverage.text,
+    keyCount: keys.length,
+    oldestText: status.oldestText,
+    newestText: status.newestText,
+    stale: status.stale,
+    bookmarkletHref: href,
+    bookmarkletNote: note,
+  });
+}
+
+/** One call from every render tail: repaint the toggle, then hydrate. */
+function renderTitlesChrome() {
+  renderTitlesToggle();
+  renderTitles();
+}
+
+/** The topbar switch; the panel mirrors it and vice versa. */
+function setTitlesEnabled(enabled, { save = true } = {}) {
+  state.titlesEnabled = Boolean(enabled);
+  // A pending transport-C fetch must not paint after the switch: bump the
+  // generation and the merge callback drops its render.
+  state.titlesSeq += 1;
+  if (save) storeTitlesPref(state.titlesEnabled);
+  renderTitlesToggle();
+  // Paint from the in-memory map immediately (the cache is not cleared by the
+  // switch), then re-read it — a first enable on a fresh tab has nothing yet.
+  renderTitles();
+  if (state.titlesEnabled) loadTitles();
+  if (state.page === 'titles') renderTitlesPage();
+  syncUrl();
+}
+
+/** The panel's dependencies. The store is opened lazily, once per session. */
+async function titlesStore() {
+  if (!state.titlesStore) state.titlesStore = await openCache();
+  return state.titlesStore;
+}
+
+function initTitles() {
+  // The stored preference first: a browser that hid titles sees keys only, even
+  // before any data loads.
+  state.titlesEnabled = titlesEnabled(readTitlesPref());
+  const config = readTitlesConfig();
+  state.titlesSite = config.site;
+  state.titlesCloudId = config.cloudId;
+  renderTitlesToggle();
+
+  // ONE delegated popover for the whole document (hover and focus), keyed by
+  // `data-ticket`, so a re-render costs nothing.
+  titlesPopover = wireTitlePopover(document, {
+    isEnabled: () => state.titlesEnabled,
+    titleFor: (key) => (state.titlesEnabled ? state.titles.get(key) || null : null),
+  });
+
+  // The bookmarklet handshake: merge only a message from the configured Jira
+  // origin whose payload has the agreed shape. Anything else is ignored.
+  listenTitlesMessage(window, {
+    site: () => state.titlesSite,
+    onRows: async (rows) => {
+      const merged = await mergeTitles(state.tenant, rows, await titlesStore());
+      await loadTitles();
+      if (state.page === 'titles') {
+        paintTitleStatus();
+        const line = document.getElementById('titles-import-line');
+        if (line) {
+          line.textContent = `bookmarklet: imported ${merged.imported} · skipped ${merged.skipped}`
+            + ` · ${merged.unchanged} unchanged`;
+        }
+      }
+    },
+  });
+
+  const body = $('titles-body');
+  if (body) {
+    titlesPanel = wireTitlesPanel(body, {
+      store: () => titlesStore(),
+      fetch: typeof fetch === 'function' ? fetch : null,
+      state: () => ({
+        tenant: state.tenant || '',
+        enabled: state.titlesEnabled,
+        site: state.titlesSite,
+        cloudId: state.titlesCloudId,
+        token: state.titlesToken,
+        keys: titleKeySet(),
+        expiresAt: state.titlesExpiry,
+        targetOrigin: (() => {
+          try { return window.location.origin; } catch { return ''; }
+        })(),
+      }),
+      onToggle: (enabled) => setTitlesEnabled(enabled),
+      onConfig: ({ site, cloudId }) => {
+        state.titlesSite = String(site || '').trim();
+        state.titlesCloudId = String(cloudId || '').trim();
+        storeTitlesConfig({ site: state.titlesSite, cloudId: state.titlesCloudId });
+        if (state.page === 'titles') renderTitlesPage();
+      },
+      onToken: ({ token, expiresAt }) => {
+        state.titlesToken = String(token || '');
+        state.titlesExpiry = Number(expiresAt) || 0;
+      },
+      onMerged: async () => {
+        // The rows are already merged; this only re-reads the cache and
+        // re-hydrates. When titles are off nothing is painted: the generation
+        // check inside loadTitles() drops a stale paint.
+        const generation = state.titlesSeq;
+        await loadTitles();
+        if (generation !== state.titlesSeq) return;
+        if (state.titlesEnabled && state.page === 'titles') paintTitleStatus();
+      },
+      onForget: async () => {
+        state.titles = new Map();
+        renderTitles();
+        paintTitleStatus();
+      },
+    });
+  }
 }
 
 // --------------------------------------------------------------- selection
@@ -3778,6 +4145,9 @@ async function load({ force = false } = {}) {
     // prd/65 N-04: this is the path the annotation write's own `/ws` echo
     // takes, so it must not talk over the "recorded …" confirmation.
     refreshStatus();
+    // prd/80: the cache read is local, not a request; it is safe on this path
+    // too, so a reload after an import annotates immediately.
+    await loadTitles();
     window.__megaspeedReady = true;
     return;
   }
@@ -3856,6 +4226,9 @@ async function load({ force = false } = {}) {
   // 404/400 state. Fetching it here threw out of load() on an unknown key, so
   // __megaspeedReady never fired and the page sat on "Loading the ticket…".
   if (state.page !== 'timeline' && state.page !== 'ticket') await ensureData(state.page);
+  // prd/80: the tenant's cached titles are read once the objects are in (the
+  // key set comes from them). IndexedDB, not a request.
+  await loadTitles();
   renderPage();
   syncChromeHeight();
   refreshStatus();
@@ -4204,6 +4577,11 @@ $('density').addEventListener('click', (event) => {
 });
 $('theme-toggle').addEventListener('click', () => {
   setTheme(otherTheme(state.theme));
+});
+// prd/80: the titles switch — immediate, no reload, no data touched. The URL
+// mirrors it (`?titles=off`) so a screen-shared link opens hidden.
+$('titles-toggle').addEventListener('click', () => {
+  setTitlesEnabled(!state.titlesEnabled);
 });
 $('scope').addEventListener('change', (event) => {
   const [kind, value] = event.target.value.split(':');
@@ -5028,6 +5406,14 @@ setTheme(
     || DEFAULT_THEME,
   { save: false, repaint: false },
 );
+/* prd/80: the titles switch, its popover and the panel are wired before the
+ * first paint. The stored preference is a browser preference; a `?titles=off`
+ * link wins for *this view* without rewriting it (as `?theme=` does), and a
+ * browser that never imported anything still renders nothing new. */
+initTitles();
+if (initialRoute.titles === 'off') state.titlesEnabled = false;
+else if (initialRoute.titles === 'on') state.titlesEnabled = true;
+renderTitlesToggle();
 // prd/28 §3: phone is list-first. A first visit lands on the Delivery list;
 // a stored choice (the user opened Timeline last time) is respected. An
 // explicit view in the URL is a deliberate destination and always wins.
