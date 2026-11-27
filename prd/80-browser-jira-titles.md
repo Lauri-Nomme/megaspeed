@@ -1,6 +1,6 @@
 # 80 — Ticket titles, resolved in the browser
 
-Status: **draft; the Jira content never transits megaspeed (hard rule).**
+Status: **draft; Jira content never transits megaspeed (hard rule).**
 
 ## Problem
 
@@ -11,209 +11,236 @@ usability gap left: at the ticket and epic level the product says *"DEMO-347
 took 21 days and 6 of them were waiting for a reviewer"* and the reader cannot
 tell which work that was. `DEMO-347` does not tell you whether to chase a
 payment bug, a parser crash, or a doc tweak. A dozen words of human-written
-text per key is the whole difference between a dashboard and an action.
+text per key is the difference between a dashboard and an action.
 
-## The invariant, and the constraint that forces the design
+## The invariant
 
 A title is ticket content. So:
 
 > **The title never comes from megaspeed.** It travels Jira → the operator's
 > browser → the screen. It is never stored in the store, served by the API,
-> proxied by the server, written into an export, a metric, or an LLM view. The
-> content does not transit the megaspeed server at all.
+> proxied by the server, written into an export, a metric, or an LLM view.
+> The content does not transit the megaspeed server at all.
 
-This is now the load-bearing constraint, and it rules out the obvious
-implementation:
+`--verify` and the canary are unchanged; a store bundle copied to another
+machine still has zero titles.
 
-**A "connect with a token" panel inside the megaspeed page cannot work against
-Jira Cloud.** Verified, not assumed:
+## Why the obvious implementation cannot work
 
-- Jira Cloud's site REST (`https://<site>.atlassian.net/rest/api/3/…`) **does
-  not send CORS headers**; Atlassian's answer is that the only bypass is a
-  proxy. A browser `fetch` from the megaspeed origin is blocked before it
-  returns a body.
-- OAuth 2.0 3LO **requires a client secret** at the token-exchange step, and
-  PKCE is not honoured (ATL `OAUTH20-2491`). A public browser client cannot
-  complete 3LO without a server holding the secret — i.e. without a proxy,
-  which is excluded.
-- The 3LO gateway (`api.atlassian.com/ex/jira/{cloudId}`) is CORS-enabled, but
-  it accepts OAuth access tokens, not API tokens, so it does not reopen the
-  path on its own.
+A "connect with a token" panel that calls Jira from the megaspeed page is
+blocked by the browser, not by our code:
 
-Consequence: the resolver is fed by a **file/clipboard import** by default, and
-an optional **browser extension** for people who want it automatic. Both keep
-Jira's content entirely out of megaspeed. A store bundle copied to another
-machine still has zero titles; `--verify` and the canary still pass.
+- **Cloud's site REST sends no CORS headers.** Atlassian's own answer: *"the
+  problem why we don't support CORS directly on your site host/domain is that
+  we accept session based authentication … the only way that you can bypass
+  CORS would be by hosting a proxy."*
+- **OAuth 2.0 3LO needs a client secret** at the token exchange, and PKCE is not
+  honoured (`OAUTH20-2491`), so a public browser client cannot complete 3LO.
+- **Web Workers do not help.** CORS is enforced per **origin**, not per thread;
+  a worker inherits the page's origin and the same policy.
+- **Service Workers do not help either.** They can intercept their own origin's
+  requests, but a cross-origin response is readable only under CORS;
+  `mode: 'no-cors'` yields an **opaque** response (status `0`, body unreadable).
+- Same for `XMLHttpRequest`, JSONP (Jira has no callback), and
+  `credentials: 'include'` (Cloud grants neither `Allow-Credentials` nor CORS).
 
-What it **does** change, written down rather than glossed: a connected megaspeed
-screenshot shows real summaries, so the feature ships with a visible
-**hide/show toggle** and a "Forget titles" action, and exports never include a
-title.
+The complete set of CORS bypasses is: an extension with host permissions, a
+proxy, or **execution inside Jira's own origin**. Excluding the first two, the
+bookmarklet is not a workaround — it is the mechanism.
 
-## What already exists (why this is cheap)
+But one CORS-enabled door does exist, and it is worth having:
 
-- **One choke point.** Every rendered key goes through `ticketLink()` in
-  `app/tickets.js` (15 call sites) and already carries `data-ticket="DEMO-347"`.
-  A post-render hydration pass needs **no call-site change**.
-- **A popover vocabulary.** `--popover-bg`, `--radius-popover`,
-  `--shadow-popover` exist in `app/style.css`; tooltips already float over the
-  graph and the benchmark cards.
-- **The keys are already client-side.** `/api/objects` and the ticket detail
-  payload carry `ticket_keys`; nothing new needs to be exposed.
-- **The topbar** already hosts the theme toggle; the titles toggle goes beside
-  it.
+> `api.atlassian.com/ex/jira/{cloudId}` is CORS-whitelisted for browser
+> `fetch`/XHR with **OAuth 2.0 authorization-code access tokens**.
 
-## Decision
+So a **pasted 3LO access token** works from the page. Its `expires_in` is
+**3600 s** and refreshing it needs the `client_secret`, which must not live in
+the browser — hence "one hour of freshness per paste", a manual refresh, not a
+connection. It is the fallback for an operator who has a token but no Jira tab.
 
-A **client-side title resolver**, off until fed, per tenant, cached in
-IndexedDB. Two fields only — `summary` and `issuetype` — rendered as a small
-type icon plus a hover/focus popover.
+## Transports
 
-### Why exactly two fields
+| # | Transport | Credential | Transit | Freshness | Verdict |
+|---|---|---|---|---|---|
+| **A** | **CSV/JSON import** — *Export → CSV (all fields)* or a JQL JSON dump, dropped on the panel | none | none | manual | **Ship first.** Zero auth, zero CORS, permanent fallback. |
+| **B** | **Bookmarklet** — runs *on the Jira tab* (same origin, so no CORS), `POST /rest/api/3/search/jql` with the live session, then `window.open` + `postMessage` into the megaspeed tab | the browser's existing Jira session | Jira → browser → megaspeed | one click | **Recommended.** No token to mint, no paste, no install. |
+| **C** | **Pasted 3LO access token** against the CORS gateway | access token | none | ~1 h | Fallback: works with no Jira tab; refresh needs an out-of-browser helper. |
+| — | extension | — | — | — | **Out.** |
+| — | server proxy | — | **excluded** | — | Content must not transit megaspeed. |
+| — | server-side fetch, titles at rest | — | excluded | — | A shadow Jira; what prd/02 exists to prevent. |
+| — | workers / service workers | — | — | — | Do not bypass CORS (see above). |
+
+All three feed the **same import shape** — `[{key, summary, type}]` — so the
+renderer, cache, toggle and tests are transport-independent. Only the
+"how do titles get here" panel differs.
+
+### B, in detail (the one-click path)
+
+```
+Jira tab (signed in)
+  └ click bookmarklet ──► fetch(rest/api/3/search/jql, credentials:'same-origin')
+                          fields=summary,issuetype only
+        ├─ window.open('…/#titles') or focus an existing megaspeed tab
+        └ postMessage({type:'megaspeed.titles', payload})   ← cross-origin allowed
+megaspeed tab ──► merge into IndexedDB ──► hydrate
+```
+
+- No token, no secret, no clipboard, no install. The credential is the session
+  the operator already has.
+- Only the Jira *origin* is contacted, and only `summary`/`issuetype` are
+  requested (§fields).
+- **Risk:** a deployment whose CSP forbids `javascript:` URLs blocks a bookmark
+  click. One-line test before we depend on it; the same snippet pasted into the
+  console always works, and transport A always works.
+
+### C, in detail (the pasted token)
+
+- The operator mints an access token **outside megaspeed** — a local helper that
+  holds the `client_secret` (the `client_secret` never enters the browser, and
+  a refresh token is never stored in `localStorage`: that would be a long-lived,
+  XSS-extractable org credential, and this tool's premise is not holding
+  secrets).
+- Paste once → the gateway answers → titles merge → the panel shows
+  "expires in 43 min".
+- Cloud ID discovery: `https://<site>.atlassian.net/_edge/tenant_info` (CORS
+  open), so the operator pastes only the token.
+- **Probe first (30 s), because it decides whether C is real:** see §Probes.
+
+## Fields — exactly two
 
 | field | verdict |
 |---|---|
 | `summary` | the point of the feature |
-| `issuetype` | cheap, stable, and turns a popover into a recognisable Jira row |
-| `status` | **no** — the store already holds workflow state, from the actual transitions; a second, live copy would disagree with the chart beside it |
-| `priority` | **no** — unused anywhere in the UI |
-| `assignee` | **forbidden.** Importing a real name next to a store pseudonym is a de-anonymisation channel: it would let anyone build the `LaNo → real person` map the whole pseudonymisation exists to prevent. The store's own actors stay pseudonymous; the resolver never asks for a user field. |
+| `issuetype` | cheap, stable, and makes the row recognisably Jira |
+| `status` | **no** — the store already has workflow state from real transitions; a live copy would disagree with the chart beside it |
+| `priority` | **no** — unused in the UI |
+| `assignee` | **forbidden.** A real name next to a store pseudonym is a de-anonymisation channel: it builds the `LaNo → person` map the pseudonymisation exists to prevent. No user field is ever requested. |
 
-The allowlist is literal and tested: `TITLE_FIELDS = ['summary', 'issuetype']`.
-`description`, `comment`, `attachment`, `assignee`, `reporter` are **never**
+Literal allowlist, tested: `TITLE_FIELDS = ['summary', 'issuetype']`.
+`description`, `comment`, `attachment`, `assignee`, `reporter` are never
 requested — receiving a description by accident would put the one category of
-data prd/02 forbids into the browser's storage.
-
-## Transports
-
-| # | Transport | Credential | Transit | Verdict |
-|---|---|---|---|---|
-| P0a | **CSV/JSON import** — Jira *Export → CSV (all fields)* or a JQL JSON dump, dropped on the connect panel | none | none | **Ship first.** No auth, no CORS, no extension; works today; permanent fallback. |
-| P0b | **Bookmarklet** — runs *on the Jira tab* (same origin, so no CORS), fetches `key,summary,issuetype` for a JQL, copies JSON to the clipboard, pasted into megaspeed | the browser's existing Jira SSO session | none (Jira → clipboard → megaspeed) | Best effort/freshness ratio. No token ever enters megaspeed. |
-| P1 | **Browser extension** (unpacked or enterprise-policy installed) — background script uses host permissions to call Jira REST directly | PAT or the SSO cookie | Jira ↔ extension; never megaspeed | The only *automatic* path. Optional. |
-| — | direct `fetch` from the page | — | — | **Impossible** (CORS + 3LO secret). Not planned. |
-| — | server proxy | — | **excluded** | Not planned; content must not transit megaspeed. |
-| — | server-side fetch with titles at rest | — | excluded | A shadow Jira; the thing prd/02 exists to prevent. |
-
-P0a and P0b are one feature: a `key,summary,issuetype` table the browser parses
-and caches. The CSV path is the zero-friction default; the bookmarklet removes
-the column-drift and staleness a hand-export has.
+data prd/02 forbids into browser storage.
 
 ## Cache
 
 - **IndexedDB** object store `titles`, key `` `${tenant}|${ticketKey}` ``.
-  Not `localStorage`: synchronous, 5 MB-capped, and it would sit in the same
-  origin as unrelated UI state.
-- **Value:** `{summary, type, fetched_at}` — no other field, ever.
+  Not `localStorage`: synchronous, 5 MB-capped, and it would sit beside
+  unrelated UI state.
+- **Value:** `{summary, type, fetched_at}` — nothing else, ever.
 - **Merge, don't replace:** an import overwrites the keys it carries and leaves
-  the rest; a partial export cannot blank the cache.
-- **Staleness:** show the cached title immediately; if `fetched_at` is older
-  than 30 days, the popover footer says "from an export · 41 days old". A stale
-  title is useful; a silently stale one is a trap.
-- **Per tenant.** Switching tenant never shows another dataset's titles.
-- **Forget titles** drops the object store.
+  the rest, so a partial export cannot blank the cache.
+- **Staleness:** render immediately; if `fetched_at` is older than 30 days the
+  popover footer says "from an export · 41 days old". A stale title is useful; a
+  silently stale one is a trap.
+- **Per tenant.** **Forget titles** drops the store.
 
 ## Render
 
 `hydrateTitles(root)` runs once at the end of each view render — an explicit
 call, not a global `MutationObserver`, so it is deterministic and testable:
-`root.querySelectorAll('[data-ticket]')` → cache lookup → annotate.
+`root.querySelectorAll('[data-ticket]')` → cache lookup → annotate. Every key in
+the app already flows through `ticketLink()` (15 call sites) and carries
+`data-ticket`, so **no call site changes**.
 
-- **Type icon:** a 14 px inline SVG matched to Jira's own glyph and palette —
-  Epic `#6554C0` (lightning), Story `#36B37E` (bookmark), Task `#4BADE8`
+- **Type icon:** 14 px inline SVG matched to Jira's glyph and palette — Epic
+  `#6554C0` (lightning), Story `#36B37E` (bookmark), Task `#4BADE8`
   (square-check), Bug `#E5493A` (bug), Sub-task `#4BADE8` (corner arrow),
-  unknown `#6B778C` (square). `aria-label` is the type name; SVG over emoji
-  because 🟣/🟢/🔵 are indistinguishable at 14 px and do not match Jira.
+  unknown `#6B778C`. `aria-label` = the type name. SVG over emoji: 🟣/🟢/🔵 are
+  indistinguishable at 14 px and do not read as Jira.
 - **Default: popover on hover and focus.** The key stays the only visible text,
   so **column widths, row heights and density are unchanged** — the property
-  that makes this safe across 15 surfaces with existing tests. Content:
-  summary (≤2 lines), type icon + name, footer "from your Jira export · not
-  stored server-side".
-- **Ticket detail page:** the header shows the key as the h1 and the **summary
-  as a subtitle line**. Highest-value placement: the page exists to answer
-  "where did the time go for this ticket".
-- **Epic / ticket list:** the title as a **muted second line under the key**,
-  because there the title *is* the content — with an acceptance check that the
-  delivery table's row height and column widths do not change.
-- **Native `title` attribute** as the fallback for surfaces that cannot anchor a
-  popover (graph/canvas): `DEMO-347 — parser crash on an empty queue`.
-- **Unresolved keys:** nothing — no shimmer, no placeholder churn.
+  that keeps 15 surfaces and their node tests safe. Content: summary (≤2 lines),
+  type icon + name, footer "from your Jira session · not stored".
+- **Ticket detail page:** key as h1, **summary as a subtitle line**. Highest
+  value: that page exists to answer "where did the time go for *this* ticket".
+- **Epic / ticket list:** title as a **muted second line under the key** — there
+  the title *is* the content — with an acceptance check that the delivery
+  table's row height and column widths do not move.
+- **Native `title` attribute** where a popover cannot anchor (graph/canvas):
+  `DEMO-347 — parser crash on an empty queue`.
+- **Unresolved keys:** nothing. No shimmer, no placeholder churn.
 - **Keyboard/touch:** focusable, Enter/Space opens, Esc closes
   (`aria-expanded`, `role="dialog"`); touch uses a 350 ms long-press so a tap
   still navigates.
-- **Coverage** in the connect panel: "412 of 600 keys have a title".
+- **Coverage** in the panel: "412 of 600 keys have a title".
 
 ## The toggle
 
 A small topbar control beside the theme toggle: **Titles — on/off**.
 
-- **Off** hides every title, the type icons, the ticket-detail subtitle and the
-  popover, and stops the extension asking. One click, immediate, no reload.
-- Persisted per browser (a UI preference, not a secret) and reflected in the URL
-  as `?titles=off` so a screen-shared link can be opened already-hidden.
-- On is the default **once titles exist**; a browser that never imported sees
-  keys and nothing else, so the out-of-the-box page is byte-identical to today.
+- **Off** removes every title, icon, subtitle and popover from the DOM and stops
+  a pending refresh. One click, immediate, no reload.
+- Persisted per browser (a preference, not a secret) and mirrored as
+  `?titles=off`, so a screen-shared link opens already hidden.
+- A browser that never imported sees keys and nothing else: the out-of-the-box
+  page is byte-identical to today.
 
 ## Rules that must hold (each is a test)
 
-1. **No title ever transits the megaspeed server.** The resolver module cannot
-   call same-origin endpoints; the server has no titles endpoint; a test asserts
-   the client's only title `fetch` targets a Jira/extension URL or `blob:`.
-2. Requested fields are exactly `['summary', 'issuetype']` — asserted.
-3. No user field is ever requested or stored (`assignee`, `reporter`).
-4. No server endpoint returns a title; `--verify` and the canary are unchanged.
-5. Titles are rendered as text nodes (`textContent`), never `innerHTML`; a
-   title containing `<script>` renders as text.
+1. **No title transits the megaspeed server.** The resolver cannot call
+   same-origin endpoints; the server has no titles route; a test asserts the
+   client's title `fetch` targets only the Jira origin (gateway or site).
+2. Requested fields are exactly `['summary','issuetype']` — asserted.
+3. No user field is requested or stored.
+4. No server endpoint returns a title; `--verify` and the canary unchanged.
+5. Titles render as `textContent`, never `innerHTML`; `<script>` in a summary
+   renders as text.
 6. Titles never reach metrics, labels, exports (Markdown/CSV/print), the policy
    lab or any LLM view: the resolver must not import the metrics/store modules,
    and the export path must not call `hydrateTitles`.
-7. Token (extension path only): memory or extension storage, never
-   `localStorage`, never a URL, never a cookie megaspeed sets.
-8. Off means off: with the toggle off, no title text is in the DOM (a test
-   asserts `document.body.textContent` contains no summary).
+7. No token, secret or refresh token in `localStorage`, a URL, or a cookie we
+   set; the pasted token lives in memory only.
+8. Off means off: with the toggle off, no summary text is in the DOM (asserted).
+
+## Probes (before dispatch, ~2 minutes)
+
+1. **Bookmarklet CSP:** drag a `javascript:alert(1)` bookmark onto the Jira
+   toolbar and click it on a Jira page. Fires ⇒ B is viable.
+2. **Gateway CORS (transport C):**
+   ```js
+   fetch(`https://api.atlassian.com/ex/jira/${cloudId}/rest/api/3/myself`,
+         { headers: { Authorization: `Bearer ${token}` } }).then(r => r.json())
+   ```
+   A JSON body ⇒ C is viable; a CORS error ⇒ C is dead, use A/B.
+3. **Basic-on-gateway (undocumented):** the same call with
+   `Authorization: Basic …` and an API token. If it answers, C gains a
+   long-lived credential; do not design around it until it does.
 
 ## Phases
 
-- **P0 (≈1 day) — import + render.** CSV/JSON/JSON-clipboard parser
-  (`Issue key`, `Summary`, `Issue Type` / `key`, `fields.summary`,
-  `fields.issuetype.name`), IndexedDB merge, `hydrateTitles`, type icons,
-  popover, ticket-detail subtitle, epic-list second line, the toggle, "forget",
-  coverage. This is the feature; everything after is freshness.
-- **P1 (≈1–2 days, optional) — bookmarklet.** ~30 lines of JS run on the Jira
-  tab: JQL → `POST /rest/api/3/search/jql` same-origin → clipboard JSON. Ships
-  as a copyable snippet plus a `javascript:` bookmark; documented in the connect
-  panel, so no install step.
-- **P2 (optional, only if P0/P1's freshness is not enough) — extension.**
-  Manifest V3, `host_permissions` for the Jira origin, a toolbar action that
-  refreshes the current view's keys and writes them via the same import shape.
-  Documented as "unpacked or enterprise-installed"; not required for the
-  feature to work.
+- **P0 (≈1 day) — import + render.** Parser for the three shapes Jira actually
+  emits (`Issue key,Summary,Issue type`; `key,fields.summary,fields.issuetype.name`;
+  the `postMessage` payload), IndexedDB merge, `hydrateTitles`, type icons,
+  popover, ticket-detail subtitle, epic-list second line, toggle, forget,
+  coverage. This is the feature.
+- **P1 (≈half day) — bookmarklet + handshake.** The snippet, the
+  `window.open`/`postMessage` receiver (origin-checked, payload-shape-checked),
+  and the panel copy. Gate on probe 1.
+- **P2 (≈half day) — pasted token.** Gateway client with cloudId discovery, the
+  expiry countdown, and a loud "no refresh in the browser" note. Gate on probe 2.
 
 ## Open questions
 
-1. **Scope of the import:** every epic plus its children (the ingest's own scope),
-   or a JQL the operator pastes? Default: the same epic/ticket set the store
-   covers, so coverage is comparable.
-2. **Refresh habit:** is a weekly/monthly CSV drop acceptable, or do we go
-   straight to the bookmarklet (P1) as the documented default? (The CSV path
-   still ships either way.)
-3. **Ticketing only, or also Confluence?** Out of scope here; asking so it is
-   not silently implied.
+1. **Scope:** the same epic/ticket set the store covers (comparable coverage), or
+   a JQL the operator pastes? Default: the store's own epic set.
+2. **Is transport C worth building** if B works? (It is the only one that works
+   with Jira closed; otherwise skip it.)
+3. Anything beyond Jira (Confluence)? Out of scope — asking so it is not
+   implied.
 
 ## Acceptance
 
-- **Unconfigured is byte-identical to today:** no request, no DOM change, no
-  new node in the topbar until the resolver has data; all existing node tests
-  green.
-- **Configured:** every `[data-ticket]` in a rendered view resolves within one
-  frame; the popover appears on hover and on focus; no layout shift in the
-  delivery table (row heights and column widths asserted unchanged).
+- **Unconfigured is byte-identical to today:** no request, no DOM change, every
+  existing node test green.
+- **Configured:** every `[data-ticket]` resolves within one frame; the popover
+  appears on hover and focus; the delivery table's row heights and column widths
+  are asserted unchanged.
 - **Ticket detail** shows the summary subtitle; the epic list shows the muted
   second line.
-- **Toggle off** removes every title from the DOM and stops the extension.
-- **Rules §"Rules that must hold"** all green, especially: nothing in the API
-  schema, nothing in `--verify`, nothing in an export, no title request to the
-  megaspeed origin.
-- **Degradation:** a malformed CSV line is skipped with a count, never a partial
-  write; a stale cache renders with its age; a missing key shows the key alone.
+- **Toggle off** removes every title from the DOM.
+- **Rules** all green, especially: nothing in the API schema, nothing in
+  `--verify`, nothing in an export, no title request to the megaspeed origin.
+- **Degradation:** a malformed CSV line is skipped with a count and never a
+  partial write; a `postMessage` from an unexpected origin is ignored; an expired
+  token says so once and keeps the keys; a stale cache renders with its age.
 - Store contract, `--verify`, `tests/` and `app/test` suites unchanged.
