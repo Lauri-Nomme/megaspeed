@@ -47,14 +47,14 @@ import { annotateRow, epicKeySet, keyListsOf, rowTicket, ticketFromQuery, ticket
  * this server. The pure vocabulary, the cache and the transports are imported
  * here; the hydrator runs at the end of every view render. */
 import {
-  TITLE_TTL_DAYS, ageDays, coverage as titleCoverage, formatAge, normalizeKey,
-  readTitlesConfig, readTitlesPref, storeTitlesConfig, storeTitlesPref,
-  titlesEnabled,
+  TITLE_TTL_DAYS, ageDays, coverage as titleCoverage, formatAge, messageLine,
+  normalizeKey, readTitlesConfig, readTitlesPref, storeTitlesConfig,
+  storeTitlesPref, titlesEnabled,
 } from '/titles.js';
 import { getTitles, mergeTitles, openCache } from '/titles-cache.js';
 import {
-  annotateDetailTitle, hydrateTitles, listenTitlesMessage, titlesMarkup,
-  wireTitlePopover, wireTitlesPanel,
+  annotateDetailTitle, claimReceiverName, hydrateTitles, listenTitlesMessage,
+  titlesMarkup, wireTitlePopover, wireTitlesPanel,
 } from '/titles-panel.js';
 import { bookmarkletCode } from '/titles-probe.js';
 import { versionLabel, versionTitle } from '/version.js';
@@ -114,6 +114,10 @@ const TIMEFRAMES = {
 
 const state = {
   meta: null,
+  // prd/80: the bookmarklet handshake's last outcome (accepted or rejected) and
+  // whether this tab currently holds the receiver window name.
+  titlesMessage: null,
+  titlesClaimed: false,
   // prd/32: the server's build identity (`/api/meta`), fetched once at boot.
   build: null,
   stamp: '',
@@ -908,6 +912,16 @@ function renderPage() {
   if (page === 'overview') renderOverviewPage();
   if (page === 'sources') renderSourcesPage();
   if (page === 'titles') renderTitlesPage();
+  // prd/80: only the Titles view holds the receiver name, so the bookmarklet
+  // reuses this tab instead of opening a popup the browser may block.
+  state.titlesClaimed = page === 'titles'
+    ? claimReceiverName(typeof window === 'undefined' ? null : window)
+    : false;
+  if (page === 'titles') {
+    const statusEl = document.getElementById('titles-status-line');
+    if (statusEl) statusEl.textContent = '';
+    paintTitleMessage();
+  }
   // prd/80: the render tail. One explicit hydration call per view render (not a
   // MutationObserver), after every view's markup exists and before the
   // preference is saved.
@@ -2877,6 +2891,24 @@ function titleStatus() {
   };
 }
 
+/**
+ * The last bookmarklet message, accepted or not (prd/80).
+ *
+ * This line is the diagnosis: "a message arrived from X — set the Jira site" is
+ * the difference between a fixable misconfiguration and a feature that looks
+ * dead because a popup was blocked.
+ */
+function paintTitleMessage() {
+  const el = document.getElementById('titles-status-line');
+  if (!el) return;
+  const described = state.titlesMessage;
+  const base = described ? messageLine(described) : '';
+  const claim = state.titlesClaimed
+    ? 'this tab is ready to receive (window name claimed)'
+    : 'open this view to receive from the bookmarklet';
+  el.textContent = [base, claim].filter(Boolean).join(' · ');
+}
+
 /** Repaint the status lines after a merge, without rebuilding the inputs. */
 function paintTitleStatus() {
   const status = titleStatus();
@@ -2916,7 +2948,8 @@ function renderTitlesPage() {
   } else {
     note = `The snippet carries ${keys.length} key${keys.length === 1 ? '' : 's'} and requests `
       + 'summary and issuetype only. Open Jira, click the bookmark, and this panel receives '
-      + 'the rows (origin-checked) and merges them.';
+      + 'the rows (origin-checked) and merges them. If the browser blocks the window, the '
+      + 'rows land on your clipboard instead — paste them in step 1.';
   }
   body.innerHTML = titlesMarkup({
     enabled: state.titlesEnabled,
@@ -2981,6 +3014,12 @@ function initTitles() {
   // origin whose payload has the agreed shape. Anything else is ignored.
   listenTitlesMessage(window, {
     site: () => state.titlesSite,
+    // prd/80: a rejected message is *said*, not swallowed — a blocked popup and a
+    // wrong site field used to look exactly like "nothing happened".
+    onEvent: (described) => {
+      state.titlesMessage = described;
+      paintTitleMessage();
+    },
     onRows: async (rows) => {
       const merged = await mergeTitles(state.tenant, rows, await titlesStore());
       await loadTitles();

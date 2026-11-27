@@ -2916,5 +2916,23 @@ def _all_stamps() -> dict:
     return {name: _file_stamp(path) for name, path in _tenant_paths().items()}
 
 
+class _NoCacheStaticFiles(StaticFiles):
+    """Static assets that always revalidate (prd/80).
+
+    Starlette sends ``ETag``/``Last-Modified`` but no ``Cache-Control``, so a
+    browser is free to reuse a module from its heuristic cache without asking.
+    A release then silently does not apply: a stale ``route.js`` does not know a
+    view the new ``index.html`` advertises, so a deep link is treated as unknown
+    and rewritten to the default view. ``no-cache`` means "store it, but ask me
+    first" -- the unchanged file still costs a ``304``, and every deploy takes
+    effect on an ordinary reload.
+    """
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["cache-control"] = "no-cache"
+        return response
+
+
 if APP_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(APP_DIR), html=True), name="app")
+    app.mount("/", _NoCacheStaticFiles(directory=str(APP_DIR), html=True), name="app")

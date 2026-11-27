@@ -206,7 +206,17 @@ bench, so nobody copy-pastes JavaScript to find out whether a transport works.
 shapes (§Phases); a malformed line is counted and skipped, never a partial
 write. Shown as "imported 412 · skipped 3 · 1886 unchanged".
 
-**Bookmarklet (transport B):** a draggable `javascript:` anchor ("drag me to
+**Bookmarklet (transport B):** the receiver is a **named window**
+(`megaspeed-titles`), claimed only while the Titles view is open, and the snippet
+reuses it (`window.open('', name)`) instead of opening a duplicate; a genuinely
+blank popup is navigated, and a **blocked** popup is never silent — the rows go
+to the clipboard and then to a prompt, with the panel's note saying where to
+paste them. The receiver also reports every message it drops: `describeMessage`
+returns `no-site`, `origin`, `shape` or `empty` and the panel prints it, because
+the first live attempt failed exactly like that (the Jira fetch succeeded, the
+popup was blocked, and the panel showed nothing at all).
+
+It is also a draggable `javascript:` anchor ("drag me to
 the bookmarks bar") — our own pages set no CSP header, so the link renders and
 drags normally — plus a "copy snippet" button for the console fallback and one
 sentence of instructions. The snippet fetches `summary,issuetype` for the

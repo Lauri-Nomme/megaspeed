@@ -282,6 +282,56 @@ export function readTitlesMessage(event, expectedOrigin) {
   return parsed.rows.length ? parsed : null;
 }
 
+/**
+ * The receiver's window name (prd/80). The panel claims it while the Titles
+ * view is open, and the bookmarklet reuses the window of that name instead of
+ * opening a duplicate — and, crucially, instead of depending on a popup the
+ * browser may block.
+ */
+export const TITLES_WINDOW_NAME = 'megaspeed-titles';
+
+/**
+ * Why a `message` did or did not become rows.
+ *
+ * The receiver used to be silent on rejection, which made the three common
+ * failures indistinguishable from "the operator never clicked": a bookmarklet
+ * window the browser blocked, a site field naming the wrong Jira, and an empty
+ * payload. The panel prints this explanation (prd/80 §The Titles panel).
+ */
+export function describeMessage(event, expectedOrigin) {
+  const origin = text(event && event.origin) || '';
+  const expected = text(expectedOrigin) || '';
+  const base = { origin, expected, rows: [], skipped: 0 };
+  if (!expected) return { ...base, accepted: false, reason: 'no-site' };
+  if (origin !== expected) return { ...base, accepted: false, reason: 'origin' };
+  const data = event ? event.data : null;
+  if (!data || typeof data !== 'object' || data.type !== 'megaspeed.titles' || data.v !== 1) {
+    return { ...base, accepted: false, reason: 'shape' };
+  }
+  const parsed = readTitlesMessage(event, expected);
+  if (!parsed) return { ...base, accepted: false, reason: 'empty' };
+  return { ...base, accepted: true, reason: 'ok', rows: parsed.rows, skipped: parsed.skipped };
+}
+
+/** One line for the panel: what the last message was, and why it was dropped. */
+export function messageLine(described) {
+  if (!described || typeof described !== 'object') return '';
+  if (described.accepted) {
+    const n = described.rows.length;
+    return `bookmarklet: ${n} row${n === 1 ? '' : 's'} from ${described.origin}`;
+  }
+  const from = described.origin || 'an unknown origin';
+  if (described.reason === 'no-site') {
+    return `a message arrived from ${from} — set the Jira site above so it can be accepted`;
+  }
+  if (described.reason === 'origin') {
+    return `message from ${from} rejected — the site field says ${described.expected}`;
+  }
+  if (described.reason === 'empty') return `message from ${from} carried no usable rows`;
+  return `message from ${from} was not a titles payload`;
+}
+
+
 /* -------------------------------------------------------------- arithmetic */
 
 /** Days since `fetchedAt`, floored, or null. */

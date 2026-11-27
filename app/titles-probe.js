@@ -19,7 +19,7 @@
  * able to print "CORS blocked" rather than a stack trace.
  */
 
-import { TITLE_FIELDS, normalizeKey, titleRow } from './titles.js';
+import { TITLES_WINDOW_NAME, TITLE_FIELDS, normalizeKey, titleRow } from './titles.js';
 
 /** The only non-Jira origin the feature may contact. */
 export const GATEWAY_ORIGIN = 'https://api.atlassian.com';
@@ -300,9 +300,25 @@ export function bookmarkletCode({ site = '', targetOrigin = '', keys = [] } = {}
     + `var K=${JSON.stringify(wanted)};`
     + `var S=${JSON.stringify(base)};`
     + `var O=${JSON.stringify(origin)};`
-    + 'var rows=[],tries=0;'
-    + 'var w=window.open(O+"/?view=titles","megaspeed-titles");'
-    + 'function send(){if(!w||w.closed)return;w.postMessage({type:"megaspeed.titles",v:1,rows:rows},O);}'
+    + `var N=${JSON.stringify(TITLES_WINDOW_NAME)};`
+    + 'var rows=[],sent=-1,tries=0,w=null;'
+    // prd/80: reuse a megaspeed tab that has claimed the name instead of always
+    // opening a popup. A popup the browser blocks used to leave `w` null and the
+    // whole snippet silently did nothing; now the blocked case is said out loud
+    // and the rows are handed over on the clipboard (the panel has a paste box).
+    + 'try{w=window.open("",N);}catch(e){w=null;}'
+    + 'if(w){try{if(!w.location.href||w.location.href==="about:blank")'
+    + '{w.location.href=O+"/?view=titles";}}catch(e){}}'
+    + 'function payload(){return {type:"megaspeed.titles",v:1,rows:rows};}'
+    + 'function send(){if(!w||w.closed)return;'
+    + 'if(rows.length===sent)return;sent=rows.length;'
+    + 'try{w.postMessage(payload(),O);}catch(e){}}'
+    + 'function fallback(){var t=JSON.stringify(payload());'
+    + 'var msg="megaspeed could not open a window for the titles. They are on your clipboard (or in the next dialog): paste them into the Titles panel.";'
+    + 'try{if(navigator.clipboard&&navigator.clipboard.writeText){'
+    + 'navigator.clipboard.writeText(t).then(function(){alert(msg);},function(){'
+    + 'window.prompt(msg,t);});return;}}catch(e){}'
+    + 'window.prompt(msg,t);}'
     + 'function pump(){send();if(++tries<20)setTimeout(pump,1000);}'
     + 'var chain=Promise.resolve();'
     + 'for(var i=0;i<K.length;i+=50){(function(batch){'
@@ -315,7 +331,9 @@ export function bookmarkletCode({ site = '', targetOrigin = '', keys = [] } = {}
     + 'var f=issue.fields||{},t=f.issuetype||{};'
     + 'rows.push({key:issue.key,summary:f.summary||"",type:t.name||""});});send();});'
     + '});})(K.slice(i,i+50));}'
-    + 'chain.catch(function(e){try{console.warn("megaspeed titles: "+((e&&e.message)||e));}catch(x){}});'
+    + 'chain.then(function(){if(!w||w.closed)fallback();},'
+    + 'function(e){try{console.warn("megaspeed titles: "+((e&&e.message)||e));}catch(x){}'
+    + 'if(!w||w.closed)fallback();});'
     + 'pump();'
     + '})();';
   return `javascript:${body}`;

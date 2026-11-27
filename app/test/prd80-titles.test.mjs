@@ -22,9 +22,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
 import {
-  TITLE_FIELDS, TITLE_TTL_DAYS, coverage, csvRecords, formatAge, importLine,
-  normalizeTitlesPref, normalizeType, parseCsv, parseJson, parseTitles,
-  readTitlesMessage, typeGlyph, typeLabel, titlesEnabled,
+  TITLES_WINDOW_NAME, TITLE_FIELDS, TITLE_TTL_DAYS, coverage, csvRecords,
+  describeMessage, formatAge, importLine, messageLine, normalizeTitlesPref,
+  normalizeType, parseCsv, parseJson, parseTitles, readTitlesMessage, typeGlyph,
+  typeLabel, titlesEnabled,
 } from '../titles.js';
 import {
   cacheKey, clearTitles, getTitles, memoryStore, mergeTitles, openCache, stats,
@@ -36,8 +37,8 @@ import {
   siteBase, testBasicGateway, testGateway, titleBatches, titleJql,
 } from '../titles-probe.js';
 import {
-  TITLE_LONGPRESS_MS, annotateDetailTitle, hydrateTitles, listenTitlesMessage,
-  probeMessage, titlesMarkup, wireTitlePopover,
+  TITLE_LONGPRESS_MS, annotateDetailTitle, claimReceiverName, hydrateTitles,
+  listenTitlesMessage, probeMessage, titlesMarkup, wireTitlePopover,
 } from '../titles-panel.js';
 import { ROUTE_VIEWS, parseRoute, serializeRoute } from '../route.js';
 import { deliveryMarkdown } from '../tables.js';
@@ -464,9 +465,18 @@ test('bookmarkletCode: snapshot — two fields, same-origin, the target origin, 
   assert.match(code, /credentials:"same-origin"/);
   assert.equal(code.includes('Bearer'), false);
   assert.equal(code.includes('Authorization'), false);
-  // the panel it opens, and the origin-checked message it sends
-  assert.match(code, /window\.open\(O\+"\/\?view=titles"/);
-  assert.match(code, /postMessage\(\{type:"megaspeed\.titles",v:1,rows:rows\},O\)/);
+  // the receiver is reused by name, and only a blank popup is navigated
+  assert.match(code, /var N="megaspeed-titles"/);
+  assert.match(code, /window\.open\("",N\)/);
+  assert.match(code, /w\.location\.href===?"about:blank"/);
+  assert.match(code, /w\.location\.href=O\+"\/\?view=titles"/);
+  // and the origin-checked message it sends, only when the rows changed
+  assert.match(code, /postMessage\(payload\(\),O\)/);
+  assert.match(code, /if\(rows\.length===sent\)return;/);
+  // a blocked popup is not silent: clipboard, then a prompt
+  assert.match(code, /navigator\.clipboard\.writeText/);
+  assert.match(code, /window\.prompt\(msg,t\)/);
+  assert.match(code, /if\(!w\|\|w\.closed\)fallback\(\)/);
   assert.match(code, /https:\/\/acme\.atlassian\.net/);
   assert.match(code, /"https:\/\/ms\.example"/);
   // the invalid key never reaches the JQL
@@ -925,4 +935,95 @@ test('the page wires the toggle, the hydrator and the panel', () => {
   // no inline table cell (the delivery table's row heights/widths stay put)
   assert.doesNotMatch(read('tables.js'), /data-ticket-line/);
   assert.doesNotMatch(read('aging.js'), /data-ticket-line/);
+});
+
+/* ------------------------------------------------------- the handshake, said
+ *
+ * prd/80: a failed handshake must be *diagnosable*. The operator clicked the
+ * bookmarklet, the tab was blocked (or the site field named the wrong Jira) and
+ * the panel used to show nothing at all -- which reads as "the feature is dead".
+ * `describeMessage`/`messageLine` are that explanation, and `claimReceiverName`
+ * is the fix for the blocked popup: the bookmarklet reuses a named tab.
+ */
+
+test('the handshake: a rejected message names the reason instead of vanishing', () => {
+  const data = { type: 'megaspeed.titles', v: 1, rows: [{ key: 'DEMO-1', summary: 'x', type: 'Task' }] };
+  const site = 'https://acme.atlassian.net';
+
+  const ok = describeMessage({ origin: site, data }, site);
+  assert.equal(ok.accepted, true);
+  assert.equal(ok.rows.length, 1);
+  assert.match(messageLine(ok), /bookmarklet: 1 row from https:\/\/acme\.atlassian\.net/);
+
+  const noSite = describeMessage({ origin: site, data }, '');
+  assert.equal(noSite.accepted, false);
+  assert.equal(noSite.reason, 'no-site');
+  assert.match(messageLine(noSite), /set the Jira site above/);
+
+  const wrong = describeMessage({ origin: 'https://other.example', data }, site);
+  assert.equal(wrong.reason, 'origin');
+  assert.match(messageLine(wrong), /rejected — the site field says https:\/\/acme\.atlassian\.net/);
+
+  const shape = describeMessage({ origin: site, data: { type: 'nope' } }, site);
+  assert.equal(shape.reason, 'shape');
+  assert.match(messageLine(shape), /was not a titles payload/);
+
+  const empty = describeMessage({ origin: site, data: { ...data, rows: [] } }, site);
+  assert.equal(empty.reason, 'empty');
+  assert.match(messageLine(empty), /no usable rows/);
+
+  // a screen-shared console stays quiet: nothing is thrown, nothing logged
+  assert.equal(messageLine(null), '');
+  assert.equal(messageLine({}), 'message from an unknown origin was not a titles payload');
+});
+
+test('the listener reports every message, accepted or not', () => {
+  const listeners = {};
+  const win = {
+    addEventListener: (name, fn) => { listeners[name] = fn; },
+    removeEventListener: (name) => { delete listeners[name]; },
+  };
+  const events = [];
+  const rows = [];
+  listenTitlesMessage(win, {
+    site: 'acme.atlassian.net',
+    onEvent: (described) => events.push(described),
+    onRows: (r) => rows.push(r),
+  });
+  const good = {
+    type: 'megaspeed.titles', v: 1,
+    rows: [{ key: 'DEMO-1', summary: 'fixed', type: 'Bug' }],
+  };
+  listeners.message({ origin: 'https://acme.atlassian.net', data: good });
+  listeners.message({ origin: 'https://evil.example', data: good });
+  assert.equal(rows.length, 1, 'only the configured origin merges');
+  assert.deepEqual(events.map((e) => e.reason), ['ok', 'origin']);
+});
+
+test('claimReceiverName: the tab the bookmarklet reuses, and never a throw', () => {
+  const win = { name: '' };
+  assert.equal(claimReceiverName(win), true);
+  assert.equal(win.name, TITLES_WINDOW_NAME);
+  assert.equal(claimReceiverName(null), false);
+  const frozen = {
+    get name() { return ''; },
+    set name(_value) { throw new Error('blocked'); },
+  };
+  assert.equal(claimReceiverName(frozen), false, 'a hostile/blocked window is not fatal');
+});
+
+test('the bookmarklet never needs a popup: reuse, else clipboard, never silence', () => {
+  const code = bookmarkletCode({
+    site: 'acme.atlassian.net', targetOrigin: 'https://ms.example', keys: ['DEMO-1'],
+  });
+  // no bare window.open(url): the named call is the reuse path
+  assert.equal(/window\.open\(O\+/.test(code), false);
+  assert.match(code, /window\.open\("",N\)/);
+  // if the browser still refuses, the rows go to the clipboard and then a prompt
+  assert.match(code, /writeText\(t\)/);
+  assert.match(code, /alert\(msg\)/);
+  assert.match(code, /window\.prompt\(msg,t\)/);
+  // the fetch is unchanged and still carries only the two fields
+  assert.match(code, /fields:T/);
+  assert.match(code, /credentials:"same-origin"/);
 });

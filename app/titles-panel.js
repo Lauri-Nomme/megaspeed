@@ -24,8 +24,8 @@
  */
 
 import {
-  readTitlesMessage, TITLE_FIELDS, TITLE_TTL_DAYS, ageDays, formatAge,
-  importLine, parseTitles, typeGlyph, typeLabel,
+  describeMessage, messageLine, readTitlesMessage, TITLES_WINDOW_NAME, TITLE_FIELDS,
+  TITLE_TTL_DAYS, ageDays, formatAge, importLine, parseTitles, typeGlyph, typeLabel,
 } from './titles.js';
 import { clearTitles, mergeTitles } from './titles-cache.js';
 import {
@@ -435,7 +435,7 @@ export function wireTitlesPanel(root, deps = {}) {
  *
  * Returns an unlisten function.
  */
-export function listenTitlesMessage(win, { site = '', onRows } = {}) {
+export function listenTitlesMessage(win, { site = '', onRows, onEvent } = {}) {
   if (!win || typeof win.addEventListener !== 'function') return () => {};
   const configured = () => {
     const raw = typeof site === 'function' ? site() : site;
@@ -448,12 +448,30 @@ export function listenTitlesMessage(win, { site = '', onRows } = {}) {
   const handler = (event) => {
     // Compare against the Jira origin, never against our own: the message comes
     // from the Jira tab, and only from there.
-    const accepted = readTitlesMessage(event, configured());
-    if (!accepted) return;
-    if (typeof onRows === 'function') onRows(accepted.rows, accepted.skipped);
+    const described = describeMessage(event, configured());
+    // Every message is reported, including a rejected one: silence is what made
+    // a blocked popup and a wrong site field indistinguishable (prd/80).
+    if (typeof onEvent === 'function') onEvent(described);
+    if (!described.accepted) return;
+    if (typeof onRows === 'function') onRows(described.rows, described.skipped);
   };
   win.addEventListener('message', handler);
   return () => win.removeEventListener('message', handler);
+}
+
+/**
+ * Claim (or release) the receiver window's name, so the bookmarklet can find an
+ * already-open panel with `window.open('', 'megaspeed-titles')` instead of
+ * opening a duplicate popup. Only the Titles view holds the name.
+ */
+export function claimReceiverName(win) {
+  if (!win) return false;
+  try {
+    win.name = TITLES_WINDOW_NAME;
+    return win.name === TITLES_WINDOW_NAME;
+  } catch {
+    return false;
+  }
 }
 
 /* ---------------------------------------------------------------- hydration */

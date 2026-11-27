@@ -73,6 +73,34 @@ write is atomic and best-effort, and the memory cache still fronts it. Tests:
 second process reads the disk, window/store changes are new keys, corrupt files
 are ignored, an unavailable report is not written.
 
+## v0.25.1 — the titles handshake is diagnosable, and needs no popup
+
+- **The bookmarklet no longer depends on a popup.** It calls
+  `window.open('', 'megaspeed-titles')` and reuses a megaspeed tab that has
+  claimed that name (only the Titles view holds it), navigating a genuinely
+  blank popup only. A blocked popup used to leave `w` null and the whole snippet
+  silently did nothing — which is exactly what happened on the first live try:
+  the Jira fetch succeeded (the POST carried all 2,391 keys) and nothing reached
+  the panel.
+- **A blocked window is not silence.** The rows go to the clipboard, then to a
+  prompt, and the panel's note says to paste them into step 1.
+- **A rejected message is reported, not dropped.** `describeMessage` names the
+  reason — `no-site` ("set the Jira site above"), `origin` ("rejected — the site
+  field says …"), `shape`, `empty` — and the Titles panel prints
+  `messageLine(described)` plus whether this tab holds the receiver name. The
+  three failure modes were previously indistinguishable from "never clicked".
+- **Send only on change:** the 20-second pump re-posts only when the row count
+  moved, so a growing batch is not merged 20 times.
+- **Static assets now send `cache-control: no-cache`** (prd/80): Starlette sent
+  `ETag`/`Last-Modified` but no `Cache-Control`, so a browser could reuse a
+  module without asking and a release silently did not apply (a stale
+  `route.js` did not know a new view and rewrote the deep link to the default
+  view). Unchanged files still cost a 304.
+- Verified end-to-end against a fake Jira origin in a headless browser: POST to
+  `/rest/api/3/search/jql`, origin-checked `postMessage`, merge, coverage 0 →
+  1,400/2,391 keys.
+- 667 node tests (4 new), 1,647 pytest / 426 subtests, 99 scrape tests.
+
 ## v0.25.0 — browser-side Jira titles (prd/80)
 
 - **The invariant:** a title is ticket content, so it travels Jira → the
