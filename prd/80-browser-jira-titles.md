@@ -1,6 +1,7 @@
 # 80 — Ticket titles, resolved in the browser
 
-Status: **draft; Jira content never transits megaspeed (hard rule).**
+Status: **implemented (v0.25.0): P0/P1/P2 built; the three live probes are
+unrun.** Jira content never transits megaspeed (hard rule).
 
 ## Problem
 

@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1647** (`tests/`) + **99** (`scrape/tests`) + **626** (node `app/test`) green.
+Tests: **1647** (`tests/`) + **99** (`scrape/tests`) + **663** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -72,6 +72,40 @@ re-simulating. A stated no-result is not persisted (the next run retries), the
 write is atomic and best-effort, and the memory cache still fronts it. Tests:
 second process reads the disk, window/store changes are new keys, corrupt files
 are ignored, an unavailable report is not written.
+
+## v0.25.0 — browser-side Jira titles (prd/80)
+
+- **The invariant:** a title is ticket content, so it travels Jira → the
+  operator's browser → the screen and never transits the megaspeed server.
+  There is no titles route, no proxy, and no same-origin request carrying a
+  title; a recording-`fetch` test asserts the only reachable origins are the
+  configured Jira site and `api.atlassian.com`.
+- **Two fields only:** `['summary','issuetype']`, literal and tested. No
+  `status` (the store already has real transitions), no `priority`, and **no
+  user field ever** — importing an assignee would build the real-name ↔
+  pseudonym map the pseudonymisation exists to prevent.
+- **Three transports, one import shape** (`{key,summary,type}`): CSV/JSON import,
+  the bookmarklet (runs on the Jira tab, same-origin, `postMessage`s into the
+  panel), and a pasted 3LO access token against the CORS-enabled gateway
+  (`api.atlassian.com/ex/jira/{cloudId}`, 3600 s, no in-browser refresh).
+  Workers/service workers cannot help: CORS is per origin, and `no-cors` is
+  opaque. An extension is out; a proxy is excluded by the invariant.
+- **Render:** `hydrateTitles` at the end of each view render over the existing
+  `[data-ticket]` anchors (no call-site change), one delegated popover, Jira-
+  matched SVG type glyphs, the ticket-detail summary subtitle, and the epic
+  child-list second line. Inline table cells get no icon or line, so the
+  delivery table's 30 px row / 250 px key cell are unchanged (asserted).
+- **Toggle:** a small topbar control plus `?titles=off`; off removes every
+  title from the DOM and restores the anchors' own tooltips (asserted).
+- **`?view=titles` panel:** import (file/paste), the draggable bookmarklet +
+  copy-snippet, cloudId Discover, Test gateway / Test Basic, Fetch titles with
+  an expiry countdown, Forget titles, and the mirrored toggle. The probes are
+  buttons, not console snippets.
+- **Unverified:** the three live probes (bookmarklet CSP, gateway CORS,
+  Basic-on-gateway) were not run — they need the real tenant. Transports B/C are
+  built and gated but unproven; transport A (CSV/JSON import) needs nothing.
+- 663 node tests (37 new), 1,647 pytest / 426 subtests, 99 scrape tests. No
+  server, ingest or store change; `--verify` and the canary untouched.
 
 ## v0.24.2 — the no-fit filter ships; close/status phrases go trailing-only
 
