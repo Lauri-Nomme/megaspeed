@@ -266,6 +266,7 @@ class Fixture:
         self.as_of = as_of
         self.events: list[dict] = []
         self.objects: list[dict] = []
+        self.relations: list[tuple[str, str, str]] = []
         self.opened: dict[int, datetime] = {}
         self._count = 0
 
@@ -282,7 +283,7 @@ class Fixture:
         return self
 
     def event(self, number: int, activity: str, actor: str, ts: datetime,
-              **attributes) -> "Fixture":
+              thread: str | None = None, **attributes) -> "Fixture":
         self._count += 1
         key = f"{REPO}#{number}:{self._count}"
         self.events.append({
@@ -292,13 +293,31 @@ class Fixture:
             "content_hash": hashlib.blake2b(key.encode(), digest_size=8).hexdigest(),
             "as_of": self.as_of,
         })
+        if thread is not None:
+            self.relations.append((key, "THREAD", thread))
         return self
+
+    def review_comment(self, number: int, actor: str, ts: datetime,
+                       **attributes) -> "Fixture":
+        """A comment linked to a THREAD labelled ``review`` (prd/81)."""
+        self._count += 1
+        thread_id = f"THREAD:{REPO}#{number}:c{self._count}"
+        self.objects.append({
+            "object_type": "THREAD", "object_id": thread_id, "repo": REPO,
+            "pr_id": number, "ticket_keys": [], "actor": None, "state": "resolved",
+            "created_at": ts, "closed_at": None, "head_commit": None,
+            "message_class": None,
+            "attributes": {"severity": "suggestion", "anchor_class": "general",
+                           "comment_kind": "review"},
+        })
+        return self.event(number, "comment_added", actor, ts, thread=thread_id,
+                          **attributes)
 
     def write(self, path: Path) -> Path:
         con = connect(path)
         try:
             ensure_schema(con)
-            write_events(con, self.events, [])
+            write_events(con, self.events, self.relations)
             write_objects(con, self.objects)
             write_run(con, {
                 "run_id": "fixture-calendar", "source": "fixture", "as_of": self.as_of,
@@ -336,7 +355,7 @@ class AnalysisCase(unittest.TestCase):
         """A review wait from Friday 16:00 to Monday 10:00 (66 wall-clock hours)."""
         fx = Fixture(as_of=at(2026, 3, 9, 12))
         fx.pr(1, "AaAa", at(2026, 3, 6, 16))
-        fx.event(1, "comment_added", "RrRr", at(2026, 3, 9, 10), severity="suggestion")
+        fx.review_comment(1, "RrRr", at(2026, 3, 9, 10))
         return fx
 
 
@@ -420,8 +439,7 @@ class VacationBlockingTests(AnalysisCase):
         fx.event(1, "pr_pushed", "AaAa", at(2026, 7, 3, 16), push_class="content")
         if delegated:
             # YyYy picks the PR up during the vacation: the ball moves
-            fx.event(1, "comment_added", "YyYy", at(2026, 7, 8, 10),
-                     severity="suggestion")
+            fx.review_comment(1, "YyYy", at(2026, 7, 8, 10))
             fx.event(1, "pr_approved", "RrRr", at(2026, 7, 20, 10))
         else:
             fx.event(1, "pr_approved", "RrRr", at(2026, 7, 20, 10))
@@ -535,7 +553,7 @@ class CalendarApiTests(unittest.TestCase):
         cls.dir = Path(cls.tmp.name).resolve()
         fixture = Fixture(as_of=at(2026, 3, 9, 12))
         fixture.pr(1, "AaAa", at(2026, 3, 6, 16))
-        fixture.event(1, "comment_added", "RrRr", at(2026, 3, 9, 10), severity="suggestion")
+        fixture.review_comment(1, "RrRr", at(2026, 3, 9, 10))
         fixture.write(cls.dir / "del.duckdb")
         # a per-tenant calendar: an override and a vacation
         (cls.dir / "del").mkdir()

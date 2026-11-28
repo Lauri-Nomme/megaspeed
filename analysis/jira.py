@@ -207,7 +207,6 @@ SPRINT_ON_TIME_TARGET = 0.80
 #: A one- or two-story sprint is not evidence about planning; say so, do not rank.
 SPRINT_MIN_STORIES = 3
 
-REVIEW_ACTIONS = ("comment_added", "pr_approved")
 LOG_DELAY_BUCKETS = ("same_day", "next_day", "within_week", "late")
 #: concepts.md §1: a day is 8 business hours, never 24 and never a calendar day.
 BUSINESS_HOURS_PER_DAY = 8.0
@@ -725,17 +724,16 @@ def _first_event_at(story: Story, activity: str) -> datetime | None:
     return min((event["_ts"] for event in story.of(activity)), default=None)
 
 
-def _first_review(pr_state) -> datetime | None:
-    """First reviewer action on a PR (comment or approval, never the author)."""
-    opened = pr_state.pr["created_ts"]
-    for event in pr_state.events:
-        if (
-            event["_ts"] >= opened
-            and event["activity"] in REVIEW_ACTIONS
-            and event["actor"] != pr_state.pr["actor"]
-        ):
-            return event["_ts"]
-    return None
+def _first_review(pr_state) -> dict | None:
+    """The earliest **human review remark** on a PR (prd/81), or ``None``.
+
+    One definition for the whole product: ``ballcourt.counts_as_review`` — a
+    human approval, or a human comment whose THREAD is labelled ``review``.
+    Bots (``court.bots``), admin/CI/bot-request thread kinds and unlabelled
+    comments are not reviews. The event is returned so the caller can name the
+    reviewer; :func:`first_review` is the timestamp wrapper.
+    """
+    return ballcourt.first_review(pr_state)
 
 
 def _pr_merge(pr_state) -> datetime | None:
@@ -747,7 +745,8 @@ def _pr_merge(pr_state) -> datetime | None:
 # the private helpers; a per-ticket read needs the same answers, not a second
 # implementation that could disagree with them.
 def first_review(pr_state) -> datetime | None:
-    return _first_review(pr_state)
+    event = _first_review(pr_state)
+    return event["_ts"] if event is not None else None
 
 
 def pr_merge(pr_state) -> datetime | None:
@@ -984,7 +983,9 @@ def _cycle(story: Story) -> Cycle:
     prs = list(story.prs)
     pr_open = min((state.pr["created_ts"] for state in prs), default=None)
     reviews = [_first_review(state) for state in prs]
-    first_review = min((ts for ts in reviews if ts is not None), default=None)
+    first_review = min(
+        (event["_ts"] for event in reviews if event is not None), default=None
+    )
     # prd/63 V-C6: when the first reviewer was *asked*. The roster add is its
     # own event; a store that adds reviewers at open has none, so the boundary
     # is the open instant (the wait is a measured zero). A late add of an

@@ -11,7 +11,7 @@ estimated cost in hours.
 Every metric prd/17 lists is computed from the store, in one pass:
 
 ======================  ==========================================================
-``time_to_first_review`` first reviewer action (comment/approval) − ``pr_opened``
+``time_to_first_review`` first human review remark (approval/review note) − ``pr_opened``
 ``cycle_time``           ``pr_merged`` − ``pr_opened`` (median + p90)
 ``flow_efficiency``      active ÷ elapsed per PR, and the waiting-time split
 ``survival``             Kaplan–Meier time-to-merge with open/declined censored
@@ -94,6 +94,11 @@ from ingest.store import iso, to_naive_utc, utcnow
 
 # v1 targets. Stated in every response that uses them (never a hidden constant).
 TARGET_FIRST_REVIEW_HOURS = 24.0
+#: prd/81: what the number measures, in the words the page prints. A first
+#: review is a human review remark — a bot's CI comment is not one.
+FIRST_REVIEW_BASIS = (
+    "first human review remark; bots, admin and CI comments excluded"
+)
 TARGET_CYCLE_HOURS = 72.0
 MAX_REVIEW_ROUNDS = 3
 #: prd/46 §3: the *advice* target is the cap the policy lab's best scenario
@@ -182,8 +187,8 @@ SEGMENT_ADVICE = {
         "PR template), and triage the unassigned PRs each morning."
     ),
     "pr_open_first_review": (
-        "Adopt a first-response target: every PR gets a first review inside a "
-        "day, and the review queue is triaged each morning. The wait for the "
+        "Adopt a first-review target: every PR gets a human review remark inside "
+        "a day, and the review queue is triaged each morning. The wait for the "
         "first look, not the review itself, is what this segment measures."
     ),
     "review_rounds": (
@@ -571,15 +576,29 @@ def cap_drill_down(computed: dict, suggestions: list[dict],
 
 
 def _first_review(state) -> dict | None:
-    """The first reviewer action on a PR: comment or approval, never the author."""
-    pr = state.pr
-    opened = pr["created_ts"]
+    """The earliest **human review remark** on a PR (prd/81).
+
+    One definition for the whole product: ``ballcourt.first_review`` — a human
+    approval, or a human comment whose THREAD is labelled ``review``. Bots,
+    admin/bot-request/CI thread kinds and unlabelled comments are not reviews.
+    """
+    return ballcourt.first_review(state)
+
+
+def _first_review_candidate(state) -> dict | None:
+    """The earliest non-author review-*shaped* event, whatever its verdict.
+
+    ``comment_added`` / ``pr_approved`` by anyone but the author, bots included.
+    Used only to attribute an *excluded* candidate (a bot, an unlabelled
+    comment), never as a metric sample (prd/81).
+    """
+    opened = state.pr["created_ts"]
     return next(
         (
             event for event in state.events
             if event["_ts"] >= opened
             and event["activity"] in REVIEW_ACTIONS
-            and event["actor"] != pr["actor"]
+            and event["actor"] != state.pr["actor"]
         ),
         None,
     )
@@ -794,19 +813,53 @@ def load_pr_sizes(con) -> dict[str, dict]:
 # metrics (prd/17 §Metrics) — each one is independently testable
 # --------------------------------------------------------------------------- #
 def time_to_first_review(court: ballcourt.BallCourt, window) -> dict:
-    """``min(first reviewer comment/approval) − pr_opened`` per PR.
+    """``first human review remark − pr_opened`` per PR (prd/81).
 
-    ``by_reviewer`` is a person aggregate, so bots are excluded from it
-    (concepts.md §2); their PRs still enter the sample, because the wait a
-    human caused (or waited through) is a fact.
+    A **first review** is the earliest event that is all of: by a human (the
+    actor is not in ``court.bots``), not the author, and either a
+    ``pr_approved`` (an approval is a review) or a ``comment_added`` whose
+    linked THREAD the store labelled ``review``.
+
+    The metric used to take the first comment by any non-author, which made a
+    CI bot the "first reviewer" on most PRs and priced the bot's speed
+    (prd/81): the headline said minutes while the drill-down showed days.
+    Bots, ``admin`` / ``bot_request`` / ``ci_notice`` / ``ci_finding`` threads
+    and comments with no resolvable label are excluded — deliberately *not*
+    replaced by a "first feedback" metric, which would measure the same CI bot.
+
+    The exclusions are auditable rather than silent:
+
+    * ``missing`` — PRs with no human review observed (larger and honest now);
+    * ``bots_skipped`` — PRs whose first non-author review-shaped event was a
+      bot's (whether a human reviewed later or never);
+    * ``unlabeled_skipped`` — PRs whose first candidate was a comment with no
+      thread label, which cannot be shown to be a review.
+
+    ``by_reviewer`` is human-only by construction; ``rows`` stays the per-PR
+    drill-down.
     """
     samples: list[float] = []
     by_reviewer: dict[str, list[float]] = defaultdict(list)
     missing = 0
+    bots_skipped = 0
+    unlabeled_skipped = 0
     rows: list[dict] = []
     for state in cohort(court, window):
         pr = state.pr
         first = _first_review(state)
+        candidate = _first_review_candidate(state)
+        # The candidate is the event the old metric would have taken. When it
+        # is not the first review, say which exclusion removed it — a bot, or a
+        # comment with no resolvable thread label. Labeled admin/CI kinds are
+        # excluded by the rule itself and are not counted here.
+        if candidate is not None and candidate is not first:
+            if candidate["actor"] in court.bots:
+                bots_skipped += 1
+            elif (
+                candidate["activity"] == "comment_added"
+                and not candidate.get("comment_kind")
+            ):
+                unlabeled_skipped += 1
         if first is None:
             missing += 1
             rows.append(_pr_row(
@@ -826,10 +879,15 @@ def time_to_first_review(court: ballcourt.BallCourt, window) -> dict:
     return {
         "n": len(samples),
         "missing": missing,
+        "bots_skipped": bots_skipped,
+        "unlabeled_skipped": unlabeled_skipped,
         "median_hours": _median(samples),
         "p90_hours": _p90(samples),
         "target_hours": TARGET_FIRST_REVIEW_HOURS,
         "over_target": sum(1 for h in samples if h > TARGET_FIRST_REVIEW_HOURS),
+        # prd/81: the one-sentence definition the page can print, so the
+        # exclusion is named where the number is read.
+        "basis": FIRST_REVIEW_BASIS,
         "bots_excluded": sorted(court.bots),
         "by_reviewer": {
             person: {"n": len(values), "median_hours": _median(values)}
@@ -2606,7 +2664,7 @@ def templates(
                 "over_target": tfr["over_target"],
                 "no_review_yet": tfr["missing"],
             },
-            "Adopt a review SLA: every PR gets a first response within 24 h. Triage the "
+            "Adopt a review SLA: every PR gets a first human review remark within 24 h. Triage the "
             "review queue each morning so nothing waits a full day for a first look.",
             severity, (median - TARGET_FIRST_REVIEW_HOURS) * tfr["n"], tfr["n"],
         ))

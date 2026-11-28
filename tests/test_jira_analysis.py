@@ -158,7 +158,8 @@ class Fixture:
         return self
 
     def pr_event(self, number: int, activity: str, actor: str, hours: float,
-                 repo: str = REPO, **attributes) -> "Fixture":
+                 repo: str = REPO, thread: str | None = None,
+                 **attributes) -> "Fixture":
         self._count += 1
         event_key = f"{repo}#{number}:{self._count}"
         self.events.append({
@@ -174,6 +175,38 @@ class Fixture:
             "as_of": self.as_of,
         })
         self.relations.append((event_key, "PR", f"PR:{repo}#{number}"))
+        if thread is not None:
+            self.relations.append((event_key, "THREAD", thread))
+        return self
+
+    def pr_thread(self, number: int, index: int, kind: str = "review",
+                  repo: str = REPO) -> str:
+        """A THREAD object on the PR with its closed-vocabulary label (prd/75)."""
+        object_id = f"THREAD:{repo}#{number}:{index}"
+        self._object(
+            "THREAD", object_id, repo=repo, pr_id=number, state="resolved",
+            created_at=self.opened[(repo, number)],
+            attributes={"severity": "suggestion", "anchor_class": "general",
+                        "comment_kind": kind},
+        )
+        return object_id
+
+    def pr_review(self, number: int, actor: str, hours: float,
+                  kind: str = "review", repo: str = REPO) -> "Fixture":
+        """A comment event linked to a labelled THREAD (prd/81).
+
+        Only a ``review`` thread makes it a first review; use :meth:`pr_event`
+        directly for an unlabelled comment.
+        """
+        index = len(self.events) + 1
+        thread = self.pr_thread(number, index, kind, repo=repo)
+        return self.pr_event(number, "comment_added", actor, hours,
+                             repo=repo, thread=thread)
+
+    def person(self, pseudonym: str, kind: str = "human") -> "Fixture":
+        """A PERSON object with the store's ``actor_kind`` (prd/02)."""
+        self._object("PERSON", f"PERSON:{pseudonym}",
+                     attributes={"actor_kind": kind})
         return self
 
     # -- materialise -------------------------------------------------------- #
@@ -220,7 +253,7 @@ def balanced_fixture() -> Fixture:
     fx.worklog("ENG-1", T0 + timedelta(hours=25), 4.0, delay_hours=1.0,
                bucket="same_day")
     fx.pr(1, "AaAa", T0 + timedelta(hours=40), closed=T0 + timedelta(hours=80))
-    fx.pr_event(1, "comment_added", "RrRr", 10, severity="suggestion")
+    fx.pr_review(1, "RrRr", 10)
     fx.pr_event(1, "pr_pushed", "AaAa", 20, push_class="content")
     fx.pr_event(1, "pr_approved", "RrRr", 30)
     fx.pr_event(1, "pr_merged", "RrRr", 40)
@@ -366,7 +399,7 @@ class WaitingTimeTests(StoreCase):
         fx.status("ENG-1", T0 + timedelta(hours=50), "in_progress")
         fx.status("ENG-1", T0 + timedelta(hours=120), "done", from_status="in_progress")
         fx.pr(1, "AaAa", T0 + timedelta(hours=60), closed=T0 + timedelta(hours=110))
-        fx.pr_event(1, "comment_added", "RrRr", 10, severity="suggestion")  # +70
+        fx.pr_review(1, "RrRr", 10)  # +70
         fx.pr_event(1, "pr_approved", "RrRr", 40)                           # +100
         fx.pr_event(1, "pr_merged", "RrRr", 50)                             # +110
         payload = self.payload(fx)
@@ -995,7 +1028,7 @@ class WorklogTests(StoreCase):
         fx.worklog("ENG-1", T0 + timedelta(hours=43), 1.0, delay_hours=61 * 24.0,
                    bucket="late")
         fx.pr(1, "AaAa", T0 + timedelta(hours=40), closed=T0 + timedelta(hours=80))
-        fx.pr_event(1, "comment_added", "RrRr", 10, severity="suggestion")
+        fx.pr_review(1, "RrRr", 10)
         fx.pr_event(1, "pr_pushed", "AaAa", 20, push_class="content")
         fx.pr_event(1, "pr_approved", "RrRr", 30)
         fx.pr_event(1, "pr_merged", "RrRr", 40)
@@ -1402,7 +1435,7 @@ class ReviewRoundDefinitionTests(StoreCase):
         fx.story("ENG-1", T0, state="done", closed=T0 + timedelta(hours=100))
         fx.pr(1, "AaAa", T0, closed=T0 + timedelta(hours=100))
         fx.pr_event(1, "pr_pushed", "AaAa", 1, push_class="content")   # setup
-        fx.pr_event(1, "comment_added", "RrRr", 5, severity="suggestion")
+        fx.pr_review(1, "RrRr", 5)
         fx.pr_event(1, "pr_pushed", "AaAa", 10, push_class="content")
         fx.pr_event(1, "pr_pushed", "AaAa", 20, push_class="pure_rebase")
         fx.pr_event(1, "pr_unapproved", "RrRr", 30, cause="push")
@@ -1421,6 +1454,138 @@ class ReviewRoundDefinitionTests(StoreCase):
         self.assertEqual(metric["excluded_pre_first_review"], 1)
         self.assertEqual(metric["excluded_pure_rebase"], 1)
         self.assertEqual(metric["excluded_push_unapprovals"], 1)
+
+
+# --------------------------------------------------------------------------- #
+# prd/81: a first review is a human review remark, not a bot comment
+# --------------------------------------------------------------------------- #
+class FirstReviewIsHumanTests(StoreCase):
+    """The analysis-level rule and the boundaries it moves.
+
+    A first review is the earliest event that is all of: by a human (not in
+    ``court.bots``), not the author, and either a ``pr_approved`` or a
+    ``comment_added`` whose THREAD is labelled ``review``. A bot's CI comment,
+    an admin/CI thread and a comment with no label are not reviews.
+    """
+
+    BOT = "CaGi41"
+
+    def cycle_for(self, fx: Fixture):
+        court, data, window, threads, bots, sizes = self.load(fx)
+        story = jira.story_for(data, "ENG-1")
+        self.assertIsNotNone(story)
+        return court, jira._cycle(story), window, rules.metrics(
+            court, threads, window, sizes, data
+        )
+
+    def base(self) -> Fixture:
+        fx = Fixture()
+        fx.person(self.BOT, "bot")
+        fx.story("ENG-1", T0, state="open")
+        fx.pr(1, "AaAa", T0 + timedelta(hours=10), state="open")
+        return fx
+
+    def test_a_bot_only_comment_is_not_a_review(self):
+        fx = self.base()
+        fx.pr_event(1, "comment_added", self.BOT, 1)
+        court, cycle, _window, _metrics = self.cycle_for(fx)
+        state = court.prs[0]
+        self.assertIn(self.BOT, court.bots)
+        self.assertIsNone(jira._first_review(state))
+        self.assertIsNone(jira.first_review(state))
+        self.assertIsNone(cycle.boundaries["first_review"])
+        self.assertIn("first_review", cycle.missing)
+
+    def test_a_bot_comment_then_a_human_review_uses_the_human_timestamp(self):
+        fx = self.base()
+        fx.pr_event(1, "comment_added", self.BOT, 1)      # the CI bot, +11
+        fx.pr_review(1, "RrRr", 20)                      # a human, +30
+        court, cycle, _window, _metrics = self.cycle_for(fx)
+        event = jira._first_review(court.prs[0])
+        self.assertIsNotNone(event)
+        self.assertEqual(event["actor"], "RrRr")
+        self.assertEqual(event["comment_kind"], "review")
+        self.assertEqual(jira.first_review(court.prs[0]),
+                         T0 + timedelta(hours=30))
+        self.assertEqual(cycle.boundaries["first_review"],
+                         T0 + timedelta(hours=30))
+
+    def test_the_authors_own_comment_is_never_a_review(self):
+        fx = self.base()
+        # even a review-labelled thread by the author is not a review of itself
+        fx.pr_review(1, "AaAa", 5)
+        court, cycle, _window, _metrics = self.cycle_for(fx)
+        self.assertIsNone(jira._first_review(court.prs[0]))
+        self.assertIsNone(cycle.boundaries["first_review"])
+
+    def test_admin_bot_request_and_ci_notices_are_not_reviews(self):
+        fx = self.base()
+        fx.pr_review(1, "RrRr", 2, kind="admin")
+        fx.pr_review(1, "RrRr", 4, kind="bot_request")
+        fx.pr_review(1, "RrRr", 6, kind="ci_notice")
+        fx.pr_review(1, "RrRr", 8, kind="ci_finding")
+        fx.pr_review(1, "RrRr", 10, kind="bot")
+        fx.pr_review(1, "RrRr", 12, kind="review")
+        court, _cycle, _window, _metrics = self.cycle_for(fx)
+        event = jira._first_review(court.prs[0])
+        self.assertIsNotNone(event)
+        self.assertEqual(event["_ts"], T0 + timedelta(hours=22))  # +12 after open
+
+    def test_a_human_approval_with_no_thread_is_a_review(self):
+        fx = self.base()
+        fx.pr_event(1, "pr_approved", "RrRr", 7)   # no THREAD, still a review
+        court, cycle, _window, _metrics = self.cycle_for(fx)
+        event = jira._first_review(court.prs[0])
+        self.assertIsNotNone(event)
+        self.assertEqual(event["activity"], "pr_approved")
+        self.assertIsNone(event["comment_kind"])
+        self.assertEqual(cycle.boundaries["first_review"],
+                         T0 + timedelta(hours=17))
+
+    def test_an_unlabeled_comment_is_not_a_review(self):
+        fx = self.base()
+        fx.pr_event(1, "comment_added", "RrRr", 4)   # no THREAD link at all
+        court, cycle, _window, _metrics = self.cycle_for(fx)
+        event = court.prs[0].events[-1]
+        self.assertIsNone(event["comment_kind"])
+        self.assertIsNone(jira._first_review(court.prs[0]))
+        self.assertIsNone(cycle.boundaries["first_review"])
+
+    def test_the_first_review_segment_is_missing_not_zero_for_bots_only(self):
+        fx = self.base()
+        fx.pr_event(1, "comment_added", self.BOT, 1)
+        fx.pr_event(1, "pr_pushed", "AaAa", 2, push_class="content")
+        _court, cycle, _window, metrics = self.cycle_for(fx)
+        # prd/36 §2 / prd/81: no human review means the segment has no boundary;
+        # it must read as missing, never as a measured 0 h wait.
+        self.assertIsNone(cycle.segment_bounds["first_review"])
+        segment = metrics["waiting_time_decomposition"]["segments"]["pr_open_first_review"]
+        self.assertEqual(segment["n"], 0)
+        self.assertEqual(segment["missing"], 1)
+        self.assertIsNone(
+            metrics["waiting_time_decomposition"]["rows"][0]["segments"]["pr_open_first_review"]
+        )
+
+    def test_review_rounds_start_at_the_human_review(self):
+        fx = self.base()
+        fx.pr_event(1, "comment_added", self.BOT, 1)          # +11
+        fx.pr_event(1, "pr_pushed", "AaAa", 2, push_class="content")  # setup
+        fx.pr_review(1, "RrRr", 5)                            # +15 boundary
+        fx.pr_event(1, "pr_pushed", "AaAa", 6, push_class="content")  # a round
+        fx.pr_event(1, "pr_unapproved", "RrRr", 7, cause="manual")    # a round
+        fx.pr_event(1, "pr_approved", "RrRr", 8)
+        _court, cycle, window, metrics = self.cycle_for(fx)
+        self.assertEqual(cycle.boundaries["first_review"],
+                         T0 + timedelta(hours=15))
+        self.assertEqual(cycle.review_rounds, 2)
+        round_metric = rules.rework_loops(_court, window)
+        self.assertEqual(round_metric["total_rounds"], 2)
+        self.assertEqual(round_metric["excluded_pre_first_review"], 1)
+        # and the wait for the human is the segment, not the bot's speed
+        decomposition = metrics["waiting_time_decomposition"]
+        self.assertEqual(
+            decomposition["segments"]["pr_open_first_review"]["hours"], 5.0
+        )
 
 
 if __name__ == "__main__":

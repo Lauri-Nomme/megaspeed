@@ -163,6 +163,17 @@ class Fixture:
                 "as_of": self.as_of,
             })
             self.relations.append((event_key, "PR", object_id))
+            if activity == "comment_added":
+                # prd/81: only a comment on a THREAD labelled ``review`` is a
+                # first review; the fixture's reviewer comment is one.
+                thread_id = f"THREAD:{REPO}#{number}:c{self._count}"
+                self._object(
+                    "THREAD", thread_id, repo=REPO, pr_id=number,
+                    state="resolved", created_at=opened + timedelta(hours=hours),
+                    attributes={"severity": "suggestion", "anchor_class": "general",
+                                "comment_kind": "review"},
+                )
+                self.relations.append((event_key, "THREAD", thread_id))
 
     def write(self, path: Path) -> Path:
         con = connect(path)

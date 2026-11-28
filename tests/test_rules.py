@@ -91,7 +91,8 @@ class Fixture:
         return self
 
     def event(self, number: int, activity: str, actor: str, hours: float,
-              people: tuple[str, ...] = (), **attributes) -> "Fixture":
+              people: tuple[str, ...] = (), thread: str | None = None,
+              **attributes) -> "Fixture":
         self._count += 1
         ts = self.opened[number] + timedelta(hours=hours)
         key = f"{REPO}#{number}:{self._count}"
@@ -109,6 +110,39 @@ class Fixture:
         })
         for person in people:
             self.relations.append((key, "PERSON", f"PERSON:{person}"))
+        if thread is not None:
+            self.relations.append((key, "THREAD", thread))
+        return self
+
+    def review_comment(self, number: int, actor: str, hours: float,
+                       kind: str = "review", **attributes) -> "Fixture":
+        """A comment event linked to a THREAD labelled ``kind`` (prd/81).
+
+        Only a ``review`` thread makes a ``comment_added`` a first review; a
+        caller that wants an unlabelled comment uses :meth:`event` directly.
+        """
+        self._count += 1
+        thread_id = f"THREAD:{REPO}#{number}:c{self._count}"
+        self.event(number, "comment_added", actor, hours, thread=thread_id,
+                   **attributes)
+        self.objects.append({
+            "object_type": "THREAD",
+            "object_id": thread_id,
+            "repo": REPO,
+            "pr_id": number,
+            "ticket_keys": [],
+            "actor": None,
+            "state": "resolved",
+            "created_at": self.opened[number] + timedelta(hours=hours),
+            "closed_at": None,
+            "head_commit": None,
+            "message_class": None,
+            "attributes": {
+                "severity": "suggestion",
+                "anchor_class": "general",
+                "comment_kind": kind,
+            },
+        })
         return self
 
     # -- objects ------------------------------------------------------------ #
@@ -246,13 +280,13 @@ class TimeToFirstReviewTests(StoreCase):
     def fixture(self) -> Fixture:
         fx = Fixture()
         fx.pr(1, "AaAa")
-        fx.event(1, "comment_added", "RrRr", 10, severity="suggestion")
+        fx.review_comment(1, "RrRr", 10)
         fx.pr(2, "AaAa")
         fx.event(2, "pr_approved", "RrRr", 40)
         fx.pr(3, "AaAa")
         # the author's own comment is not a review action
         fx.event(3, "comment_added", "AaAa", 5, severity="suggestion")
-        fx.event(3, "comment_added", "SsSs", 100, severity="suggestion")
+        fx.review_comment(3, "SsSs", 100)
         fx.pr(4, "AaAa")
         fx.event(4, "pr_pushed", "AaAa", 12, push_class="content")
         return fx
@@ -282,13 +316,84 @@ class TimeToFirstReviewTests(StoreCase):
         fx = Fixture()
         for number, first_review in enumerate((2, 4, 6, 10, 60), start=1):
             fx.pr(number, "AaAa")
-            fx.event(number, "comment_added", "RrRr", first_review, severity="suggestion")
+            fx.review_comment(number, "RrRr", first_review)
         payload = self.insights(fx)
         self.assertIsNone(by_id(payload, "review-sla"))
         suggestion = by_id(payload, "review-tail")
         self.assertIsNotNone(suggestion)
         self.assertEqual(suggestion["severity"], "info")
         self.assertEqual(suggestion["impact_hours"], 18.0)   # (60 − 24) × 1 × 0.5
+
+
+class FirstReviewIsHumanTests(StoreCase):
+    """prd/81: the metric counts a human review remark, never a bot comment."""
+
+    BOT = "CaGi41"
+
+    def fixture(self) -> Fixture:
+        fx = Fixture()
+        fx.person(self.BOT, "bot")
+        # 1: a bot comments; no human ever reviews
+        fx.pr(1, "AaAa")
+        fx.event(1, "comment_added", self.BOT, 1)
+        # 2: a bot comments first, a human reviews 30 h after open
+        fx.pr(2, "AaAa")
+        fx.event(2, "comment_added", self.BOT, 1)
+        fx.review_comment(2, "RrRr", 30)
+        # 3: only the author's own review-labelled comment
+        fx.pr(3, "AaAa")
+        fx.review_comment(3, "AaAa", 2)
+        # 4: admin / bot-request / CI notices, then a review at 9 h
+        fx.pr(4, "AaAa")
+        fx.review_comment(4, "RrRr", 3, kind="admin")
+        fx.review_comment(4, "RrRr", 5, kind="bot_request")
+        fx.review_comment(4, "RrRr", 7, kind="ci_notice")
+        fx.review_comment(4, "RrRr", 9)
+        # 5: a human approval with no thread is a review
+        fx.pr(5, "AaAa")
+        fx.event(5, "pr_approved", "SsSs", 12)
+        # 6: an unlabelled comment, then a labelled review at 20 h
+        fx.pr(6, "AaAa")
+        fx.event(6, "comment_added", "RrRr", 4)   # no THREAD link
+        fx.review_comment(6, "RrRr", 20)
+        return fx
+
+    def test_a_bot_only_comment_is_missing_and_counted_as_bot_skipped(self):
+        metric = self.metric(self.fixture(), "time_to_first_review")
+        missing = {row["number"]: row for row in metric["rows"]
+                   if row["missing_review"]}
+        self.assertEqual(set(missing), {1, 3})
+        self.assertTrue(missing[1]["missing_review"])
+        self.assertIsNone(missing[1]["first_review_hours"])
+        # PRs 1 and 2 had a bot as the earliest non-author event
+        self.assertEqual(metric["bots_skipped"], 2)
+        self.assertEqual(metric["unlabeled_skipped"], 1)   # PR 6
+        self.assertEqual(metric["n"], 4)                   # 2, 4, 5, 6
+        self.assertEqual(metric["missing"], 2)             # 1, 3
+
+    def test_the_boundary_is_the_human_review_not_the_bot_comment(self):
+        metric = self.metric(self.fixture(), "time_to_first_review")
+        hours = {row["number"]: row["first_review_hours"]
+                 for row in metric["rows"]}
+        self.assertEqual(hours[2], 30.0)   # not the bot's 1 h
+        self.assertEqual(hours[4], 9.0)    # the review, not the admin/CI notes
+        self.assertEqual(hours[5], 12.0)   # approval, threadless
+        self.assertEqual(hours[6], 20.0)   # the labelled review, not the bare comment
+        reviewer = {row["number"]: row["reviewer"] for row in metric["rows"]}
+        self.assertNotIn(self.BOT, reviewer.values())
+        self.assertEqual(metric["median_hours"], 16.0)     # 9, 12, 20, 30
+
+    def test_the_payload_carries_both_skip_counters_and_no_bot_reviewer(self):
+        payload = self.insights(self.fixture())
+        metric = payload["metrics"]["time_to_first_review"]
+        self.assertEqual(metric["bots_skipped"], 2)
+        self.assertEqual(metric["unlabeled_skipped"], 1)
+        self.assertIn(self.BOT, metric["bots_excluded"])
+        self.assertNotIn(self.BOT, metric["by_reviewer"])
+        self.assertEqual(set(metric["by_reviewer"]), {"RrRr", "SsSs"})
+        # the basis names the exclusion where the number is read
+        self.assertIn("first human review remark", metric["basis"])
+        self.assertIn("bots, admin and CI comments excluded", metric["basis"])
 
 
 # --------------------------------------------------------------------------- #
@@ -627,19 +732,19 @@ class ReworkLoopTests(StoreCase):
     def fixture(self) -> Fixture:
         fx = Fixture()
         fx.pr(1, "AaAa", state="merged", closed=T0 + timedelta(hours=100))
-        fx.event(1, "comment_added", "RrRr", 5, severity="suggestion")  # first review
+        fx.review_comment(1, "RrRr", 5)  # first review
         fx.event(1, "pr_pushed", "AaAa", 10, push_class="content")
         fx.event(1, "pr_pushed", "AaAa", 20, push_class="content")
         fx.event(1, "pr_unapproved", "RrRr", 30, cause="push")   # not a second round
         fx.event(1, "pr_approved", "RrRr", 50)
         fx.event(1, "pr_merged", "RrRr", 100)
         fx.pr(2, "AaAa")
-        fx.event(2, "comment_added", "RrRr", 5, severity="suggestion")
+        fx.review_comment(2, "RrRr", 5)
         fx.event(2, "pr_pushed", "AaAa", 10, push_class="pure_rebase")  # head move
         fx.event(2, "pr_pushed", "AaAa", 20, push_class="rebase_conflict")
         fx.pr(3, "AaAa")
         fx.pr(4, "AaAa")
-        fx.event(4, "comment_added", "RrRr", 5, severity="suggestion")
+        fx.review_comment(4, "RrRr", 5)
         for hours in (10, 20, 30, 40):
             fx.event(4, "pr_pushed", "AaAa", hours, push_class="content")
         return fx
@@ -709,7 +814,7 @@ class ReworkLoopTests(StoreCase):
             ((0, 20), (1, 30), (1, 34), (2, 45), (2, 52), (3, 70)), start=1
         ):
             fx.pr(number, "AaAa", state="merged", closed=T0 + timedelta(hours=cycle))
-            fx.event(number, "comment_added", "RrRr", 1, severity="suggestion")
+            fx.review_comment(number, "RrRr", 1)
             for index in range(rounds):
                 fx.event(number, "pr_pushed", "AaAa", 2 + index * 3,
                          push_class="content")
@@ -736,7 +841,7 @@ class ReworkLoopTests(StoreCase):
             ((0, 20), (1, 30), (1, 34), (2, 45), (2, 52), (3, 70)), start=1
         ):
             fx.pr(number, "AaAa", state="merged", closed=T0 + timedelta(hours=cycle))
-            fx.event(number, "comment_added", "RrRr", 1, severity="suggestion")
+            fx.review_comment(number, "RrRr", 1)
             for index in range(rounds):
                 fx.event(number, "pr_pushed", "AaAa", 2 + index * 3,
                          push_class="content")
@@ -761,7 +866,7 @@ class ReworkLoopTests(StoreCase):
             ((0, 20), (1, 30), (1, 34), (2, 45), (2, 52), (3, 70)), start=1
         ):
             fx.pr(number, "AaAa", state="merged", closed=T0 + timedelta(hours=cycle))
-            fx.event(number, "comment_added", "RrRr", 1, severity="suggestion")
+            fx.review_comment(number, "RrRr", 1)
             for index in range(rounds):
                 fx.event(number, "pr_pushed", "AaAa", 2 + index * 3,
                          push_class="content")
@@ -842,7 +947,7 @@ class CommentTaxTests(StoreCase):
     def fixture(self) -> Fixture:
         fx = Fixture()
         fx.pr(1, "AaAa", state="merged", closed=T0 + timedelta(hours=60))
-        fx.event(1, "comment_added", "RrRr", 10, severity="suggestion")
+        fx.review_comment(1, "RrRr", 10)
         fx.event(1, "pr_pushed", "AaAa", 30, push_class="content")
         fx.event(1, "pr_approved", "RrRr", 50)
         fx.event(1, "pr_merged", "RrRr", 60)
@@ -906,7 +1011,7 @@ class ConformanceTests(StoreCase):
         fx.event(1, "pr_merged", "AaAa", 48)
         # four rounds, then approved (a round needs a first review)
         fx.pr(2, "AaAa", state="merged", closed=T0 + timedelta(hours=200))
-        fx.event(2, "comment_added", "RrRr", 5, severity="suggestion")
+        fx.review_comment(2, "RrRr", 5)
         for hours in (10, 20, 30, 40):
             fx.event(2, "pr_pushed", "AaAa", hours, push_class="content")
         fx.event(2, "pr_approved", "RrRr", 50)
@@ -1329,8 +1434,7 @@ class PrSizeTests(StoreCase):
             fx.pr(number, "AaAa")
             for _ in range(commits):
                 fx.commit(number)
-            fx.event(number, "comment_added", "RrRr", first_review,
-                     severity="suggestion")
+            fx.review_comment(number, "RrRr", first_review)
         return fx
 
     def lines_fixture(self) -> Fixture:
@@ -1344,8 +1448,7 @@ class PrSizeTests(StoreCase):
                 "lines_added": added, "lines_removed": removed,
             })
             fx.commit(number)
-            fx.event(number, "comment_added", "RrRr", first_review,
-                     severity="suggestion")
+            fx.review_comment(number, "RrRr", first_review)
         return fx
 
     def test_commits_are_counted_and_diff_size_is_marked_pending(self):
@@ -1383,8 +1486,7 @@ class PrSizeTests(StoreCase):
             fx.pr(number, "AaAa")
             for _ in range(commits):
                 fx.commit(number)
-            fx.event(number, "comment_added", "RrRr", first_review,
-                     severity="suggestion")
+            fx.review_comment(number, "RrRr", first_review)
         suggestion = by_id(
             self.insights(fx, caps={"commits": 1, "lines": 400}), "pr-size",
         )
@@ -1420,8 +1522,7 @@ class PrSizeTests(StoreCase):
             fx.pr(number, "AaAa")
             for _ in range(commits):
                 fx.commit(number)
-            fx.event(number, "comment_added", "RrRr", first_review,
-                     severity="suggestion")
+            fx.review_comment(number, "RrRr", first_review)
         self.assertIsNone(by_id(self.insights(fx), "pr-size"))
 
     def test_one_large_pr_is_not_a_sample(self):
@@ -1430,8 +1531,7 @@ class PrSizeTests(StoreCase):
             fx.pr(number, "AaAa")
             for _ in range(commits):
                 fx.commit(number)
-            fx.event(number, "comment_added", "RrRr", first_review,
-                     severity="suggestion")
+            fx.review_comment(number, "RrRr", first_review)
         self.assertIsNone(by_id(self.insights(fx), "pr-size"))
 
     def test_no_review_latency_means_no_rule(self):
@@ -1560,13 +1660,13 @@ class DrillDownTests(StoreCase):
         # PR 1: first review in 10 h, merged at 20 h — healthy
         fx.pr(1, "AaAa", state="merged", closed=T0 + timedelta(hours=20),
               tickets=("ENG-1",))
-        fx.event(1, "comment_added", "RrRr", 10, severity="suggestion")
+        fx.review_comment(1, "RrRr", 10)
         fx.event(1, "pr_approved", "RrRr", 15)
         fx.event(1, "pr_merged", "RrRr", 20)
         # PR 2: first review in 100 h, merged at 120 h — over target
         fx.pr(2, "AaAa", state="merged", closed=T0 + timedelta(hours=120),
               tickets=("ENG-2",))
-        fx.event(2, "comment_added", "RrRr", 100, severity="suggestion")
+        fx.review_comment(2, "RrRr", 100)
         fx.event(2, "pr_approved", "RrRr", 110)
         fx.event(2, "pr_merged", "RrRr", 120)
         # PR 3: open, never reviewed — the missing-review row
@@ -1617,11 +1717,11 @@ class DrillDownTests(StoreCase):
     def test_rework_rows_carry_the_round_count_per_pr(self):
         fx = Fixture()
         fx.pr(1, "AaAa")
-        fx.event(1, "comment_added", "RrRr", 5, severity="suggestion")
+        fx.review_comment(1, "RrRr", 5)
         for index in range(4):
             fx.event(1, "pr_pushed", "AaAa", 10 + index, push_class="content")
         fx.pr(2, "AaAa")
-        fx.event(2, "comment_added", "RrRr", 5, severity="suggestion")
+        fx.review_comment(2, "RrRr", 5)
         fx.event(2, "pr_pushed", "AaAa", 10, push_class="content")
         rows = self.metric(fx, "rework_loops")["rows"]
         by_number = {row["number"]: row for row in rows}
@@ -2227,7 +2327,7 @@ class InsightPayloadCapTests(StoreCase):
         for number in range(1, prs + 1):
             fx.pr(number, "AaAa", state="merged",
                   closed=T0 + timedelta(hours=20), tickets=(f"ENG-{number}",))
-            fx.event(number, "comment_added", "RrRr", 5)
+            fx.review_comment(number, "RrRr", 5)
             fx.event(number, "pr_approved", "RrRr", 10)
             fx.event(number, "pr_merged", "RrRr", 20)
         for index in range(threads):

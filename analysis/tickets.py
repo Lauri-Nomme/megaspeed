@@ -62,7 +62,7 @@ BOUNDARY_REASON: dict[str, str] = {
     ),
     "pr_open": "no PR names this key",
     "reviewer_added": "no reviewer is named on the PR's roster (a store that asks reviewers at open has none)",
-    "first_review": "no reviewer action on its PRs",
+    "first_review": "no human review remark on its PRs",
     "approval": "no approval on its PRs",
     "merged": "no merged PR names this key",
     "done": "no status change to done, and the story is still open",

@@ -35,7 +35,7 @@ class RoundCapAffectedTests(StoreCase):
         fx = Fixture()
         for number, rounds in enumerate((0, 1, 2, 3, 4), start=1):
             fx.pr(number, "AaAa")
-            fx.event(number, "comment_added", "RrRr", 1, severity="suggestion")
+            fx.review_comment(number, "RrRr", 1)
             for index in range(rounds):
                 fx.event(number, "pr_pushed", "AaAa", 2 + index,
                          push_class="content")

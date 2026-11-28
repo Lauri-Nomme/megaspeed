@@ -516,10 +516,16 @@ class DelCombinedEvidenceTests(unittest.TestCase):
         self.assertEqual(payload["n"], 87)
         self.assertEqual((steps["refine"]["clean_n"], steps["refine"]["n"]), (87, 87))
         self.assertEqual((steps["develop"]["clean_n"], steps["develop"]["n"]), (66, 87))
-        self.assertEqual((steps["review"]["clean_n"], steps["review"]["n"]), (11, 87))
+        # prd/81: the review step is anchored on the first *human review
+        # remark*, not the first comment. This store predates the prd/75 thread
+        # taxonomy (no ``comment_kind``), so only approvals are reviews — the
+        # old 11/87 counted the first comment, whatever it was, as a review.
+        self.assertEqual((steps["review"]["clean_n"], steps["review"]["n"]), (49, 87))
         self.assertEqual((steps["verify"]["clean_n"], steps["verify"]["n"]), (78, 87))
-        self.assertEqual(payload["rolled"], 0.086)
-        self.assertEqual(payload["clean_joint"], 8)
+        # prd/81 retires the old 0.086 / 8: the all-four-steps pin is
+        # recomputed against the human-review boundary, not the old one.
+        self.assertEqual(payload["rolled"], 0.383)
+        self.assertEqual(payload["clean_joint"], 33)
 
     def test_the_stability_rates_match_the_research(self):
         payload = jira.stability(self.court, self.data, self.window)

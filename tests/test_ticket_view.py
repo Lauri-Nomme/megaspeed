@@ -155,6 +155,7 @@ class Fixture:
 
     def pr_event(self, number: int, activity: str, actor: str, hours: float,
                  tickets: tuple[str, ...] = (), people: tuple[str, ...] = (),
+                 thread: str | None = None,
                  **attributes) -> "Fixture":
         self._count += 1
         event_key = f"{REPO}#{number}:{self._count}"
@@ -177,7 +178,24 @@ class Fixture:
             self.relations.append((event_key, "TICKET", f"TICKET:{ticket}"))
         for person in people:
             self.relations.append((event_key, "PERSON", f"PERSON:{person}"))
+        if thread is not None:
+            self.relations.append((event_key, "THREAD", thread))
         return self
+
+    def pr_review(self, number: int, actor: str, hours: float,
+                  kind: str = "review", tickets: tuple[str, ...] = (),
+                  **attributes) -> "Fixture":
+        """A comment linked to a THREAD labelled ``kind`` (prd/81)."""
+        index = len(self.events) + 1
+        thread_id = f"THREAD:{REPO}#{number}:c{index}"
+        self._object(
+            "THREAD", thread_id, repo=REPO, pr_id=number, state="resolved",
+            created_at=self.opened[number] + timedelta(hours=hours),
+            attributes={"severity": "suggestion", "anchor_class": "general",
+                        "comment_kind": kind},
+        )
+        return self.pr_event(number, "comment_added", actor, hours,
+                             tickets=tickets, thread=thread_id, **attributes)
 
     def thread(self, number: int, index: int, *, state: str = "open",
                closed: datetime | None = None) -> "Fixture":
@@ -230,8 +248,7 @@ def fixture() -> Fixture:
     fx.pr(52, "AaAa", T0 + timedelta(hours=40), tickets=("DEL-1", "DEL-167"),
           closed=T0 + timedelta(hours=80),
           attributes={"lines_added": 38, "lines_removed": 0})
-    fx.pr_event(52, "comment_added", "RrRr", 10, severity="suggestion",
-                tickets=("DEL-1", "DEL-167"))
+    fx.pr_review(52, "RrRr", 10, tickets=("DEL-1", "DEL-167"))
     fx.pr_event(52, "pr_pushed", "AaAa", 20, push_class="content",
                 tickets=("DEL-1", "DEL-167"))
     fx.pr_event(52, "pr_approved", "RrRr", 30, tickets=("DEL-1", "DEL-167"))
@@ -240,8 +257,8 @@ def fixture() -> Fixture:
     fx.pr(53, "AlNg", T0 + timedelta(hours=45), tickets=("DEL-1", "DEL-167"),
           state="open", closed=None,
           attributes={"lines_added": 62, "lines_removed": 0})
-    fx.pr_event(53, "comment_added", "RrRr", 10, severity="mandatory",
-                tickets=("DEL-1", "DEL-167"))
+    fx.pr_review(53, "RrRr", 10, tickets=("DEL-1", "DEL-167"),
+                 severity="mandatory")
     fx.pr_event(53, "pr_pushed", "AlNg", 20, push_class="content",
                 tickets=("DEL-1", "DEL-167"))
 
@@ -354,8 +371,7 @@ class TicketCycleTests(StoreCase):
               closed=T0 + timedelta(hours=58))
         fx.pr_event(70, "reviewer_changed", "AaAa", 24, change="added",
                     reviewers=("RrRr",), people=("RrRr",), tickets=("DEL-310",))
-        fx.pr_event(70, "comment_added", "RrRr", 30, severity="suggestion",
-                    tickets=("DEL-310",))
+        fx.pr_review(70, "RrRr", 30, tickets=("DEL-310",))
         fx.pr_event(70, "pr_approved", "RrRr", 34, tickets=("DEL-310",))
         fx.pr_event(70, "pr_merged", "AaAa", 38, tickets=("DEL-310",))
         con, court, data = self.load(fx)
@@ -711,8 +727,7 @@ class PrDrawerFactsTests(StoreCase):
         fx.pr_event(210, "reviewer_changed", "AaAa", 2, change="added",
                     people=("RrRr", "SsSs"), tickets=("DEL-210",))
         fx.pr_event(210, "pr_approved", "RrRr", 4, tickets=("DEL-210",))
-        fx.pr_event(210, "comment_added", "RrRr", 5, severity="suggestion",
-                    tickets=("DEL-210",))
+        fx.pr_review(210, "RrRr", 5, tickets=("DEL-210",))
         fx.thread(210, 1, state="open")
         fx.thread(210, 2, state="resolved", closed=T0 + timedelta(hours=6))
         return fx
@@ -751,8 +766,7 @@ class OpenStoryHeadlineTests(StoreCase):
               tickets=("DEL-176",), state="open", closed=None)
         fx.pr_event(60, "reviewer_changed", "AaAa", 1, change="added",
                     people=("RrRr", "FrMo"), tickets=("DEL-176",))
-        fx.pr_event(60, "comment_added", "RrRr", 3, severity="suggestion",
-                    tickets=("DEL-176",))
+        fx.pr_review(60, "RrRr", 3, tickets=("DEL-176",))
         fx.pr_event(60, "pr_approved", "RrRr", 5, tickets=("DEL-176",))
         return fx
 

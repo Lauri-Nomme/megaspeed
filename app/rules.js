@@ -280,7 +280,7 @@ function drillItem(row, suggestion, base = '') {
 
   if (metric === 'time_to_first_review') {
     value = row.first_review_hours == null ? 'no review yet' : fmtHours(row.first_review_hours);
-    detail = row.reviewer ? `review by ${row.reviewer}` : 'no reviewer action';
+    detail = row.reviewer ? `review by ${row.reviewer}` : 'no human review remark';
   } else if (metric === 'cycle_time') {
     value = fmtHours(row.hours);
     detail = row.censored

@@ -76,7 +76,7 @@ def contrast_fixture(stories: int = 10, open_prs: int = 10) -> BenchFixture:
               closed=base + timedelta(hours=70))
         fx.respond(number, "reviewer_changed", "AaAa", 1, people=("RrRr",),
                    change="added")
-        fx.respond(number, "comment_added", "RrRr", 10)
+        fx.pr_review(number, "RrRr", 10)
         fx.pr_event(number, "pr_approved", "RrRr", 20)
         fx.pr_event(number, "pr_merged", "RrRr", 30)
 
@@ -93,7 +93,7 @@ def contrast_fixture(stories: int = 10, open_prs: int = 10) -> BenchFixture:
           closed=base + timedelta(hours=80))
     fx.respond(50, "reviewer_changed", "AaAa", 1, people=("RrRr",),
                change="added")
-    fx.respond(50, "comment_added", "RrRr", 10)
+    fx.pr_review(50, "RrRr", 10)
     fx.pr_event(50, "pr_approved", "RrRr", 30)
     fx.pr_event(50, "pr_merged", "RrRr", 40)
 

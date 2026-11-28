@@ -340,32 +340,63 @@ class PRState:
     events: list[dict]
     commits: list[datetime]
     intervals: list[Interval]
+    #: The store's declared bots (``court.bots``), so the review definition can
+    #: exclude them without a second read of the store (prd/81).
+    bots: frozenset[str] = frozenset()
 
 
-#: A reviewer action that starts the first review (concepts.md §6, prd/40).
+#: The activities that can start a first review (concepts.md §6, prd/40, prd/81).
 REVIEW_ACTIONS = ("comment_added", "pr_approved")
 
 
-def first_review(state: PRState) -> dict | None:
-    """The first reviewer action on a PR: comment or approval, never the author."""
-    opened = state.pr["created_ts"]
-    return next(
-        (
-            event for event in state.events
-            if event["_ts"] >= opened
-            and event["activity"] in REVIEW_ACTIONS
-            and event["actor"] != state.pr["actor"]
-        ),
-        None,
+def counts_as_review(event: dict, pr: dict, bots=()) -> bool:
+    """Is this event a review remark by someone other than the author? (prd/81)
+
+    A first review is a **human review remark**: a human ``pr_approved`` (an
+    approval needs no thread) or a human ``comment_added`` whose linked THREAD
+    the store labelled ``review``. Bots are excluded from every activity — a CI
+    comment arriving two minutes after open is not a review — and so is every
+    other thread kind (``admin``, ``bot_request``, ``ci_notice``, …). A comment
+    with no resolvable thread label is *first anything*, not a first review.
+    """
+    actor = event.get("actor")
+    if actor == pr.get("actor") or actor in bots:
+        return False
+    if event["activity"] == "pr_approved":
+        return True
+    return (
+        event["activity"] == "comment_added"
+        and event.get("comment_kind") == "review"
     )
+
+
+def first_review(state: PRState, bots=None) -> dict | None:
+    """The earliest human review remark on a PR (prd/81), or ``None``.
+
+    ``bots`` defaults to the set loaded with the state, so the analysis, the
+    rounds boundary and the ticket view share one definition; a caller that
+    holds a court may pass its set explicitly.
+    """
+    if bots is None:
+        bots = state.bots
+    opened = state.pr["created_ts"]
+    for event in state.events:
+        if event["_ts"] < opened:
+            continue
+        if counts_as_review(event, state.pr, bots):
+            return event
+    return None
 
 
 def review_round_events(state: PRState) -> tuple[list[dict], list[dict]]:
     """The events that are review *rounds*, per ``concepts.md`` §6.
 
     ``rounds = #pr_pushed (after first review) + #pr_unapproved with
-    cause ≠ "push" (after first review)``. Three exclusions, each a measured
-    over-count in the old ``#pr_pushed + #pr_unapproved``:
+    cause ≠ "push" (after first review)``. The boundary is the first **human
+    review remark** (:func:`first_review`, prd/81), so a CI comment no longer
+    opens the rework window. The rounds themselves are unaffected in
+    definition; three exclusions, each a measured over-count in the old
+    ``#pr_pushed + #pr_unapproved``:
 
     * pre-first-review pushes are setup, not rework;
     * a ``pure_rebase`` that lost no approval is a head move, not a re-review;
@@ -1091,21 +1122,32 @@ def load(
         if person:
             people_by_event[event_key].append(person)
     # prd/41 B6: a comment event's THREAD outcome (walked_back / rejected / …).
+    # prd/81: the same THREAD rows carry ``comment_kind``, which is what says a
+    # comment is a review remark rather than a CI notice or an admin note. Both
+    # ride one read of the THREAD objects and one read of their event links.
     # Absent on a store ingested before the thread classifier: then nothing is
-    # treated as withdrawn and the mandatory-comment behaviour is unchanged.
+    # treated as withdrawn, and a comment has no label (so it is not a review).
     thread_outcome: dict[str, str] = {}
+    thread_kind: dict[str, str] = {}
     if _has_column(conn, "objects", "attributes"):
         for object_id, attrs in conn.execute(THREAD_OUTCOME_SQL).fetchall():
             payload = json.loads(attrs) if attrs else {}
             outcome = payload.get("thread_outcome")
             if outcome:
                 thread_outcome[object_id] = outcome
+            kind = payload.get("comment_kind")
+            if kind:
+                thread_kind[object_id] = kind
     outcome_by_event: dict[str, str] = {}
-    if thread_outcome:
+    kind_by_event: dict[str, str] = {}
+    if thread_outcome or thread_kind:
         for event_key, object_id in conn.execute(THREAD_LINK_SQL).fetchall():
             outcome = thread_outcome.get(object_id)
             if outcome:
                 outcome_by_event[event_key] = outcome
+            kind = thread_kind.get(object_id)
+            if kind:
+                kind_by_event[event_key] = kind
     events = []
     for key, ts, activity, actor, repo, pr_id, attrs in conn.execute(EVENT_SQL).fetchall():
         attributes = json.loads(attrs) if attrs else {}
@@ -1123,6 +1165,9 @@ def load(
             "attributes": attributes,
             "people": tuple(people_by_event.get(key, ())),
             "thread_outcome": outcome_by_event.get(key),
+            # prd/81: review / ci_notice / admin / bot / bot_request / … from the
+            # event's THREAD; ``None`` when the store has no label for it.
+            "comment_kind": kind_by_event.get(key),
         })
     objects = []
     for otype, oid, repo, pr_id, keys, actor, state, created, closed in conn.execute(OBJECT_SQL).fetchall():
@@ -1183,7 +1228,10 @@ def load(
     for object_id, pr in pr_objects.items():
         pr_events = sorted(by_pr.get(object_id, []), key=lambda e: (e["_ts"], e["key"]))
         commits = sorted(commits_by_pr.get((pr["repo"], pr["pr_id"]), []))
-        state = PRState(pr=pr, events=pr_events, commits=commits, intervals=[])
+        state = PRState(
+            pr=pr, events=pr_events, commits=commits, intervals=[],
+            bots=frozenset(bots),
+        )
         _timeline(
             state, snapshot, open_pr=pr["closed_ts"] is None,
             sentinels=sentinels, sentinel_after_peers=sentinel_after_peers,
