@@ -1,6 +1,6 @@
 # 81 — A first review is a human review remark, not a bot comment
 
-Status: **draft; dispatch.**
+Status: **implemented (v0.25.2).**
 
 ## Problem
 

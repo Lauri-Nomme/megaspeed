@@ -2,7 +2,7 @@
 
 Live behind nginx (→ `127.0.0.1:8766`), default tenant `del-combined` (Bitbucket + Jira, backdated).
 GitHub: `Lauri-Nomme/megaspeed` (private, scrubbed).
-Tests: **1647** (`tests/`) + **99** (`scrape/tests`) + **663** (node `app/test`) green.
+Tests: **1658** (`tests/`) + **99** (`scrape/tests`) + **663** (node `app/test`) green.
 
 ## v0.12.0 — the decision layer (prd/58–64)
 
@@ -72,6 +72,38 @@ re-simulating. A stated no-result is not persisted (the next run retries), the
 write is atomic and best-effort, and the memory cache still fronts it. Tests:
 second process reads the disk, window/store changes are new keys, corrupt files
 are ignored, an unavailable report is not written.
+
+## v0.25.2 — a first review is a human review remark (prd/81)
+
+- **The metric was pricing automation.** `_first_review` took the first
+  non-author comment/approval without looking at `actor_kind` or the thread
+  label, so **1,654 of 2,560 PRs** had a CI bot as their "first reviewer"
+  (`CaGi41` 1,566, `AgJu` 88) and `time_to_first_review` reported a **1.8-minute
+  median with 6 PRs over the 24 h target** while its own drill-down showed days.
+- **The rule now:** a first review is the earliest event that is a human (not in
+  `court.bots`, the store's own `actor_kind`), not the author, and either a
+  human `pr_approved` or a `comment_added` whose THREAD is labelled
+  `comment_kind=review`. An unlabeled comment is *first anything*, not a first
+  review; it is counted instead of accepted. No "first feedback" metric — that
+  would measure the CI bot.
+- **Live after restart:** n 2,496 · missing 78 · **bots_skipped 1,654** ·
+  unlabeled_skipped 0 · median **0.15 h (9 min)** · p90 **4.0 h** · over-target
+  **6 → 40** · no bot in `by_reviewer` or the drill-down rows. `basis` says
+  "first human review remark; bots, admin and CI comments excluded".
+- **Re-anchored downstream:** the `first_review` boundary feeds
+  `pr_open_first_review` and `review_rounds`, so the team mean rounds move
+  **2.26 → 1.9** (target 2, 682 PRs over it, 2,795 excess rounds), review cost
+  **2.93 → 3.1 h per extra round**, review-rounds share 9.9% → 9.5%.
+- **Epic DEMO-56715 re-measured** (1,821 h): refinement 36%, unscheduled 31%,
+  **review rounds 15% (267 h)**, committed 11%, work 6%; merged-PR mean rounds
+  **3.9 vs the team's 1.9** and 2× the 2-round target. The earlier 5.4-vs-2.26
+  comparison is retired.
+- **Caveat (documented by the tests):** a store ingested before the label
+  pipeline has no `comment_kind`, so there "review" collapses to approvals only
+  and the `del-combined` yield pins move (review-clean 11 → 49). The fix is to
+  re-ingest with labels, not to loosen the rule.
+- 1,658 tests / 426 subtests, 667 node, 99 scrape. No store, ingest or
+  comment_tax change; `--verify` and the canary untouched.
 
 ## v0.25.1 — the titles handshake is diagnosable, and needs no popup
 
